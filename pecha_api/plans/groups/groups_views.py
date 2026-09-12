@@ -461,7 +461,9 @@ def delete_group_member_by_id(
     response_model=GroupPracticesFeedResponse,
 )
 def get_group_practices_feed_endpoint(
-    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
     group_id: Annotated[Optional[UUID], Query(description="Filter practices to a single group")] = None,
     should_include_unfollowed: Annotated[
         bool,
@@ -469,7 +471,8 @@ def get_group_practices_feed_endpoint(
             alias="include_unfollowed",
             description=(
                 "false = practices from joined groups only; "
-                "true = practices from all public groups"
+                "true = practices from all public groups. "
+                "Guests always see public groups."
             ),
         ),
     ] = False,
@@ -485,11 +488,12 @@ def get_group_practices_feed_endpoint(
     series, and recitation collections) across author groups, sorted newest
     first.
 
-    Requires auth. Defaults to groups the user joined. Pass
-    ``include_unfollowed=true`` to include all public groups.
+    Optional auth. Guests see published public groups. Logged-in users default
+    to groups they joined; pass ``include_unfollowed=true`` to include all
+    public groups.
     """
     return get_group_practices_feed(
-        token=authentication_credential.credentials,
+        token=authentication_credential.credentials if authentication_credential else None,
         group_id=group_id,
         should_include_unfollowed=should_include_unfollowed,
         skip=skip,

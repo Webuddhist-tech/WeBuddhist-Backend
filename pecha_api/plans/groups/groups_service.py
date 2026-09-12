@@ -1069,7 +1069,7 @@ def _group_card_title(group: AuthorGroup, language: Optional[str] = None) -> Opt
 
 
 def get_group_practices_feed(
-    token: str,
+    token: Optional[str] = None,
     group_id: Optional[UUID] = None,
     should_include_unfollowed: bool = False,
     skip: int = 0,
@@ -1080,13 +1080,15 @@ def get_group_practices_feed(
     """Merged feed of practices (series, group accumulators, plans that are
     not part of a series, and recitation collections) across the user's
     joined public groups; with should_include_unfollowed=True, across all
-    public groups."""
-    current_user = validate_and_extract_user_details(token=token)
+    public groups. Guests (no token) always see published public groups."""
+    current_user = None
+    if token:
+        current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
         scope_group_ids, joined_group_id_set = resolve_public_group_scope(
             db=db,
-            user_id=current_user.id,
+            user_id=current_user.id if current_user else None,
             should_include_unfollowed=should_include_unfollowed,
         )
         if group_id is not None:
@@ -1170,7 +1172,7 @@ def get_group_practices_feed(
                 group_id=owning_group_id,
                 language=language,
                 published_only=True,
-                user_id=current_user.id,
+                user_id=current_user.id if current_user else None,
             )
             series_pairs.extend(zip(group_series, dtos))
 
@@ -1182,13 +1184,15 @@ def get_group_practices_feed(
         }
 
         accumulator_ids = [accumulator.id for accumulator in accumulators]
-        joined_accumulator_ids = set(
-            get_joined_group_accumulator_ids_by_user(
-                db=db,
-                user_id=current_user.id,
-                group_accumulator_ids=accumulator_ids,
+        joined_accumulator_ids = set()
+        if current_user:
+            joined_accumulator_ids = set(
+                get_joined_group_accumulator_ids_by_user(
+                    db=db,
+                    user_id=current_user.id,
+                    group_accumulator_ids=accumulator_ids,
+                )
             )
-        )
         accumulator_member_counts = get_group_accumulator_joiners_counts(
             db=db, group_accumulator_ids=accumulator_ids
         )

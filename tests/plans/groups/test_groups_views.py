@@ -615,9 +615,25 @@ def test_get_group_practices_feed_passes_filters():
     )
 
 
-def test_get_group_practices_feed_requires_auth():
-    response = client.get("/author/groups/practices")
-    assert response.status_code == status.HTTP_403_FORBIDDEN
+def test_get_group_practices_feed_allows_guest():
+    feed_response = GroupPracticesFeedResponse(
+        practices=[], skip=0, limit=20, total=0, include_unfollowed=False
+    )
+    with patch(
+        "pecha_api.plans.groups.groups_views.get_group_practices_feed",
+        return_value=feed_response,
+    ) as mock_service:
+        response = client.get("/author/groups/practices")
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(
+        token=None,
+        group_id=None,
+        should_include_unfollowed=False,
+        skip=0,
+        limit=20,
+        language=None,
+        timezone_name=None,
+    )
 
 
 def test_follow_and_unfollow_group():

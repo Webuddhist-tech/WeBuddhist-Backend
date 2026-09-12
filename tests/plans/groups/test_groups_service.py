@@ -3564,6 +3564,54 @@ def test_get_group_practices_feed_merges_and_sorts_by_created_at():
     assert mock_series_to_dtos.call_args.kwargs["published_only"] is True
 
 
+def test_get_group_practices_feed_guest_uses_public_scope_without_user_lookups():
+    group = _make_group()
+    accumulator = _make_feed_accumulator(group.id, datetime(2026, 1, 2, tzinfo=timezone.utc))
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+    ) as mock_validate, patch(
+        "pecha_api.plans.groups.groups_service.resolve_public_group_scope",
+        return_value=([group.id], set()),
+    ) as mock_scope, patch(
+        "pecha_api.plans.groups.groups_service.get_series_for_group_ids",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_standalone_plans_for_group_ids",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_accumulators_for_group_ids",
+        return_value=([accumulator], 1),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joined_group_accumulator_ids_by_user",
+    ) as mock_joined_acc, patch(
+        "pecha_api.plans.groups.groups_service.get_group_accumulator_joiners_counts",
+        return_value={accumulator.id: 5},
+    ), patch(
+        "pecha_api.plans.groups.groups_service._group_accumulator_to_dto",
+        side_effect=_feed_accumulator_dto,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_collections_for_group_ids_with_total",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_collection_item_counts",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_groups_by_ids",
+        return_value=[group],
+    ):
+        _session_local_context(mock_session)
+        result = get_group_practices_feed(token=None, skip=0, limit=20)
+
+    mock_validate.assert_not_called()
+    mock_joined_acc.assert_not_called()
+    mock_scope.assert_called_once()
+    assert mock_scope.call_args.kwargs["user_id"] is None
+    assert result.total == 1
+    assert result.practices[0].is_joined is False
+    assert result.practices[0].accumulator.is_joined is False
+
+
 def test_get_group_practices_feed_marks_unfollowed_groups():
     joined_group = _make_group(slug="joined-group")
     other_group = _make_group(slug="other-group")

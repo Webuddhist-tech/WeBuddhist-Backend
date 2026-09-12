@@ -9,7 +9,7 @@ from pecha_api.author_group_feed.response_models import AuthorGroupFeedResponse
 from pecha_api.author_group_feed.service import get_author_group_feed_service
 from pecha_api.db.database import get_db
 
-oauth2_scheme = HTTPBearer()
+optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
 author_group_feed_router = APIRouter(
     prefix="/author/groups/feeds",
@@ -23,10 +23,10 @@ author_group_feed_router = APIRouter(
     response_model=AuthorGroupFeedResponse,
 )
 async def get_author_group_feed(
-    authentication_credential: Annotated[
-        HTTPAuthorizationCredentials, Depends(oauth2_scheme)
-    ],
     db: Annotated[Session, Depends(get_db)],
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     should_include_unfollowed: Annotated[
@@ -35,7 +35,8 @@ async def get_author_group_feed(
             alias="include_unfollowed",
             description=(
                 "false = joined groups only (My tab); "
-                "true = also mix in other public groups (Discover tab)"
+                "true = also mix in other public groups (Discover tab). "
+                "Guests always see public groups."
             ),
         ),
     ] = False,
@@ -46,12 +47,13 @@ async def get_author_group_feed(
 ):
     """Mixed chronological feed of posts and events from author groups.
 
-    Requires auth. Defaults to groups the user joined. Pass
-    ``include_unfollowed=true`` to also mix in other public groups.
+    Optional auth. Guests see published public groups. Logged-in users default
+    to groups they joined. Pass ``include_unfollowed=true`` to also mix in
+    other public groups.
     """
     return await get_author_group_feed_service(
         db=db,
-        token=authentication_credential.credentials,
+        token=authentication_credential.credentials if authentication_credential else None,
         should_include_unfollowed=should_include_unfollowed,
         skip=skip,
         limit=limit,
