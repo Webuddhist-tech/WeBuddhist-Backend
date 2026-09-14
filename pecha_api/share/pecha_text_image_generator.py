@@ -20,7 +20,7 @@ class SyntheticImageGenerator:
         self.bg_color = self._parse_hex_color(bg_color or CONFIG["BG_COLOR"]["DEFAULT"])
 
     def _parse_hex_color(self, hex_color: str) -> tuple:
-        """Parse a hex color string (e.g., '#ac1c22') to an RGB tuple using config indices."""
+        """Parse a hex color string (e.g., '#ff0000') to an RGB tuple using config indices."""
         hex_color = hex_color.lstrip('#')
         return tuple(int(hex_color[i:i+2], 16) for i in CONFIG["HEX_COLOR_INDICES"])
 
