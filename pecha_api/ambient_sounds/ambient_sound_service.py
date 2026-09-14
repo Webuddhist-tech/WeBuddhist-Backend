@@ -9,8 +9,8 @@ from starlette import status
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url, upload_file, delete_file
 from pecha_api.config import get, get_int, DEFAULTS
-from pecha_api.error_contants import ErrorConstants
-from pecha_api.users.users_service import verify_admin_access
+from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
+from pecha_api.plans.shared.permissions import require_super_admin
 from .ambient_sound_repository import (
     get_ambient_sound_by_id,
     list_ambient_sounds,
@@ -53,11 +53,8 @@ def convert_ambient_sound_to_dto(ambient_sound: AmbientSound) -> AmbientSoundDTO
 
 
 def _validate_admin(token: str) -> None:
-    if not verify_admin_access(token=token):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=ErrorConstants.ADMIN_ERROR_MESSAGE
-        )
+    author = validate_cms_author_details(token=token)
+    require_super_admin(author)
 
 
 def _validate_audio_file(file: UploadFile) -> None:
