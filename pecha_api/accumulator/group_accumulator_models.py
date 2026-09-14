@@ -32,6 +32,19 @@ class GroupAccumulator(Base):
 
     accumulator = relationship("Accumulator")
 
+    metadata_entries = relationship(
+        "GroupAccumulatorMetadata",
+        back_populates="group_accumulator",
+        cascade="all, delete-orphan",
+    )
+
+    links = relationship(
+        "GroupAccumulatorLink",
+        back_populates="group_accumulator",
+        cascade="all, delete-orphan",
+        order_by="GroupAccumulatorLink.display_order",
+    )
+
     __table_args__ = (
         Index("idx_group_accumulators_group_id", "group_id"),
         Index("idx_group_accumulators_accumulator_id", "accumulator_id"),

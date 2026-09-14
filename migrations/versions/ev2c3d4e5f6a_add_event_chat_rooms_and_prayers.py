@@ -1,6 +1,6 @@
 """add event chat rooms, message types and prayers
 
-Revision ID: ev1a2b3c4d5e
+Revision ID: ev2c3d4e5f6a
 Revises: sr1a2b3c4d5e
 Create Date: 2026-09-11 10:00:00.000000
 
@@ -22,7 +22,7 @@ from sqlalchemy.dialects import postgresql
 from migrations.idempotency import column_exists, enum_exists, index_exists, table_exists
 
 # revision identifiers, used by Alembic.
-revision: str = "ev1a2b3c4d5e"
+revision: str = "ev2c3d4e5f6a"
 down_revision: Union[str, None] = "sr1a2b3c4d5e"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
