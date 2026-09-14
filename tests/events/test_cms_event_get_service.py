@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -189,6 +189,50 @@ def test_detail_404_when_missing(
     assert exc.value.status_code == 404
     # permission check never runs for a missing event
     mock_require_read.assert_not_called()
+
+
+@patch(f"{MODULE}.SessionLocal")
+@patch(f"{MODULE}.get_event_participant_count", return_value=0)
+@patch(f"{MODULE}.require_can_read_group_content")
+@patch(f"{MODULE}.get_event_by_id")
+@patch(f"{MODULE}.validate_cms_author_details")
+@patch(f"{MODULE}.expand_occurrences")
+def test_detail_uses_next_occurrence_dates_for_recurring_event(
+    mock_expand,
+    mock_validate,
+    mock_get_by_id,
+    mock_require_read,
+    _mock_count,
+    mock_session,
+):
+    """Detail must show the same expanded occurrence as the list, not the
+    stored template dates (which can be a past occurrence or a time-only
+    anchor on 'today')."""
+    mock_session.return_value.__enter__.return_value = MagicMock()
+    mock_validate.return_value = _author()
+    stored_start = datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc)
+    stored_end = datetime(2026, 1, 15, 17, 0, tzinfo=timezone.utc)
+    event = _event()
+    event.is_recurring = True
+    event.recurrence_frequency = "MONTHLY"
+    event.recurrence_date_system = "GREGORIAN"
+    event.recurrence_calendar_type = None
+    event.recurrence_month = None
+    event.recurrence_day = 15
+    event.recurrence_day_of_week = None
+    event.duration_days = 1
+    event.start_date = stored_start
+    event.end_date = stored_end
+    mock_get_by_id.return_value = event
+    mock_expand.return_value = [(date(2026, 10, 15), date(2026, 10, 15))]
+
+    result = get_cms_event_by_id_service(token="tok", event_id=event.id)
+
+    assert result.start_date == datetime(2026, 10, 15, 9, 30, tzinfo=timezone.utc)
+    assert result.end_date == datetime(2026, 10, 15, 17, 0, tzinfo=timezone.utc)
+    assert result.occurrence_date == result.start_date
+    assert result.is_recurring is True
+    mock_require_read.assert_called_once()
 
 
 @patch(f"{MODULE}.SessionLocal")

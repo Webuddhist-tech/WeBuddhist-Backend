@@ -447,7 +447,8 @@ def test_create_new_plan_success():
         assert created_plan_model.description == request.description
         assert created_plan_model.image_url == request.image_url
         assert created_plan_model.start_date == request.start_date
-        assert created_plan_model.author_id is not None and str(created_plan_model.author_id) != ""
+        assert created_plan_model.author_id is not None
+        assert str(created_plan_model.author_id) != ""
 
         # verify repository interactions - plan items (bulk)
         mock_save_plan_items.assert_called_once_with(db=db_session, plan_items=ANY)
@@ -873,14 +874,14 @@ async def test_get_plan_day_details_success():
     subtask1.content = "Practice for 10 minutes"
     subtask1.display_order = 1
     subtask1.timestamp = None
-
+    subtask1.reference_id = None
     subtask2 = MagicMock()
     subtask2.id = uuid.uuid4()
     subtask2.content_type = ContentType.AUDIO
     subtask2.content = "https://example.com/audio.mp3"
     subtask2.display_order = 2
     subtask2.timestamp = None
-
+    subtask2.reference_id = None
     task = MagicMock()
     task.id = uuid.uuid4()
     task.title = "Guided Meditation"

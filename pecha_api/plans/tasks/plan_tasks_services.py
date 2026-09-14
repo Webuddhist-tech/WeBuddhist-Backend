@@ -25,6 +25,7 @@ from pecha_api.plans.public.plans_cache_service import (
     schedule_invalidate_plan_day_cache_for_task,
 )
 from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content, resolve_subtasks_refs
+from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 
 def _get_max_display_order(plan_item_id: UUID) -> int:
     with SessionLocal() as db:
@@ -150,9 +151,16 @@ async def get_task_subtasks_service(task_id: UUID, token: str) -> GetTaskRespons
             resolve_subtasks_content(task.sub_tasks),
             resolve_subtasks_refs(task.sub_tasks),
         )
+        plan_item = get_plan_item_by_id(db=db, day_id=task.plan_item_id)
+        plan = get_plan_by_id(db=db, plan_id=plan_item.plan_id) if plan_item else None
+        resolved_references = resolve_subtask_references(
+            db=db,
+            subtasks=task.sub_tasks,
+            language=getattr(plan, "language", None),
+        )
 
         subtasks_dto = []
-        for sub_task, resolved_content, segment_refs in zip(task.sub_tasks, resolved_contents, resolved_refs):
+        for sub_task, resolved_content, segment_refs, reference in zip(task.sub_tasks, resolved_contents, resolved_refs, resolved_references):
             content_and_image_url = _generate_image_url_content_type(
                 content_type=sub_task.content_type,
                 content=resolved_content,
@@ -173,6 +181,8 @@ async def get_task_subtasks_service(task_id: UUID, token: str) -> GetTaskRespons
                     segment_ids=sub_task.segment_ids,
                     segment_numbers=sub_task.segment_numbers,
                     segment_refs=segment_refs,
+                    reference_id=sub_task.reference_id,
+                    reference=reference,
                     image_url=content_and_image_url.image_url,
                     audio_url=audio_url,
                     display_order=sub_task.display_order,

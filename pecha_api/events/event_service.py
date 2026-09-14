@@ -342,6 +342,36 @@ def _group_card_map(db, group_ids: List[UUID]) -> dict:
     }
 
 
+def _display_occurrence_for_event(
+    event: Event,
+) -> tuple[datetime, datetime, Optional[datetime]]:
+    """Dates to surface on event detail so they match the list.
+
+    Recurring templates store a rule plus a time-of-day, not necessarily the
+    next occurrence. List endpoints expand that rule; detail must do the same
+    or the two screens disagree about the start date.
+    """
+    if not event.is_recurring:
+        return event.start_date, event.end_date, None
+
+    now = datetime.now(timezone.utc)
+    from_date = now.date()
+    to_date = (now + timedelta(days=365)).date()
+    occurrences = expand_occurrences(event, from_date, to_date)
+    if occurrences:
+        start_d, end_d = occurrences[0]
+    else:
+        result = resolve_current_or_next_occurrence(event, after=from_date)
+        if not result:
+            return event.start_date, event.end_date, None
+        start_d, end_d, _is_active = result
+
+    start, end = combine_occurrence_window(
+        start_d, end_d, event.start_date, event.end_date
+    )
+    return start, end, start
+
+
 def _event_to_dto(
     event: Event,
     language: Optional[str] = None,
@@ -351,6 +381,8 @@ def _event_to_dto(
     group_name: Optional[str] = None,
     group_avatar_url: Optional[str] = None,
     occurrence_date: Optional[datetime] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
 ) -> EventDTO:
     recurrence_dto = None
     if event.is_recurring:
@@ -363,6 +395,9 @@ def _event_to_dto(
             day_of_week=event.recurrence_day_of_week,
             duration_days=event.duration_days,
         )
+
+    dto_start = start_date if start_date is not None else event.start_date
+    dto_end = end_date if end_date is not None else event.end_date
     
     return EventDTO(
         id=event.id,
@@ -383,10 +418,10 @@ def _event_to_dto(
         group_id=event.group_id,
         location_id=event.location_id,
         location=_location_to_dto(event),
-        start_date=event.start_date,
-        end_date=event.end_date,
+        start_date=dto_start,
+        end_date=dto_end,
         timezone=getattr(event, "timezone", None),
-        is_one_day=event.end_date.date() == event.start_date.date(),
+        is_one_day=dto_end.date() == dto_start.date(),
         featured=event.featured,
         is_recurring=event.is_recurring,
         recurrence=recurrence_dto,
@@ -594,28 +629,20 @@ def get_events_service(
         event_dtos = []
         for item in paginated_items:
             event = item['event']
-            # Temporarily override dates for DTO generation
-            original_start = event.start_date
-            original_end = event.end_date
-            event.start_date = item['start_date']
-            event.end_date = item['end_date']
-            
-            dto = _event_to_dto(
-                event,
-                language=language,
-                fallback=fallback,
-                participant_count=counts_by_event.get(event.id, 0),
-                is_joined=(event.id in joined_ids) if current_user else None,
-                group_name=group_cards.get(event.group_id, (None, None))[0],
-                group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
-                occurrence_date=item['occurrence_date'],
+            event_dtos.append(
+                _event_to_dto(
+                    event,
+                    language=language,
+                    fallback=fallback,
+                    participant_count=counts_by_event.get(event.id, 0),
+                    is_joined=(event.id in joined_ids) if current_user else None,
+                    group_name=group_cards.get(event.group_id, (None, None))[0],
+                    group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
+                    occurrence_date=item['occurrence_date'],
+                    start_date=item['start_date'],
+                    end_date=item['end_date'],
+                )
             )
-            
-            # Restore original dates
-            event.start_date = original_start
-            event.end_date = original_end
-            
-            event_dtos.append(dto)
 
         return EventsResponse(
             events=event_dtos,
@@ -682,8 +709,14 @@ def get_cms_event_by_id_service(
             )
         require_can_read_group_content(db=db, group_id=event.group_id, author=current_author)
         participant_count = get_event_participant_count(db=db, event_id=event_id)
+        start_date, end_date, occurrence_date = _display_occurrence_for_event(event)
         return _event_to_dto(
-            event, language=language, participant_count=participant_count
+            event,
+            language=language,
+            participant_count=participant_count,
+            occurrence_date=occurrence_date,
+            start_date=start_date,
+            end_date=end_date,
         )
 
 
@@ -732,6 +765,7 @@ def get_event_by_id_service(
         group_name, group_avatar_url = _group_card_map(db, [event.group_id]).get(
             event.group_id, (None, None)
         )
+        start_date, end_date, occurrence_date = _display_occurrence_for_event(event)
         return _event_to_dto(
             event,
             language=language,
@@ -740,6 +774,9 @@ def get_event_by_id_service(
             is_joined=is_joined,
             group_name=group_name,
             group_avatar_url=group_avatar_url,
+            occurrence_date=occurrence_date,
+            start_date=start_date,
+            end_date=end_date,
         )
 
 
@@ -908,12 +945,56 @@ def _apply_date_only_update(event: Event, request: UpdateEventRequest) -> tuple[
     return False, should_reschedule_reminders
 
 
+def _clear_recurrence_fields(event: Event) -> None:
+    event.is_recurring = False
+    event.recurrence_frequency = None
+    event.recurrence_date_system = None
+    event.recurrence_calendar_type = None
+    event.recurrence_month = None
+    event.recurrence_day = None
+    event.recurrence_day_of_week = None
+    event.duration_days = 1
+
+
+def _apply_clear_recurrence(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
+    """Handle an explicit `recurrence: null`.
+
+    For a recurring template this is a conversion to a one-time event, and
+    dates are required so it is not left on a stale rule-derived occurrence.
+    For an event that is already one-time it is a no-op, so the rest of the
+    update proceeds normally rather than demanding dates it does not need.
+    """
+    if not event.is_recurring:
+        _clear_recurrence_fields(event)
+        return _apply_date_only_update(event, request)
+
+    # Falling back to the template's stored dates would silently pin the
+    # event to an old, possibly past occurrence and reschedule reminders for
+    # it, so the caller must name the one-time date explicitly.
+    if request.start_date is None or request.end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start_date and end_date are required when converting to a one-time event",
+        )
+    _validate_date_range(request.start_date, request.end_date)
+    event.start_date = request.start_date
+    event.end_date = request.end_date
+    _clear_recurrence_fields(event)
+    # Leaving a recurring series always invalidates the reminders it spawned,
+    # whether or not the caller also moved the date.
+    return False, True
+
+
 def _apply_recurrence_or_dates(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
     """Applies recurrence/date changes to `event`.
 
     Returns (should_cancel_reminders, should_reschedule_reminders).
+    An explicit `recurrence: null` clears the rule and keeps the event one-time.
+    Omitting `recurrence` leaves the existing rule (or lack of one) untouched.
     """
-    if request.recurrence is not None:
+    if "recurrence" in request.model_fields_set:
+        if request.recurrence is None:
+            return _apply_clear_recurrence(event, request)
         return _apply_recurrence_update(event, request)
     return _apply_date_only_update(event, request)
 
@@ -1101,11 +1182,6 @@ def get_featured_events_service(
         result = []
         for item in paginated_items:
             event = item['event']
-            original_start = event.start_date
-            original_end = event.end_date
-            event.start_date = item['start_date']
-            event.end_date = item['end_date']
-            
             result.append(
                 _event_to_dto(
                     event,
@@ -1116,12 +1192,11 @@ def get_featured_events_service(
                     group_name=group_cards.get(event.group_id, (None, None))[0],
                     group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
                     occurrence_date=item['occurrence_date'],
+                    start_date=item['start_date'],
+                    end_date=item['end_date'],
                 )
             )
-            
-            event.start_date = original_start
-            event.end_date = original_end
-        
+
         return result
 
 
