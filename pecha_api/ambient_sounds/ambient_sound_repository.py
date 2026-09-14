@@ -59,4 +59,3 @@ def unset_other_defaults(db: Session, exclude_id: Optional[UUID] = None) -> None
     if exclude_id is not None:
         query = query.filter(AmbientSound.id != exclude_id)
     query.update({AmbientSound.is_default: False}, synchronize_session=False)
-    db.commit()

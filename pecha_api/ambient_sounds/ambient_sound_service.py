@@ -100,17 +100,21 @@ def create_ambient_sound_service(
     upload_file(bucket_name=get("AWS_BUCKET_NAME"), s3_key=s3_key, file=file)
 
     with SessionLocal() as db:
-        if is_default:
-            unset_other_defaults(db)
+        try:
+            if is_default:
+                unset_other_defaults(db)
 
-        new_ambient_sound = AmbientSound(
-            id=uuid4(),
-            name=name,
-            s3_key=s3_key,
-            is_default=is_default,
-            display_order=display_order
-        )
-        saved_ambient_sound = save_ambient_sound(db, new_ambient_sound)
+            new_ambient_sound = AmbientSound(
+                id=uuid4(),
+                name=name,
+                s3_key=s3_key,
+                is_default=is_default,
+                display_order=display_order
+            )
+            saved_ambient_sound = save_ambient_sound(db, new_ambient_sound)
+        except Exception:
+            delete_file(s3_key)
+            raise
         return convert_ambient_sound_to_dto(saved_ambient_sound)
 
 
@@ -133,6 +137,7 @@ def update_ambient_sound_service(
             )
 
         old_s3_key = None
+        new_s3_key = None
         if file is not None:
             _validate_audio_file(file)
             file_extension = os.path.splitext(file.filename.lower())[1] if file.filename else ""
@@ -151,7 +156,12 @@ def update_ambient_sound_service(
                 unset_other_defaults(db, exclude_id=ambient_sound.id)
             ambient_sound.is_default = is_default
 
-        updated_ambient_sound = update_ambient_sound(db, ambient_sound)
+        try:
+            updated_ambient_sound = update_ambient_sound(db, ambient_sound)
+        except Exception:
+            if new_s3_key is not None:
+                delete_file(new_s3_key)
+            raise
         dto = convert_ambient_sound_to_dto(updated_ambient_sound)
 
     if old_s3_key:

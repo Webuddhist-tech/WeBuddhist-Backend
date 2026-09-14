@@ -11,12 +11,18 @@ Revises: a2e952bd8fa8
 Create Date: 2026-09-14 12:00:00.000000
 
 """
+import logging
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from botocore.exceptions import ClientError
 
 from migrations.idempotency import table_exists, column_exists, index_exists, fk_exists
+from pecha_api.config import get
+from pecha_api.uploads.S3_utils import s3_client
+
+logger = logging.getLogger(__name__)
 
 # revision identifiers, used by Alembic.
 revision: str = "96d1c3054f20"
@@ -62,7 +68,19 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id"),
         )
 
+    bucket_name = get("AWS_BUCKET_NAME")
     for seed_id, name, s3_key, is_default, display_order in SEED_SOUNDS:
+        try:
+            s3_client.head_object(Bucket=bucket_name, Key=s3_key)
+        except ClientError:
+            logger.warning(
+                "Seed ambient sound object not found in S3 (bucket=%s, key=%s); "
+                "the catalog entry will be created but its audio URL will 404 until the object is uploaded.",
+                bucket_name, s3_key,
+            )
+        except Exception:
+            logger.warning("Could not verify seed ambient sound object in S3 (key=%s)", s3_key, exc_info=True)
+
         escaped_name = name.replace("'", "''")
         op.execute(
             f"""
@@ -122,6 +140,9 @@ def downgrade() -> None:
     if index_exists("timers", AMBIENT_SOUND_INDEX):
         op.drop_index(AMBIENT_SOUND_INDEX, table_name="timers")
 
+    # Groupless timers (group_id IS NULL) can't exist in the pre-upgrade schema;
+    # remove them so the NOT NULL constraint below can be restored.
+    op.execute("DELETE FROM timers WHERE group_id IS NULL")
     op.alter_column("timers", "group_id", existing_type=sa.UUID(), nullable=False)
 
     if fk_exists("timers", PARENT_PRESET_FK):

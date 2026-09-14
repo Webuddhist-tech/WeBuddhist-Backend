@@ -200,7 +200,8 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
                 detail={"error": FORBIDDEN, "message": ONLY_USER_TIMERS_CAN_BE_UPDATED}
             )
 
-        if request.ambient_sound_id is not None:
+        ambient_sound_id_provided = "ambient_sound_id" in request.model_fields_set
+        if ambient_sound_id_provided and request.ambient_sound_id is not None:
             _validate_ambient_sound(db, request.ambient_sound_id)
 
         if request.name is not None:
@@ -211,7 +212,7 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             timer.duration = request.duration
         if request.audio_url is not None:
             timer.audio_url = request.audio_url
-        if request.ambient_sound_id is not None:
+        if ambient_sound_id_provided:
             timer.ambient_sound_id = request.ambient_sound_id
         if request.bell_at_start is not None:
             timer.bell_at_start = request.bell_at_start
