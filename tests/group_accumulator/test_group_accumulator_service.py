@@ -1501,3 +1501,54 @@ class TestGroupAccumulatorReviewRegressions:
         )
 
         assert calls == ["clear", "flush", "extend"]
+
+    @patch('pecha_api.group_accumulator.group_accumulator_service.update_group_accumulator')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.verify_group_exists')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.create_group_accumulator')
+    def test_write_response_echoes_saved_links(
+        self, mock_create, mock_verify, mock_session, mock_update
+    ):
+        """Studio needs the derived link_type back without a second fetch."""
+        group_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_verify.return_value = True
+        mock_create.return_value = MockGroupAccumulator(group_id=group_id)
+
+        result = create_group_accumulator_service(
+            group_id=group_id,
+            request=CreateGroupAccumulatorRequest(
+                links=[
+                    GroupAccumulatorLinkRequest(url="https://youtu.be/dQw4w9WgXcQ"),
+                    GroupAccumulatorLinkRequest(url="https://vimeo.com/12345678"),
+                ]
+            ),
+        )
+
+        assert [link.link_type for link in result.links] == [
+            GroupAccumulatorLinkType.YOUTUBE,
+            GroupAccumulatorLinkType.LINK,
+        ]
+        assert result.links[0].video_id == "dQw4w9WgXcQ"
+        assert [link.display_order for link in result.links] == [0, 1]
+
+    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_link_counts')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulators')
+    def test_public_list_sends_count_not_links(
+        self, mock_get, mock_session, mock_link_counts
+    ):
+        """The list stays light, but reports how many links exist rather than
+        claiming there are none."""
+        group_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        accumulator = MockGroupAccumulator(group_id=group_id)
+        mock_get.return_value = ([accumulator], 1)
+        mock_link_counts.return_value = {accumulator.id: 3}
+
+        result = get_group_accumulators_service(group_id=group_id)
+
+        assert result.accumulators[0].links is None
+        assert result.accumulators[0].link_count == 3

@@ -8,6 +8,7 @@ from _datetime import datetime, timezone
 from pecha_api.accumulator import (
     GroupAccumulator,
     GroupAccumulatorHistory,
+    GroupAccumulatorLink,
     UserGroupAccumulator,
     group_accumulator_joins,
 )
@@ -525,6 +526,24 @@ def get_group_accumulator_joiners_counts(
         .all()
     )
     return {row.group_accumulator_id: int(row.member_count) for row in rows}
+
+
+def get_group_accumulator_link_counts(
+    db: Session,
+    group_accumulator_ids: List[UUID],
+) -> dict[UUID, int]:
+    if not group_accumulator_ids:
+        return {}
+    rows = (
+        db.query(
+            GroupAccumulatorLink.group_accumulator_id,
+            func.count().label("link_count"),
+        )
+        .filter(GroupAccumulatorLink.group_accumulator_id.in_(group_accumulator_ids))
+        .group_by(GroupAccumulatorLink.group_accumulator_id)
+        .all()
+    )
+    return {row.group_accumulator_id: int(row.link_count) for row in rows}
 
 
 def list_group_accumulator_joiners_paginated(

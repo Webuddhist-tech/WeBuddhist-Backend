@@ -116,7 +116,15 @@ class GroupAccumulatorDTO(BaseModel):
     )
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads only.",
+        description="All per-language About entries. Returned on CMS reads and writes only.",
+    )
+    links: Optional[List[GroupAccumulatorLinkDTO]] = Field(
+        None,
+        description="Links ordered by display_order. Returned on CMS reads and writes; null on the public list, where link_count is sent instead.",
+    )
+    link_count: int = Field(
+        0,
+        description="Number of links on this accumulator. Always populated.",
     )
     is_joined: Optional[bool] = Field(
         None,
@@ -189,6 +197,7 @@ class GroupAccumulatorDetailDTO(BaseModel):
         default_factory=list,
         description="Links shared by the group, ordered by display_order",
     )
+    link_count: int = Field(0, description="Number of links on this accumulator")
     total_count: int = Field(..., description="Total lifetime count from all users")
     total_today_count: int = Field(0, description="Total count from all users for today in the request timezone")
     user: Optional[GroupAccumulatorDetailUserDTO] = Field(
