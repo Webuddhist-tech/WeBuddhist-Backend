@@ -122,6 +122,29 @@ class ChatBroadcaster:
             logger.error(f"Failed to broadcast reactions to Redis: {e}")
             raise
 
+    async def broadcast_prayers(
+        self,
+        room_id: UUID,
+        prayers: list,
+    ) -> None:
+        """Publish updated prayer counts for one or more prayer requests.
+
+        A batch pray sends one payload for every message the user selected, so
+        praying for twenty requests is one publish, not twenty. prayed_by_me is
+        viewer-specific and cannot travel in a shared broadcast; clients derive
+        their own state from each entry's user_ids, as they do for reactions."""
+        channel = f"chat:room:{room_id}:messages"
+        payload = {
+            "type": "prayers_updated",
+            "prayers": prayers,
+        }
+
+        try:
+            await self.redis.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.error(f"Failed to broadcast prayers to Redis: {e}")
+            raise
+
     async def broadcast_message_deleted(
         self,
         room_id: UUID,

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
@@ -20,11 +20,8 @@ from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_posts_for_group_ids
 from pecha_api.group_posts.service import build_post_dtos
 from pecha_api.plans.groups.groups_models import AuthorGroup
-from pecha_api.plans.groups.groups_repository import (
-    get_groups_by_ids,
-    get_joined_group_ids_by_user,
-    get_public_group_ids,
-)
+from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.groups_repository import get_groups_by_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.users.users_service import validate_and_extract_user_details
 
@@ -80,28 +77,6 @@ def _group_display_name(group: AuthorGroup, language: Optional[str] = None) -> s
     return entries[0].title
 
 
-def _resolve_feed_group_ids(
-    *,
-    joined_ids: List[UUID],
-    should_include_unfollowed: bool,
-    db: Session,
-) -> Tuple[List[UUID], Set[UUID]]:
-    """Return (group_ids_to_query, joined_id_set).
-
-    Joined groups count regardless of visibility; unjoined groups only when
-    they are public."""
-    resolved_joined = [
-        group.id for group in get_groups_by_ids(db=db, group_ids=joined_ids)
-    ]
-    joined_set = set(resolved_joined)
-
-    if not should_include_unfollowed:
-        return resolved_joined, joined_set
-
-    public_ids = get_public_group_ids(db=db)
-    return list({*public_ids, *resolved_joined}), joined_set
-
-
 def _build_group_card_map(
     db: Session,
     group_ids: List[UUID],
@@ -121,24 +96,26 @@ def _build_group_card_map(
 
 def _get_author_group_feed(
     db: Session,
-    token: str,
+    token: Optional[str],
     should_include_unfollowed: bool,
     skip: int = 0,
     limit: int = 20,
     language: Optional[str] = None,
 ) -> AuthorGroupFeedResponse:
-    """Authenticated mixed feed of posts and events from author groups.
+    """Mixed feed of posts and events from author groups.
 
-    Default: only groups the user joined.
+    Guests (no token) always see published public groups.
+    Logged-in default: groups the user joined.
     With should_include_unfollowed=True: mix in other public groups.
     """
-    current_user = validate_and_extract_user_details(token=token)
+    current_user = None
+    if token:
+        current_user = validate_and_extract_user_details(token=token)
 
-    joined_group_ids = get_joined_group_ids_by_user(db=db, user_id=current_user.id)
-    group_ids, joined_group_id_set = _resolve_feed_group_ids(
-        joined_ids=joined_group_ids,
-        should_include_unfollowed=should_include_unfollowed,
+    group_ids, joined_group_id_set = resolve_public_group_scope(
         db=db,
+        user_id=current_user.id if current_user else None,
+        should_include_unfollowed=should_include_unfollowed,
     )
 
     if not group_ids:
@@ -160,7 +137,9 @@ def _get_author_group_feed(
         limit=fetch_limit,
         status=GroupPostStatus.PUBLISHED,
     )
-    post_dtos = build_post_dtos(db, posts, user_id=current_user.id)
+    post_dtos = build_post_dtos(
+        db, posts, user_id=current_user.id if current_user else None
+    )
 
     # Get one-shot events
     one_shot_events, one_shot_total = get_events(
@@ -205,13 +184,15 @@ def _get_author_group_feed(
     events_total = one_shot_total + len(expanded_recurring)
     event_ids = [event.id for event in events] + [item['event'].id for item in expanded_recurring]
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
-    joined_event_ids = set(
-        get_joined_event_ids_by_user(
-            db=db,
-            user_id=current_user.id,
-            event_ids=event_ids,
+    joined_event_ids: Set[UUID] = set()
+    if current_user:
+        joined_event_ids = set(
+            get_joined_event_ids_by_user(
+                db=db,
+                user_id=current_user.id,
+                event_ids=event_ids,
+            )
         )
-    )
 
     page_group_ids = list({
         *[post.group_id for post in posts],
@@ -329,7 +310,7 @@ def _get_author_group_feed(
 
 async def get_author_group_feed_service(
     db: Session,
-    token: str,
+    token: Optional[str] = None,
     should_include_unfollowed: bool = False,
     skip: int = 0,
     limit: int = 20,

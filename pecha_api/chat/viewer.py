@@ -232,6 +232,7 @@ _CHAT_VIEWER_HTML = """
         .message-parent:hover { background: rgba(102, 126, 234, 0.15); }
         .message-parent-sender { font-weight: 600; color: #4f46e5; }
         .message-parent-body { color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px; }
+        .message-parent-body.deleted { color: #9ca3af; font-style: italic; }
 
         .message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
         .reaction-chip {
@@ -880,10 +881,14 @@ _CHAT_VIEWER_HTML = """
 
             let parentHtml = "";
             if (message.parent) {
+                const parentDeleted = !!message.parent.deleted_at;
+                const parentBody = parentDeleted
+                    ? deletedBodyText(message.parent)
+                    : escapeHtml(message.parent.body);
                 parentHtml = `
                     <div class="message-parent" data-parent-id="${escapeHtml(String(message.parent.id))}" title="Go to original message">
                         <div class="message-parent-sender">${escapeHtml(message.parent.sender_email)}</div>
-                        <div class="message-parent-body">${escapeHtml(message.parent.body)}</div>
+                        <div class="message-parent-body${parentDeleted ? " deleted" : ""}">${parentBody}</div>
                     </div>
                 `;
             }

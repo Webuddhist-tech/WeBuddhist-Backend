@@ -40,7 +40,7 @@ class MockUser:
 
 
 class MockMessage:
-    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello"):
+    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", parent=None):
         self.id = uuid4()
         self.room_id = room_id or uuid4()
         self.sender_id = sender_id or uuid4()
@@ -48,6 +48,8 @@ class MockMessage:
         self.body = body
         self.created_at = datetime.now(tz.utc)
         self.deleted_at = None
+        self.parent = parent
+        self.parent_message_id = parent.id if parent else None
 
 
 class MockGroup:
@@ -87,6 +89,58 @@ class TestBuildMessageDTO:
         dto = build_message_dto(message)
 
         assert dto.sender_avatar_url is None
+
+    def test_includes_parent_when_parent_exists(self):
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob", lastname="Smith")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Original")
+        reply = MockMessage(body="Reply", parent=parent)
+
+        dto = build_message_dto(reply)
+        payload = dto.model_dump()
+
+        assert dto.parent is not None
+        assert dto.parent.id == parent.id
+        assert dto.parent.body == "Original"
+        assert dto.parent.sender_id == parent_sender.id
+        assert dto.parent.sender_email == "parent@example.com"
+        assert dto.parent.sender_name == "Bob Smith"
+        assert dto.parent.deleted_at is None
+        assert "deleted_at" not in payload["parent"]
+
+    def test_includes_deleted_parent_without_content(self):
+        deleted_at = datetime.now(tz.utc)
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob", lastname="Smith")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Secret content")
+        parent.deleted_at = deleted_at
+        reply = MockMessage(body="Reply", parent=parent)
+
+        dto = build_message_dto(reply)
+        payload = dto.model_dump()
+
+        assert dto.parent is not None
+        assert dto.parent.id == parent.id
+        assert dto.parent.body == ""
+        assert dto.parent.sender_id == parent_sender.id
+        assert dto.parent.sender_email == "parent@example.com"
+        assert dto.parent.sender_name == "Bob Smith"
+        assert dto.parent.deleted_at == deleted_at.isoformat()
+        assert payload["parent"]["deleted_at"] == deleted_at.isoformat()
+        assert payload["parent"]["body"] == ""
+
+    def test_deleted_message_clears_body_and_keeps_sender(self):
+        deleted_at = datetime.now(tz.utc)
+        sender = MockUser(email="alice@example.com", firstname="Alice")
+        message = MockMessage(sender=sender, sender_id=sender.id, body="Secret content")
+        message.deleted_at = deleted_at
+
+        dto = build_message_dto(message)
+        payload = dto.model_dump()
+
+        assert dto.body == ""
+        assert dto.sender_email == "alice@example.com"
+        assert dto.sender_name == "Alice"
+        assert dto.deleted_at == deleted_at.isoformat()
+        assert payload["deleted_at"] == deleted_at.isoformat()
 
 
 class MockRoom:
@@ -564,8 +618,9 @@ class TestRoomIdRoutesRespectGroupStatus:
     @patch('pecha_api.chat.service.is_group_id_published')
     @patch('pecha_api.chat.service.get_room_by_id')
     def test_dm_room_skips_the_group_check(self, mock_get_room, mock_published):
-        """DM rooms have no group_id and must never consult group status."""
-        room = MagicMock(group_id=None)
+        """DM rooms have no group_id and no event_id, so they must never
+        consult group status."""
+        room = MagicMock(group_id=None, event_id=None)
         mock_get_room.return_value = room
 
         assert _get_room_or_404(db=MagicMock(), room_id=uuid4()) is room

@@ -4,6 +4,7 @@ from pecha_api.plans.plans_enums import DifficultyLevel, PlanStatus,ContentType
 from uuid import UUID
 from datetime import datetime, date as DateType
 from pecha_api.plans.plans_models import Plan
+from pecha_api.plans.shared.subtask_reference_resolver import SubTaskReferenceDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 from pecha_api.plans.series.series_response_models import SeriesProgressDTO
 
@@ -62,6 +63,8 @@ class SubTaskDTO(BaseModel):
     pecha_segment_id: Optional[str] = None
     segment_ids: Optional[List[str]] = None
     segment_numbers: Optional[List[int]] = None
+    reference_id: Optional[UUID] = None
+    reference: Optional[SubTaskReferenceDTO] = None
     display_order: Optional[int] = None
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None

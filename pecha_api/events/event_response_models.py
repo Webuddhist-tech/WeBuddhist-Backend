@@ -210,6 +210,11 @@ class EventDTO(BaseModel):
         description="For expanded occurrences, the specific occurrence date"
     )
     event_format: EventFormat = "hybrid"
+    chat_enabled: bool = True
+    chat_room_id: Optional[UUID] = Field(
+        None,
+        description="The event's chat room, when one has been created (null until first use)",
+    )
     metadata: EventMetadataResponse
     youtube: List[EventYoutubeDTO] = []
     links: List[EventLinkDTO] = []
@@ -270,6 +275,7 @@ class CreateEventRequest(BaseModel):
     location_id: Optional[UUID] = None
     recurrence: Optional[RecurrenceInput] = None
     event_format: EventFormat = "hybrid"
+    chat_enabled: bool = True
 
     @field_validator("metadata")
     @classmethod
@@ -316,6 +322,7 @@ class UpdateEventRequest(BaseModel):
     location_id: Optional[UUID] = None
     recurrence: Optional[RecurrenceInput] = None
     event_format: Optional[EventFormat] = None
+    chat_enabled: Optional[bool] = None
 
     @field_validator("event_format")
     @classmethod

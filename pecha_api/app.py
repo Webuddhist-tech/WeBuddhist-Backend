@@ -55,6 +55,7 @@ from pecha_api.group_posts import like_views as group_post_like_views
 from pecha_api.group_posts import comment_like_views as group_post_comment_like_views
 from pecha_api.chat import views as chat_views
 from pecha_api.chat.admin_views import cms_chat_reports_router
+from pecha_api.chat.cms_views import cms_group_chat_router
 from pecha_api.chat import viewer as chat_viewer_views
 from pecha_api.chat import internal_views as chat_notification_internal_views
 from pecha_api.bookmarks import bookmark_views
@@ -129,6 +130,7 @@ api.include_router(cms_admin_router)
 api.include_router(id_remap_router)
 api.include_router(cms_china_restrictions_router)
 api.include_router(cms_chat_reports_router)
+api.include_router(cms_group_chat_router)
 api.include_router(cms_transfers_router)
 api.include_router(group_transfers_router)
 api.include_router(plan_transfers_router)

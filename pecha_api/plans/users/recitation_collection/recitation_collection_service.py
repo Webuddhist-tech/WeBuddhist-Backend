@@ -14,7 +14,12 @@ from pecha_api.utils import Utils
 from pecha_api.plans.auth.plan_auth_models import ResponseError
 from pecha_api.plans.media.media_response_models import PlanUploadResponse
 from pecha_api.plans.media.media_services import prepare_image_upload, validate_file
-from pecha_api.plans.response_message import IMAGE_UPLOAD_SUCCESS, NOT_FOUND
+from pecha_api.plans.response_message import (
+    DUPLICATE_DISPLAY_ORDER,
+    IMAGE_UPLOAD_SUCCESS,
+    NOT_FOUND,
+    BAD_REQUEST,
+)
 
 from pecha_api.plans.users.recitation_collection.recitation_collection_models import (
     RecitationCollection,
@@ -29,7 +34,9 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_repositor
     save_collection,
     update_collection,
     get_max_display_order_for_collection,
+    collection_item_display_order_taken,
     save_collection_items,
+    update_collection_item,
     delete_collection,
     soft_delete_collection_item
 )
@@ -41,6 +48,7 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_response_
     CreateCollectionRequest,
     CreateCollectionResponse,
     UpdateCollectionRequest,
+    UpdateCollectionItemRequest,
     AddItemsRequest,
     AddItemsResponse
 )
@@ -273,7 +281,7 @@ def validate_collection_exists(collection, collection_id: UUID):
 def create_collection_items(
     collection_id: UUID,
     text_ids: list[str],
-    start_order: int
+    start_order: float
 ) -> list[RecitationCollectionItem]:
     return [
         RecitationCollectionItem(
@@ -389,3 +397,64 @@ async def delete_collection_item_service(
             )
 
         soft_delete_collection_item(db=db, item=item)
+
+
+async def update_collection_item_display_order_service(
+    token: str,
+    collection_id: UUID,
+    item_id: UUID,
+    request: UpdateCollectionItemRequest,
+) -> RecitationCollectionItemDTO:
+
+    current_user = validate_and_extract_user_details(token=token)
+
+    with SessionLocal() as db:
+        collection = get_collection_by_id(
+            db=db,
+            collection_id=collection_id,
+            user_id=current_user.id
+        )
+        validate_collection_exists(collection, collection_id)
+
+        item = get_collection_item_by_id(
+            db=db,
+            item_id=item_id,
+            collection_id=collection_id
+        )
+        if not item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ResponseError(
+                    error=NOT_FOUND,
+                    message=f"Item with ID {item_id} not found"
+                ).model_dump()
+            )
+
+        if item.display_order != request.display_order:
+            if collection_item_display_order_taken(
+                db=db,
+                collection_id=collection_id,
+                display_order=request.display_order,
+                exclude_item_id=item.id,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=ResponseError(
+                        error=BAD_REQUEST,
+                        message=DUPLICATE_DISPLAY_ORDER
+                    ).model_dump()
+                )
+            item.display_order = request.display_order
+            item = update_collection_item(db=db, item=item)
+
+        items_dto = await build_items_dto([item])
+        if items_dto:
+            return items_dto[0]
+        return RecitationCollectionItemDTO(
+            id=item.id,
+            text_id=item.text_id,
+            title="",
+            language=None,
+            type=None,
+            display_order=item.display_order,
+        )

@@ -14,6 +14,7 @@ class NotificationType(enum.Enum):
     GROUP_JOIN_REQUEST = "GROUP_JOIN_REQUEST"
     VERSE_OF_DAY = "VERSE_OF_DAY"
     ROUTINE_REMINDER = "ROUTINE_REMINDER"
+    PRAYER_RECEIVED = "PRAYER_RECEIVED"
 
 
 class NotificationChannel(enum.Enum):
@@ -49,6 +50,7 @@ GROUP_SCOPED_TYPES = frozenset(
         NotificationType.GROUP_POST,
         NotificationType.EVENT,
         NotificationType.ACCUMULATION,
+        NotificationType.PRAYER_RECEIVED,
     }
 )
 
@@ -69,6 +71,7 @@ V1_TOGGLEABLE_TYPES = (
     NotificationType.EVENT_REMINDER,
     NotificationType.ACCUMULATION,
     NotificationType.SERIES,
+    NotificationType.PRAYER_RECEIVED,
 )
 
 # Group-scoped subset of the above, in render order.

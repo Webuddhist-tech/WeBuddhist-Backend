@@ -686,6 +686,8 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
     current_user = validate_and_extract_user_details(token=token)
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
+        plan = get_plan_by_id(db=db, plan_id=plan_id)
+        plan_language = getattr(plan, "language", None)
         completed_task_ids = []
         completed_subtask_ids = set()
         task_ids = [task.id for task in plan_item.tasks]
@@ -710,7 +712,11 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
         from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
         tasks_sub_tasks = await asyncio.gather(
             *[
-                _get_user_sub_tasks_dto_bulk(sub_tasks=task.sub_tasks, completed_subtask_ids=completed_subtask_ids)
+                _get_user_sub_tasks_dto_bulk(
+                    sub_tasks=task.sub_tasks,
+                    completed_subtask_ids=completed_subtask_ids,
+                    language=plan_language,
+                )
                 for task in plan_item.tasks
             ]
         )
@@ -749,13 +755,16 @@ def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID]) -> List[UserSubTaskDTO]:
+async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID], language=None) -> List[UserSubTaskDTO]:
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
     resolved_contents = await resolve_subtasks_content(sub_tasks)
+    resolved_references = resolve_subtask_references(subtasks=sub_tasks, language=language)
 
     result = []
-    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+    for sub_task, resolved_content, reference in zip(sub_tasks, resolved_contents, resolved_references):
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
             _get_presigned_url(content=sub_task.audio_url)
@@ -774,6 +783,8 @@ async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_s
                 pecha_segment_id=sub_task.pecha_segment_id,
                 segment_ids=sub_task.segment_ids,
                 segment_numbers=sub_task.segment_numbers,
+                reference_id=sub_task.reference_id,
+                reference=reference,
                 start_ms=start_ms,
                 end_ms=end_ms,
             )

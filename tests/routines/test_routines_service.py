@@ -35,6 +35,13 @@ from pecha_api.routines.routines_service import (
     build_time_block_dto,
 )
 from pecha_api.plans.media.media_response_models import ImageUrlModel
+from pecha_api.plans.users.recitation_collection.recitation_collection_models import (
+    RecitationCollection,
+    RecitationCollectionItem,
+)
+from pecha_api.plans.users.recitation_collection.recitation_collection_repository import (
+    soft_delete_collection_item,
+)
 from pecha_api.routines.routines_response_models import (
     CreateTimeBlockRequest,
     UpdateTimeBlockRequest,
@@ -3057,6 +3064,91 @@ def test_resolve_recitation_collection_sessions_defaults_item_count_to_zero():
     assert len(result) == 1
     assert result[0].item_count == 0
     assert result[0].image is None
+
+
+def _make_sqlite_collection_db():
+    """Real in-memory SQLite session. The mocked db above stubs out the count
+    query entirely, so it cannot see whether soft-deleted items are filtered -
+    this exercises the actual SQL."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    RecitationCollection.metadata.create_all(
+        bind=engine,
+        tables=[RecitationCollection.__table__, RecitationCollectionItem.__table__],
+    )
+    return sessionmaker(bind=engine)()
+
+
+def test_resolve_recitation_collection_sessions_excludes_soft_deleted_items():
+    """item_count must not count items removed from the collection.
+
+    Collection items are soft-deleted (deleted_at is stamped, the row stays so
+    chant completion history survives), so a count that does not filter on
+    deleted_at reports the pre-deletion number forever.
+    """
+    user_id = uuid.uuid4()
+    db = _make_sqlite_collection_db()
+
+    now = datetime.now(timezone.utc).isoformat()
+    collection = RecitationCollection(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        name="Daily Chants",
+        img_url="collections/img.jpg",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(collection)
+    db.commit()
+
+    for order, text_id in enumerate(["text-1", "text-2", "text-3"], start=1):
+        db.add(
+            RecitationCollectionItem(
+                id=uuid.uuid4(),
+                recitation_collection_id=collection.id,
+                text_id=text_id,
+                display_order=order,
+            )
+        )
+    db.commit()
+
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_type=SessionType.RECITATION_COLLECTION,
+        source_id=collection.id,
+        display_order=0,
+    )
+
+    with patch(
+        "pecha_api.routines.routines_service.safe_get_image_url",
+        return_value=None,
+    ):
+        before = _resolve_recitation_collection_sessions(
+            db=db, collection_sessions=[session], user_id=user_id
+        )
+        assert before[0].item_count == 3
+
+        # Remove two of the three items the way the API does.
+        removed = (
+            db.query(RecitationCollectionItem)
+            .filter(RecitationCollectionItem.text_id.in_(["text-2", "text-3"]))
+            .all()
+        )
+        for item in removed:
+            soft_delete_collection_item(db=db, item=item)
+
+        after = _resolve_recitation_collection_sessions(
+            db=db, collection_sessions=[session], user_id=user_id
+        )
+
+    assert after[0].item_count == 1
 
 
 def test_resolve_group_recitation_collection_sessions_empty():

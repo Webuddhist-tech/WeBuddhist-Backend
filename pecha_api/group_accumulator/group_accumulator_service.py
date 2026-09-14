@@ -1,8 +1,16 @@
 from typing import List, Optional, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 from fastapi import HTTPException
 from starlette import status
 
+from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
+from pecha_api.accumulator.group_accumulator_link_model import GroupAccumulatorLink
+from pecha_api.accumulator.link_utils import classify_link, is_valid_http_url
+from pecha_api.accumulator.response_message import INVALID_URL
+from pecha_api.plans.shared.metadata_utils import (
+    DEFAULT_FALLBACK_LANGUAGE,
+    filter_by_language_with_fallback,
+)
 from pecha_api.db.database import SessionLocal
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.timezone_utils import get_day_bounds_in_timezone, normalize_timezone_name
@@ -67,6 +75,9 @@ from .group_accumulator_response_models import (
     GroupAccumulatorUserSessionDTO,
     GroupAccumulatorUserSessionsResponse,
     GroupAccumulatorMemberSortBy,
+    GroupAccumulatorMetadataDTO,
+    GroupAccumulatorLinkDTO,
+    GroupAccumulatorLinkRequest,
 )
 
 
@@ -113,11 +124,207 @@ def _build_detail_user_dto(
     )
 
 
+def _metadata_language(entry) -> str:
+    language = entry.language
+    return language.value if hasattr(language, "value") else str(language)
+
+
+def _resolve_description(group_accumulator, language: Optional[str]) -> Optional[str]:
+    """Falls back to EN when the requested language has no entry."""
+    entries = list(getattr(group_accumulator, "metadata_entries", None) or [])
+    if not entries:
+        return None
+    matched = filter_by_language_with_fallback(
+        entries=entries,
+        language=language or DEFAULT_FALLBACK_LANGUAGE,
+        language_of=_metadata_language,
+    )
+    if not matched:
+        return None
+    return matched[0].description
+
+
+def _convert_metadata_entries(group_accumulator) -> List[GroupAccumulatorMetadataDTO]:
+    return [
+        GroupAccumulatorMetadataDTO(
+            language=entry.language,
+            description=entry.description,
+        )
+        for entry in (getattr(group_accumulator, "metadata_entries", None) or [])
+    ]
+
+
+def _convert_links(group_accumulator) -> List[GroupAccumulatorLinkDTO]:
+    links = list(getattr(group_accumulator, "links", None) or [])
+    links.sort(key=lambda link: link.display_order)
+    return [
+        GroupAccumulatorLinkDTO(
+            id=link.id,
+            url=link.url,
+            link_type=link.link_type,
+            video_id=link.video_id,
+            title=link.title,
+            display_order=link.display_order,
+        )
+        for link in links
+    ]
+
+
+def _build_metadata_entries(
+    metadata: List[GroupAccumulatorMetadataDTO],
+) -> List[GroupAccumulatorMetadata]:
+    return [
+        GroupAccumulatorMetadata(
+            id=uuid4(),
+            description=entry.description,
+            language=entry.language,
+        )
+        for entry in metadata
+    ]
+
+
+def _build_link_entries(
+    links: List[GroupAccumulatorLinkRequest],
+    *,
+    created_by: Optional[str] = None,
+) -> List[GroupAccumulatorLink]:
+    entries = []
+    for display_order, entry in enumerate(links):
+        url = entry.url.strip()
+        if not is_valid_http_url(url):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "BAD_REQUEST", "message": INVALID_URL},
+            )
+        link_type, video_id = classify_link(url)
+        entries.append(
+            GroupAccumulatorLink(
+                id=uuid4(),
+                url=url,
+                link_type=link_type,
+                video_id=video_id,
+                title=entry.title,
+                display_order=display_order,
+                created_by=created_by,
+                updated_by=created_by,
+            )
+        )
+    return entries
+
+
+def _apply_update_request(
+    db,
+    group_accumulator,
+    request: UpdateGroupAccumulatorRequest,
+    *,
+    created_by: Optional[str] = None,
+) -> None:
+    """Apply the editable fields of an update request. Unset fields are left
+    untouched."""
+    for field in (
+        "accumulator_id",
+        "title",
+        "image_key",
+        "target_count",
+        "start_date",
+        "end_date",
+    ):
+        value = getattr(request, field)
+        if value is not None:
+            setattr(group_accumulator, field, value)
+
+    _apply_metadata_and_links(
+        db,
+        group_accumulator,
+        metadata=request.metadata,
+        links=request.links,
+        created_by=created_by,
+    )
+
+
+def _validate_link_requests(links: Optional[List[GroupAccumulatorLinkRequest]]) -> None:
+    """Raise before any row is written when a URL is unusable."""
+    if links is not None:
+        _build_link_entries(links)
+
+
+def _create_with_children(
+    db,
+    group_id: UUID,
+    request: CreateGroupAccumulatorRequest,
+    *,
+    created_by: Optional[str] = None,
+):
+    """Create the accumulator and its metadata/links. Links are validated up
+    front so a bad URL cannot leave a committed parent behind."""
+    if not verify_group_exists(db, group_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": "Group not found"},
+        )
+
+    _validate_link_requests(request.links)
+
+    group_accumulator = create_group_accumulator(
+        db=db,
+        group_id=group_id,
+        accumulator_id=request.accumulator_id,
+        title=request.title,
+        image_key=request.image_key,
+        target_count=request.target_count,
+        start_date=request.start_date,
+        end_date=request.end_date,
+    )
+    _apply_metadata_and_links(
+        db,
+        group_accumulator,
+        metadata=request.metadata,
+        links=request.links,
+        created_by=created_by,
+    )
+    update_group_accumulator(db=db, group_accumulator=group_accumulator)
+    return group_accumulator
+
+
+def _apply_metadata_and_links(
+    db,
+    group_accumulator,
+    *,
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]],
+    links: Optional[List[GroupAccumulatorLinkRequest]],
+    created_by: Optional[str] = None,
+) -> None:
+    """Full-replace both child sets. None leaves the existing rows untouched;
+    an empty list clears them."""
+    # Build (and so validate) the replacements before touching existing rows.
+    new_metadata = _build_metadata_entries(metadata) if metadata is not None else None
+    new_links = (
+        _build_link_entries(links, created_by=created_by) if links is not None else None
+    )
+
+    if new_metadata is not None:
+        group_accumulator.metadata_entries.clear()
+    if new_links is not None:
+        group_accumulator.links.clear()
+
+    # The metadata unique constraint on (group_accumulator_id, language) is
+    # checked per statement, so the deletes must land before the inserts.
+    if new_metadata is not None or new_links is not None:
+        db.flush()
+
+    if new_metadata is not None:
+        group_accumulator.metadata_entries.extend(new_metadata)
+    if new_links is not None:
+        group_accumulator.links.extend(new_links)
+
+
 def _convert_to_dto(
     group_accumulator,
     *,
     is_joined: Optional[bool] = None,
     member_count: int = 0,
+    language: Optional[str] = None,
+    include_cms_fields: bool = False,
 ) -> GroupAccumulatorDTO:
     preset_accumulator = getattr(group_accumulator, "accumulator", None)
     return GroupAccumulatorDTO(
@@ -132,6 +339,9 @@ def _convert_to_dto(
         target_count=group_accumulator.target_count,
         start_date=group_accumulator.start_date,
         end_date=group_accumulator.end_date,
+        description=_resolve_description(group_accumulator, language),
+        metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
+        links=_convert_links(group_accumulator),
         is_joined=is_joined,
         member_count=member_count,
         created_at=group_accumulator.created_at,
@@ -152,8 +362,11 @@ def _convert_to_detail_dto(
     member_count: int,
     user: Optional[GroupAccumulatorDetailUserDTO] = None,
     is_joined: Optional[bool] = None,
+    language: Optional[str] = None,
+    include_cms_fields: bool = False,
 ) -> GroupAccumulatorDetailDTO:
     preset_accumulator = getattr(group_accumulator, "accumulator", None)
+    links = _convert_links(group_accumulator)
     return GroupAccumulatorDetailDTO(
         id=group_accumulator.id,
         preset_accumulator_id=group_accumulator.accumulator_id,
@@ -166,6 +379,9 @@ def _convert_to_detail_dto(
         target_count=group_accumulator.target_count,
         start_date=group_accumulator.start_date,
         end_date=group_accumulator.end_date,
+        description=_resolve_description(group_accumulator, language),
+        metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
+        links=links,
         total_count=total_count,
         total_today_count=total_today_count,
         user=user,
@@ -181,23 +397,8 @@ def create_group_accumulator_service(
     request: CreateGroupAccumulatorRequest,
 ) -> GroupAccumulatorDTO:
     with SessionLocal() as db:
-        if not verify_group_exists(db, group_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": "NOT_FOUND", "message": "Group not found"}
-            )
-        
-        group_accumulator = create_group_accumulator(
-            db=db,
-            group_id=group_id,
-            accumulator_id=request.accumulator_id,
-            title=request.title,
-            image_key=request.image_key,
-            target_count=request.target_count,
-            start_date=request.start_date,
-            end_date=request.end_date,
-        )
-        return _convert_to_dto(group_accumulator)
+        group_accumulator = _create_with_children(db, group_id, request)
+        return _convert_to_dto(group_accumulator, include_cms_fields=True)
 
 
 def get_group_accumulators_service(
@@ -206,6 +407,7 @@ def get_group_accumulators_service(
     limit: int = 20,
     token: Optional[str] = None,
     timezone_name: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> GroupAccumulatorsResponse:
     with SessionLocal() as db:
         accumulators, total = get_group_accumulators(db, group_id, skip, limit)
@@ -238,6 +440,7 @@ def get_group_accumulators_service(
                     acc,
                     is_joined=acc.id in joined_ids if token else None,
                     member_count=member_counts.get(acc.id, 0),
+                    language=language,
                 )
                 for acc in accumulators
             ],
@@ -251,6 +454,7 @@ def get_group_accumulator_service(
     group_accumulator_id: UUID,
     timezone_name: Optional[str] = None,
     token: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> GroupAccumulatorDetailDTO:
     assert_visible_for_timezone(
         timezone_name=timezone_name,
@@ -309,6 +513,7 @@ def get_group_accumulator_service(
             member_count=member_count,
             user=user,
             is_joined=is_joined,
+            language=language,
         )
 
 
@@ -331,21 +536,10 @@ def update_group_accumulator_service(
                 detail={"error": "FORBIDDEN", "message": "Group accumulator does not belong to this group"}
             )
         
-        if request.accumulator_id is not None:
-            group_accumulator.accumulator_id = request.accumulator_id
-        if request.title is not None:
-            group_accumulator.title = request.title
-        if request.image_key is not None:
-            group_accumulator.image_key = request.image_key
-        if request.target_count is not None:
-            group_accumulator.target_count = request.target_count
-        if request.start_date is not None:
-            group_accumulator.start_date = request.start_date
-        if request.end_date is not None:
-            group_accumulator.end_date = request.end_date
-        
+        _apply_update_request(db, group_accumulator, request)
+
         updated = update_group_accumulator(db, group_accumulator)
-        return _convert_to_dto(updated)
+        return _convert_to_dto(updated, include_cms_fields=True)
 
 
 def delete_group_accumulator_service(
@@ -722,24 +916,14 @@ def create_group_accumulator_cms_service(
     author = validate_cms_author_details(token=token)
     with SessionLocal() as db:
         require_can_create_content(db=db, group_id=group_id, author=author)
-        
-        if not verify_group_exists(db, group_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": "NOT_FOUND", "message": "Group not found"}
-            )
-        
-        group_accumulator = create_group_accumulator(
-            db=db,
-            group_id=group_id,
-            accumulator_id=request.accumulator_id,
-            title=request.title,
-            image_key=request.image_key,
-            target_count=request.target_count,
-            start_date=request.start_date,
-            end_date=request.end_date,
+
+        group_accumulator = _create_with_children(
+            db,
+            group_id,
+            request,
+            created_by=getattr(author, "email", None),
         )
-        return _convert_to_dto(group_accumulator)
+        return _convert_to_dto(group_accumulator, include_cms_fields=True)
 
 
 def get_group_accumulators_cms_service(
@@ -760,7 +944,11 @@ def get_group_accumulators_cms_service(
         )
         return GroupAccumulatorsResponse(
             accumulators=[
-                _convert_to_dto(acc, member_count=member_counts.get(acc.id, 0))
+                _convert_to_dto(
+                    acc,
+                    member_count=member_counts.get(acc.id, 0),
+                    include_cms_fields=True,
+                )
                 for acc in accumulators
             ],
             total=total,
@@ -807,6 +995,7 @@ def get_group_accumulator_cms_service(
             total_count=total_count,
             total_today_count=total_today_count,
             member_count=member_count,
+            include_cms_fields=True,
         )
 
 
@@ -834,21 +1023,15 @@ def update_group_accumulator_cms_service(
                 detail={"error": "FORBIDDEN", "message": "Group accumulator does not belong to this group"}
             )
         
-        if request.accumulator_id is not None:
-            group_accumulator.accumulator_id = request.accumulator_id
-        if request.title is not None:
-            group_accumulator.title = request.title
-        if request.image_key is not None:
-            group_accumulator.image_key = request.image_key
-        if request.target_count is not None:
-            group_accumulator.target_count = request.target_count
-        if request.start_date is not None:
-            group_accumulator.start_date = request.start_date
-        if request.end_date is not None:
-            group_accumulator.end_date = request.end_date
-        
+        _apply_update_request(
+            db,
+            group_accumulator,
+            request,
+            created_by=getattr(author, "email", None),
+        )
+
         updated = update_group_accumulator(db, group_accumulator)
-        return _convert_to_dto(updated)
+        return _convert_to_dto(updated, include_cms_fields=True)
 
 
 def delete_group_accumulator_cms_service(

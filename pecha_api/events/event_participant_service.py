@@ -77,16 +77,33 @@ def _participants_response(
 
 
 def join_event_service(token: str, event_id: UUID) -> None:
-    """Join an event. Idempotent: joining again is a no-op."""
+    """Join an event. Idempotent: joining again is a no-op.
+
+    Also puts the user into the event's chat room when one exists, so the room
+    shows up in their inbox before they ever type in it."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
         _get_event_or_404(db, event_id)
         upsert_event_participant(db=db, event_id=event_id, user_id=current_user.id)
+        try:
+            # Deferred: chat imports events at module level, so events cannot
+            # import chat back at module level.
+            from pecha_api.chat.service import join_event_chat_room
+
+            join_event_chat_room(db=db, event_id=event_id, user=current_user)
+        except Exception:
+            # The RSVP is the user's actual intent; a chat-room hiccup must not
+            # undo it. The room is joined again on their first message anyway.
+            logging.exception(
+                f"Failed to add user {current_user.id} to chat room for event {event_id}"
+            )
 
 
 def leave_event_service(token: str, event_id: UUID) -> None:
-    """Leave an event. 404 when the caller had not joined."""
+    """Leave an event. 404 when the caller had not joined.
+
+    Also drops the event's chat room from their inbox."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
@@ -98,6 +115,14 @@ def leave_event_service(token: str, event_id: UUID) -> None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"You have not joined event '{event_id}'",
+            )
+        try:
+            from pecha_api.chat.service import leave_event_chat_room
+
+            leave_event_chat_room(db=db, event_id=event_id, user_id=current_user.id)
+        except Exception:
+            logging.exception(
+                f"Failed to remove user {current_user.id} from chat room for event {event_id}"
             )
 
 

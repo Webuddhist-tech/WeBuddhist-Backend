@@ -83,6 +83,7 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
             "purge_deleted_timers",
             "reconcile_undispatched_audio_jobs",
             "reconcile_undispatched_chat_notifications",
+            "reconcile_undispatched_prayer_notifications",
             "reconcile_undispatched_join_request_notifications",
             "reconcile_undispatched_group_post_notifications",
             "reconcile_undispatched_event_notifications",
@@ -93,6 +94,8 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
         assert mock_scheduler.add_job.call_args_list[1].kwargs["args"] == [30]
         assert [call.kwargs for call in mock_interval_trigger.call_args_list] == [
             {"seconds": 60},
+            {"seconds": 30},
+            # Prayer notifications reconcile on the chat interval.
             {"seconds": 30},
             {"seconds": 60},
             {"seconds": 45},
