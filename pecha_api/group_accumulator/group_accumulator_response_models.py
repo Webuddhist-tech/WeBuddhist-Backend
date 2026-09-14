@@ -1,15 +1,48 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List
 from datetime import datetime
 from uuid import UUID
 from enum import Enum
 
 from pecha_api.plans.media.media_response_models import ImageUrlModel
+from pecha_api.plans.plans_enums import LanguageCode
+from pecha_api.accumulator.accumulator_enums import GroupAccumulatorLinkType
 
 
 class GroupAccumulatorMemberSortBy(str, Enum):
     TOTAL = "total"
     TODAY = "today"
+
+
+class GroupAccumulatorMetadataDTO(BaseModel):
+    language: LanguageCode
+    description: Optional[str] = None
+
+
+class GroupAccumulatorLinkRequest(BaseModel):
+    """`link_type` and `video_id` are derived server-side from the URL."""
+    url: str
+    title: Optional[str] = None
+
+
+class GroupAccumulatorLinkDTO(BaseModel):
+    id: UUID
+    url: str
+    link_type: GroupAccumulatorLinkType
+    video_id: Optional[str] = Field(
+        None,
+        description="YouTube video id; null when link_type is LINK",
+    )
+    title: Optional[str] = None
+    display_order: int
+
+
+def _validate_metadata_languages(metadata: Optional[List[GroupAccumulatorMetadataDTO]]):
+    if metadata is None:
+        return
+    languages = [entry.language for entry in metadata]
+    if len(languages) != len(set(languages)):
+        raise ValueError("metadata languages must be unique")
 
 
 class CreateGroupAccumulatorRequest(BaseModel):
@@ -19,6 +52,19 @@ class CreateGroupAccumulatorRequest(BaseModel):
     target_count: Optional[int] = Field(None, ge=1)
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
+        None,
+        description="Per-language About text. Replaces the full set; [] clears it.",
+    )
+    links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
+        None,
+        description="Ordered links. Replaces the full set; [] clears it. Array index becomes display_order.",
+    )
+
+    @model_validator(mode="after")
+    def validate_metadata(self):
+        _validate_metadata_languages(self.metadata)
+        return self
 
 
 class UpdateGroupAccumulatorRequest(BaseModel):
@@ -28,6 +74,19 @@ class UpdateGroupAccumulatorRequest(BaseModel):
     target_count: Optional[int] = Field(None, ge=1)
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
+        None,
+        description="Per-language About text. Replaces the full set; [] clears it. Omit to leave unchanged.",
+    )
+    links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
+        None,
+        description="Ordered links. Replaces the full set; [] clears it. Omit to leave unchanged.",
+    )
+
+    @model_validator(mode="after")
+    def validate_metadata(self):
+        _validate_metadata_languages(self.metadata)
+        return self
 
 
 class GroupAccumulatorDTO(BaseModel):
@@ -51,6 +110,14 @@ class GroupAccumulatorDTO(BaseModel):
     target_count: Optional[int] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    description: Optional[str] = Field(
+        None,
+        description="About text resolved for the requested language, falling back to EN",
+    )
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
+        None,
+        description="All per-language About entries. Returned on CMS reads only.",
+    )
     is_joined: Optional[bool] = Field(
         None,
         description="Whether the authenticated user has joined (null when unauthenticated)",
@@ -110,6 +177,18 @@ class GroupAccumulatorDetailDTO(BaseModel):
     target_count: Optional[int] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    description: Optional[str] = Field(
+        None,
+        description="About text resolved for the requested language, falling back to EN",
+    )
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
+        None,
+        description="All per-language About entries. Returned on CMS reads only.",
+    )
+    links: List[GroupAccumulatorLinkDTO] = Field(
+        default_factory=list,
+        description="Links shared by the group, ordered by display_order",
+    )
     total_count: int = Field(..., description="Total lifetime count from all users")
     total_today_count: int = Field(0, description="Total count from all users for today in the request timezone")
     user: Optional[GroupAccumulatorDetailUserDTO] = Field(

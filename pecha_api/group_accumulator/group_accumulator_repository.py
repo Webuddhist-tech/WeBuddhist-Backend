@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Dict
 from uuid import UUID
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import delete, func, select
 import _datetime
 from _datetime import datetime, timezone
@@ -55,7 +55,10 @@ def get_group_accumulators(
 ) -> Tuple[List[GroupAccumulator], int]:
     query = (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(
+            joinedload(GroupAccumulator.accumulator),
+            selectinload(GroupAccumulator.metadata_entries),
+        )
         .filter(
             GroupAccumulator.group_id == group_id,
             GroupAccumulator.deleted_at.is_(None),
@@ -79,7 +82,10 @@ def get_group_accumulators_for_group_ids(
         return [], 0
     query = (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(
+            joinedload(GroupAccumulator.accumulator),
+            selectinload(GroupAccumulator.metadata_entries),
+        )
         .filter(
             GroupAccumulator.group_id.in_(group_ids),
             GroupAccumulator.deleted_at.is_(None),
@@ -98,7 +104,11 @@ def get_group_accumulator_by_id(
 ) -> Optional[GroupAccumulator]:
     return (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(
+            joinedload(GroupAccumulator.accumulator),
+            selectinload(GroupAccumulator.metadata_entries),
+            selectinload(GroupAccumulator.links),
+        )
         .filter(
             GroupAccumulator.id == group_accumulator_id,
             GroupAccumulator.deleted_at.is_(None),
