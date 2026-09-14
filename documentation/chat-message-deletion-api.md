@@ -14,8 +14,8 @@ instead of having a message vanish mid-scroll.
 | `DELETE` | `/chat/rooms/{room_id}/messages` | Several messages, 1-50 (204) |
 
 Both require an active member of the room, and both let a caller delete **only
-their own messages**. There is no admin override here — moderation is a
-separate surface.
+their own messages**. There is no admin override on these two; moderation is a
+separate, CMS-only surface — see [§6](#6-cms-moderation-delete-anyones-message).
 
 ---
 
@@ -106,6 +106,12 @@ clients grey the message out without refetching history:
   "deleted_at": "2026-09-14T11:20:00+00:00" }
 ```
 
+A moderator deletion ([§6](#6-cms-moderation-delete-anyones-message)) publishes
+the same event with one extra key, `"source": "CMS"`, and a `user_id` that is
+the moderator's **author** id rather than a chat user id. Clients that ignore
+unknown keys need no change; a client that wants to say "removed by a
+moderator" instead of "deleted" can key off `source`.
+
 A bulk delete sends **one event per message**, all sharing the same
 `deleted_at` — not a single batched payload. A client that already handles the
 single delete therefore needs no change to support bulk.
@@ -126,3 +132,51 @@ history fetch.
 | 404 | `Not found: <ids>` | Bulk: those ids are not live messages in this room — nothing was deleted |
 | 404 | `Not found` | Single: room or message gone, or already deleted |
 | 422 | — | `message_ids` empty, or more than 50 ids |
+
+These are the member-facing endpoints only; the CMS endpoint below has its own
+error table.
+
+---
+
+## 6. CMS moderation — delete anyone's message
+
+```http
+DELETE /cms/author/groups/{group_id}/chat/messages/{message_id}
+Authorization: Bearer <CMS author token>
+```
+
+`204 No Content`. This is the moderation counterpart to §1: it deletes the
+message **whoever sent it**, in the chat room belonging to `group_id`.
+
+**Who may call it.** An author whose role in that group lets them update the
+group's content — `OWNER`, `ADMIN` or `AUTHOR`, the same set that gates every
+other group content write (posts, events, plans). A platform `SUPER_ADMIN`
+passes for any group; a `REVIEWER` is read-only across the CMS and is refused.
+
+Two deliberate differences from the member endpoints:
+
+- **The group, not the room, is in the path.** A group has exactly one chat
+  room, so the moderator never has to look up a room id; authorisation is a
+  property of the group anyway.
+- **Room membership is not required.** A moderator moderates from the CMS
+  without joining the chat. The member endpoints still demand active
+  membership.
+
+Otherwise it behaves exactly like §1: the same soft delete, the same tombstone
+in history (§3), and the same `message_deleted` broadcast (§4) — so a client
+already handling member deletions greys the message out with no change.
+
+Only `GROUP` rooms are reachable this way. Event and private rooms have no
+`group_id`, so they have no CMS moderation endpoint.
+
+### Errors
+
+| Status | Detail | Meaning |
+|--------|--------|---------|
+| 403 | `NO_GROUP_MEMBERSHIP` | The author has no role in this group, or only `VIEWER` |
+| 403 | `FORBIDDEN` | Platform reviewer — the CMS is read-only for them |
+| 404 | `Not found` | No such group, the group has no chat room, or the message is not a live message in it |
+
+An unpublished group is still moderatable — its backlog is exactly what may
+need cleaning up — so the publication check the member endpoints apply does not
+apply here.
