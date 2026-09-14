@@ -21,6 +21,15 @@ def _apply_created_at_range(query, range_start: datetime, range_end: datetime):
     )
 
 
+def _accumulator_load_options():
+    """Eager-load everything the DTOs serialize, so list queries stay flat."""
+    return (
+        joinedload(GroupAccumulator.accumulator),
+        selectinload(GroupAccumulator.metadata_entries),
+        selectinload(GroupAccumulator.links),
+    )
+
+
 def create_group_accumulator(
     db: Session,
     group_id: UUID,
@@ -55,10 +64,7 @@ def get_group_accumulators(
 ) -> Tuple[List[GroupAccumulator], int]:
     query = (
         db.query(GroupAccumulator)
-        .options(
-            joinedload(GroupAccumulator.accumulator),
-            selectinload(GroupAccumulator.metadata_entries),
-        )
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.group_id == group_id,
             GroupAccumulator.deleted_at.is_(None),
@@ -82,10 +88,7 @@ def get_group_accumulators_for_group_ids(
         return [], 0
     query = (
         db.query(GroupAccumulator)
-        .options(
-            joinedload(GroupAccumulator.accumulator),
-            selectinload(GroupAccumulator.metadata_entries),
-        )
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.group_id.in_(group_ids),
             GroupAccumulator.deleted_at.is_(None),
@@ -104,11 +107,7 @@ def get_group_accumulator_by_id(
 ) -> Optional[GroupAccumulator]:
     return (
         db.query(GroupAccumulator)
-        .options(
-            joinedload(GroupAccumulator.accumulator),
-            selectinload(GroupAccumulator.metadata_entries),
-            selectinload(GroupAccumulator.links),
-        )
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.id == group_accumulator_id,
             GroupAccumulator.deleted_at.is_(None),

@@ -324,7 +324,7 @@ def _convert_to_dto(
     is_joined: Optional[bool] = None,
     member_count: int = 0,
     language: Optional[str] = None,
-    include_metadata: bool = False,
+    include_cms_fields: bool = False,
 ) -> GroupAccumulatorDTO:
     preset_accumulator = getattr(group_accumulator, "accumulator", None)
     return GroupAccumulatorDTO(
@@ -340,7 +340,8 @@ def _convert_to_dto(
         start_date=group_accumulator.start_date,
         end_date=group_accumulator.end_date,
         description=_resolve_description(group_accumulator, language),
-        metadata=_convert_metadata_entries(group_accumulator) if include_metadata else None,
+        metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
+        links=_convert_links(group_accumulator),
         is_joined=is_joined,
         member_count=member_count,
         created_at=group_accumulator.created_at,
@@ -362,9 +363,10 @@ def _convert_to_detail_dto(
     user: Optional[GroupAccumulatorDetailUserDTO] = None,
     is_joined: Optional[bool] = None,
     language: Optional[str] = None,
-    include_metadata: bool = False,
+    include_cms_fields: bool = False,
 ) -> GroupAccumulatorDetailDTO:
     preset_accumulator = getattr(group_accumulator, "accumulator", None)
+    links = _convert_links(group_accumulator)
     return GroupAccumulatorDetailDTO(
         id=group_accumulator.id,
         preset_accumulator_id=group_accumulator.accumulator_id,
@@ -378,8 +380,8 @@ def _convert_to_detail_dto(
         start_date=group_accumulator.start_date,
         end_date=group_accumulator.end_date,
         description=_resolve_description(group_accumulator, language),
-        metadata=_convert_metadata_entries(group_accumulator) if include_metadata else None,
-        links=_convert_links(group_accumulator),
+        metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
+        links=links,
         total_count=total_count,
         total_today_count=total_today_count,
         user=user,
@@ -396,7 +398,7 @@ def create_group_accumulator_service(
 ) -> GroupAccumulatorDTO:
     with SessionLocal() as db:
         group_accumulator = _create_with_children(db, group_id, request)
-        return _convert_to_dto(group_accumulator, include_metadata=True)
+        return _convert_to_dto(group_accumulator, include_cms_fields=True)
 
 
 def get_group_accumulators_service(
@@ -537,7 +539,7 @@ def update_group_accumulator_service(
         _apply_update_request(db, group_accumulator, request)
 
         updated = update_group_accumulator(db, group_accumulator)
-        return _convert_to_dto(updated, include_metadata=True)
+        return _convert_to_dto(updated, include_cms_fields=True)
 
 
 def delete_group_accumulator_service(
@@ -921,7 +923,7 @@ def create_group_accumulator_cms_service(
             request,
             created_by=getattr(author, "email", None),
         )
-        return _convert_to_dto(group_accumulator, include_metadata=True)
+        return _convert_to_dto(group_accumulator, include_cms_fields=True)
 
 
 def get_group_accumulators_cms_service(
@@ -945,7 +947,7 @@ def get_group_accumulators_cms_service(
                 _convert_to_dto(
                     acc,
                     member_count=member_counts.get(acc.id, 0),
-                    include_metadata=True,
+                    include_cms_fields=True,
                 )
                 for acc in accumulators
             ],
@@ -993,7 +995,7 @@ def get_group_accumulator_cms_service(
             total_count=total_count,
             total_today_count=total_today_count,
             member_count=member_count,
-            include_metadata=True,
+            include_cms_fields=True,
         )
 
 
@@ -1029,7 +1031,7 @@ def update_group_accumulator_cms_service(
         )
 
         updated = update_group_accumulator(db, group_accumulator)
-        return _convert_to_dto(updated, include_metadata=True)
+        return _convert_to_dto(updated, include_cms_fields=True)
 
 
 def delete_group_accumulator_cms_service(

@@ -116,7 +116,11 @@ class GroupAccumulatorDTO(BaseModel):
     )
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads only.",
+        description="All per-language About entries. Returned on CMS reads and writes only.",
+    )
+    links: List[GroupAccumulatorLinkDTO] = Field(
+        default_factory=list,
+        description="Links shared by the group, ordered by display_order",
     )
     is_joined: Optional[bool] = Field(
         None,
