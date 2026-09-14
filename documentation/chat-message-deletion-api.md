@@ -107,10 +107,24 @@ clients grey the message out without refetching history:
 ```
 
 A moderator deletion ([§6](#6-cms-moderation-delete-anyones-message)) publishes
-the same event with one extra key, `"source": "CMS"`, and a `user_id` that is
-the moderator's **author** id rather than a chat user id. Clients that ignore
-unknown keys need no change; a client that wants to say "removed by a
-moderator" instead of "deleted" can key off `source`.
+the same event, with three differences in `deleted_by`:
+
+```json
+{ "type": "message_deleted",
+  "message_id": "a1…",
+  "deleted_by": { "user_id": "a9…", "name": "Tenzin", "source": "CMS" },
+  "deleted_at": "2026-09-14T11:20:00+00:00" }
+```
+
+- `source` is `"CMS"` — key off it to say "removed by a moderator" rather than
+  "deleted".
+- `user_id` is the moderator's **author** id, not a chat user id. Don't look it
+  up against room members.
+- **`email` is absent.** A sender's own deletion carries their email because
+  the room already shows it on every message they sent; a moderator is not a
+  member of the room, so their CMS address is not disclosed to it. An author
+  with no name on file shows as `"Moderator"` rather than falling back to the
+  address. Read `name` for display and never expect `email` here.
 
 A bulk delete sends **one event per message**, all sharing the same
 `deleted_at` — not a single batched payload. A client that already handles the

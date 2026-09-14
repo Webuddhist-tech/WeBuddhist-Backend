@@ -71,9 +71,10 @@ class TestCmsDeleteGroupChatMessageService:
         assert mock_soft_delete.call_args.kwargs["message"] is message
         assert result.room_id == room.id
         assert result.deleted_at == deleted_at.isoformat()
+        # No email: this reaches every client in a room the moderator is not
+        # a member of.
         assert result.deleted_by == {
             "user_id": str(author.id),
-            "email": author.email,
             "name": "Tenzin Kunsang",
             "source": "CMS",
         }
@@ -186,12 +187,13 @@ class TestCmsDeleteGroupChatMessageService:
     @patch('pecha_api.chat.cms_service.get_group_by_id')
     @patch('pecha_api.chat.cms_service.validate_and_extract_author_details')
     @patch('pecha_api.chat.cms_service.SessionLocal')
-    def test_actor_name_falls_back_to_email(
+    def test_nameless_author_falls_back_to_a_generic_label_not_their_email(
         self, mock_session, mock_author, mock_get_group, mock_get_room,
         mock_require, mock_get_message, mock_soft_delete,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_author.return_value = MockAuthor(first_name="", last_name=None)
+        author = MockAuthor(first_name="", last_name=None)
+        mock_author.return_value = author
         mock_get_group.return_value = MagicMock()
         mock_get_room.return_value = _room()
         mock_get_message.return_value = MockMessage()
@@ -201,4 +203,5 @@ class TestCmsDeleteGroupChatMessageService:
             token="t", group_id=uuid4(), message_id=uuid4()
         )
 
-        assert result.deleted_by["name"] == "mod@example.com"
+        assert result.deleted_by["name"] == "Moderator"
+        assert author.email not in str(result.deleted_by)

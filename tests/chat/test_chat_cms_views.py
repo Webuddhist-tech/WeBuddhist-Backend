@@ -33,7 +33,6 @@ class TestCmsDeleteGroupChatMessage:
         deleted_at = datetime.now(tz.utc).isoformat()
         deleted_by = {
             "user_id": str(uuid4()),
-            "email": "mod@example.com",
             "name": "Tenzin Kunsang",
             "source": "CMS",
         }

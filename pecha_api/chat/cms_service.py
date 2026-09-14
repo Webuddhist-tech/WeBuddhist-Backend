@@ -38,15 +38,18 @@ class CmsMessageDeletion(NamedTuple):
 def _moderator_actor(author: Author) -> dict:
     """The `deleted_by` block for a CMS deletion.
 
-    Same shape as a member's own deletion, so a client needs no new parser -
-    but `user_id` is the moderator's *author* id, not a website user id, and
+    `user_id` is the moderator's *author* id, not a website user id, and
     `source` marks it as a moderator action so the UI can say "removed by a
-    moderator" rather than "deleted by the sender"."""
+    moderator" rather than "deleted by the sender".
+
+    No `email`, unlike a member's own deletion. This event reaches every client
+    in the room, and a moderator is not a member of it - their CMS address is
+    not a room-visible identity the way a sender's is, so it is left out and
+    never used as the display-name fallback either."""
     name = f"{author.first_name} {author.last_name or ''}".strip()
     return {
         "user_id": str(author.id),
-        "email": author.email,
-        "name": name or author.email or "Moderator",
+        "name": name or "Moderator",
         "source": "CMS",
     }
 
