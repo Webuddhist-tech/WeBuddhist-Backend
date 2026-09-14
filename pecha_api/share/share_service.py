@@ -1,8 +1,6 @@
 from fastapi import HTTPException
 import io
-import os
 import re
-import tempfile
 from functools import partial
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -10,7 +8,7 @@ from uuid import UUID
 
 from pecha_api.error_contants import ErrorConstants
 from starlette.responses import StreamingResponse
-from .pecha_text_image_generator import generate_segment_image
+from .pecha_text_image_generator import ImageDestination, generate_segment_image
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
 from pecha_api.config import get
@@ -100,7 +98,7 @@ def _generate_logo_image_(share_request: ShareRequest):
 
 async def _generate_segment_content_image_(
     share_request: ShareRequest,
-    output_path: Optional[str] = None,
+    output_path: Optional[ImageDestination] = None,
 ):
     main_content_text, reference_text, language = await _resolve_share_image_text(
         share_request
@@ -114,7 +112,7 @@ async def _generate_segment_content_image_(
         "bg_color": share_request.bg_color,
         "logo_path": LOGO_PATH if share_request.logo else None,
     }
-    if output_path:
+    if output_path is not None:
         image_kwargs["output_path"] = output_path
     # Pillow rendering is CPU-bound and blocks the event loop otherwise.
     await to_thread.run_sync(partial(generate_segment_image, **image_kwargs))
@@ -268,18 +266,15 @@ def _generate_url_(
 
 
 async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        output_path = tmp.name
-    try:
-        await _generate_segment_content_image_(
-            share_request=share_request,
-            output_path=output_path,
-        )
-        async with await anyio.open_file(output_path, "rb") as file:
-            return await file.read()
-    finally:
-        if os.path.exists(output_path):
-            os.remove(output_path)
+    # Rendered straight into memory: a temp file would put open/read/unlink
+    # syscalls on the async request path and leak the file if the render
+    # failed. The buffer is filled inside the render worker thread.
+    buffer = io.BytesIO()
+    await _generate_segment_content_image_(
+        share_request=share_request,
+        output_path=buffer,
+    )
+    return buffer.getvalue()
 
 
 def _apply_inferred_ids(share_request: ShareRequest) -> None:
