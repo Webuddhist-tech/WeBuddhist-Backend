@@ -550,6 +550,7 @@ async def websocket_chat_live(
     Server -> client events:
       {"type": "room_info", "room_id": "..."}   (sent once, right after connect)
       {"type": "message_created", "message": {...}}
+      {"type": "message_deleted", "message_id": "...", "deleted_by": {...}, "deleted_at": "..."}
       {"type": "reactions_updated", "message_id": "...", "reactions": [{"emoji": "...", "count": N, "user_ids": [...]}]}
       {"type": "prayers_updated", "prayers": [{"message_id": "...", "prayer_count": N, "user_ids": [...]}]}
       {"type": "typing", "user_id": "...", "email": "...", "is_typing": true|false}
