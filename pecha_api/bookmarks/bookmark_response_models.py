@@ -51,6 +51,9 @@ class BookmarkTimerDTO(BaseModel):
     id: UUID
     title: str
     duration: int
+    ambient_sound_name: Optional[str] = None
+    bell_at_start: bool = True
+    bell_at_end: bool = True
 
 
 class BookmarkRecitationCollectionDTO(BaseModel):

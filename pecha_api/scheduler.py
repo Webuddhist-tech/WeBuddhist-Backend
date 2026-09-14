@@ -23,6 +23,7 @@ from pecha_api.group_posts.notification_dispatch_service import (
 )
 from pecha_api.plans.audio.audio_job_service import reconcile_undispatched_audio_jobs
 from pecha_api.verse_of_day.verse_of_day_service import cleanup_expired_verses_of_day
+from pecha_api.timers.timer_service import purge_deleted_timers
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,20 @@ def setup_scheduler() -> None:
         args=[expiry_days],
         id="cleanup_expired_verses_of_day",
         name="Cleanup expired verses of the day",
+        replace_existing=True,
+    )
+
+    timer_retention_days = get_int("TIMER_DELETED_RETENTION_DAYS")
+    if timer_retention_days < 1:
+        raise ValueError(
+            f"TIMER_DELETED_RETENTION_DAYS must be a positive integer, got {timer_retention_days}"
+        )
+    scheduler.add_job(
+        purge_deleted_timers,
+        CronTrigger(hour=0, minute=30),
+        args=[timer_retention_days],
+        id="purge_deleted_timers",
+        name="Purge soft-deleted timers past retention",
         replace_existing=True,
     )
 

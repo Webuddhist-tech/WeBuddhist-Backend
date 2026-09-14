@@ -12,6 +12,7 @@ from pecha_api.timers.timer_views import (
     create_user_timer,
     update_user_timer,
     delete_user_timer,
+    restore_user_timer,
     record_timer_stop,
     get_user_timer_history
 )
@@ -21,6 +22,7 @@ from pecha_api.timers.timer_response_models import (
     CreateTimerRequest,
     UpdateTimerRequest,
     RecordTimerStopRequest,
+    RecordTimerStopResponse,
     TimerHistoryResponse,
     TimerHistoryDTO,
     TimerSessionDTO
@@ -48,7 +50,11 @@ class TestDataFactory:
         name="Test Timer",
         duration=300,
         description=None,
-        audio_url=None
+        audio_url=None,
+        ambient_sound_id=None,
+        bell_at_start=True,
+        bell_at_end=True,
+        parent_preset_id=None
     ) -> TimerDTO:
         """Create a TimerDTO with specified attributes."""
         return TimerDTO(
@@ -60,6 +66,10 @@ class TestDataFactory:
             description=description,
             duration=duration,
             audio_url=audio_url,
+            ambient_sound_id=ambient_sound_id,
+            bell_at_start=bell_at_start,
+            bell_at_end=bell_at_end,
+            parent_preset_id=parent_preset_id,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
@@ -700,6 +710,73 @@ class TestDeleteUserTimer:
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
 
 
+class TestRestoreUserTimer:
+    """Test cases for restore_user_timer endpoint."""
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_success(self, mock_service):
+        """Test successful restore of a soft-deleted timer."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        expected_dto = TestDataFactory.create_timer_dto(timer_id=timer_id)
+        mock_service.return_value = expected_dto
+
+        result = await restore_user_timer(
+            timer_id=timer_id,
+            credentials=auth_credentials
+        )
+
+        assert result == expected_dto
+        mock_service.assert_called_once_with(token=token, timer_id=timer_id)
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_not_deleted(self, mock_service):
+        """Test restore_user_timer when the timer was never deleted."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "Conflict", "message": "Timer is not deleted"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await restore_user_timer(
+                timer_id=timer_id,
+                credentials=auth_credentials
+            )
+
+        assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_not_found(self, mock_service):
+        """Test restore_user_timer when timer doesn't exist."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": "Timer not found"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await restore_user_timer(
+                timer_id=timer_id,
+                credentials=auth_credentials
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
 class TestRecordTimerStop:
     """Test cases for record_timer_stop endpoint."""
     
@@ -712,12 +789,13 @@ class TestRecordTimerStop:
         
         auth_credentials = TestDataFactory.create_auth_credentials(token=token)
         request = RecordTimerStopRequest(timer_id=timer_id, duration=600)
-        
-        mock_service.return_value = None
-        
+
+        expected_response = RecordTimerStopResponse(timer_id=timer_id, name="Test Timer", duration_ms=600)
+        mock_service.return_value = expected_response
+
         result = await record_timer_stop(request=request, credentials=auth_credentials)
-        
-        assert result == {"message": "Timer session recorded successfully"}
+
+        assert result == expected_response
         mock_service.assert_called_once_with(token=token, request=request)
     
     @patch('pecha_api.timers.timer_views.record_timer_stop_service')

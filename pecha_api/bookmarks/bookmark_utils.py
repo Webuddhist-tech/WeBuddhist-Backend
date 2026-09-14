@@ -63,6 +63,7 @@ from openpecha_api.segments.openpecha_segment_service import (
     fetch_segment_details,
 )
 from pecha_api.timers.timer_repository import get_timer_by_id
+from pecha_api.ambient_sounds.ambient_sound_repository import get_ambient_sound_by_id
 from pecha_api.group_recitation_collection.repository import (
     get_collection_item_counts,
     get_collection_without_group_filter,
@@ -590,11 +591,20 @@ def enrich_timer_bookmark(db: Session, source_id: str) -> dict:
     if not timer:
         return {}
 
+    ambient_sound_name = None
+    if timer.ambient_sound_id:
+        ambient_sound = get_ambient_sound_by_id(db=db, ambient_sound_id=timer.ambient_sound_id)
+        if ambient_sound:
+            ambient_sound_name = ambient_sound.name
+
     return {
         "timer": BookmarkTimerDTO(
             id=timer.id,
             title=timer.name,
             duration=timer.duration,
+            ambient_sound_name=ambient_sound_name,
+            bell_at_start=timer.bell_at_start,
+            bell_at_end=timer.bell_at_end,
         )
     }
 
