@@ -1533,22 +1533,40 @@ class TestGroupAccumulatorReviewRegressions:
         assert result.links[0].video_id == "dQw4w9WgXcQ"
         assert [link.display_order for link in result.links] == [0, 1]
 
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_link_counts')
     @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
     @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulators')
-    def test_public_list_sends_count_not_links(
-        self, mock_get, mock_session, mock_link_counts
-    ):
-        """The list stays light, but reports how many links exist rather than
-        claiming there are none."""
+    def test_public_list_returns_links(self, mock_get, mock_session):
+        """Every response embedding the DTO returns real links."""
         group_id = uuid4()
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         accumulator = MockGroupAccumulator(group_id=group_id)
+        accumulator.links = [
+            MagicMock(
+                id=uuid4(),
+                url="https://youtu.be/dQw4w9WgXcQ",
+                link_type=GroupAccumulatorLinkType.YOUTUBE,
+                video_id="dQw4w9WgXcQ",
+                title="V",
+                display_order=0,
+            )
+        ]
         mock_get.return_value = ([accumulator], 1)
-        mock_link_counts.return_value = {accumulator.id: 3}
 
         result = get_group_accumulators_service(group_id=group_id)
 
-        assert result.accumulators[0].links is None
-        assert result.accumulators[0].link_count == 3
+        links = result.accumulators[0].links
+        assert len(links) == 1
+        assert links[0].link_type == GroupAccumulatorLinkType.YOUTUBE
+
+    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulators')
+    def test_public_list_empty_when_no_links(self, mock_get, mock_session):
+        group_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get.return_value = ([MockGroupAccumulator(group_id=group_id)], 1)
+
+        result = get_group_accumulators_service(group_id=group_id)
+
+        assert result.accumulators[0].links == []

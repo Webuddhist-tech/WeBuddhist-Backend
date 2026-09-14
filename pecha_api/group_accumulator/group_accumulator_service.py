@@ -53,7 +53,6 @@ from .group_accumulator_repository import (
     get_joined_group_accumulator_ids_by_user,
     get_group_accumulator_joiners_count,
     get_group_accumulator_joiners_counts,
-    get_group_accumulator_link_counts,
     list_group_accumulator_joiners_paginated,
     get_active_user_group_accumulator,
     get_or_create_active_user_group_accumulator,
@@ -326,12 +325,8 @@ def _convert_to_dto(
     member_count: int = 0,
     language: Optional[str] = None,
     include_cms_fields: bool = False,
-    link_count: Optional[int] = None,
 ) -> GroupAccumulatorDTO:
     preset_accumulator = getattr(group_accumulator, "accumulator", None)
-    links = _convert_links(group_accumulator) if include_cms_fields else None
-    if link_count is None:
-        link_count = len(links) if links is not None else 0
     return GroupAccumulatorDTO(
         id=group_accumulator.id,
         preset_accumulator_id=group_accumulator.accumulator_id,
@@ -346,8 +341,7 @@ def _convert_to_dto(
         end_date=group_accumulator.end_date,
         description=_resolve_description(group_accumulator, language),
         metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
-        links=links,
-        link_count=link_count,
+        links=_convert_links(group_accumulator),
         is_joined=is_joined,
         member_count=member_count,
         created_at=group_accumulator.created_at,
@@ -388,7 +382,6 @@ def _convert_to_detail_dto(
         description=_resolve_description(group_accumulator, language),
         metadata=_convert_metadata_entries(group_accumulator) if include_cms_fields else None,
         links=links,
-        link_count=len(links),
         total_count=total_count,
         total_today_count=total_today_count,
         user=user,
@@ -436,14 +429,9 @@ def get_group_accumulators_service(
                 )
             )
 
-        accumulator_ids = [acc.id for acc in accumulators]
         member_counts = get_group_accumulator_joiners_counts(
             db=db,
-            group_accumulator_ids=accumulator_ids,
-        )
-        link_counts = get_group_accumulator_link_counts(
-            db=db,
-            group_accumulator_ids=accumulator_ids,
+            group_accumulator_ids=[acc.id for acc in accumulators],
         )
 
         return GroupAccumulatorsResponse(
@@ -453,7 +441,6 @@ def get_group_accumulators_service(
                     is_joined=acc.id in joined_ids if token else None,
                     member_count=member_counts.get(acc.id, 0),
                     language=language,
-                    link_count=link_counts.get(acc.id, 0),
                 )
                 for acc in accumulators
             ],
