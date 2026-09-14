@@ -6,6 +6,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from pecha_api.chat.notification_dispatch_service import (
     reconcile_undispatched_chat_notifications,
+    reconcile_undispatched_prayer_notifications,
 )
 from pecha_api.plans.groups.join_request_dispatch_service import (
     reconcile_undispatched_join_request_notifications,
@@ -62,6 +63,14 @@ def setup_scheduler() -> None:
         IntervalTrigger(seconds=chat_reconcile_interval),
         id="reconcile_undispatched_chat_notifications",
         name="Re-enqueue undispatched chat notifications",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        reconcile_undispatched_prayer_notifications,
+        IntervalTrigger(seconds=chat_reconcile_interval),
+        id="reconcile_undispatched_prayer_notifications",
+        name="Re-enqueue undispatched prayer notifications",
         replace_existing=True,
     )
 

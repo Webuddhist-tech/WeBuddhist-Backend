@@ -3,7 +3,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, field_validator, model_serializer
 
-from pecha_api.chat.enums import ChatMessageReportReason
+from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageType
+
+MAX_PRAYER_BATCH_SIZE = 50
 
 
 class ChatMessageParentDTO(BaseModel):
@@ -50,8 +52,19 @@ class ChatMessageReactionDTO(BaseModel):
     users: List[ChatMessageReactionUserDTO] = []
 
 
+class ChatMessagePrayerUserDTO(BaseModel):
+    """Identity of one person who prayed, for showing who prayed."""
+    user_id: UUID
+    email: Optional[str] = None
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
 class ChatMessageDTO(BaseModel):
-    """DTO for a single chat message."""
+    """DTO for a single chat message.
+
+    The prayer fields describe a PRAYER message (a prayer request) and are
+    omitted entirely on a TEXT message."""
     id: UUID
     room_id: UUID
     sender_id: UUID
@@ -59,17 +72,26 @@ class ChatMessageDTO(BaseModel):
     sender_name: str
     sender_avatar_url: Optional[str] = None
     body: str
+    message_type: str = ChatMessageType.TEXT.value
     created_at: str
     deleted_at: Optional[str] = None
     parent: Optional[ChatMessageParentDTO] = None
     reactions: List[ChatMessageReactionDTO] = []
+    prayer_count: int = 0
+    prayed_by_me: bool = False
+    recent_prayers: List[ChatMessagePrayerUserDTO] = []
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
-        """Omit deleted_at entirely for non-deleted messages instead of sending null."""
+        """Omit deleted_at entirely for non-deleted messages instead of sending
+        null, and the prayer fields entirely for messages that are not prayer
+        requests."""
         data = handler(self)
         if data.get("deleted_at") is None:
             data.pop("deleted_at", None)
+        if data.get("message_type") != ChatMessageType.PRAYER.value:
+            for field in ("prayer_count", "prayed_by_me", "recent_prayers"):
+                data.pop(field, None)
         return data
 
 
@@ -103,6 +125,7 @@ class ChatRoomDTO(BaseModel):
     """DTO for a room, presigned picture, and inbox summary fields."""
     id: UUID
     group_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
     sender_id: Optional[UUID] = None
     receiver_id: Optional[UUID] = None
     kind: str
@@ -165,8 +188,11 @@ class AdminChatMessageReportDTO(BaseModel):
     description: Optional[str] = None
     message_id: Optional[UUID] = None
     message_text: Optional[str] = None
+    # Absent when the message was never stored (a profanity rejection).
+    message_type: Optional[str] = None
     room_id: Optional[UUID] = None
     room_name: Optional[str] = None
+    room_kind: Optional[str] = None
     reporter: Optional[AdminChatReportUserDTO] = None
     reported_user: Optional[AdminChatReportUserDTO] = None
     created_at: str
@@ -182,9 +208,11 @@ class AdminChatMessageReportsResponse(BaseModel):
 
 
 class SendChatMessageRequest(BaseModel):
-    """Request to send a message to a room (group or DM). Pass
-    parent_message_id to send it as a reply to that message."""
+    """Request to send a message to a room (group, event or DM). Pass
+    parent_message_id to send it as a reply to that message, and
+    message_type=PRAYER to post it as a prayer request."""
     body: str
+    message_type: ChatMessageType = ChatMessageType.TEXT
     parent_message_id: Optional[UUID] = None
 
     @field_validator("body")
@@ -196,6 +224,59 @@ class SendChatMessageRequest(BaseModel):
         if len(value) > 4000:
             raise ValueError("Message body must not exceed 4000 characters")
         return value
+
+
+class PrayForMessagesRequest(BaseModel):
+    """Request to pray for one or several selected prayer requests at once.
+
+    The multi-select action: the client sends the ids the user ticked."""
+    message_ids: List[UUID]
+
+    @field_validator("message_ids")
+    @classmethod
+    def validate_message_ids(cls, value: List[UUID]) -> List[UUID]:
+        if not value:
+            raise ValueError("message_ids must not be empty")
+        # Preserve the client's order while dropping repeats, so a duplicate id
+        # cannot inflate the response with two entries for one message.
+        deduped = list(dict.fromkeys(value))
+        if len(deduped) > MAX_PRAYER_BATCH_SIZE:
+            raise ValueError(
+                f"message_ids must not exceed {MAX_PRAYER_BATCH_SIZE} messages"
+            )
+        return deduped
+
+
+class ChatMessagePrayerStateDTO(BaseModel):
+    """One prayer request's state after a batch pray. `created` is False when
+    the caller had already prayed for it."""
+    message_id: UUID
+    prayer_count: int
+    prayed_by_me: bool
+    created: bool
+
+
+class PrayerBatchResponse(BaseModel):
+    """Response for the batch pray endpoint, one entry per requested message."""
+    prayers: List[ChatMessagePrayerStateDTO]
+
+
+class ChatMessagePrayerDTO(BaseModel):
+    """One person who prayed for a request, and when."""
+    user_id: UUID
+    email: Optional[str] = None
+    name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    created_at: str
+
+
+class ChatMessagePrayersResponse(BaseModel):
+    """Response for the who-prayed endpoint."""
+    message_id: UUID
+    prayers: List[ChatMessagePrayerDTO]
+    skip: int
+    limit: int
+    total: int
 
 
 class AddChatMessageReactionRequest(BaseModel):

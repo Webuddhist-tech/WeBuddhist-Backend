@@ -35,6 +35,8 @@ class Event(Base):
     image_url = Column(String(1000), nullable=True)
     featured = Column(Boolean, default=False, nullable=False)
     event_format = Column(String(10), nullable=False, server_default="hybrid")
+    # Per-event kill switch for the event's chat room (CMS-controlled).
+    chat_enabled = Column(Boolean, default=True, nullable=False, server_default=text("true"))
     
     is_recurring = Column(Boolean, default=False, nullable=False)
     recurrence_frequency = Column(String(20), nullable=True)

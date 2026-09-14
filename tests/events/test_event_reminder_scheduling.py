@@ -208,6 +208,38 @@ class TestUpdateEventReminderBranches:
         mock_cancel.assert_not_called()
         mock_reschedule.assert_not_called()
 
+    def test_returns_chat_room_id_when_a_room_already_exists(self) -> None:
+        """update_event_service must surface chat_room_id like the read
+        endpoints do - the DTO's exclude_none serialization otherwise drops it
+        silently when it's left unset."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        request = UpdateEventRequest(image_url="https://example.com/banner.png")
+        mock_db = MagicMock()
+        room_id = uuid4()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.cancel_event_reminders"
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ), patch(
+            f"{MODULE}._chat_room_id_for_event", return_value=room_id
+        ) as mock_chat_room:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            result = update_event_service(
+                token="token", event_id=existing.id, request=request
+            )
+
+        mock_chat_room.assert_called_once_with(db=mock_db, event_id=existing.id)
+        assert result.chat_room_id == room_id
+
     def test_converting_to_one_time_clears_recurrence_and_reschedules(self) -> None:
         group_id = uuid4()
         existing = _event_stub(group_id=group_id, is_recurring=True)

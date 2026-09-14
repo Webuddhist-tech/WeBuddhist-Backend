@@ -18,28 +18,37 @@ from pecha_api.chat.member_service import (
 from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
+    list_message_prayers_service,
     list_room_messages_service,
+    pray_for_messages_service,
     remove_message_reaction_service,
     report_message_service,
     send_direct_message_service,
+    send_event_message_service,
     send_group_message_service,
+    unpray_message_service,
 )
 from pecha_api.chat.response_models import (
     AddChatMessageReactionRequest,
     AddChatRoomMembersRequest,
     ChatMessageDTO,
+    ChatMessagePrayersResponse,
     ChatMessageReactionDTO,
     ChatMessagesResponse,
     ChatPeopleResponse,
     ChatRoomDTO,
     ChatRoomMembersResponse,
     ChatRoomsResponse,
+    PrayerBatchResponse,
+    PrayForMessagesRequest,
     ReportChatMessageRequest,
     SendChatMessageRequest,
     UpdateChatRoomRequest,
 )
+from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.service import (
     _sender_name,
+    get_event_room_service,
     get_room_detail_service,
     list_group_people_service,
     list_my_rooms_service,
@@ -141,10 +150,19 @@ def list_room_messages(
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    message_type: Annotated[Optional[ChatMessageType], Query()] = None,
 ):
-    """Paginated message history for a room (newest first). Active member only."""
+    """Paginated message history for a room (newest first). Active member only.
+
+    Pass message_type=PRAYER for the room's prayer requests only."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return list_room_messages_service(room_id=room_id, user=user, skip=skip, limit=limit)
+    return list_room_messages_service(
+        room_id=room_id,
+        user=user,
+        skip=skip,
+        limit=limit,
+        message_type=message_type.value if message_type else None,
+    )
 
 
 async def _broadcast_message_deleted_safe(
@@ -276,6 +294,45 @@ def send_group_chat_message(
         user=user,
         body=request.body,
         parent_message_id=request.parent_message_id,
+        message_type=request.message_type.value,
+    )
+
+
+@chat_router.get(
+    "/chat/events/{event_id}/room",
+    status_code=status.HTTP_200_OK,
+    response_model=ChatRoomDTO,
+)
+def get_event_chat_room(
+    event_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Get an event's chat room, creating it and joining the caller on first
+    use. Open to anyone who joins or follows the event's group."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    return get_event_room_service(event_id=event_id, user=user)
+
+
+@chat_router.post(
+    "/chat/events/{event_id}/messages",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ChatMessageDTO,
+)
+def send_event_chat_message(
+    event_id: UUID,
+    request: SendChatMessageRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Send a message to an event's chat room. Auto-creates the room (caller
+    becomes CREATOR) on the first message from an eligible joiner/follower of
+    the event's group. Pass message_type=PRAYER to post a prayer request."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    return send_event_message_service(
+        event_id=event_id,
+        user=user,
+        body=request.body,
+        parent_message_id=request.parent_message_id,
+        message_type=request.message_type.value,
     )
 
 
@@ -297,6 +354,75 @@ def send_direct_chat_message(
         user=user,
         body=request.body,
         parent_message_id=request.parent_message_id,
+        message_type=request.message_type.value,
+    )
+
+
+async def _broadcast_prayers_safe(room_id: UUID, prayers: list) -> None:
+    """Push a prayers_updated event to the room's live stream. Best-effort:
+    the prayers are already persisted, so a broadcast failure must not fail
+    the request."""
+    try:
+        broadcaster = get_broadcaster()
+        await broadcaster.broadcast_prayers(room_id=room_id, prayers=prayers)
+    except Exception as e:
+        logger.error(f"Failed to broadcast prayers for room {room_id}: {e}")
+
+
+@chat_router.post(
+    "/chat/rooms/{room_id}/prayers",
+    status_code=status.HTTP_200_OK,
+    response_model=PrayerBatchResponse,
+)
+async def pray_for_messages(
+    room_id: UUID,
+    request: PrayForMessagesRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Pray for one or several selected prayer requests in one action.
+
+    Idempotent: praying again for the same request changes nothing but still
+    reports its current state. Ids that are no longer live prayer requests in
+    this room are skipped."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    result = pray_for_messages_service(
+        room_id=room_id, user=user, message_ids=request.message_ids
+    )
+    await _broadcast_prayers_safe(room_id=room_id, prayers=result.broadcast)
+    return result.response
+
+
+@chat_router.delete(
+    "/chat/messages/{message_id}/prayers/me",
+    status_code=status.HTTP_200_OK,
+    response_model=PrayerBatchResponse,
+)
+async def unpray_message(
+    message_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Take back the caller's prayer for a request (idempotent)."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    result = unpray_message_service(message_id=message_id, user=user)
+    await _broadcast_prayers_safe(room_id=result.room_id, prayers=result.broadcast)
+    return result.response
+
+
+@chat_router.get(
+    "/chat/messages/{message_id}/prayers",
+    status_code=status.HTTP_200_OK,
+    response_model=ChatMessagePrayersResponse,
+)
+def list_message_prayers(
+    message_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    """Who prayed for this request, newest first. Active member only."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    return list_message_prayers_service(
+        message_id=message_id, user=user, skip=skip, limit=limit
     )
 
 
@@ -369,19 +495,23 @@ async def websocket_chat_live(
     websocket: WebSocket,
     token: str = Query(...),
     group_id: Optional[UUID] = Query(None),
+    event_id: Optional[UUID] = Query(None),
     receiver_id: Optional[UUID] = Query(None),
 ):
-    """Live chat stream for a room (WebSocket). Pass either group_id (group
-    chat) or receiver_id (DM) — the room is resolved/auto-created on connect.
+    """Live chat stream for a room (WebSocket). Pass exactly one of group_id
+    (group chat), event_id (an event's room) or receiver_id (DM) - the room is
+    resolved/auto-created on connect.
 
     Client -> server messages:
-      {"type": "message", "body": "...", "parent_message_id": "..."}   (parent_message_id optional; makes it a reply)
+      {"type": "message", "body": "...", "message_type": "TEXT"|"PRAYER", "parent_message_id": "..."}
+          (message_type defaults to TEXT; parent_message_id optional, makes it a reply)
       {"type": "typing", "is_typing": true|false}   (ephemeral, not persisted)
 
     Server -> client events:
       {"type": "room_info", "room_id": "..."}   (sent once, right after connect)
       {"type": "message_created", "message": {...}}
       {"type": "reactions_updated", "message_id": "...", "reactions": [{"emoji": "...", "count": N, "user_ids": [...]}]}
+      {"type": "prayers_updated", "prayers": [{"message_id": "...", "prayer_count": N, "user_ids": [...]}]}
       {"type": "typing", "user_id": "...", "email": "...", "is_typing": true|false}
       {"type": "presence", "count": N, "online": [{"user_id": "...", "email": "..."}]}
       {"type": "error", "code": "...", "message": "..."}
@@ -389,12 +519,12 @@ async def websocket_chat_live(
     user = None
     room_id: Optional[UUID] = None
 
-    if (group_id is None) == (receiver_id is None):
+    if sum(param is not None for param in (group_id, event_id, receiver_id)) != 1:
         await websocket.accept()
         await websocket.send_json({
             "type": "error",
             "code": "INVALID_PARAMS",
-            "message": "Pass exactly one of group_id or receiver_id",
+            "message": "Pass exactly one of group_id, event_id or receiver_id",
         })
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -424,6 +554,7 @@ async def websocket_chat_live(
         from pecha_api.chat.service import (
             _get_room_or_404,
             _require_active_member,
+            resolve_or_create_event_room,
             resolve_or_create_group_room,
             resolve_or_create_private_room,
         )
@@ -432,6 +563,8 @@ async def websocket_chat_live(
             with SessionLocal() as db:
                 if group_id is not None:
                     room = resolve_or_create_group_room(db=db, group_id=group_id, user=user)
+                elif event_id is not None:
+                    room = resolve_or_create_event_room(db=db, event_id=event_id, user=user)
                 else:
                     room = resolve_or_create_private_room(db=db, user=user, receiver_id=receiver_id)
                 room_id = room.id
@@ -539,6 +672,10 @@ async def websocket_chat_live(
                     })
                     continue
 
+                message_type = str(
+                    data.get("message_type") or ChatMessageType.TEXT.value
+                ).upper()
+
                 try:
                     if group_id is not None:
                         message_dto = send_group_message_service(
@@ -546,6 +683,15 @@ async def websocket_chat_live(
                             user=user,
                             body=data.get("body", ""),
                             parent_message_id=parent_message_id,
+                            message_type=message_type,
+                        )
+                    elif event_id is not None:
+                        message_dto = send_event_message_service(
+                            event_id=event_id,
+                            user=user,
+                            body=data.get("body", ""),
+                            parent_message_id=parent_message_id,
+                            message_type=message_type,
                         )
                     else:
                         message_dto = send_direct_message_service(
@@ -553,6 +699,7 @@ async def websocket_chat_live(
                             user=user,
                             body=data.get("body", ""),
                             parent_message_id=parent_message_id,
+                            message_type=message_type,
                         )
                 except HTTPException as e:
                     logger.error(f"Message send failed: {e.detail}")

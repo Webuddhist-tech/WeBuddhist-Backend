@@ -1,21 +1,25 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Tuple
-from uuid import UUID
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+from uuid import UUID, uuid4
 
 from sqlalchemy import exists, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
 from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
+from pecha_api.events.event_model import Event
 
 from pecha_api.chat.enums import ChatMessageReportSource, ChatRoomMemberRole
 from pecha_api.chat.models import (
     ChatMessage,
+    ChatMessagePrayer,
     ChatMessageReaction,
     ChatMessageReport,
     ChatRoom,
     ChatRoomMember,
 )
+from pecha_api.users.users_models import Users
 
 
 def get_room_by_id(db: Session, room_id: UUID) -> Optional[ChatRoom]:
@@ -32,6 +36,32 @@ def get_room_by_group_id(db: Session, group_id: UUID) -> Optional[ChatRoom]:
         .filter(ChatRoom.group_id == group_id, ChatRoom.deleted_at.is_(None))
         .first()
     )
+
+
+def get_room_by_event_id(db: Session, event_id: UUID) -> Optional[ChatRoom]:
+    return (
+        db.query(ChatRoom)
+        .filter(ChatRoom.event_id == event_id, ChatRoom.deleted_at.is_(None))
+        .first()
+    )
+
+
+def get_room_ids_by_event_ids(
+    db: Session,
+    event_ids: Sequence[UUID],
+) -> Dict[UUID, UUID]:
+    """Room id for each event that has one, keyed by event_id.
+
+    One query per page of events, so a list endpoint can carry the room link
+    without a lookup per row. Events with no room yet are simply absent."""
+    if not event_ids:
+        return {}
+    rows = (
+        db.query(ChatRoom.event_id, ChatRoom.id)
+        .filter(ChatRoom.event_id.in_(event_ids), ChatRoom.deleted_at.is_(None))
+        .all()
+    )
+    return dict(rows)
 
 
 def get_room_by_pair(db: Session, low_id: UUID, high_id: UUID) -> Optional[ChatRoom]:
@@ -195,6 +225,52 @@ def list_my_active_rooms(
                     .correlate(ChatRoom)
                 ),
             ),
+            # Same two gates for event rooms, which carry event_id instead of
+            # group_id: the owning group must still be published and still have
+            # this user, and the event's chat must not have been switched off.
+            or_(
+                ChatRoom.event_id.is_(None),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(AuthorGroup, AuthorGroup.id == Event.group_id)
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        Event.chat_enabled.is_(True),
+                        AuthorGroup.status == AuthorGroupStatus.PUBLISHED,
+                    )
+                    .correlate(ChatRoom)
+                ),
+            ),
+            or_(
+                ChatRoom.event_id.is_(None),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(
+                        author_group_joins,
+                        author_group_joins.c.group_id == Event.group_id,
+                    )
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        author_group_joins.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(
+                        author_group_followers,
+                        author_group_followers.c.group_id == Event.group_id,
+                    )
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        author_group_followers.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+            ),
         )
     )
     total = query.count()
@@ -219,12 +295,15 @@ def get_room_messages(
     room_id: UUID,
     skip: int = 0,
     limit: int = 20,
+    message_type: Optional[str] = None,
 ) -> Tuple[List[ChatMessage], int]:
     query = (
         db.query(ChatMessage)
         .filter(ChatMessage.room_id == room_id)
         .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
     )
+    if message_type is not None:
+        query = query.filter(ChatMessage.message_type == message_type)
     total = query.count()
     messages = (
         query.options(
@@ -397,6 +476,263 @@ def get_reactions_map(
     for reaction in reactions:
         result.setdefault(reaction.message_id, []).append(reaction)
     return result
+
+
+def get_prayer(
+    db: Session,
+    message_id: UUID,
+    user_id: UUID,
+) -> Optional[ChatMessagePrayer]:
+    return (
+        db.query(ChatMessagePrayer)
+        .filter(
+            ChatMessagePrayer.message_id == message_id,
+            ChatMessagePrayer.user_id == user_id,
+        )
+        .first()
+    )
+
+
+def get_prayer_by_id(db: Session, prayer_id: UUID) -> Optional[ChatMessagePrayer]:
+    return (
+        db.query(ChatMessagePrayer)
+        .filter(ChatMessagePrayer.id == prayer_id)
+        .first()
+    )
+
+
+def add_prayer(db: Session, prayer: ChatMessagePrayer) -> ChatMessagePrayer:
+    db.add(prayer)
+    db.commit()
+    db.refresh(prayer)
+    return prayer
+
+
+def add_prayers_ignoring_duplicates(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+) -> List[Tuple[UUID, UUID]]:
+    """Pray for several messages at once, in one statement and one commit.
+
+    Rows the user already has are left alone (the uniqueness constraint is what
+    makes the batch endpoint idempotent). Returns (message_id, prayer_id) for
+    the prayers actually created, so only those raise a notification."""
+    if not message_ids:
+        return []
+    statement = (
+        pg_insert(ChatMessagePrayer.__table__)
+        .values(
+            [
+                {"id": uuid4(), "message_id": message_id, "user_id": user_id}
+                for message_id in message_ids
+            ]
+        )
+        .on_conflict_do_nothing(constraint="uq_chat_message_prayers_message_user")
+        .returning(
+            ChatMessagePrayer.__table__.c.message_id,
+            ChatMessagePrayer.__table__.c.id,
+        )
+    )
+    created = [(row[0], row[1]) for row in db.execute(statement).all()]
+    db.commit()
+    return created
+
+
+def remove_prayer(db: Session, prayer: ChatMessagePrayer) -> None:
+    db.delete(prayer)
+    db.commit()
+
+
+def count_message_prayers(db: Session, message_id: UUID) -> int:
+    return (
+        db.query(func.count(ChatMessagePrayer.id))
+        .filter(ChatMessagePrayer.message_id == message_id)
+        .scalar()
+        or 0
+    )
+
+
+def get_prayer_counts_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+) -> Dict[UUID, int]:
+    """Prayer counts for many messages at once, keyed by message_id.
+
+    One grouped query per page of messages, so the prayers table stays the
+    source of truth with no denormalised counter to drift."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayer.message_id, func.count(ChatMessagePrayer.id))
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .group_by(ChatMessagePrayer.message_id)
+        .all()
+    )
+    return dict(rows)
+
+
+def get_prayed_message_ids(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+) -> Set[UUID]:
+    """Which of these messages the viewer has already prayed for."""
+    if not message_ids:
+        return set()
+    rows = (
+        db.query(ChatMessagePrayer.message_id)
+        .filter(
+            ChatMessagePrayer.message_id.in_(message_ids),
+            ChatMessagePrayer.user_id == user_id,
+        )
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def get_prayer_user_ids_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+) -> Dict[UUID, List[UUID]]:
+    """Everyone who prayed for each message, keyed by message_id.
+
+    Feeds the prayers_updated broadcast, where each client works out its own
+    prayed_by_me from the shared payload (reactions do the same)."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayer.message_id, ChatMessagePrayer.user_id)
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .order_by(ChatMessagePrayer.created_at.asc())
+        .all()
+    )
+    result: Dict[UUID, List[UUID]] = {}
+    for message_id, user_id in rows:
+        result.setdefault(message_id, []).append(user_id)
+    return result
+
+
+def get_recent_prayers_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    per_message: int = 3,
+) -> Dict[UUID, List[Users]]:
+    """The most recent few people who prayed for each message (avatar stack).
+
+    Ranked in one query rather than one query per message; the full roster
+    comes from list_message_prayers."""
+    if not message_ids or per_message < 1:
+        return {}
+    ranked = (
+        db.query(
+            ChatMessagePrayer.message_id.label("message_id"),
+            ChatMessagePrayer.user_id.label("user_id"),
+            func.row_number()
+            .over(
+                partition_by=ChatMessagePrayer.message_id,
+                order_by=ChatMessagePrayer.created_at.desc(),
+            )
+            .label("rank"),
+        )
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .subquery()
+    )
+    rows = (
+        db.query(ranked.c.message_id, Users)
+        .join(Users, Users.id == ranked.c.user_id)
+        .filter(ranked.c.rank <= per_message)
+        .order_by(ranked.c.message_id, ranked.c.rank)
+        .all()
+    )
+    result: Dict[UUID, List[Users]] = {}
+    for message_id, user in rows:
+        result.setdefault(message_id, []).append(user)
+    return result
+
+
+def list_message_prayers(
+    db: Session,
+    message_id: UUID,
+    skip: int = 0,
+    limit: int = 20,
+) -> Tuple[List[ChatMessagePrayer], int]:
+    """Who prayed for one request, newest first."""
+    query = db.query(ChatMessagePrayer).filter(
+        ChatMessagePrayer.message_id == message_id
+    )
+    total = query.with_entities(func.count(ChatMessagePrayer.id)).scalar() or 0
+    prayers = (
+        query.options(selectinload(ChatMessagePrayer.user))
+        .order_by(ChatMessagePrayer.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return prayers, total
+
+
+# Written to notification_sqs_message_id for a prayer that deliberately did not
+# raise a push (self-pray, or one already covered by a recent notification for
+# the same request). Excluded from has_dispatched_prayer_since below so a
+# suppressed prayer never counts as an actual dispatch for coalescing.
+SUPPRESSED_SQS_MESSAGE_ID = "SUPPRESSED"
+
+
+def has_dispatched_prayer_since(
+    db: Session,
+    *,
+    message_id: UUID,
+    since: datetime,
+    exclude_prayer_id: Optional[UUID] = None,
+) -> bool:
+    """Whether this request already had a prayer notification actually sent
+    (not merely suppressed) recently.
+
+    Backs coalescing: ten people praying in the same window is one push, not ten."""
+    query = db.query(ChatMessagePrayer.id).filter(
+        ChatMessagePrayer.message_id == message_id,
+        ChatMessagePrayer.notification_dispatched_at.isnot(None),
+        ChatMessagePrayer.notification_dispatched_at >= since,
+        ChatMessagePrayer.notification_sqs_message_id.isnot(None),
+        ChatMessagePrayer.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+    )
+    if exclude_prayer_id is not None:
+        query = query.filter(ChatMessagePrayer.id != exclude_prayer_id)
+    return db.query(query.exists()).scalar() or False
+
+
+def mark_prayer_notification_dispatched(
+    db: Session,
+    prayer_id: UUID,
+    sqs_message_id: str,
+) -> Optional[ChatMessagePrayer]:
+    prayer = get_prayer_by_id(db=db, prayer_id=prayer_id)
+    if not prayer:
+        return None
+    prayer.notification_sqs_message_id = sqs_message_id
+    prayer.notification_dispatched_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(prayer)
+    return prayer
+
+
+def list_undispatched_prayer_notifications(
+    db: Session,
+    *,
+    older_than: datetime,
+    limit: int,
+) -> List[ChatMessagePrayer]:
+    return (
+        db.query(ChatMessagePrayer)
+        .filter(
+            ChatMessagePrayer.notification_sqs_message_id.is_(None),
+            ChatMessagePrayer.created_at <= older_than,
+        )
+        .order_by(ChatMessagePrayer.created_at.asc())
+        .limit(limit)
+        .all()
+    )
 
 
 def get_report_by_message_and_reporter(

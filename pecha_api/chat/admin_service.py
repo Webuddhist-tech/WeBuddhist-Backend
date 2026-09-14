@@ -9,6 +9,7 @@ from pecha_api.chat.response_models import (
     AdminChatMessageReportsResponse,
     AdminChatReportUserDTO,
 )
+from pecha_api.chat.service import _message_type_value, room_kind
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details
 from pecha_api.plans.shared.permissions import require_super_admin_or_reviewer
@@ -42,6 +43,8 @@ def _build_report_dto(report: ChatMessageReport) -> AdminChatMessageReportDTO:
         message_text=message_text,
         room_id=room.id if room else report.room_id,
         room_name=room.name if room else None,
+        room_kind=room_kind(room) if room else None,
+        message_type=_message_type_value(message) if message else None,
         reporter=_build_user_dto(report.reporter),
         reported_user=_build_user_dto(reported_user),
         created_at=report.created_at.isoformat() if report.created_at else "",
