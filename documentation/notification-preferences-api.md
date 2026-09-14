@@ -56,10 +56,17 @@ Group list (the subset that accepts a per-group override), same order:
 
 `GROUP_INVITE` and `GROUP_JOIN_REQUEST` are transactional and rejected on both
 endpoints with `422` — someone who asked to join a group expects to hear the
-answer. `VERSE_OF_DAY` and `ROUTINE_REMINDER` are rejected on the *group*
-endpoints (they have no group scope); a global `PATCH` accepts and enforces
-them, but they are not part of the rendered list above, so a client that only
-reads `GET` never sees them.
+answer.
+
+`VERSE_OF_DAY` and `ROUTINE_REMINDER` are rejected on the *group* endpoints
+(they have no group scope), and a global `PATCH` stores them — but **do not
+offer them as toggles**: nothing enforces them yet. Verse-of-day recipient
+selection reads active push devices with no preference lookup at all, and the
+routine query lets `PLAN` sessions (the ones that become routine reminders)
+past its preference predicate by design. Saving one succeeds and the pushes
+keep arriving. They are also absent from the rendered list above, so a client
+driven by `GET` never surfaces them — which is the intended behaviour until
+their senders learn to filter.
 
 ---
 
@@ -191,12 +198,21 @@ deleting rows that do not exist is not an error.
 
 ## 7. Where it is enforced
 
-On the `PUSH` channel, before any push target is built:
+On the `PUSH` channel, before any push target is built. Which mechanism a type
+uses follows from whether it is group-scoped:
 
-- **Chat and prayer requests** resolve group-aware (a `GROUP` row beats the
-  `GLOBAL` one) in `filter_users_by_notification_preference`.
-- **Event, reminder, series and routine** fan-outs apply the global rows as a
-  SQL predicate (`global_preference_blocks`) inside the recipient query.
+| Type | Mechanism |
+|------|-----------|
+| `CHAT_MESSAGE`, `GROUP_POST`, `EVENT` | Group-aware: `_preference_filtered_join` inside the paginated recipient query (a `GROUP` row beats the `GLOBAL` one) |
+| `PRAYER_RECEIVED` | Group-aware: `filter_users_by_notification_preference(..., scope_id=group_id)` on the single recipient |
+| `EVENT_REMINDER` | Global rows only, as the `global_preference_blocks` predicate in the event-participant query |
+| `SERIES` | Global rows only, same predicate, in the routine time-block query |
+| `ACCUMULATION` | Nothing reads it yet — no sender exists |
+| `VERSE_OF_DAY`, `ROUTINE_REMINDER` | Not enforced (§3) |
+
+Group-aware filtering sits ahead of `OFFSET`/`LIMIT` **and** inside the count,
+so `total` describes the same set the page is drawn from — the worker pages off
+that total.
 
 A user whose preference is off, or whose snooze has not expired, is dropped
 from the recipient list — the notification is never enqueued for them.
