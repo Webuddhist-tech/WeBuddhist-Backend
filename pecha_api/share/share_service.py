@@ -3,6 +3,7 @@ import io
 import os
 import re
 import tempfile
+from functools import partial
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
@@ -20,6 +21,7 @@ from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_post_by_id_only
 import anyio
+from anyio import to_thread
 
 from pecha_api.share.share_response_models import (
     ShareRequest,
@@ -49,6 +51,8 @@ _TYPE_TO_ID_FIELD = {
     "event": "event_id",
     "post": "post_id",
 }
+# Order matters: _primary_content_id resolves ties with this precedence.
+_CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
 
 
 async def get_generated_image(share_request: Optional[ShareRequest] = None):
@@ -76,7 +80,7 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
     _apply_inferred_ids(share_request)
     og_description = DEFAULT_OG_DESCRIPTION
     if share_request.logo:
-        _generate_logo_image_(share_request=share_request)
+        await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
     await _generate_segment_content_image_(share_request=share_request)
 
@@ -108,11 +112,12 @@ async def _generate_segment_content_image_(
         "lang": language,
         "text_color": share_request.text_color,
         "bg_color": share_request.bg_color,
-        "logo_path": LOGO_PATH,
+        "logo_path": LOGO_PATH if share_request.logo else None,
     }
     if output_path:
         image_kwargs["output_path"] = output_path
-    generate_segment_image(**image_kwargs)
+    # Pillow rendering is CPU-bound and blocks the event loop otherwise.
+    await to_thread.run_sync(partial(generate_segment_image, **image_kwargs))
 
 
 async def _resolve_share_image_text(
@@ -129,12 +134,20 @@ async def _resolve_share_image_text(
     segment_id = _normalized_id(share_request.segment_id)
     text_id = _normalized_id(share_request.text_id)
 
+    # The poem/event/post lookups use a synchronous session, so they run in a
+    # worker thread rather than blocking the event loop for every OG request.
     if poem_id is not None:
-        return _resolve_poem_share_text(poem_id, site_name)
+        return await to_thread.run_sync(
+            partial(_resolve_poem_share_text, poem_id, site_name)
+        )
     if event_id is not None:
-        return _resolve_event_share_text(event_id, share_request.language, site_name)
+        return await to_thread.run_sync(
+            partial(_resolve_event_share_text, event_id, share_request.language, site_name)
+        )
     if post_id is not None:
-        return _resolve_post_share_text(post_id, site_name)
+        return await to_thread.run_sync(
+            partial(_resolve_post_share_text, post_id, site_name)
+        )
     if segment_id is not None:
         segment_details = await get_openpecha_segment_details_by_id(
             segment_id=segment_id,
@@ -270,13 +283,22 @@ async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
 
 
 def _apply_inferred_ids(share_request: ShareRequest) -> None:
+    """Fill the poem/event/post ids from the target URL, but only when the
+    caller supplied no content identifier at all.
+
+    Inferring alongside an explicit identifier mixes two sources of truth: a
+    request carrying segment_id plus an event URL would gain an event_id, and
+    the fixed precedence in _primary_content_id would then silently share the
+    event instead of the requested segment. The caller's own identifier wins,
+    and the URL is consulted only when there is nothing to conflict with.
+    """
+    if _primary_content_id(share_request)[0] is not None:
+        return
+
     inferred = _ids_from_url(share_request.url)
-    if _normalized_id(share_request.poem_id) is None:
-        share_request.poem_id = inferred.get("poem_id")
-    if _normalized_id(share_request.event_id) is None:
-        share_request.event_id = inferred.get("event_id")
-    if _normalized_id(share_request.post_id) is None:
-        share_request.post_id = inferred.get("post_id")
+    share_request.poem_id = inferred.get("poem_id")
+    share_request.event_id = inferred.get("event_id")
+    share_request.post_id = inferred.get("post_id")
 
 
 def _ids_from_url(url: Optional[str]) -> dict[str, str]:
@@ -314,7 +336,7 @@ def _has_resolvable_content(share_request: ShareRequest) -> bool:
 
 
 def _primary_content_id(share_request: ShareRequest) -> tuple[Optional[str], Optional[str]]:
-    for key in ("poem_id", "event_id", "post_id", "segment_id", "text_id"):
+    for key in _CONTENT_ID_FIELDS:
         value = _normalized_id(getattr(share_request, key, None))
         if value is not None:
             return value, key

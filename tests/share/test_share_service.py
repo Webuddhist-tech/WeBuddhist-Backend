@@ -13,6 +13,7 @@ from pecha_api.share.share_service import (
     _generate_logo_image_,
     _generate_segment_content_image_,
     _ids_from_url,
+    _apply_inferred_ids,
 )
 from pecha_api.share.share_response_models import (
     ShortUrlResponse,
@@ -216,7 +217,7 @@ async def test_generate_segment_content_image_with_segment():
             lang="en",
             text_color=TextColor.BLACK,
             bg_color=BgColor.DEFAULT,
-            logo_path="pecha_api/share/static/img/pecha-logo.png"
+            logo_path=None,
         )
 
 
@@ -254,7 +255,7 @@ async def test_generate_segment_content_image_without_segment():
             lang="en",
             text_color=TextColor.BLACK,
             bg_color=BgColor.DEFAULT,
-            logo_path="pecha_api/share/static/img/pecha-logo.png"
+            logo_path=None,
         )
 
 
@@ -390,7 +391,7 @@ async def test_generate_segment_content_image_with_poem():
             lang="bo",
             text_color=TextColor.DEFAULT,
             bg_color=BgColor.DEFAULT,
-            logo_path="pecha_api/share/static/img/pecha-logo.png",
+            logo_path=None,
         )
 
 
@@ -425,7 +426,7 @@ async def test_generate_segment_content_image_with_event():
             lang="en",
             text_color=TextColor.DEFAULT,
             bg_color=BgColor.DEFAULT,
-            logo_path="pecha_api/share/static/img/pecha-logo.png",
+            logo_path=None,
         )
 
 
@@ -451,7 +452,7 @@ async def test_generate_segment_content_image_with_post():
             lang=None,
             text_color=TextColor.DEFAULT,
             bg_color=BgColor.DEFAULT,
-            logo_path="pecha_api/share/static/img/pecha-logo.png",
+            logo_path=None,
         )
 
 
@@ -518,3 +519,62 @@ async def test_get_generated_image_with_poem_renders_content():
     mock_render.assert_awaited_once_with(share_request)
     assert isinstance(response, StreamingResponse)
     assert response.media_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_generate_segment_content_image_includes_logo_when_requested():
+    share_request = ShareRequest(
+        text_id="text_1",
+        language="en",
+        logo=True,
+        text_color=TextColor.BLACK,
+        bg_color=BgColor.DEFAULT,
+    )
+    mock_text_detail = TextDTO(
+        id="text_1",
+        title="Test Title",
+        language="en",
+        type="version",
+        group_id="group_1",
+        is_published=True,
+        created_date="2021-01-01",
+        updated_date="2021-01-01",
+        published_date="2021-01-01",
+        published_by="user_1",
+        categories=[],
+        views=0,
+    )
+
+    with patch("pecha_api.share.share_service.get_text_by_id_from_openpecha", new_callable=AsyncMock, return_value=mock_text_detail), \
+         patch("pecha_api.share.share_service.generate_segment_image") as mock_generate_image:
+
+        await _generate_segment_content_image_(share_request)
+
+        assert mock_generate_image.call_args.kwargs["logo_path"] == (
+            "pecha_api/share/static/img/pecha-logo.png"
+        )
+
+
+def test_apply_inferred_ids_keeps_explicit_identifier_over_url():
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        segment_id="seg_123",
+        url=f"https://webuddhist.com/events/{event_id}",
+        language="en",
+    )
+
+    _apply_inferred_ids(share_request)
+
+    # The explicit segment_id wins; no event_id is inferred alongside it, so
+    # the OG image stays the segment the caller asked to share.
+    assert share_request.event_id is None
+    assert share_request.segment_id == "seg_123"
+
+
+def test_apply_inferred_ids_fills_from_url_when_no_identifier_given():
+    post_id = str(uuid4())
+    share_request = ShareRequest(url=f"https://webuddhist.com/posts/{post_id}")
+
+    _apply_inferred_ids(share_request)
+
+    assert share_request.post_id == post_id
