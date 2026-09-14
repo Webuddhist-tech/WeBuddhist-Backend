@@ -212,10 +212,78 @@ def _build_link_entries(
     return entries
 
 
+def _apply_update_request(
+    db,
+    group_accumulator,
+    request: UpdateGroupAccumulatorRequest,
+    *,
+    created_by: Optional[str] = None,
+) -> None:
+    """Apply the editable fields of an update request. Unset fields are left
+    untouched."""
+    for field in (
+        "accumulator_id",
+        "title",
+        "image_key",
+        "target_count",
+        "start_date",
+        "end_date",
+    ):
+        value = getattr(request, field)
+        if value is not None:
+            setattr(group_accumulator, field, value)
+
+    _apply_metadata_and_links(
+        db,
+        group_accumulator,
+        metadata=request.metadata,
+        links=request.links,
+        created_by=created_by,
+    )
+
+
 def _validate_link_requests(links: Optional[List[GroupAccumulatorLinkRequest]]) -> None:
     """Raise before any row is written when a URL is unusable."""
     if links is not None:
         _build_link_entries(links)
+
+
+def _create_with_children(
+    db,
+    group_id: UUID,
+    request: CreateGroupAccumulatorRequest,
+    *,
+    created_by: Optional[str] = None,
+):
+    """Create the accumulator and its metadata/links. Links are validated up
+    front so a bad URL cannot leave a committed parent behind."""
+    if not verify_group_exists(db, group_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": "Group not found"},
+        )
+
+    _validate_link_requests(request.links)
+
+    group_accumulator = create_group_accumulator(
+        db=db,
+        group_id=group_id,
+        accumulator_id=request.accumulator_id,
+        title=request.title,
+        image_key=request.image_key,
+        target_count=request.target_count,
+        start_date=request.start_date,
+        end_date=request.end_date,
+    )
+    _apply_metadata_and_links(
+        db,
+        group_accumulator,
+        metadata=request.metadata,
+        links=request.links,
+        created_by=created_by,
+    )
+    update_group_accumulator(db=db, group_accumulator=group_accumulator)
+    return group_accumulator
 
 
 def _apply_metadata_and_links(
@@ -327,31 +395,7 @@ def create_group_accumulator_service(
     request: CreateGroupAccumulatorRequest,
 ) -> GroupAccumulatorDTO:
     with SessionLocal() as db:
-        if not verify_group_exists(db, group_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": "NOT_FOUND", "message": "Group not found"}
-            )
-
-        _validate_link_requests(request.links)
-
-        group_accumulator = create_group_accumulator(
-            db=db,
-            group_id=group_id,
-            accumulator_id=request.accumulator_id,
-            title=request.title,
-            image_key=request.image_key,
-            target_count=request.target_count,
-            start_date=request.start_date,
-            end_date=request.end_date,
-        )
-        _apply_metadata_and_links(
-            db,
-            group_accumulator,
-            metadata=request.metadata,
-            links=request.links,
-        )
-        update_group_accumulator(db=db, group_accumulator=group_accumulator)
+        group_accumulator = _create_with_children(db, group_id, request)
         return _convert_to_dto(group_accumulator, include_metadata=True)
 
 
@@ -490,24 +534,7 @@ def update_group_accumulator_service(
                 detail={"error": "FORBIDDEN", "message": "Group accumulator does not belong to this group"}
             )
         
-        if request.accumulator_id is not None:
-            group_accumulator.accumulator_id = request.accumulator_id
-        if request.title is not None:
-            group_accumulator.title = request.title
-        if request.image_key is not None:
-            group_accumulator.image_key = request.image_key
-        if request.target_count is not None:
-            group_accumulator.target_count = request.target_count
-        if request.start_date is not None:
-            group_accumulator.start_date = request.start_date
-        if request.end_date is not None:
-            group_accumulator.end_date = request.end_date
-        _apply_metadata_and_links(
-            db,
-            group_accumulator,
-            metadata=request.metadata,
-            links=request.links,
-        )
+        _apply_update_request(db, group_accumulator, request)
 
         updated = update_group_accumulator(db, group_accumulator)
         return _convert_to_dto(updated, include_metadata=True)
@@ -888,32 +915,12 @@ def create_group_accumulator_cms_service(
     with SessionLocal() as db:
         require_can_create_content(db=db, group_id=group_id, author=author)
 
-        if not verify_group_exists(db, group_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": "NOT_FOUND", "message": "Group not found"}
-            )
-
-        _validate_link_requests(request.links)
-
-        group_accumulator = create_group_accumulator(
-            db=db,
-            group_id=group_id,
-            accumulator_id=request.accumulator_id,
-            title=request.title,
-            image_key=request.image_key,
-            target_count=request.target_count,
-            start_date=request.start_date,
-            end_date=request.end_date,
-        )
-        _apply_metadata_and_links(
+        group_accumulator = _create_with_children(
             db,
-            group_accumulator,
-            metadata=request.metadata,
-            links=request.links,
+            group_id,
+            request,
             created_by=getattr(author, "email", None),
         )
-        update_group_accumulator(db=db, group_accumulator=group_accumulator)
         return _convert_to_dto(group_accumulator, include_metadata=True)
 
 
@@ -1014,23 +1021,10 @@ def update_group_accumulator_cms_service(
                 detail={"error": "FORBIDDEN", "message": "Group accumulator does not belong to this group"}
             )
         
-        if request.accumulator_id is not None:
-            group_accumulator.accumulator_id = request.accumulator_id
-        if request.title is not None:
-            group_accumulator.title = request.title
-        if request.image_key is not None:
-            group_accumulator.image_key = request.image_key
-        if request.target_count is not None:
-            group_accumulator.target_count = request.target_count
-        if request.start_date is not None:
-            group_accumulator.start_date = request.start_date
-        if request.end_date is not None:
-            group_accumulator.end_date = request.end_date
-        _apply_metadata_and_links(
+        _apply_update_request(
             db,
             group_accumulator,
-            metadata=request.metadata,
-            links=request.links,
+            request,
             created_by=getattr(author, "email", None),
         )
 

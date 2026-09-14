@@ -1273,6 +1273,25 @@ class TestGetGroupAccumulatorUserSessionsService:
 class TestGroupAccumulatorMetadataAndLinks:
     """Tests for the per-language About text and the ordered link set."""
 
+    @pytest.fixture
+    def detail_for(self):
+        """Fetch the public detail DTO for an accumulator carrying `entries`."""
+        def _fetch(entries, language):
+            accumulator_id = uuid4()
+            accumulator = MockGroupAccumulator(id=accumulator_id)
+            accumulator.metadata_entries = entries
+            prefix = 'pecha_api.group_accumulator.group_accumulator_service.'
+            with patch(prefix + 'assert_visible_for_timezone'), \
+                 patch(prefix + 'SessionLocal'), \
+                 patch(prefix + 'get_group_accumulator_by_id', return_value=accumulator), \
+                 patch(prefix + 'get_group_accumulator_total_count', return_value=0), \
+                 patch(prefix + 'get_group_accumulator_joiners_count', return_value=0), \
+                 patch(prefix + 'get_group_accumulator_count_in_range', return_value=0):
+                return get_group_accumulator_service(
+                    group_accumulator_id=accumulator_id, language=language
+                )
+        return _fetch
+
     @patch('pecha_api.group_accumulator.group_accumulator_service.update_group_accumulator')
     @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
     @patch('pecha_api.group_accumulator.group_accumulator_service.verify_group_exists')
@@ -1387,60 +1406,19 @@ class TestGroupAccumulatorMetadataAndLinks:
         assert accumulator.links == []
         assert accumulator.metadata_entries == []
 
-    @patch('pecha_api.group_accumulator.group_accumulator_service.assert_visible_for_timezone')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_by_id')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_total_count')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_joiners_count')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_count_in_range')
-    def test_detail_resolves_description_for_language(
-        self, mock_range, mock_joiners, mock_total, mock_get, mock_session, mock_visible
-    ):
+    def test_detail_resolves_description_for_language(self, detail_for):
         """BO is served when present; an untranslated language falls back to EN."""
-        accumulator_id = uuid4()
-        mock_db = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_db
-        accumulator = MockGroupAccumulator(id=accumulator_id)
-        accumulator.metadata_entries = [
+        entries = [
             MagicMock(language=LanguageCode.EN, description="English about"),
             MagicMock(language=LanguageCode.BO, description="Tibetan about"),
         ]
-        mock_get.return_value = accumulator
-        mock_total.return_value = 0
-        mock_joiners.return_value = 0
-        mock_range.return_value = 0
 
-        bo = get_group_accumulator_service(
-            group_accumulator_id=accumulator_id, language="BO"
-        )
-        assert bo.description == "Tibetan about"
-
+        assert detail_for(entries, "BO").description == "Tibetan about"
         # NE has no entry, so it falls back to EN
-        ne = get_group_accumulator_service(
-            group_accumulator_id=accumulator_id, language="NE"
-        )
-        assert ne.description == "English about"
+        assert detail_for(entries, "NE").description == "English about"
 
-    @patch('pecha_api.group_accumulator.group_accumulator_service.assert_visible_for_timezone')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_by_id')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_total_count')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_joiners_count')
-    @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_count_in_range')
-    def test_detail_without_metadata_returns_null_description(
-        self, mock_range, mock_joiners, mock_total, mock_get, mock_session, mock_visible
-    ):
-        accumulator_id = uuid4()
-        mock_db = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_db
-        mock_get.return_value = MockGroupAccumulator(id=accumulator_id)
-        mock_total.return_value = 0
-        mock_joiners.return_value = 0
-        mock_range.return_value = 0
-
-        result = get_group_accumulator_service(
-            group_accumulator_id=accumulator_id, language="EN"
-        )
+    def test_detail_without_metadata_returns_null_description(self, detail_for):
+        result = detail_for([], "EN")
 
         assert result.description is None
         assert result.links == []
