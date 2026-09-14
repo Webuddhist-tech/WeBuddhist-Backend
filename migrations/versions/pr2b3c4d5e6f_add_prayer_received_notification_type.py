@@ -17,7 +17,7 @@ from migrations.idempotency import enum_exists, enum_value_exists
 
 # revision identifiers, used by Alembic.
 revision: str = "pr2b3c4d5e6f"
-down_revision: Union[str, None] = "ev1a2b3c4d5e"
+down_revision: Union[str, None] = "ev2c3d4e5f6a"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

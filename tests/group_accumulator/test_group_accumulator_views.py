@@ -139,7 +139,7 @@ class TestGetGroupAccumulators:
         assert data["accumulators"][0]["mantra_id"] is None
         assert data["accumulators"][1]["text_id"] is None
         assert data["accumulators"][1]["mantra_id"] == str(mantra_id)
-        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20, token=None, timezone_name=None)
+        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20, token=None, timezone_name=None, language=None)
 
     @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
     def test_get_group_accumulators_with_pagination(self, mock_service):
@@ -156,7 +156,7 @@ class TestGetGroupAccumulators:
         )
 
         assert response.status_code == status.HTTP_200_OK
-        mock_service.assert_called_once_with(group_id=group_id, skip=5, limit=5, token=None, timezone_name=None)
+        mock_service.assert_called_once_with(group_id=group_id, skip=5, limit=5, token=None, timezone_name=None, language=None)
 
     @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
     def test_get_group_accumulators_empty(self, mock_service):
@@ -212,6 +212,7 @@ class TestGetGroupAccumulator:
             group_accumulator_id=group_accumulator_id,
             timezone_name=None,
             token=None,
+            language=None,
         )
 
     @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulator_service')
