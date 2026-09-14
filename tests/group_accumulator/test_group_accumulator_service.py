@@ -1445,3 +1445,81 @@ class TestGroupAccumulatorMetadataAndLinks:
         assert result.description is None
         assert result.links == []
         assert result.metadata is None
+
+
+class TestGroupAccumulatorReviewRegressions:
+    """Regressions for the four issues raised in PR review."""
+
+    def test_link_title_longer_than_column_is_rejected(self):
+        """A 501-char title must fail validation, not the database commit."""
+        with pytest.raises(Exception):
+            GroupAccumulatorLinkRequest(url="https://example.com/a", title="T" * 501)
+
+        assert GroupAccumulatorLinkRequest(url="https://example.com/a", title="T" * 500)
+
+    def test_description_default_language_is_deterministic(self):
+        """Omitting `language` must resolve EN, not an arbitrary stored row."""
+        from pecha_api.group_accumulator.group_accumulator_service import (
+            _resolve_description,
+        )
+
+        accumulator = MagicMock()
+        # BO first, so a naive "take the first entry" would return Tibetan
+        accumulator.metadata_entries = [
+            MagicMock(language=LanguageCode.BO, description="bo text"),
+            MagicMock(language=LanguageCode.EN, description="en text"),
+        ]
+
+        assert _resolve_description(accumulator, None) == "en text"
+        assert _resolve_description(accumulator, "BO") == "bo text"
+        assert _resolve_description(accumulator, "NE") == "en text"
+
+    @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.verify_group_exists')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.create_group_accumulator')
+    def test_invalid_link_rejected_before_parent_is_created(
+        self, mock_create, mock_verify, mock_session
+    ):
+        """A bad URL must abort before the accumulator row is written."""
+        group_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_verify.return_value = True
+
+        request = CreateGroupAccumulatorRequest(
+            title="Should never be created",
+            links=[GroupAccumulatorLinkRequest(url="not a url")],
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            create_group_accumulator_service(group_id=group_id, request=request)
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_create.assert_not_called()
+
+    def test_metadata_replacement_flushes_before_insert(self):
+        """Replacing an existing language must delete the old row before
+        inserting its replacement, or the unique constraint rejects the write."""
+        from pecha_api.group_accumulator.group_accumulator_service import (
+            _apply_metadata_and_links,
+        )
+
+        calls = []
+        accumulator = MagicMock()
+        accumulator.metadata_entries = MagicMock()
+        accumulator.metadata_entries.clear.side_effect = lambda: calls.append("clear")
+        accumulator.metadata_entries.extend.side_effect = lambda _: calls.append("extend")
+        accumulator.links = MagicMock()
+        db = MagicMock()
+        db.flush.side_effect = lambda: calls.append("flush")
+
+        _apply_metadata_and_links(
+            db,
+            accumulator,
+            metadata=[
+                GroupAccumulatorMetadataDTO(language=LanguageCode.EN, description="v2")
+            ],
+            links=None,
+        )
+
+        assert calls == ["clear", "flush", "extend"]

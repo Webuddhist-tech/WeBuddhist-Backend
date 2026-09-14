@@ -7,7 +7,10 @@ from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumula
 from pecha_api.accumulator.group_accumulator_link_model import GroupAccumulatorLink
 from pecha_api.accumulator.link_utils import classify_link, is_valid_http_url
 from pecha_api.accumulator.response_message import INVALID_URL
-from pecha_api.plans.shared.metadata_utils import filter_by_language_with_fallback
+from pecha_api.plans.shared.metadata_utils import (
+    DEFAULT_FALLBACK_LANGUAGE,
+    filter_by_language_with_fallback,
+)
 from pecha_api.db.database import SessionLocal
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.timezone_utils import get_day_bounds_in_timezone, normalize_timezone_name
@@ -133,7 +136,7 @@ def _resolve_description(group_accumulator, language: Optional[str]) -> Optional
         return None
     matched = filter_by_language_with_fallback(
         entries=entries,
-        language=language,
+        language=language or DEFAULT_FALLBACK_LANGUAGE,
         language_of=_metadata_language,
     )
     if not matched:
@@ -209,7 +212,14 @@ def _build_link_entries(
     return entries
 
 
+def _validate_link_requests(links: Optional[List[GroupAccumulatorLinkRequest]]) -> None:
+    """Raise before any row is written when a URL is unusable."""
+    if links is not None:
+        _build_link_entries(links)
+
+
 def _apply_metadata_and_links(
+    db,
     group_accumulator,
     *,
     metadata: Optional[List[GroupAccumulatorMetadataDTO]],
@@ -218,14 +228,26 @@ def _apply_metadata_and_links(
 ) -> None:
     """Full-replace both child sets. None leaves the existing rows untouched;
     an empty list clears them."""
-    if metadata is not None:
+    # Build (and so validate) the replacements before touching existing rows.
+    new_metadata = _build_metadata_entries(metadata) if metadata is not None else None
+    new_links = (
+        _build_link_entries(links, created_by=created_by) if links is not None else None
+    )
+
+    if new_metadata is not None:
         group_accumulator.metadata_entries.clear()
-        group_accumulator.metadata_entries.extend(_build_metadata_entries(metadata))
-    if links is not None:
+    if new_links is not None:
         group_accumulator.links.clear()
-        group_accumulator.links.extend(
-            _build_link_entries(links, created_by=created_by)
-        )
+
+    # The metadata unique constraint on (group_accumulator_id, language) is
+    # checked per statement, so the deletes must land before the inserts.
+    if new_metadata is not None or new_links is not None:
+        db.flush()
+
+    if new_metadata is not None:
+        group_accumulator.metadata_entries.extend(new_metadata)
+    if new_links is not None:
+        group_accumulator.links.extend(new_links)
 
 
 def _convert_to_dto(
@@ -310,7 +332,9 @@ def create_group_accumulator_service(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "NOT_FOUND", "message": "Group not found"}
             )
-        
+
+        _validate_link_requests(request.links)
+
         group_accumulator = create_group_accumulator(
             db=db,
             group_id=group_id,
@@ -322,6 +346,7 @@ def create_group_accumulator_service(
             end_date=request.end_date,
         )
         _apply_metadata_and_links(
+            db,
             group_accumulator,
             metadata=request.metadata,
             links=request.links,
@@ -478,6 +503,7 @@ def update_group_accumulator_service(
         if request.end_date is not None:
             group_accumulator.end_date = request.end_date
         _apply_metadata_and_links(
+            db,
             group_accumulator,
             metadata=request.metadata,
             links=request.links,
@@ -861,13 +887,15 @@ def create_group_accumulator_cms_service(
     author = validate_cms_author_details(token=token)
     with SessionLocal() as db:
         require_can_create_content(db=db, group_id=group_id, author=author)
-        
+
         if not verify_group_exists(db, group_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "NOT_FOUND", "message": "Group not found"}
             )
-        
+
+        _validate_link_requests(request.links)
+
         group_accumulator = create_group_accumulator(
             db=db,
             group_id=group_id,
@@ -879,6 +907,7 @@ def create_group_accumulator_cms_service(
             end_date=request.end_date,
         )
         _apply_metadata_and_links(
+            db,
             group_accumulator,
             metadata=request.metadata,
             links=request.links,
@@ -998,6 +1027,7 @@ def update_group_accumulator_cms_service(
         if request.end_date is not None:
             group_accumulator.end_date = request.end_date
         _apply_metadata_and_links(
+            db,
             group_accumulator,
             metadata=request.metadata,
             links=request.links,

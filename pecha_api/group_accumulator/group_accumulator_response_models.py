@@ -21,8 +21,8 @@ class GroupAccumulatorMetadataDTO(BaseModel):
 
 class GroupAccumulatorLinkRequest(BaseModel):
     """`link_type` and `video_id` are derived server-side from the URL."""
-    url: str
-    title: Optional[str] = None
+    url: str = Field(..., max_length=2000)
+    title: Optional[str] = Field(None, max_length=500)
 
 
 class GroupAccumulatorLinkDTO(BaseModel):
