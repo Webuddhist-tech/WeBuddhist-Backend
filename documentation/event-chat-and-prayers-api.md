@@ -168,7 +168,8 @@ payload, so the tap can deep-link to the request itself.
   whose copy reads from the live count — "12 people are praying for your
   request" — rather than one push per prayer.
 - Users can mute it globally or per group, like `CHAT_MESSAGE`
-  (`PRAYER_RECEIVED` is a group-scoped notification type).
+  (`PRAYER_RECEIVED` is a group-scoped notification type) — see
+  [notification-preferences-api.md](./notification-preferences-api.md).
 
 ---
 
