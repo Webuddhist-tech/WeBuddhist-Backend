@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator, model_serializer
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageType
 
 MAX_PRAYER_BATCH_SIZE = 50
+MAX_MESSAGE_DELETE_BATCH_SIZE = 50
 
 
 class ChatMessageParentDTO(BaseModel):
@@ -243,6 +244,27 @@ class PrayForMessagesRequest(BaseModel):
         if len(deduped) > MAX_PRAYER_BATCH_SIZE:
             raise ValueError(
                 f"message_ids must not exceed {MAX_PRAYER_BATCH_SIZE} messages"
+            )
+        return deduped
+
+
+class DeleteChatMessagesRequest(BaseModel):
+    """Request to delete several of the caller's own messages in one action.
+
+    The multi-select action: the client sends the ids the user ticked."""
+    message_ids: List[UUID]
+
+    @field_validator("message_ids")
+    @classmethod
+    def validate_message_ids(cls, value: List[UUID]) -> List[UUID]:
+        if not value:
+            raise ValueError("message_ids must not be empty")
+        # Preserve the client's order while dropping repeats, so a duplicate id
+        # cannot make the same message look deleted twice.
+        deduped = list(dict.fromkeys(value))
+        if len(deduped) > MAX_MESSAGE_DELETE_BATCH_SIZE:
+            raise ValueError(
+                f"message_ids must not exceed {MAX_MESSAGE_DELETE_BATCH_SIZE} messages"
             )
         return deduped
 

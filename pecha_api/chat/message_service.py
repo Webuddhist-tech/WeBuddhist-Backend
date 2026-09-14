@@ -31,6 +31,7 @@ from pecha_api.chat.repository import (
     create_report,
     get_message_by_id,
     get_message_by_id_any_room,
+    get_messages_by_ids,
     get_prayed_message_ids,
     get_prayer,
     get_prayer_counts_map,
@@ -45,6 +46,7 @@ from pecha_api.chat.repository import (
     remove_prayer,
     remove_reaction,
     soft_delete_message,
+    soft_delete_messages,
     touch_room,
 )
 from pecha_api.chat.response_models import (
@@ -80,6 +82,7 @@ _ALREADY_REPORTED = "ALREADY_REPORTED"
 _CANNOT_REPORT_OWN_MESSAGE = "CANNOT_REPORT_OWN_MESSAGE"
 _PRAYER_NOT_ALLOWED_IN_DM = "PRAYER_NOT_ALLOWED_IN_DM"
 _NOT_A_PRAYER_REQUEST = "NOT_A_PRAYER_REQUEST"
+_NOT_OWN_MESSAGES = "message_ids include other users' messages"
 _RECENT_PRAYERS_LIMIT = 3
 
 
@@ -90,6 +93,15 @@ class PrayerBatchResult(NamedTuple):
     room_id: UUID
     response: PrayerBatchResponse
     broadcast: List[Dict[str, Any]]
+
+
+class BulkDeleteResult(NamedTuple):
+    """What a bulk delete produced: the messages that were deleted and the one
+    timestamp they all carry, so the caller can broadcast a matching event per
+    message."""
+
+    message_ids: List[UUID]
+    deleted_at: str
 
 
 def send_group_message_service(
@@ -302,6 +314,48 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
 
         deleted_at = soft_delete_message(db=db, message=message)
         return deleted_at.isoformat()
+
+
+def delete_messages_service(
+    room_id: UUID, message_ids: Sequence[UUID], user: Users
+) -> BulkDeleteResult:
+    """Soft-delete several of the caller's own messages in one action.
+
+    All or nothing, deliberately: if the selection contains a message the
+    caller did not send, or one that is no longer a live message in this room,
+    nothing is deleted and the caller is told which ids were the problem -
+    silently deleting the rest would leave them guessing what survived."""
+    with SessionLocal() as db:
+        _get_room_or_404(db=db, room_id=room_id)
+        _require_active_member(db=db, room_id=room_id, user_id=user.id)
+
+        messages = get_messages_by_ids(db=db, message_ids=message_ids, room_id=room_id)
+        found = {message.id: message for message in messages}
+
+        missing = [message_id for message_id in message_ids if message_id not in found]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"{NOT_FOUND}: {', '.join(str(message_id) for message_id in missing)}",
+            )
+
+        not_own = [
+            message_id
+            for message_id in message_ids
+            if found[message_id].sender_id != user.id
+        ]
+        if not_own:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"{_NOT_OWN_MESSAGES}: {', '.join(str(message_id) for message_id in not_own)}",
+            )
+
+        ordered = [found[message_id] for message_id in message_ids]
+        deleted_at = soft_delete_messages(db=db, messages=ordered)
+        return BulkDeleteResult(
+            message_ids=[message.id for message in ordered],
+            deleted_at=deleted_at.isoformat(),
+        )
 
 
 def _get_room_message_or_404(

@@ -18,6 +18,7 @@ from pecha_api.chat.member_service import (
 from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
+    delete_messages_service,
     list_message_prayers_service,
     list_room_messages_service,
     pray_for_messages_service,
@@ -39,6 +40,7 @@ from pecha_api.chat.response_models import (
     ChatRoomDTO,
     ChatRoomMembersResponse,
     ChatRoomsResponse,
+    DeleteChatMessagesRequest,
     PrayerBatchResponse,
     PrayForMessagesRequest,
     ReportChatMessageRequest,
@@ -206,6 +208,44 @@ async def delete_room_message(
             "name": _sender_name(user),
         },
         deleted_at=deleted_at,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@chat_router.delete(
+    "/chat/rooms/{room_id}/messages",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_room_messages(
+    room_id: UUID,
+    request: DeleteChatMessagesRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Soft-delete several of the caller's own messages in one action.
+
+    All or nothing: if the selection includes a message the caller did not
+    send, nothing is deleted and the response names the offending ids.
+    Broadcasts one message_deleted event per message, so connected clients grey
+    them out live exactly as they do for a single delete."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    result = delete_messages_service(
+        room_id=room_id, message_ids=request.message_ids, user=user
+    )
+    deleted_by = {
+        "user_id": str(user.id),
+        "email": user.email,
+        "name": _sender_name(user),
+    }
+    await asyncio.gather(
+        *(
+            _broadcast_message_deleted_safe(
+                room_id=room_id,
+                message_id=message_id,
+                deleted_by=deleted_by,
+                deleted_at=result.deleted_at,
+            )
+            for message_id in result.message_ids
+        )
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
