@@ -5,6 +5,7 @@ from uuid import uuid4
 import pecha_api.app  # noqa: F401
 
 from pecha_api.chat.repository import (
+    SUPPRESSED_SQS_MESSAGE_ID,
     add_member,
     count_active_members,
     count_unread_messages,
@@ -20,6 +21,7 @@ from pecha_api.chat.repository import (
     get_room_by_id,
     get_room_by_pair,
     get_room_messages,
+    has_dispatched_prayer_since,
     leave_member,
     list_active_members,
     list_my_active_rooms,
@@ -294,3 +296,68 @@ class TestMessages:
         query.scalar.return_value = None
 
         assert count_unread_messages(db=db, room_id=uuid4(), last_read_at=None) == 0
+
+
+class TestHasDispatchedPrayerSince:
+    """A suppressed prayer (self-pray, or one coalesced away) must not itself
+    count as a dispatched notification - otherwise it would keep suppressing
+    every later prayer for the same request."""
+
+    def test_excludes_suppressed_dispatches_from_the_filter(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = False
+
+        has_dispatched_prayer_since(
+            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any(
+            "notification_sqs_message_id IS NOT NULL" in condition
+            for condition in conditions
+        )
+        assert any(
+            "notification_sqs_message_id !=" in condition for condition in conditions
+        )
+
+    def test_returns_true_when_a_real_dispatch_is_recent(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = True
+
+        assert has_dispatched_prayer_since(
+            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
+        ) is True
+
+    def test_returns_false_when_none_found(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = None
+
+        assert has_dispatched_prayer_since(
+            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
+        ) is False
+
+    def test_exclude_prayer_id_adds_a_second_filter(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = False
+
+        has_dispatched_prayer_since(
+            db=db,
+            message_id=uuid4(),
+            since=datetime.now(tz.utc),
+            exclude_prayer_id=uuid4(),
+        )
+
+        assert query.filter.call_count == 2
+
+    def test_suppressed_sentinel_matches_what_the_dispatch_service_writes(self):
+        # Guards against the sentinel drifting out of sync between the two
+        # modules now that it is defined once here and re-exported there.
+        from pecha_api.chat.notification_dispatch_service import (
+            SUPPRESSED_SQS_MESSAGE_ID as reexported,
+        )
+
+        assert reexported == SUPPRESSED_SQS_MESSAGE_ID == "SUPPRESSED"

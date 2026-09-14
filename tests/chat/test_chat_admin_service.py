@@ -62,6 +62,7 @@ class TestListChatMessageReportsService:
         room.name = "Sangha group"
         message = MagicMock(id=uuid4())
         message.body = "reported message body"
+        message.message_type = "TEXT"
         message.sender = offender
         message.room = room
 
@@ -104,6 +105,7 @@ class TestListChatMessageReportsService:
         room.name = "Old room"
         message = MagicMock(id=uuid4())
         message.body = "legacy body"
+        message.message_type = "TEXT"
         message.sender = offender
         message.room = room
 

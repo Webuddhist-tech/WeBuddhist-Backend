@@ -56,9 +56,11 @@ def _message_dto(room_id=None) -> ChatMessageDTO:
     )
 
 
-def _ws_url(group_id=None, receiver_id=None, token="test-token"):
+def _ws_url(group_id=None, receiver_id=None, event_id=None, token="test-token"):
     if group_id is not None:
         return f"/chat/live?token={token}&group_id={group_id}"
+    if event_id is not None:
+        return f"/chat/live?token={token}&event_id={event_id}"
     if receiver_id is not None:
         return f"/chat/live?token={token}&receiver_id={receiver_id}"
     return f"/chat/live?token={token}"
@@ -261,7 +263,11 @@ class TestWebSocketChatMessages:
                 websocket.send_json({"type": "message", "body": "Hello"})
 
         mock_send_group.assert_called_once_with(
-            group_id=group_id, user=user, body="Hello", parent_message_id=None
+            group_id=group_id,
+            user=user,
+            body="Hello",
+            parent_message_id=None,
+            message_type="TEXT",
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -278,7 +284,11 @@ class TestWebSocketChatMessages:
                 websocket.send_json({"type": "message", "body": "Hey"})
 
         mock_send_direct.assert_called_once_with(
-            receiver_id=receiver_id, user=user, body="Hey", parent_message_id=None
+            receiver_id=receiver_id,
+            user=user,
+            body="Hey",
+            parent_message_id=None,
+            message_type="TEXT",
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -444,3 +454,116 @@ class TestRemoteEviction:
 
                 websocket.send_json({"type": "ping"})
                 assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+
+
+class TestWebSocketEventRoomsAndPrayers:
+    """The socket's third room kind, and the PRAYER message type."""
+
+    def test_rejects_group_and_event_together(self):
+        url = f"/chat/live?token=test&group_id={uuid4()}&event_id={uuid4()}"
+        with client.websocket_connect(url) as websocket:
+            message = websocket.receive_json()
+
+        assert message["code"] == "INVALID_PARAMS"
+
+    def test_connects_to_an_event_room(self):
+        event_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(user=user, room=room):
+            with patch(
+                "pecha_api.chat.service.resolve_or_create_event_room",
+                return_value=room,
+            ) as mock_resolve:
+                with client.websocket_connect(_ws_url(event_id=event_id)) as websocket:
+                    message = websocket.receive_json()
+
+        assert message["type"] == "room_info"
+        assert message["room_id"] == str(room.id)
+        assert mock_resolve.call_args.kwargs["event_id"] == event_id
+
+    def test_sends_an_event_message(self):
+        event_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(user=user, room=room) as (broadcaster, _, _, _):
+            with patch(
+                "pecha_api.chat.service.resolve_or_create_event_room",
+                return_value=room,
+            ), patch(
+                "pecha_api.chat.views.send_event_message_service",
+                return_value=dto,
+            ) as mock_send_event:
+                with client.websocket_connect(_ws_url(event_id=event_id)) as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({"type": "message", "body": "Tashi delek"})
+
+        mock_send_event.assert_called_once_with(
+            event_id=event_id,
+            user=user,
+            body="Tashi delek",
+            parent_message_id=None,
+            message_type="TEXT",
+        )
+        broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
+
+    def test_sends_a_prayer_request(self):
+        group_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(user=user, room=room) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = dto
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {
+                        "type": "message",
+                        "body": "Please pray for my mother",
+                        "message_type": "PRAYER",
+                    }
+                )
+
+        assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
+
+    def test_message_type_is_normalised_to_upper_case(self):
+        group_id = uuid4()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(room=room) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = dto
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "message_type": "prayer"}
+                )
+
+        assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
+
+    def test_rejected_message_type_keeps_the_socket_usable(self):
+        """A per-message rejection must not end the session, the way a
+        profanity rejection does not."""
+        group_id = uuid4()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(room=room) as (_, mock_send_group, _, _):
+            mock_send_group.side_effect = HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PRAYER_NOT_ALLOWED_IN_DM",
+            )
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "message_type": "PRAYER"}
+                )
+                error = websocket.receive_json()
+                # Still open: a second frame is still served.
+                websocket.send_json({"type": "typing", "is_typing": True})
+
+        assert error["type"] == "error"
+        assert error["code"] == "PRAYER_NOT_ALLOWED_IN_DM"

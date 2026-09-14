@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
 from typing import List, Optional
@@ -372,6 +374,49 @@ def _display_occurrence_for_event(
     return start, end, start
 
 
+def _close_event_chat_sockets_best_effort(*, event_id: UUID) -> None:
+    """Evict live chat sockets for an event whose chat was just switched off.
+
+    Runs the async broadcast from this sync CMS path; a failure is logged and
+    ignored, since the write it follows has already been committed."""
+    from pecha_api.chat.service import close_event_chat_sockets
+
+    try:
+        asyncio.run(
+            close_event_chat_sockets(event_id=event_id, reason="EVENT_CHAT_DISABLED")
+        )
+    except RuntimeError:
+        # Already inside a running loop (ASGI worker): schedule instead.
+        try:
+            asyncio.get_running_loop().create_task(
+                close_event_chat_sockets(event_id=event_id, reason="EVENT_CHAT_DISABLED")
+            )
+        except Exception:
+            logging.exception("Failed to close chat sockets for event %s", event_id)
+    except Exception:
+        logging.exception("Failed to close chat sockets for event %s", event_id)
+
+
+def _chat_room_id_for_event(*, db, event_id: UUID) -> Optional[UUID]:
+    """The event's chat room, if one has been created yet. Rooms are created
+    lazily on first use, so an event with no conversation has none.
+
+    Imported inside the function: chat reaches into events at module level, so
+    events must not import chat back at module level."""
+    from pecha_api.chat.repository import get_room_by_event_id
+
+    room = get_room_by_event_id(db=db, event_id=event_id)
+    return room.id if room else None
+
+
+def _chat_room_ids_for_events(*, db, event_ids) -> dict:
+    """Room id per event for a page of events, in one query. See the note in
+    _chat_room_id_for_event on why the import is deferred."""
+    from pecha_api.chat.repository import get_room_ids_by_event_ids
+
+    return get_room_ids_by_event_ids(db=db, event_ids=event_ids)
+
+
 def _event_to_dto(
     event: Event,
     language: Optional[str] = None,
@@ -383,6 +428,7 @@ def _event_to_dto(
     occurrence_date: Optional[datetime] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    chat_room_id: Optional[UUID] = None,
 ) -> EventDTO:
     recurrence_dto = None
     if event.is_recurring:
@@ -427,6 +473,8 @@ def _event_to_dto(
         recurrence=recurrence_dto,
         occurrence_date=occurrence_date,
         event_format=event.event_format,
+        chat_enabled=bool(getattr(event, "chat_enabled", True)),
+        chat_room_id=chat_room_id,
         metadata=_metadata_response(
             event.metadata_entries, language=language, fallback=fallback
         ),
@@ -612,6 +660,7 @@ def get_events_service(
         # Get participant counts for all unique event IDs
         event_ids = list({item['event'].id for item in paginated_items})
         counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+        chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
         group_ids = list({item['event'].group_id for item in paginated_items})
         group_cards = _group_card_map(db, group_ids)
 
@@ -641,6 +690,7 @@ def get_events_service(
                     occurrence_date=item['occurrence_date'],
                     start_date=item['start_date'],
                     end_date=item['end_date'],
+                    chat_room_id=chat_rooms_by_event.get(event.id),
                 )
             )
 
@@ -717,6 +767,7 @@ def get_cms_event_by_id_service(
             occurrence_date=occurrence_date,
             start_date=start_date,
             end_date=end_date,
+            chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
         )
 
 
@@ -777,6 +828,7 @@ def get_event_by_id_service(
             occurrence_date=occurrence_date,
             start_date=start_date,
             end_date=end_date,
+            chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
         )
 
 
@@ -830,6 +882,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         timezone=request.timezone,
         image_url=request.image_url,
         event_format=request.event_format,
+        chat_enabled=request.chat_enabled,
         is_recurring=is_recurring,
         recurrence_frequency=recurrence_frequency,
         recurrence_date_system=recurrence_date_system,
@@ -1024,6 +1077,8 @@ def _apply_simple_field_updates(event: Event, request: UpdateEventRequest) -> No
         event.image_url = request.image_url
     if "event_format" in fields_set:
         event.event_format = request.event_format
+    if "chat_enabled" in fields_set and request.chat_enabled is not None:
+        event.chat_enabled = request.chat_enabled
 
 
 def _apply_relational_field_updates(db, event: Event, request: UpdateEventRequest) -> None:
@@ -1061,6 +1116,8 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
 
         _require_can_edit_event(db, event.group_id, current_author)
 
+        chat_was_enabled = bool(getattr(event, "chat_enabled", True))
+
         should_cancel_reminders, should_reschedule_reminders = _apply_recurrence_or_dates(
             event, request
         )
@@ -1081,7 +1138,16 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
             link_entries=request.links,
             youtube_entries=request.youtube,
         )
-        return _event_to_dto(saved)
+
+        # Switching the chat off has to reach sockets that are already open;
+        # the request-layer gate only ends them at their next frame.
+        if chat_was_enabled and not bool(getattr(saved, "chat_enabled", True)):
+            _close_event_chat_sockets_best_effort(event_id=saved.id)
+
+        return _event_to_dto(
+            saved,
+            chat_room_id=_chat_room_id_for_event(db=db, event_id=saved.id),
+        )
 
 
 def delete_event_service(token: str, event_id: UUID) -> None:
@@ -1166,6 +1232,7 @@ def get_featured_events_service(
         
         event_ids = list({item['event'].id for item in paginated_items})
         counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+        chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
         group_cards = _group_card_map(db, [item['event'].group_id for item in paginated_items])
 
         joined_ids: set[UUID] = set()
@@ -1194,6 +1261,7 @@ def get_featured_events_service(
                     occurrence_date=item['occurrence_date'],
                     start_date=item['start_date'],
                     end_date=item['end_date'],
+                    chat_room_id=chat_rooms_by_event.get(event.id),
                 )
             )
 

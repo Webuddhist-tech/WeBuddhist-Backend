@@ -618,8 +618,9 @@ class TestRoomIdRoutesRespectGroupStatus:
     @patch('pecha_api.chat.service.is_group_id_published')
     @patch('pecha_api.chat.service.get_room_by_id')
     def test_dm_room_skips_the_group_check(self, mock_get_room, mock_published):
-        """DM rooms have no group_id and must never consult group status."""
-        room = MagicMock(group_id=None)
+        """DM rooms have no group_id and no event_id, so they must never
+        consult group status."""
+        room = MagicMock(group_id=None, event_id=None)
         mock_get_room.return_value = room
 
         assert _get_room_or_404(db=MagicMock(), room_id=uuid4()) is room

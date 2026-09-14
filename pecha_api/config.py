@@ -123,6 +123,8 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
+    # Prayers for the same request inside this window raise one push, not one each
+    PRAYER_NOTIFICATION_COALESCE_SECONDS=900,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",
