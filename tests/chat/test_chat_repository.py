@@ -17,6 +17,7 @@ from pecha_api.chat.repository import (
     get_last_messages_map,
     get_member,
     get_message_by_id,
+    get_messages_by_ids,
     get_room_by_group_id,
     get_room_by_id,
     get_room_by_pair,
@@ -27,6 +28,7 @@ from pecha_api.chat.repository import (
     list_my_active_rooms,
     mark_read,
     soft_delete_message,
+    soft_delete_messages,
     touch_room,
     update_room,
 )
@@ -296,6 +298,50 @@ class TestMessages:
         query.scalar.return_value = None
 
         assert count_unread_messages(db=db, room_id=uuid4(), last_read_at=None) == 0
+
+
+class TestBulkMessageDeletion:
+    """The bulk delete's guarantees live in these two functions, so they are
+    checked here directly rather than through the service, which mocks them."""
+
+    def test_get_messages_by_ids_skips_query_when_no_ids(self):
+        db = MagicMock()
+
+        assert get_messages_by_ids(db=db, message_ids=[], room_id=uuid4()) == []
+        db.query.assert_not_called()
+
+    def test_get_messages_by_ids_restricts_to_live_messages_of_the_room(self):
+        db = MagicMock()
+        messages = [MagicMock(), MagicMock()]
+        query = _query_chain(db, results=messages)
+
+        result = get_messages_by_ids(
+            db=db, message_ids=[uuid4(), uuid4()], room_id=uuid4()
+        )
+
+        assert result == messages
+        clauses = [str(clause) for clause in query.filter.call_args.args]
+        # A caller must not reach another room's messages, nor delete one twice.
+        assert any("chat_messages.id IN" in clause for clause in clauses)
+        assert any("chat_messages.room_id =" in clause for clause in clauses)
+        assert any("chat_messages.deleted_at IS NULL" in clause for clause in clauses)
+
+    def test_soft_delete_messages_shares_one_timestamp_and_commits_once(self):
+        db = MagicMock()
+        messages = [MagicMock(deleted_at=None) for _ in range(3)]
+
+        result = soft_delete_messages(db=db, messages=messages)
+
+        assert all(message.deleted_at == result for message in messages)
+        assert result.tzinfo is not None
+        # One commit, so a bulk delete lands all or nothing.
+        db.commit.assert_called_once()
+
+    def test_soft_delete_messages_with_no_messages_still_returns_timestamp(self):
+        db = MagicMock()
+
+        assert soft_delete_messages(db=db, messages=[]) is not None
+        db.commit.assert_called_once()
 
 
 class TestHasDispatchedPrayerSince:

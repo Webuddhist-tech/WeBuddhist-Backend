@@ -281,6 +281,110 @@ class TestRoomMessages:
         assert response.status_code == status.HTTP_204_NO_CONTENT
 
 
+class TestBulkDeleteMessages:
+
+    @patch('pecha_api.chat.views.get_broadcaster')
+    @patch('pecha_api.chat.views.delete_messages_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_bulk_delete_messages(self, mock_validate, mock_service, mock_get_broadcaster):
+        from unittest.mock import AsyncMock
+        from pecha_api.chat.message_service import BulkDeleteResult
+
+        client = get_client()
+        user = MagicMock()
+        user.id = uuid4()
+        user.email = "sender@example.com"
+        user.firstname = "Sender"
+        user.lastname = "Name"
+        mock_validate.return_value = user
+        room_id = uuid4()
+        message_ids = [uuid4(), uuid4()]
+        deleted_at = datetime.now(tz.utc).isoformat()
+        mock_service.return_value = BulkDeleteResult(message_ids=message_ids, deleted_at=deleted_at)
+        broadcaster = MagicMock()
+        broadcaster.broadcast_message_deleted = AsyncMock()
+        mock_get_broadcaster.return_value = broadcaster
+
+        response = client.request(
+            "DELETE",
+            f"/chat/rooms/{room_id}/messages",
+            headers=AUTH_HEADERS,
+            json={"message_ids": [str(message_id) for message_id in message_ids]},
+        )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        assert mock_service.call_args.kwargs["message_ids"] == message_ids
+        # One message_deleted event per message, so clients grey each out live.
+        assert broadcaster.broadcast_message_deleted.await_count == 2
+        for message_id, call in zip(message_ids, broadcaster.broadcast_message_deleted.await_args_list):
+            assert call.kwargs == {
+                "room_id": room_id,
+                "message_id": message_id,
+                "deleted_by": {"user_id": str(user.id), "email": user.email, "name": "Sender Name"},
+                "deleted_at": deleted_at,
+            }
+
+    @patch('pecha_api.chat.views.delete_messages_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_bulk_delete_rejects_other_users_messages(self, mock_validate, mock_service):
+        client = get_client()
+        mock_validate.return_value = MagicMock()
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="message_ids include other users' messages: abc",
+        )
+
+        response = client.request(
+            "DELETE",
+            f"/chat/rooms/{uuid4()}/messages",
+            headers=AUTH_HEADERS,
+            json={"message_ids": [str(uuid4())]},
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert "other users" in response.json()["detail"]
+
+    @patch('pecha_api.chat.views.delete_messages_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_bulk_delete_rejects_empty_selection(self, mock_validate, mock_service):
+        client = get_client()
+        mock_validate.return_value = MagicMock()
+
+        response = client.request(
+            "DELETE",
+            f"/chat/rooms/{uuid4()}/messages",
+            headers=AUTH_HEADERS,
+            json={"message_ids": []},
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        mock_service.assert_not_called()
+
+    @patch('pecha_api.chat.views.get_broadcaster')
+    @patch('pecha_api.chat.views.delete_messages_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_bulk_delete_broadcast_failure_does_not_fail_request(
+        self, mock_validate, mock_service, mock_get_broadcaster
+    ):
+        from pecha_api.chat.message_service import BulkDeleteResult
+
+        client = get_client()
+        mock_validate.return_value = MagicMock()
+        mock_service.return_value = BulkDeleteResult(
+            message_ids=[uuid4()], deleted_at=datetime.now(tz.utc).isoformat()
+        )
+        mock_get_broadcaster.side_effect = RuntimeError("redis down")
+
+        response = client.request(
+            "DELETE",
+            f"/chat/rooms/{uuid4()}/messages",
+            headers=AUTH_HEADERS,
+            json={"message_ids": [str(uuid4())]},
+        )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+
+
 class TestRoomDetailAndProfile:
 
     @patch('pecha_api.chat.views.get_room_detail_service')

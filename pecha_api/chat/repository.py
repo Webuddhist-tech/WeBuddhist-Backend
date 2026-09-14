@@ -336,6 +336,36 @@ def soft_delete_message(db: Session, message: ChatMessage) -> datetime:
     return deleted_at
 
 
+def get_messages_by_ids(
+    db: Session, message_ids: Sequence[UUID], room_id: UUID
+) -> List[ChatMessage]:
+    """Live (not yet deleted) messages of this room among the given ids.
+
+    Ids that do not belong to the room, or that are already deleted, simply do
+    not come back - the caller decides what that means."""
+    if not message_ids:
+        return []
+    return (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.id.in_(message_ids),
+            ChatMessage.room_id == room_id,
+            ChatMessage.deleted_at.is_(None),
+        )
+        .all()
+    )
+
+
+def soft_delete_messages(db: Session, messages: Sequence[ChatMessage]) -> datetime:
+    """Soft-delete several messages in one commit, so a bulk delete is all or
+    nothing and every message carries the same deleted_at."""
+    deleted_at = datetime.now(timezone.utc)
+    for message in messages:
+        message.deleted_at = deleted_at
+    db.commit()
+    return deleted_at
+
+
 def mark_message_notification_dispatched(
     db: Session,
     message_id: UUID,
