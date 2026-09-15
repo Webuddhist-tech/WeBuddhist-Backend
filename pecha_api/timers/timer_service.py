@@ -2,31 +2,34 @@ from typing import Optional, List
 from uuid import UUID, uuid4
 import logging
 import _datetime
-from _datetime import datetime
+from _datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from starlette import status
 from ..db.database import SessionLocal
 from ..uploads.S3_utils import generate_presigned_access_url
-from ..config import get
+from ..config import get, get_int
 from ..users.users_service import validate_and_extract_user_details
 from pecha_api.daily_log.daily_log_cache_service import schedule_invalidate_user_stats_cache
+from pecha_api.ambient_sounds.ambient_sound_repository import get_ambient_sound_by_id
 from .timer_repository import (
-    get_timers_by_group, 
+    get_timers_by_group,
     get_user_timers_by_group,
     save_timer,
     get_timer_by_id,
     update_timer,
     delete_timer,
     save_timer_history,
-    get_user_timer_history
+    get_user_timer_history,
+    purge_deleted_timers_older_than
 )
 from .timer_response_models import (
-    TimersResponse, 
-    TimerDTO, 
-    CreateTimerRequest, 
+    TimersResponse,
+    TimerDTO,
+    CreateTimerRequest,
     UpdateTimerRequest,
     RecordTimerStopRequest,
+    RecordTimerStopResponse,
     TimerHistoryResponse,
     TimerHistoryDTO,
     TimerSessionDTO
@@ -37,11 +40,16 @@ from .timer_enums import TimerType
 from .response_message import (
     NOT_FOUND,
     FORBIDDEN,
+    CONFLICT,
     TIMER_NOT_FOUND,
     TIMER_UPDATE_NOT_ALLOWED,
     TIMER_DELETE_NOT_ALLOWED,
     ONLY_USER_TIMERS_CAN_BE_UPDATED,
-    ONLY_USER_TIMERS_CAN_BE_DELETED
+    ONLY_USER_TIMERS_CAN_BE_DELETED,
+    AMBIENT_SOUND_NOT_FOUND,
+    PARENT_PRESET_NOT_FOUND,
+    TIMER_NOT_DELETED,
+    TIMER_RESTORE_WINDOW_EXPIRED
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +77,10 @@ def convert_timer_to_dto(timer: Timer) -> TimerDTO:
         description=timer.description,
         duration=timer.duration,
         audio_url=generate_audio_presigned_url(timer.audio_url),
+        ambient_sound_id=timer.ambient_sound_id,
+        bell_at_start=timer.bell_at_start,
+        bell_at_end=timer.bell_at_end,
+        parent_preset_id=timer.parent_preset_id,
         created_at=timer.created_at,
         updated_at=timer.updated_at
     )
@@ -81,6 +93,30 @@ def convert_timers_to_dtos(timers: List[Timer]) -> List[TimerDTO]:
 def is_user_created_timer(timer: Timer) -> bool:
     timer_type = timer.type.value if hasattr(timer.type, 'value') else timer.type
     return timer_type == TimerType.USER.value
+
+
+def _validate_ambient_sound(db, ambient_sound_id: Optional[UUID]) -> None:
+    if ambient_sound_id is None:
+        return
+    ambient_sound = get_ambient_sound_by_id(db, ambient_sound_id)
+    if not ambient_sound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": NOT_FOUND, "message": AMBIENT_SOUND_NOT_FOUND}
+        )
+
+
+def _validate_parent_preset(db, parent_preset_id: Optional[UUID]) -> None:
+    if parent_preset_id is None:
+        return
+    parent_preset = get_timer_by_id(db, parent_preset_id)
+    if not parent_preset or not (
+        (parent_preset.type.value if hasattr(parent_preset.type, 'value') else parent_preset.type) == TimerType.PRESET.value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": NOT_FOUND, "message": PARENT_PRESET_NOT_FOUND}
+        )
 
 
 def get_all_timers_service(
@@ -116,8 +152,11 @@ def get_user_timers_service(
 
 def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
     current_user = validate_and_extract_user_details(token=token)
-    
+
     with SessionLocal() as db:
+        _validate_ambient_sound(db, request.ambient_sound_id)
+        _validate_parent_preset(db, request.parent_preset_id)
+
         new_timer = Timer(
             id=uuid4(),
             user_id=current_user.id,
@@ -126,9 +165,13 @@ def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
             name=request.name,
             description=request.description,
             duration=request.duration,
-            audio_url=request.audio_url
+            audio_url=request.audio_url,
+            ambient_sound_id=request.ambient_sound_id,
+            bell_at_start=request.bell_at_start,
+            bell_at_end=request.bell_at_end,
+            parent_preset_id=request.parent_preset_id
         )
-        
+
         saved_timer = save_timer(db, new_timer)
         return convert_timer_to_dto(saved_timer)
 
@@ -156,7 +199,11 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"error": FORBIDDEN, "message": ONLY_USER_TIMERS_CAN_BE_UPDATED}
             )
-        
+
+        ambient_sound_id_provided = "ambient_sound_id" in request.model_fields_set
+        if ambient_sound_id_provided and request.ambient_sound_id is not None:
+            _validate_ambient_sound(db, request.ambient_sound_id)
+
         if request.name is not None:
             timer.name = request.name
         if request.description is not None:
@@ -165,7 +212,13 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             timer.duration = request.duration
         if request.audio_url is not None:
             timer.audio_url = request.audio_url
-        
+        if ambient_sound_id_provided:
+            timer.ambient_sound_id = request.ambient_sound_id
+        if request.bell_at_start is not None:
+            timer.bell_at_start = request.bell_at_start
+        if request.bell_at_end is not None:
+            timer.bell_at_end = request.bell_at_end
+
         updated_timer = update_timer(db, timer)
         return convert_timer_to_dto(updated_timer)
 
@@ -197,9 +250,46 @@ def delete_timer_service(token: str, timer_id: UUID) -> None:
         delete_timer(db, timer)
 
 
-def record_timer_stop_service(token: str, request: RecordTimerStopRequest) -> None:
+def restore_timer_service(token: str, timer_id: UUID) -> TimerDTO:
     current_user = validate_and_extract_user_details(token=token)
-    
+
+    with SessionLocal() as db:
+        timer = get_timer_by_id(db, timer_id, include_deleted=True)
+
+        if not timer:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": NOT_FOUND, "message": TIMER_NOT_FOUND}
+            )
+
+        if timer.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": FORBIDDEN, "message": TIMER_UPDATE_NOT_ALLOWED}
+            )
+
+        if timer.deleted_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": CONFLICT, "message": TIMER_NOT_DELETED}
+            )
+
+        retention_days = get_int("TIMER_DELETED_RETENTION_DAYS")
+        cutoff = datetime.now(_datetime.timezone.utc) - timedelta(days=retention_days)
+        if timer.deleted_at < cutoff:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": CONFLICT, "message": TIMER_RESTORE_WINDOW_EXPIRED}
+            )
+
+        timer.deleted_at = None
+        restored_timer = update_timer(db, timer)
+        return convert_timer_to_dto(restored_timer)
+
+
+def record_timer_stop_service(token: str, request: RecordTimerStopRequest) -> RecordTimerStopResponse:
+    current_user = validate_and_extract_user_details(token=token)
+
     with SessionLocal() as db:
         timer = get_timer_by_id(db, request.timer_id)
         if not timer:
@@ -207,7 +297,7 @@ def record_timer_stop_service(token: str, request: RecordTimerStopRequest) -> No
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": NOT_FOUND, "message": TIMER_NOT_FOUND}
             )
-        
+
         timer_history = TimerHistory(
             id=uuid4(),
             timer_id=request.timer_id,
@@ -215,10 +305,26 @@ def record_timer_stop_service(token: str, request: RecordTimerStopRequest) -> No
             duration_ms=request.duration,
             created_at=datetime.now(_datetime.timezone.utc)
         )
-        
+
         save_timer_history(db, timer_history)
+        response = RecordTimerStopResponse(
+            timer_id=timer.id,
+            name=timer.name,
+            duration_ms=request.duration
+        )
 
     schedule_invalidate_user_stats_cache(user_id=current_user.id)
+    return response
+
+
+def purge_deleted_timers(retention_days: int) -> int:
+    if retention_days < 1:
+        raise ValueError(f"retention_days must be a positive integer, got {retention_days}")
+    cutoff = datetime.now(_datetime.timezone.utc) - timedelta(days=retention_days)
+    with SessionLocal() as db:
+        deleted_count = purge_deleted_timers_older_than(db, cutoff)
+        logger.info("Purged %s soft-deleted timer(s) older than %s", deleted_count, cutoff)
+        return deleted_count
 
 
 def get_timer_history_service(
