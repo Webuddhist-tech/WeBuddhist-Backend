@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, DateTime, UUID, Text, Index, Integer, Boolean, ForeignKey
+from sqlalchemy.orm import relationship
 from ..db.database import Base
 from uuid import uuid4
 import _datetime
@@ -16,7 +17,14 @@ class Timer(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     duration = Column(Integer, nullable=False)
-    audio_url = Column(String(1000), nullable=True)
+    # The audio and its cover image live in timer_audios, so a timer points at
+    # one instead of carrying loose S3 keys. SET NULL: deleting an audio must
+    # not take the timers that used it (and their history) with it.
+    timer_audio_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("timer_audios.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     ambient_sound_id = Column(
         UUID(as_uuid=True),
         ForeignKey("ambient_sounds.id", ondelete="SET NULL"),
@@ -36,9 +44,13 @@ class Timer(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), onupdate=lambda: datetime.now(_datetime.timezone.utc))
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Eager: the DTO always needs it, and it must survive the session closing.
+    timer_audio = relationship("TimerAudio", lazy="joined")
+
     __table_args__ = (
         Index("idx_timers_user_id", "user_id"),
         Index("idx_timers_type", "type"),
         Index("idx_timers_ambient_sound_id", "ambient_sound_id"),
+        Index("idx_timers_timer_audio_id", "timer_audio_id"),
         Index("idx_timers_parent_preset_id", "parent_preset_id"),
     )
