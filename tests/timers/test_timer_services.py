@@ -30,6 +30,7 @@ from pecha_api.timers.timer_response_models import (
 )
 from pecha_api.timers.timer_model import Timer
 from pecha_api.timers.timer_audio_model import TimerAudio
+from pecha_api.timers.timer_audio_enums import TimerAudioType
 from pecha_api.timers.timer_history_model import TimerHistory
 from pecha_api.timers.timer_enums import TimerType
 
@@ -119,6 +120,7 @@ class TestDataFactory:
         timer_audio_id=None,
         user_id=None,
         name="Bell",
+        audio_type=TimerAudioType.USER,
         audio_s3_key="audio/bell.mp3",
         image_s3_key="images/timer_covers/bell.png"
     ):
@@ -126,6 +128,7 @@ class TestDataFactory:
         timer_audio = MagicMock(spec=TimerAudio)
         timer_audio.id = timer_audio_id or uuid4()
         timer_audio.user_id = user_id or uuid4()
+        timer_audio.type = audio_type
         timer_audio.name = name
         timer_audio.audio_s3_key = audio_s3_key
         timer_audio.image_s3_key = image_s3_key

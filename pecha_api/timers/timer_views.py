@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated, Optional
 from uuid import UUID
@@ -29,9 +29,7 @@ from .timer_response_models import (
     RecordTimerStopResponse,
     TimerHistoryResponse,
     TimerAudioDTO,
-    TimerAudiosResponse,
-    CreateTimerAudioRequest,
-    UpdateTimerAudioRequest
+    TimerAudiosResponse
 )
 from ..users.users_service import validate_and_extract_user_details
 
@@ -136,36 +134,50 @@ async def get_user_timer_history(
 
 @timer_router.get("/audios", response_model=TimerAudiosResponse)
 async def list_timer_audios(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return")
 ):
-    """Every uploaded audio with its cover image, so a user can pick one for
-    their own timer. Shared: the list is not filtered by owner."""
-    return list_timer_audios_service(skip=skip, limit=limit)
+    """Every preset, plus the caller's own uploads. Other people's uploads are
+    never listed, which is why this needs authentication."""
+    return list_timer_audios_service(
+        token=credentials.credentials,
+        skip=skip,
+        limit=limit
+    )
 
 
 @timer_router.post("/audios", status_code=status.HTTP_201_CREATED, response_model=TimerAudioDTO)
 async def create_timer_audio(
-    request: CreateTimerAudioRequest,
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    name: str = Form(...),
+    audio_file: UploadFile = File(...),
+    image_file: Optional[UploadFile] = File(None)
 ):
+    """Upload an audio for yourself. The cover image is optional."""
     return create_timer_audio_service(
         token=credentials.credentials,
-        request=request
+        name=name,
+        audio_file=audio_file,
+        image_file=image_file
     )
 
 
 @timer_router.put("/audios/{timer_audio_id}", response_model=TimerAudioDTO)
 async def update_timer_audio(
     timer_audio_id: UUID,
-    request: UpdateTimerAudioRequest,
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    name: Optional[str] = Form(None),
+    audio_file: Optional[UploadFile] = File(None),
+    image_file: Optional[UploadFile] = File(None)
 ):
-    """Only the uploader may change an audio."""
+    """Only your own uploads; presets are managed in Studio."""
     return update_timer_audio_service(
         token=credentials.credentials,
         timer_audio_id=timer_audio_id,
-        request=request
+        name=name,
+        audio_file=audio_file,
+        image_file=image_file
     )
 
 
@@ -174,8 +186,7 @@ async def delete_timer_audio(
     timer_audio_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    """Only the uploader may delete. Timers using it keep working; their
-    timer_audio_id is set to NULL."""
+    """Timers using it keep working; their timer_audio_id is set to NULL."""
     delete_timer_audio_service(
         token=credentials.credentials,
         timer_audio_id=timer_audio_id

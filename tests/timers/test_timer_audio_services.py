@@ -1,3 +1,4 @@
+import io
 import pytest
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -6,242 +7,320 @@ from datetime import datetime
 from fastapi import HTTPException
 from starlette import status
 
+from pecha_api.timers.timer_audio_enums import TimerAudioType
 from pecha_api.timers.timer_audio_model import TimerAudio
 from pecha_api.timers.timer_audio_service import (
     convert_timer_audio_to_dto,
+    create_preset_timer_audio_service,
     create_timer_audio_service,
+    delete_preset_timer_audio_service,
     delete_timer_audio_service,
+    list_preset_timer_audios_service,
     list_timer_audios_service,
     update_timer_audio_service,
 )
-from pecha_api.timers.timer_response_models import (
-    CreateTimerAudioRequest,
-    TimerAudioDTO,
-    TimerAudiosResponse,
-    UpdateTimerAudioRequest,
-)
+from pecha_api.timers.timer_response_models import TimerAudioDTO, TimerAudiosResponse
 
 SERVICE = "pecha_api.timers.timer_audio_service"
 
 
-def _mock_timer_audio(timer_audio_id=None, user_id=None, name="Bell"):
+def _audio(timer_audio_id=None, user_id=None, name="Bell",
+           audio_type=TimerAudioType.USER, image_s3_key="images/bell.png"):
     timer_audio = MagicMock(spec=TimerAudio)
     timer_audio.id = timer_audio_id or uuid4()
-    timer_audio.user_id = user_id or uuid4()
+    timer_audio.user_id = user_id
+    timer_audio.type = audio_type
     timer_audio.name = name
     timer_audio.audio_s3_key = "audio/bell.mp3"
-    timer_audio.image_s3_key = "images/bell.png"
+    timer_audio.image_s3_key = image_s3_key
     timer_audio.created_at = datetime.now()
     timer_audio.updated_at = datetime.now()
     return timer_audio
 
 
-def _mock_user(user_id=None):
+def _user(user_id=None):
     user = MagicMock()
     user.id = user_id or uuid4()
     return user
+
+
+def _stamped_save(db, audio):
+    """save_timer_audio() normally returns a flushed row, so timestamps exist."""
+    audio.created_at = datetime.now()
+    audio.updated_at = datetime.now()
+    return audio
+
+
+def _upload_file(filename="bell.mp3"):
+    upload = MagicMock()
+    upload.filename = filename
+    upload.size = 1024
+    upload.file = io.BytesIO(b"data")
+    return upload
 
 
 class TestConvertTimerAudioToDto:
     def test_returns_none_for_none(self):
         assert convert_timer_audio_to_dto(None) is None
 
-    @patch(f"{SERVICE}._presign", side_effect=lambda key: f"https://cdn/{key}")
-    def test_presigns_both_audio_and_image(self, _mock_presign):
-        timer_audio = _mock_timer_audio()
-
-        result = convert_timer_audio_to_dto(timer_audio)
+    @patch(f"{SERVICE}._presign", side_effect=lambda key: f"https://cdn/{key}" if key else None)
+    def test_presigns_audio_and_image(self, _presign):
+        result = convert_timer_audio_to_dto(_audio(user_id=uuid4()))
 
         assert isinstance(result, TimerAudioDTO)
         assert result.audio_url == "https://cdn/audio/bell.mp3"
         assert result.image_url == "https://cdn/images/bell.png"
-        assert result.name == "Bell"
+
+    @patch(f"{SERVICE}._presign", side_effect=lambda key: f"https://cdn/{key}" if key else None)
+    def test_image_is_optional(self, _presign):
+        """An audio with no cover still serialises."""
+        result = convert_timer_audio_to_dto(_audio(user_id=uuid4(), image_s3_key=None))
+
+        assert result.audio_url == "https://cdn/audio/bell.mp3"
+        assert result.image_url is None
+
+    @patch(f"{SERVICE}._presign", return_value=None)
+    def test_preset_has_no_owner(self, _presign):
+        result = convert_timer_audio_to_dto(
+            _audio(user_id=None, audio_type=TimerAudioType.PRESET)
+        )
+
+        assert result.type == TimerAudioType.PRESET
+        assert result.user_id is None
 
 
 class TestListTimerAudiosService:
-    @patch(f"{SERVICE}._presign", side_effect=lambda key: f"https://cdn/{key}")
-    @patch(f"{SERVICE}.count_timer_audios")
-    @patch(f"{SERVICE}.list_timer_audios")
-    @patch(f"{SERVICE}.SessionLocal")
-    def test_lists_audios_from_every_owner(
-        self, mock_session, mock_list, mock_count, _mock_presign
-    ):
-        """The catalogue is shared, so audios from different users all appear."""
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mine, theirs = _mock_timer_audio(name="Mine"), _mock_timer_audio(name="Theirs")
-        mock_list.return_value = [mine, theirs]
-        mock_count.return_value = 2
-
-        result = list_timer_audios_service(skip=0, limit=20)
-
-        assert isinstance(result, TimerAudiosResponse)
-        assert result.total == 2
-        assert [audio.name for audio in result.audios] == ["Mine", "Theirs"]
-
     @patch(f"{SERVICE}._presign", return_value=None)
-    @patch(f"{SERVICE}.count_timer_audios")
-    @patch(f"{SERVICE}.list_timer_audios")
+    @patch(f"{SERVICE}.count_visible_timer_audios", return_value=2)
+    @patch(f"{SERVICE}.list_visible_timer_audios")
     @patch(f"{SERVICE}.SessionLocal")
-    def test_passes_pagination_through(
-        self, mock_session, mock_list, mock_count, _mock_presign
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_lists_only_what_the_caller_may_see(
+        self, mock_validate, mock_session, mock_list, _count, _presign
     ):
+        """Presets plus the caller's own uploads: the filter is scoped by user."""
+        user_id = uuid4()
+        mock_validate.return_value = _user(user_id=user_id)
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        mock_list.return_value = []
-        mock_count.return_value = 0
+        mock_list.return_value = [
+            _audio(user_id=None, name="Preset", audio_type=TimerAudioType.PRESET),
+            _audio(user_id=user_id, name="Mine"),
+        ]
 
-        result = list_timer_audios_service(skip=10, limit=5)
+        result = list_timer_audios_service(token="valid", skip=0, limit=20)
 
-        mock_list.assert_called_once_with(mock_db, skip=10, limit=5)
-        assert result.skip == 10
-        assert result.limit == 5
+        mock_list.assert_called_once_with(mock_db, user_id=user_id, skip=0, limit=20)
+        assert isinstance(result, TimerAudiosResponse)
+        assert [a.name for a in result.audios] == ["Preset", "Mine"]
 
 
 class TestCreateTimerAudioService:
-    @patch(f"{SERVICE}._presign", side_effect=lambda key: f"https://cdn/{key}")
+    @patch(f"{SERVICE}._presign", return_value=None)
     @patch(f"{SERVICE}.save_timer_audio")
+    @patch(f"{SERVICE}.upload_file")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_creates_audio_owned_by_caller(
-        self, mock_validate, mock_session, mock_save, _mock_presign
+    def test_upload_is_owned_and_typed_user(
+        self, mock_validate, mock_session, mock_upload, mock_save, _presign
     ):
         user_id = uuid4()
-        mock_validate.return_value = _mock_user(user_id=user_id)
+        mock_validate.return_value = _user(user_id=user_id)
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_save.return_value = _mock_timer_audio(user_id=user_id)
+        mock_save.side_effect = _stamped_save
 
-        request = CreateTimerAudioRequest(
-            name="Bell",
-            audio_s3_key="audio/bell.mp3",
-            image_s3_key="images/bell.png",
+        create_timer_audio_service(
+            token="valid", name="Bell", audio_file=_upload_file(), image_file=None
         )
-        result = create_timer_audio_service(token="valid", request=request)
 
         saved = mock_save.call_args[0][1]
         assert saved.user_id == user_id
-        assert saved.audio_s3_key == "audio/bell.mp3"
-        assert saved.image_s3_key == "images/bell.png"
-        assert result.audio_url == "https://cdn/audio/bell.mp3"
+        assert saved.type == TimerAudioType.USER
+        assert saved.name == "Bell"
+        assert saved.image_s3_key is None
 
-    def test_image_key_is_required(self):
-        """The pairing is enforced by the schema, not by service code."""
-        with pytest.raises(Exception):
-            CreateTimerAudioRequest(name="Bell", audio_s3_key="audio/bell.mp3")
+    @patch(f"{SERVICE}._presign", return_value=None)
+    @patch(f"{SERVICE}.save_timer_audio")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_image_is_uploaded_when_given(
+        self, mock_validate, mock_session, mock_upload, mock_save, _presign
+    ):
+        mock_validate.return_value = _user()
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_save.side_effect = _stamped_save
+
+        create_timer_audio_service(
+            token="valid",
+            name="Bell",
+            audio_file=_upload_file(),
+            image_file=_upload_file("cover.png"),
+        )
+
+        saved = mock_save.call_args[0][1]
+        assert saved.image_s3_key is not None
+        assert mock_upload.call_count == 2
+
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_rejects_unsupported_audio_format(self, mock_validate):
+        mock_validate.return_value = _user()
+
+        with pytest.raises(HTTPException) as exc_info:
+            create_timer_audio_service(
+                token="valid", name="Bad", audio_file=_upload_file("virus.exe")
+            )
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.save_timer_audio", side_effect=RuntimeError("db down"))
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_uploaded_objects_are_cleaned_up_when_the_row_fails(
+        self, mock_validate, mock_session, mock_upload, mock_save, mock_delete
+    ):
+        """Otherwise a failed create leaves orphans in the bucket."""
+        mock_validate.return_value = _user()
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        with pytest.raises(RuntimeError):
+            create_timer_audio_service(
+                token="valid",
+                name="Bell",
+                audio_file=_upload_file(),
+                image_file=_upload_file("cover.png"),
+            )
+
+        assert mock_delete.call_count == 2
 
 
-class TestUpdateTimerAudioService:
+class TestUpdateAndDeleteOwnUpload:
     @patch(f"{SERVICE}._presign", return_value=None)
     @patch(f"{SERVICE}.update_timer_audio")
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_owner_can_update(
-        self, mock_validate, mock_session, mock_get, mock_update, _mock_presign
+    def test_owner_can_rename(
+        self, mock_validate, mock_session, mock_get, mock_update, _presign
     ):
         user_id = uuid4()
-        mock_validate.return_value = _mock_user(user_id=user_id)
+        mock_validate.return_value = _user(user_id=user_id)
         mock_session.return_value.__enter__.return_value = MagicMock()
-        timer_audio = _mock_timer_audio(user_id=user_id)
-        mock_get.return_value = timer_audio
-        mock_update.return_value = timer_audio
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
+        mock_update.side_effect = _stamped_save
 
-        update_timer_audio_service(
-            token="valid",
-            timer_audio_id=timer_audio.id,
-            request=UpdateTimerAudioRequest(name="Renamed"),
-        )
+        update_timer_audio_service(token="valid", timer_audio_id=audio.id, name="Renamed")
 
-        assert timer_audio.name == "Renamed"
+        assert audio.name == "Renamed"
 
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_non_owner_is_forbidden(self, mock_validate, mock_session, mock_get):
-        mock_validate.return_value = _mock_user()
+    def test_another_users_upload_is_forbidden(self, mock_validate, mock_session, mock_get):
+        mock_validate.return_value = _user()
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get.return_value = _mock_timer_audio(user_id=uuid4())
+        mock_get.return_value = _audio(user_id=uuid4())
 
         with pytest.raises(HTTPException) as exc_info:
-            update_timer_audio_service(
-                token="valid",
-                timer_audio_id=uuid4(),
-                request=UpdateTimerAudioRequest(name="Hijacked"),
-            )
+            update_timer_audio_service(token="valid", timer_audio_id=uuid4(), name="Nope")
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
-    @patch(f"{SERVICE}.get_timer_audio_by_id", return_value=None)
-    @patch(f"{SERVICE}.SessionLocal")
-    @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_missing_audio_is_not_found(self, mock_validate, mock_session, _mock_get):
-        mock_validate.return_value = _mock_user()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-
-        with pytest.raises(HTTPException) as exc_info:
-            update_timer_audio_service(
-                token="valid",
-                timer_audio_id=uuid4(),
-                request=UpdateTimerAudioRequest(name="Nope"),
-            )
-
-        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
-
-    @patch(f"{SERVICE}._presign", return_value=None)
-    @patch(f"{SERVICE}.update_timer_audio")
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_keys_are_left_alone_when_omitted(
-        self, mock_validate, mock_session, mock_get, mock_update, _mock_presign
+    def test_a_preset_cannot_be_edited_through_the_user_endpoint(
+        self, mock_validate, mock_session, mock_get
     ):
-        """Both keys are NOT NULL, so omitting them must not clear them."""
-        user_id = uuid4()
-        mock_validate.return_value = _mock_user(user_id=user_id)
+        """Presets belong to Studio, so they read as missing here."""
+        mock_validate.return_value = _user()
         mock_session.return_value.__enter__.return_value = MagicMock()
-        timer_audio = _mock_timer_audio(user_id=user_id)
-        mock_get.return_value = timer_audio
-        mock_update.return_value = timer_audio
+        mock_get.return_value = _audio(user_id=None, audio_type=TimerAudioType.PRESET)
 
-        update_timer_audio_service(
-            token="valid",
-            timer_audio_id=timer_audio.id,
-            request=UpdateTimerAudioRequest(name="Renamed"),
-        )
+        with pytest.raises(HTTPException) as exc_info:
+            update_timer_audio_service(token="valid", timer_audio_id=uuid4(), name="Nope")
 
-        assert timer_audio.audio_s3_key == "audio/bell.mp3"
-        assert timer_audio.image_s3_key == "images/bell.png"
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
-
-class TestDeleteTimerAudioService:
     @patch(f"{SERVICE}.delete_timer_audio")
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_owner_can_delete(self, mock_validate, mock_session, mock_get, mock_delete):
         user_id = uuid4()
-        mock_validate.return_value = _mock_user(user_id=user_id)
+        mock_validate.return_value = _user(user_id=user_id)
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        timer_audio = _mock_timer_audio(user_id=user_id)
-        mock_get.return_value = timer_audio
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
 
-        delete_timer_audio_service(token="valid", timer_audio_id=timer_audio.id)
+        delete_timer_audio_service(token="valid", timer_audio_id=audio.id)
 
-        mock_delete.assert_called_once_with(mock_db, timer_audio)
+        mock_delete.assert_called_once_with(mock_db, audio)
+
+
+class TestPresetCatalogue:
+    @patch(f"{SERVICE}._presign", return_value=None)
+    @patch(f"{SERVICE}.save_timer_audio")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}._validate_admin")
+    def test_preset_has_no_owner_and_preset_type(
+        self, mock_admin, mock_session, mock_upload, mock_save, _presign
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_save.side_effect = _stamped_save
+
+        create_preset_timer_audio_service(
+            token="admin", name="Singing Bowl", audio_file=_upload_file()
+        )
+
+        saved = mock_save.call_args[0][1]
+        assert saved.user_id is None
+        assert saved.type == TimerAudioType.PRESET
+        mock_admin.assert_called_once_with("admin")
+
+    @patch(f"{SERVICE}._validate_admin", side_effect=HTTPException(status_code=403, detail="nope"))
+    def test_non_admin_cannot_publish_a_preset(self, _mock_admin):
+        with pytest.raises(HTTPException) as exc_info:
+            create_preset_timer_audio_service(
+                token="user", name="Sneaky", audio_file=_upload_file()
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    @patch(f"{SERVICE}._presign", return_value=None)
+    @patch(f"{SERVICE}.count_preset_timer_audios", return_value=1)
+    @patch(f"{SERVICE}.list_preset_timer_audios")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}._validate_admin")
+    def test_catalogue_lists_presets_only(
+        self, _admin, mock_session, mock_list, _count, _presign
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_list.return_value = [
+            _audio(user_id=None, name="Preset", audio_type=TimerAudioType.PRESET)
+        ]
+
+        result = list_preset_timer_audios_service(token="admin")
+
+        assert [a.type for a in result.audios] == [TimerAudioType.PRESET]
 
     @patch(f"{SERVICE}.delete_timer_audio")
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
-    @patch(f"{SERVICE}.validate_and_extract_user_details")
-    def test_non_owner_cannot_delete(
-        self, mock_validate, mock_session, mock_get, mock_delete
+    @patch(f"{SERVICE}._validate_admin")
+    def test_a_user_upload_cannot_be_deleted_through_the_cms(
+        self, _admin, mock_session, mock_get, mock_delete
     ):
-        mock_validate.return_value = _mock_user()
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get.return_value = _mock_timer_audio(user_id=uuid4())
+        mock_get.return_value = _audio(user_id=uuid4())
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_timer_audio_service(token="valid", timer_audio_id=uuid4())
+            delete_preset_timer_audio_service(token="admin", timer_audio_id=uuid4())
 
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
         mock_delete.assert_not_called()

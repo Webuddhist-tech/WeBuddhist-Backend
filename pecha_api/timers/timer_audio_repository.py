@@ -1,3 +1,4 @@
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
@@ -5,18 +6,56 @@ from uuid import UUID
 from fastapi import HTTPException
 from starlette import status
 
+from .timer_audio_enums import TimerAudioType
 from .timer_audio_model import TimerAudio
 from .response_message import BAD_REQUEST, CONFLICT, TIMER_AUDIO_NAME_ALREADY_USED
+
+
+def _visible_to(query, user_id: UUID):
+    """Presets, plus this user's own uploads. Nobody else's uploads."""
+    return query.filter(
+        or_(
+            TimerAudio.type == TimerAudioType.PRESET,
+            TimerAudio.user_id == user_id,
+        )
+    )
 
 
 def get_timer_audio_by_id(db: Session, timer_audio_id: UUID) -> Optional[TimerAudio]:
     return db.query(TimerAudio).filter(TimerAudio.id == timer_audio_id).first()
 
 
-def list_timer_audios(db: Session, skip: int = 0, limit: int = 20) -> List[TimerAudio]:
-    """Every audio, whoever uploaded it: the catalogue is shared."""
+def get_visible_timer_audio_by_id(
+    db: Session, timer_audio_id: UUID, user_id: UUID
+) -> Optional[TimerAudio]:
+    """Someone else's upload reads as missing rather than forbidden, so ids
+    cannot be probed."""
+    return _visible_to(
+        db.query(TimerAudio).filter(TimerAudio.id == timer_audio_id), user_id
+    ).first()
+
+
+def list_visible_timer_audios(
+    db: Session, user_id: UUID, skip: int = 0, limit: int = 20
+) -> List[TimerAudio]:
+    return (
+        _visible_to(db.query(TimerAudio), user_id)
+        .order_by(TimerAudio.type.asc(), TimerAudio.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def count_visible_timer_audios(db: Session, user_id: UUID) -> int:
+    return _visible_to(db.query(TimerAudio), user_id).count()
+
+
+def list_preset_timer_audios(db: Session, skip: int = 0, limit: int = 20) -> List[TimerAudio]:
+    """Studio's catalogue view: presets only, nobody's uploads."""
     return (
         db.query(TimerAudio)
+        .filter(TimerAudio.type == TimerAudioType.PRESET)
         .order_by(TimerAudio.created_at.desc())
         .offset(skip)
         .limit(limit)
@@ -24,8 +63,8 @@ def list_timer_audios(db: Session, skip: int = 0, limit: int = 20) -> List[Timer
     )
 
 
-def count_timer_audios(db: Session) -> int:
-    return db.query(TimerAudio).count()
+def count_preset_timer_audios(db: Session) -> int:
+    return db.query(TimerAudio).filter(TimerAudio.type == TimerAudioType.PRESET).count()
 
 
 def save_timer_audio(db: Session, timer_audio: TimerAudio) -> TimerAudio:

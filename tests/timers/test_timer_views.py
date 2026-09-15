@@ -28,6 +28,7 @@ from pecha_api.timers.timer_response_models import (
     TimerSessionDTO,
     TimerAudioDTO
 )
+from pecha_api.timers.timer_audio_enums import TimerAudioType
 from pecha_api.timers.timer_enums import TimerType
 
 
@@ -124,6 +125,7 @@ class TestDataFactory:
         timer_audio_id=None,
         user_id=None,
         name="Bell",
+        audio_type=TimerAudioType.USER,
         audio_url="https://presigned-url.com/audio/timer_sounds/bell.mp3",
         image_url="https://presigned-url.com/images/timer_covers/bell.png"
     ) -> TimerAudioDTO:
@@ -131,6 +133,7 @@ class TestDataFactory:
         return TimerAudioDTO(
             id=timer_audio_id or uuid4(),
             user_id=user_id or uuid4(),
+            type=audio_type,
             name=name,
             audio_url=audio_url,
             image_url=image_url,
