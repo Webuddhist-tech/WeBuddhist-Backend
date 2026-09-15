@@ -43,23 +43,25 @@ class TestDataFactory:
     def create_timer_dto(
         timer_id=None,
         user_id=None,
-        group_id=None,
+        group_id="_default",
         timer_type=TimerType.USER,
         name="Test Timer",
         duration=300,
         description=None,
-        audio_url=None
+        audio_url=None,
+        image_url=None
     ) -> TimerDTO:
         """Create a TimerDTO with specified attributes."""
         return TimerDTO(
             id=timer_id or uuid4(),
             user_id=user_id or uuid4(),
-            group_id=group_id or uuid4(),
+            group_id=uuid4() if group_id == "_default" else group_id,
             type=timer_type,
             name=name,
             description=description,
             duration=duration,
             audio_url=audio_url,
+            image_url=image_url,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
@@ -76,19 +78,21 @@ class TestDataFactory:
     
     @staticmethod
     def create_timer_request(
-        group_id=None,
+        group_id="_default",
         name="New Timer",
         duration=600,
         description=None,
-        audio_url=None
+        audio_url=None,
+        image_url=None
     ) -> CreateTimerRequest:
         """Create a CreateTimerRequest with specified attributes."""
         return CreateTimerRequest(
-            group_id=group_id or uuid4(),
+            group_id=uuid4() if group_id == "_default" else group_id,
             name=name,
             description=description,
             duration=duration,
-            audio_url=audio_url
+            audio_url=audio_url,
+            image_url=image_url
         )
     
     @staticmethod
@@ -96,14 +100,16 @@ class TestDataFactory:
         name=None,
         duration=None,
         description=None,
-        audio_url=None
+        audio_url=None,
+        image_url=None
     ) -> UpdateTimerRequest:
         """Create an UpdateTimerRequest with specified attributes."""
         return UpdateTimerRequest(
             name=name,
             description=description,
             duration=duration,
-            audio_url=audio_url
+            audio_url=audio_url,
+            image_url=image_url
         )
 
 
@@ -451,6 +457,67 @@ class TestCreateUserTimer:
         
         assert result.audio_url is not None
         assert result.description == "Meditation timer"
+
+    @patch('pecha_api.timers.timer_views.create_timer_service')
+    @pytest.mark.asyncio
+    async def test_create_user_timer_without_group_id(self, mock_service):
+        """Test creating a personal timer with no group."""
+        token = "valid_token"
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        request = TestDataFactory.create_timer_request(
+            group_id=None,
+            name="Personal Timer",
+            duration=600
+        )
+
+        created_timer = TestDataFactory.create_timer_dto(
+            group_id=None,
+            name="Personal Timer",
+            duration=600,
+            timer_type=TimerType.USER
+        )
+        mock_service.return_value = created_timer
+
+        result = await create_user_timer(
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.group_id is None
+        assert result.name == "Personal Timer"
+        mock_service.assert_called_once_with(token=token, request=request)
+
+    @patch('pecha_api.timers.timer_views.create_timer_service')
+    @pytest.mark.asyncio
+    async def test_create_user_timer_with_image_url(self, mock_service):
+        """Test creating timer with image URL."""
+        token = "valid_token"
+        image_url = "images/timer_covers/bell.png"
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        request = TestDataFactory.create_timer_request(
+            group_id=None,
+            name="Timer with Image",
+            duration=300,
+            image_url=image_url
+        )
+
+        created_timer = TestDataFactory.create_timer_dto(
+            group_id=None,
+            name="Timer with Image",
+            duration=300,
+            image_url="https://presigned-url.com/images/timer_covers/bell.png"
+        )
+        mock_service.return_value = created_timer
+
+        result = await create_user_timer(
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.image_url is not None
+        assert result.group_id is None
 
 
 class TestUpdateUserTimer:

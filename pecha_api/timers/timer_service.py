@@ -47,14 +47,14 @@ from .response_message import (
 logger = logging.getLogger(__name__)
 
 
-def generate_audio_presigned_url(audio_url: Optional[str]) -> Optional[str]:
-    if not audio_url:
+def generate_audio_presigned_url(media_url: Optional[str]) -> Optional[str]:
+    if not media_url:
         return None
     try:
         bucket_name = get("AWS_BUCKET_NAME")
-        return generate_presigned_access_url(bucket_name, audio_url)
+        return generate_presigned_access_url(bucket_name, media_url)
     except Exception as e:
-        logger.error(f"Failed to generate presigned URL for audio: {audio_url}", exc_info=True)
+        logger.error(f"Failed to generate presigned URL for media: {media_url}", exc_info=True)
         return None
 
 
@@ -69,6 +69,7 @@ def convert_timer_to_dto(timer: Timer) -> TimerDTO:
         description=timer.description,
         duration=timer.duration,
         audio_url=generate_audio_presigned_url(timer.audio_url),
+        image_url=generate_audio_presigned_url(timer.image_url),
         created_at=timer.created_at,
         updated_at=timer.updated_at
     )
@@ -126,7 +127,8 @@ def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
             name=request.name,
             description=request.description,
             duration=request.duration,
-            audio_url=request.audio_url
+            audio_url=request.audio_url,
+            image_url=request.image_url
         )
         
         saved_timer = save_timer(db, new_timer)
@@ -165,6 +167,8 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             timer.duration = request.duration
         if request.audio_url is not None:
             timer.audio_url = request.audio_url
+        if request.image_url is not None:
+            timer.image_url = request.image_url
         
         updated_timer = update_timer(db, timer)
         return convert_timer_to_dto(updated_timer)

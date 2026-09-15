@@ -8,12 +8,13 @@ from .timer_enums import TimerType
 class TimerDTO(BaseModel):
     id: UUID
     user_id: UUID
-    group_id: UUID
+    group_id: Optional[UUID] = None
     type: TimerType
     name: str
     description: Optional[str] = None
     duration: int
     audio_url: Optional[str] = None
+    image_url: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -26,11 +27,12 @@ class TimersResponse(BaseModel):
 
 
 class CreateTimerRequest(BaseModel):
-    group_id: UUID
+    group_id: Optional[UUID] = None
     name: str
     description: Optional[str] = None
     duration: int
     audio_url: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class UpdateTimerRequest(BaseModel):
@@ -38,6 +40,7 @@ class UpdateTimerRequest(BaseModel):
     description: Optional[str] = None
     duration: Optional[int] = None
     audio_url: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class RecordTimerStopRequest(BaseModel):
