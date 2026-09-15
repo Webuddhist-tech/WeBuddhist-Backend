@@ -5,20 +5,22 @@ from uuid import UUID
 from starlette import status
 
 from .timer_service import (
-    get_all_timers_service, 
+    get_all_timers_service,
     get_user_timers_service,
     create_timer_service,
     update_timer_service,
     delete_timer_service,
+    restore_timer_service,
     record_timer_stop_service,
     get_timer_history_service
 )
 from .timer_response_models import (
-    TimersResponse, 
-    TimerDTO, 
-    CreateTimerRequest, 
+    TimersResponse,
+    TimerDTO,
+    CreateTimerRequest,
     UpdateTimerRequest,
     RecordTimerStopRequest,
+    RecordTimerStopResponse,
     TimerHistoryResponse
 )
 from ..users.users_service import validate_and_extract_user_details
@@ -87,16 +89,26 @@ async def delete_user_timer(
     )
 
 
-@timer_router.post("/user/timer_stop", status_code=status.HTTP_201_CREATED)
+@timer_router.post("/user/{timer_id}/restore", response_model=TimerDTO)
+async def restore_user_timer(
+    timer_id: UUID,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+):
+    return restore_timer_service(
+        token=credentials.credentials,
+        timer_id=timer_id
+    )
+
+
+@timer_router.post("/user/timer_stop", status_code=status.HTTP_201_CREATED, response_model=RecordTimerStopResponse)
 async def record_timer_stop(
     request: RecordTimerStopRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    record_timer_stop_service(
+    return record_timer_stop_service(
         token=credentials.credentials,
         request=request
     )
-    return {"message": "Timer session recorded successfully"}
 
 
 @timer_router.get("/user/timer_history", response_model=TimerHistoryResponse)

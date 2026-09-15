@@ -1005,20 +1005,57 @@ def test_enrich_timer_bookmark_success():
     from pecha_api.bookmarks.bookmark_utils import enrich_timer_bookmark
 
     timer_id = uuid4()
+    ambient_sound_id = uuid4()
     mock_timer = MagicMock()
     mock_timer.id = timer_id
     mock_timer.name = "Meditation Timer"
     mock_timer.duration = 600
+    mock_timer.ambient_sound_id = ambient_sound_id
+    mock_timer.bell_at_start = True
+    mock_timer.bell_at_end = False
+
+    mock_ambient_sound = MagicMock()
+    mock_ambient_sound.name = "Rain"
 
     with patch(
         "pecha_api.bookmarks.bookmark_utils.get_timer_by_id",
         return_value=mock_timer,
+    ), patch(
+        "pecha_api.bookmarks.bookmark_utils.get_ambient_sound_by_id",
+        return_value=mock_ambient_sound,
     ):
         result = enrich_timer_bookmark(db=MagicMock(), source_id=str(timer_id))
 
     assert result["timer"].id == timer_id
     assert result["timer"].title == "Meditation Timer"
     assert result["timer"].duration == 600
+    assert result["timer"].ambient_sound_name == "Rain"
+    assert result["timer"].bell_at_start is True
+    assert result["timer"].bell_at_end is False
+
+
+def test_enrich_timer_bookmark_no_ambient_sound():
+    from pecha_api.bookmarks.bookmark_utils import enrich_timer_bookmark
+
+    timer_id = uuid4()
+    mock_timer = MagicMock()
+    mock_timer.id = timer_id
+    mock_timer.name = "Meditation Timer"
+    mock_timer.duration = 600
+    mock_timer.ambient_sound_id = None
+    mock_timer.bell_at_start = True
+    mock_timer.bell_at_end = True
+
+    with patch(
+        "pecha_api.bookmarks.bookmark_utils.get_timer_by_id",
+        return_value=mock_timer,
+    ) as mock_get_timer, patch(
+        "pecha_api.bookmarks.bookmark_utils.get_ambient_sound_by_id",
+    ) as mock_get_ambient_sound:
+        result = enrich_timer_bookmark(db=MagicMock(), source_id=str(timer_id))
+
+    mock_get_ambient_sound.assert_not_called()
+    assert result["timer"].ambient_sound_name is None
 
 
 def test_enrich_timer_bookmark_returns_empty_when_not_found():

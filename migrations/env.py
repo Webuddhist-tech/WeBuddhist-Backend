@@ -31,6 +31,8 @@ from pecha_api.routines.routines_models import Routine, RoutineTimeBlock, Routin
 from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata, AuthorGroupMember, AuthorGroupSocialLink, AuthorGroupInvite
 from pecha_api.mantra.mantra_model import Mantra
 from pecha_api.timers.timer_model import Timer
+from pecha_api.timers.timer_history_model import TimerHistory
+from pecha_api.ambient_sounds.ambient_sound_model import AmbientSound
 from pecha_api.accumulator.accumulator_models import Accumulator
 from pecha_api.accumulator.accumulator_metadata_model import AccumulatorMetadata
 from pecha_api.accumulator.mala_image_model import MalaImage

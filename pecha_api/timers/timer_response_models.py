@@ -15,6 +15,10 @@ class TimerDTO(BaseModel):
     duration: int
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
+    ambient_sound_id: Optional[UUID] = None
+    bell_at_start: bool
+    bell_at_end: bool
+    parent_preset_id: Optional[UUID] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -33,6 +37,10 @@ class CreateTimerRequest(BaseModel):
     duration: int
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
+    ambient_sound_id: Optional[UUID] = None
+    bell_at_start: bool = True
+    bell_at_end: bool = True
+    parent_preset_id: Optional[UUID] = None
 
 
 class UpdateTimerRequest(BaseModel):
@@ -41,11 +49,20 @@ class UpdateTimerRequest(BaseModel):
     duration: Optional[int] = None
     audio_url: Optional[str] = None
     image_url: Optional[str] = None
+    ambient_sound_id: Optional[UUID] = None
+    bell_at_start: Optional[bool] = None
+    bell_at_end: Optional[bool] = None
 
 
 class RecordTimerStopRequest(BaseModel):
     timer_id: UUID
     duration: int
+
+
+class RecordTimerStopResponse(BaseModel):
+    timer_id: UUID
+    name: str
+    duration_ms: int
 
 
 class TimerSessionDTO(BaseModel):

@@ -1,8 +1,13 @@
 import logging
 import textwrap
+from typing import BinaryIO, Union
 from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from pecha_api.share.pecha_text_image_generator_config import CONFIG
+
+# A render destination: either a filesystem path or an open binary buffer.
+ImageDestination = Union[str, BinaryIO]
+IMAGE_FORMAT = "PNG"
 
 class SyntheticImageGenerator:
     def __init__(
@@ -83,7 +88,7 @@ class SyntheticImageGenerator:
         self,
         text: str,
         ref_str: str,
-        img_file_name: str = None,
+        img_file_name: ImageDestination = None,
         text_color: str = None,
         logo_path: str = None
     ) -> None:
@@ -122,7 +127,8 @@ class SyntheticImageGenerator:
         if logo_path:
             img = _add_logo_to_image(img, logo_path, self.image_width, self.image_height)
         # Save the image
-        img.save(img_file_name or CONFIG["IMG_OUTPUT_PATH"])
+        destination = img_file_name if img_file_name is not None else CONFIG["IMG_OUTPUT_PATH"]
+        img.save(destination, format=IMAGE_FORMAT)
 
 def create_synthetic_data(
     text: str,
@@ -131,7 +137,7 @@ def create_synthetic_data(
     bg_color: str,
     text_color: str = None,
     logo_path: str = None,
-    output_path: str = None
+    output_path: ImageDestination = None
 ) -> None:
     """
     Generate a synthetic image from text and reference string, saving to output_path.
@@ -145,7 +151,8 @@ def create_synthetic_data(
         font_type=font_type_lang,
         bg_color=CONFIG["BG_COLOR"].get(bg_color, CONFIG["BG_COLOR"]["DEFAULT"])
     )
-    generator.save_image(cleaned_text, ref_str, img_file_name=output_path or CONFIG["IMG_OUTPUT_PATH"], text_color=text_color, logo_path=logo_path)
+    destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
+    generator.save_image(cleaned_text, ref_str, img_file_name=destination, text_color=text_color, logo_path=logo_path)
 
 def generate_segment_image(
     text: str = None,
@@ -154,7 +161,7 @@ def generate_segment_image(
     bg_color: str = None,
     text_color: str = None,
     logo_path: str = None,
-    output_path: str = None
+    output_path: ImageDestination = None
 ) -> None:
     """
     Main entry to generate a text image or fallback logo image.
@@ -186,7 +193,8 @@ def generate_segment_image(
             )
         except (OSError, ValueError) as e:
             logging.warning(f"Error adding fallback logo: {e}")
-        img.save(output_path or CONFIG["IMG_OUTPUT_PATH"])
+        destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
+        img.save(destination, format=IMAGE_FORMAT)
 
 def _clean_text(content: str, max_lines: int = 4) -> str:
     """

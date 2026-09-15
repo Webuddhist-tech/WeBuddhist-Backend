@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from starlette import status
 
@@ -11,6 +11,7 @@ from pecha_api.timers.timer_service import (
     create_timer_service,
     update_timer_service,
     delete_timer_service,
+    restore_timer_service,
     convert_timer_to_dto,
     generate_audio_presigned_url,
     is_user_created_timer,
@@ -45,7 +46,12 @@ class TestDataFactory:
         duration=300,
         description=None,
         audio_url=None,
-        image_url=None
+        image_url=None,
+        ambient_sound_id=None,
+        bell_at_start=True,
+        bell_at_end=True,
+        parent_preset_id=None,
+        deleted_at=None
     ):
         """Create a mock Timer model."""
         timer = MagicMock(spec=Timer)
@@ -58,6 +64,11 @@ class TestDataFactory:
         timer.duration = duration
         timer.audio_url = audio_url
         timer.image_url = image_url
+        timer.ambient_sound_id = ambient_sound_id
+        timer.bell_at_start = bell_at_start
+        timer.bell_at_end = bell_at_end
+        timer.parent_preset_id = parent_preset_id
+        timer.deleted_at = deleted_at
         timer.created_at = datetime.utcnow()
         timer.updated_at = datetime.utcnow()
         return timer
@@ -720,16 +731,147 @@ class TestDeleteTimerService:
         """Test delete_timer_service with invalid token."""
         timer_id = uuid4()
         token = "invalid_token"
-        
+
         mock_validate.side_effect = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials"
         )
-        
+
         with pytest.raises(HTTPException) as exc_info:
             delete_timer_service(token=token, timer_id=timer_id)
-        
+
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+class TestRestoreTimerService:
+    """Test cases for restore_timer_service function."""
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_restore_timer_service_success(self, mock_validate, mock_update, mock_get, mock_session):
+        """Test successful restore of a soft-deleted timer within the retention window."""
+        user_id = uuid4()
+        timer_id = uuid4()
+        token = "valid_token"
+
+        mock_user = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_validate.return_value = mock_user
+
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        existing_timer = TestDataFactory.create_mock_timer(
+            timer_id=timer_id,
+            user_id=user_id,
+            timer_type=TimerType.USER,
+            deleted_at=datetime.now(timezone.utc)
+        )
+        mock_get.return_value = existing_timer
+        mock_update.return_value = existing_timer
+
+        result = restore_timer_service(token=token, timer_id=timer_id)
+
+        assert result.id == timer_id
+        assert existing_timer.deleted_at is None
+        mock_get.assert_called_once_with(mock_db, timer_id, include_deleted=True)
+        mock_update.assert_called_once_with(mock_db, existing_timer)
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_restore_timer_service_not_found(self, mock_validate, mock_get, mock_session):
+        """Test restore_timer_service when timer doesn't exist at all."""
+        user_id = uuid4()
+        timer_id = uuid4()
+        token = "valid_token"
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            restore_timer_service(token=token, timer_id=timer_id)
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_restore_timer_service_not_owner(self, mock_validate, mock_get, mock_session):
+        """Test restore_timer_service when the caller doesn't own the timer."""
+        user_id = uuid4()
+        other_user_id = uuid4()
+        timer_id = uuid4()
+        token = "valid_token"
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        existing_timer = TestDataFactory.create_mock_timer(
+            timer_id=timer_id,
+            user_id=other_user_id,
+            deleted_at=datetime.now(timezone.utc)
+        )
+        mock_get.return_value = existing_timer
+
+        with pytest.raises(HTTPException) as exc_info:
+            restore_timer_service(token=token, timer_id=timer_id)
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_restore_timer_service_not_deleted(self, mock_validate, mock_get, mock_session):
+        """Test restore_timer_service when the timer was never deleted."""
+        user_id = uuid4()
+        timer_id = uuid4()
+        token = "valid_token"
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        existing_timer = TestDataFactory.create_mock_timer(
+            timer_id=timer_id,
+            user_id=user_id,
+            deleted_at=None
+        )
+        mock_get.return_value = existing_timer
+
+        with pytest.raises(HTTPException) as exc_info:
+            restore_timer_service(token=token, timer_id=timer_id)
+
+        assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_restore_timer_service_window_expired(self, mock_validate, mock_get, mock_session):
+        """Test restore_timer_service when the retention window has passed."""
+        user_id = uuid4()
+        timer_id = uuid4()
+        token = "valid_token"
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        existing_timer = TestDataFactory.create_mock_timer(
+            timer_id=timer_id,
+            user_id=user_id,
+            deleted_at=datetime.now(timezone.utc) - timedelta(days=60)
+        )
+        mock_get.return_value = existing_timer
+
+        with pytest.raises(HTTPException) as exc_info:
+            restore_timer_service(token=token, timer_id=timer_id)
+
+        assert exc_info.value.status_code == status.HTTP_409_CONFLICT
 
 
 class TestHelperFunctions:
@@ -850,20 +992,22 @@ class TestRecordTimerStopService:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         
-        existing_timer = TestDataFactory.create_mock_timer(timer_id=timer_id)
+        existing_timer = TestDataFactory.create_mock_timer(timer_id=timer_id, name="Test Timer")
         mock_get.return_value = existing_timer
-        
+
         request = RecordTimerStopRequest(timer_id=timer_id, duration=600)
-        
+
         mock_save.return_value = TestDataFactory.create_mock_timer_history(
             timer_id=timer_id,
             user_id=user_id,
             duration=600
         )
-        
+
         result = record_timer_stop_service(token=token, request=request)
-        
-        assert result is None
+
+        assert result.timer_id == timer_id
+        assert result.name == "Test Timer"
+        assert result.duration_ms == 600
         mock_validate.assert_called_once_with(token=token)
         mock_get.assert_called_once_with(mock_db, timer_id)
         mock_save.assert_called_once()

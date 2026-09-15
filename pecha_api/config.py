@@ -141,6 +141,9 @@ DEFAULTS = dict(
     VERSE_OF_DAY_EXPIRY_DAYS=7,
     VERSE_OF_DAY_NOTIFICATION_TITLE="Verse of the Day",
 
+    # Soft-deleted timer retention (days) before the purge job hard-deletes them
+    TIMER_DELETED_RETENTION_DAYS=30,
+
     # Group post notification SQS queue (backend producer -> worker consumer)
     GROUP_POST_NOTIFICATION_SQS_QUEUE_URL="",
     GROUP_POST_NOTIFICATION_DISPATCH_RECONCILE_GRACE_SECONDS=120,
