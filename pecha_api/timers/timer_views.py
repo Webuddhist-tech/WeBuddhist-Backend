@@ -14,6 +14,12 @@ from .timer_service import (
     record_timer_stop_service,
     get_timer_history_service
 )
+from .timer_audio_service import (
+    create_timer_audio_service,
+    delete_timer_audio_service,
+    list_timer_audios_service,
+    update_timer_audio_service,
+)
 from .timer_response_models import (
     TimersResponse,
     TimerDTO,
@@ -21,7 +27,11 @@ from .timer_response_models import (
     UpdateTimerRequest,
     RecordTimerStopRequest,
     RecordTimerStopResponse,
-    TimerHistoryResponse
+    TimerHistoryResponse,
+    TimerAudioDTO,
+    TimerAudiosResponse,
+    CreateTimerAudioRequest,
+    UpdateTimerAudioRequest
 )
 from ..users.users_service import validate_and_extract_user_details
 
@@ -121,4 +131,52 @@ async def get_user_timer_history(
         token=credentials.credentials,
         skip=skip,
         limit=limit
+    )
+
+
+@timer_router.get("/audios", response_model=TimerAudiosResponse)
+async def list_timer_audios(
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return")
+):
+    """Every uploaded audio with its cover image, so a user can pick one for
+    their own timer. Shared: the list is not filtered by owner."""
+    return list_timer_audios_service(skip=skip, limit=limit)
+
+
+@timer_router.post("/audios", status_code=status.HTTP_201_CREATED, response_model=TimerAudioDTO)
+async def create_timer_audio(
+    request: CreateTimerAudioRequest,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+):
+    return create_timer_audio_service(
+        token=credentials.credentials,
+        request=request
+    )
+
+
+@timer_router.put("/audios/{timer_audio_id}", response_model=TimerAudioDTO)
+async def update_timer_audio(
+    timer_audio_id: UUID,
+    request: UpdateTimerAudioRequest,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+):
+    """Only the uploader may change an audio."""
+    return update_timer_audio_service(
+        token=credentials.credentials,
+        timer_audio_id=timer_audio_id,
+        request=request
+    )
+
+
+@timer_router.delete("/audios/{timer_audio_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_timer_audio(
+    timer_audio_id: UUID,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
+):
+    """Only the uploader may delete. Timers using it keep working; their
+    timer_audio_id is set to NULL."""
+    delete_timer_audio_service(
+        token=credentials.credentials,
+        timer_audio_id=timer_audio_id
     )

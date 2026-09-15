@@ -42,6 +42,12 @@ def upgrade() -> None:
 def downgrade() -> None:
     if column_exists("timers", "image_url"):
         op.drop_column("timers", "image_url")
+    # Personal timers carry no group and cannot be represented once group_id is
+    # NOT NULL again, so Postgres would reject the ALTER and strand the
+    # rollback. Remove them first. This also removes their timer_history rows,
+    # which cascade on timers.id -- lossy, but consistent with dropping
+    # image_url above, and the only way this migration can be reversed.
+    op.execute("DELETE FROM timers WHERE group_id IS NULL")
     op.alter_column(
         "timers",
         "group_id",
