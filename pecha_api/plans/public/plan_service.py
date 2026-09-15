@@ -657,7 +657,31 @@ async def get_plan_daily_content(
     requested_date: Optional[DateType] = None,
     language: Optional[str] = None,
 ) -> DailyPlanResponse:
+    # Phase 1: every query off the loop. Phase 2 resolves task content from
+    # Mongo once the session is closed — safe because the day's tasks and
+    # sub-tasks are eager-loaded.
+    response, plan_item, plan_language = await run_in_threadpool(
+        _load_plan_daily_content,
+        plan_id=plan_id,
+        requested_date=requested_date,
+        language=language,
+    )
 
+    response.tasks = await asyncio.gather(
+        *[
+            build_task_dto(task, language=plan_language)
+            for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
+        ]
+    )
+    return response
+
+
+def _load_plan_daily_content(
+    plan_id: UUID,
+    requested_date: Optional[DateType] = None,
+    language: Optional[str] = None,
+):
+    """Build the daily response minus its tasks, plus what phase 2 needs."""
     with SessionLocal() as db:
         plan = _resolve_daily_plan(
             db=db,
@@ -711,11 +735,11 @@ async def get_plan_daily_content(
             db=db, plan_id=plan.id, day_number=day_number
         )
 
-        plan_image = await get_image_url(image_url=plan.image_url)
+        plan_image = build_image_url(image_url=plan.image_url)
 
         series_dto = None
         if plan.series:
-            series_image = await get_image_url(image_url=plan.series.image)
+            series_image = build_image_url(image_url=plan.series.image)
             metadata_entries = getattr(plan.series, "metadata_entries", None) or []
             if language:
                 metadata_entries = _filter_series_metadata_by_language(
@@ -788,13 +812,7 @@ async def get_plan_daily_content(
                     next_plan_id = next_plan.id
 
         audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
-        tasks = await asyncio.gather(
-            *[
-                build_task_dto(task, language=plan.language)
-                for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
-            ]
-        )
-        return DailyPlanResponse(
+        response = DailyPlanResponse(
             plan_id=plan.id,
             plan_title=plan.title,
             plan_description=plan.description,
@@ -811,8 +829,10 @@ async def get_plan_daily_content(
             next_plan_id=next_plan_id,
             audio_url=audio_url,
             audio_duration_ms=audio_duration_ms,
-            tasks=tasks,
+            tasks=[],
         )
+        # Tasks are filled in by the caller, off the session.
+        return response, plan_item, plan.language
 
 
 def get_tags(language: str = "en") -> TagsResponse:
