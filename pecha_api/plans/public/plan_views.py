@@ -4,6 +4,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 from datetime import date as DateType
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api import config
 from pecha_api.db.database import SessionLocal
@@ -156,12 +157,15 @@ async def get_plan_days_list(
     user_id = None
     if credentials:
         try:
-            user = validate_and_extract_user_details(token=credentials.credentials)
+            user = await run_in_threadpool(
+                validate_and_extract_user_details, token=credentials.credentials
+            )
             user_id = user.id
         except Exception:
             pass
-    
-    auto_enroll_plan(plan_id=plan_id, user_id=user_id)
+
+    # Enrollment is a synchronous DB transaction; keep it off the event loop.
+    await run_in_threadpool(auto_enroll_plan, plan_id=plan_id, user_id=user_id)
     return await get_plan_days(plan_id=plan_id)
 
 

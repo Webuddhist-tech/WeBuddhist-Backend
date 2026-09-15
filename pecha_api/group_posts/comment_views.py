@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.group_posts.comment_response_models import (
@@ -125,7 +126,7 @@ async def websocket_post_comments(
     try:
         # 1. Authenticate
         try:
-            user = validate_and_extract_user_details(token=token)
+            user = await run_in_threadpool(validate_and_extract_user_details, token=token)
         except HTTPException as auth_error:
             logger.error(f"WebSocket auth failed: {auth_error.detail}")
             await websocket.accept()
@@ -137,16 +138,19 @@ async def websocket_post_comments(
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
             return
 
-        # 2. Validate post & group exist (synchronous)
+        # 2. Validate post & group exist (sync SQLAlchemy, so run off the loop)
         from pecha_api.db.database import SessionLocal
         from pecha_api.group_posts.comment_service import (
             _validate_group_access,
             _get_and_validate_post,
         )
 
-        with SessionLocal() as db:
-            post, group_id = _get_and_validate_post(db, post_id)
-            _validate_group_access(db, group_id, user.id)
+        def _validate_post_access() -> None:
+            with SessionLocal() as db:
+                _, group_id = _get_and_validate_post(db, post_id)
+                _validate_group_access(db, group_id, user.id)
+
+        await run_in_threadpool(_validate_post_access)
 
         # 3. Accept, track connection, and subscribe to Redis channel
         await websocket.accept()
@@ -186,7 +190,8 @@ async def websocket_post_comments(
                     if parent_comment_id is not None:
                         parent_comment_id = UUID(str(parent_comment_id))
 
-                    comment_dto = create_post_comment_service(
+                    comment_dto = await run_in_threadpool(
+                        create_post_comment_service,
                         post_id=post_id,
                         user_id=user.id,
                         text=data.get("text", ""),
