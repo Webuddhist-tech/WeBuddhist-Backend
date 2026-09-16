@@ -51,10 +51,17 @@ def _stamped_save(db, audio):
     return audio
 
 
-def _upload_file(filename="bell.mp3"):
+def _stamped_update(db, audio):
+    """update_timer_audio() normally returns the refreshed row."""
+    audio.updated_at = datetime.now()
+    return audio
+
+
+def _upload_file(filename="bell.mp3", content_type="image/png"):
     upload = MagicMock()
     upload.filename = filename
     upload.size = 1024
+    upload.content_type = content_type
     upload.file = io.BytesIO(b"data")
     return upload
 
@@ -141,11 +148,14 @@ class TestCreateTimerAudioService:
 
     @patch(f"{SERVICE}._presign", return_value=None)
     @patch(f"{SERVICE}.save_timer_audio")
+    @patch(f"{SERVICE}.upload_bytes")
+    @patch(f"{SERVICE}.ImageUtils")
     @patch(f"{SERVICE}.upload_file")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_image_is_uploaded_when_given(
-        self, mock_validate, mock_session, mock_upload, mock_save, _presign
+        self, mock_validate, mock_session, mock_upload, mock_image_utils,
+        mock_upload_bytes, mock_save, _presign
     ):
         mock_validate.return_value = _user()
         mock_session.return_value.__enter__.return_value = MagicMock()
@@ -159,8 +169,32 @@ class TestCreateTimerAudioService:
         )
 
         saved = mock_save.call_args[0][1]
-        assert saved.image_s3_key is not None
-        assert mock_upload.call_count == 2
+        assert saved.image_s3_key.endswith(".webp")
+        assert mock_upload.call_count == 1
+        assert mock_upload_bytes.call_count == 1
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_a_cover_that_is_not_an_image_is_rejected(
+        self, mock_validate, mock_session, mock_upload, mock_delete
+    ):
+        """Anything that does not decode as an image never reaches the bucket,
+        and the audio uploaded alongside it does not stay behind."""
+        mock_validate.return_value = _user()
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        with pytest.raises(HTTPException) as exc_info:
+            create_timer_audio_service(
+                token="valid",
+                name="Bell",
+                audio_file=_upload_file(),
+                image_file=_upload_file("payload.png"),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_delete.assert_called_once()
 
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_rejects_unsupported_audio_format(self, mock_validate):
@@ -175,11 +209,14 @@ class TestCreateTimerAudioService:
 
     @patch(f"{SERVICE}.delete_file")
     @patch(f"{SERVICE}.save_timer_audio", side_effect=RuntimeError("db down"))
+    @patch(f"{SERVICE}.upload_bytes")
+    @patch(f"{SERVICE}.ImageUtils")
     @patch(f"{SERVICE}.upload_file")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_uploaded_objects_are_cleaned_up_when_the_row_fails(
-        self, mock_validate, mock_session, mock_upload, mock_save, mock_delete
+        self, mock_validate, mock_session, mock_upload, mock_image_utils,
+        mock_upload_bytes, mock_save, mock_delete
     ):
         """Otherwise a failed create leaves orphans in the bucket."""
         mock_validate.return_value = _user()
@@ -260,6 +297,77 @@ class TestUpdateAndDeleteOwnUpload:
         delete_timer_audio_service(token="valid", timer_audio_id=audio.id)
 
         mock_delete.assert_called_once_with(mock_db, audio)
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.delete_timer_audio")
+    @patch(f"{SERVICE}.get_timer_audio_by_id")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_deleting_an_upload_takes_its_objects_with_it(
+        self, mock_validate, mock_session, mock_get, _mock_delete_row, mock_delete_file
+    ):
+        """Nothing points at them once the row is gone."""
+        user_id = uuid4()
+        mock_validate.return_value = _user(user_id=user_id)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
+
+        delete_timer_audio_service(token="valid", timer_audio_id=audio.id)
+
+        assert {call.args[0] for call in mock_delete_file.call_args_list} == {
+            "audio/bell.mp3",
+            "images/bell.png",
+        }
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}._presign", return_value=None)
+    @patch(f"{SERVICE}.update_timer_audio", side_effect=_stamped_update)
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.get_timer_audio_by_id")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_replacing_the_audio_drops_the_object_it_replaced(
+        self, mock_validate, mock_session, mock_get, _mock_upload,
+        _mock_update, _presign, mock_delete_file
+    ):
+        user_id = uuid4()
+        mock_validate.return_value = _user(user_id=user_id)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
+
+        update_timer_audio_service(
+            token="valid", timer_audio_id=audio.id, audio_file=_upload_file()
+        )
+
+        mock_delete_file.assert_called_once_with("audio/bell.mp3")
+        assert audio.audio_s3_key != "audio/bell.mp3"
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.update_timer_audio", side_effect=RuntimeError("db down"))
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.get_timer_audio_by_id")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_a_failed_update_drops_the_replacement_not_the_original(
+        self, mock_validate, mock_session, mock_get, _mock_upload,
+        _mock_update, mock_delete_file
+    ):
+        user_id = uuid4()
+        mock_validate.return_value = _user(user_id=user_id)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
+
+        with pytest.raises(RuntimeError):
+            update_timer_audio_service(
+                token="valid", timer_audio_id=audio.id, audio_file=_upload_file()
+            )
+
+        deleted = {call.args[0] for call in mock_delete_file.call_args_list}
+        assert "audio/bell.mp3" not in deleted
+        assert len(deleted) == 1
 
 
 class TestPresetCatalogue:

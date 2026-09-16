@@ -73,22 +73,48 @@ def upgrade() -> None:
     # Backfill every timer that has an audio key. The image is optional now, so
     # a timer with audio but no image migrates fine, image_s3_key just stays
     # NULL. The audio is named after the timer it came from.
+    #
+    # Timer names were never unique per user, so two different audio keys can
+    # arrive carrying the same name and collide on uq_timer_audios_user_name.
+    # The second and later of each name gets a " (n)" suffix, trimmed so the
+    # result still fits the 255-character column.
     if column_exists("timers", "audio_url"):
         op.execute(
             """
+            WITH grouped AS (
+                SELECT t.user_id          AS user_id,
+                       t.audio_url        AS audio_s3_key,
+                       MIN(t.name)        AS name,
+                       MIN(t.image_url)   AS image_s3_key
+                  FROM timers t
+                 WHERE t.audio_url IS NOT NULL
+                   AND t.user_id IS NOT NULL
+                 GROUP BY t.user_id, t.audio_url
+            ),
+            numbered AS (
+                SELECT g.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY g.user_id, g.name
+                           ORDER BY g.audio_s3_key
+                       ) AS name_rank
+                  FROM grouped g
+            )
             INSERT INTO timer_audios
                    (id, user_id, type, name, audio_s3_key, image_s3_key, created_at)
             SELECT gen_random_uuid(),
-                   t.user_id,
+                   n.user_id,
                    'user_uploaded'::timeraudiotype,
-                   MIN(t.name),
-                   t.audio_url,
-                   MIN(t.image_url),
+                   CASE
+                       WHEN n.name_rank = 1 THEN n.name
+                       ELSE left(
+                                n.name,
+                                255 - 3 - length(n.name_rank::text)
+                            ) || ' (' || n.name_rank::text || ')'
+                   END,
+                   n.audio_s3_key,
+                   n.image_s3_key,
                    NOW()
-              FROM timers t
-             WHERE t.audio_url IS NOT NULL
-               AND t.user_id IS NOT NULL
-             GROUP BY t.user_id, t.audio_url
+              FROM numbered n
             """
         )
         op.execute(

@@ -8,7 +8,13 @@ from starlette import status
 
 from ..config import get, get_int, DEFAULTS
 from ..db.database import SessionLocal
-from ..uploads.S3_utils import delete_file, generate_presigned_access_url, upload_file
+from ..image_utils import WEBP_CONTENT_TYPE, WEBP_EXTENSION, ImageUtils
+from ..uploads.S3_utils import (
+    delete_file,
+    generate_presigned_access_url,
+    upload_bytes,
+    upload_file,
+)
 from ..users.users_service import validate_and_extract_user_details
 from ..plans.authors.plan_authors_service import validate_cms_author_details
 from ..plans.shared.permissions import require_super_admin
@@ -104,6 +110,73 @@ def _upload(file: UploadFile, prefix: str) -> str:
     return s3_key
 
 
+def _upload_image(file: UploadFile, prefix: str) -> str:
+    """Covers go through the same validate-and-compress-to-webp pipeline as
+    every other user-supplied image, so a non-image or an oversized file is
+    rejected rather than stored behind a presigned URL."""
+    compressed_image = ImageUtils().validate_and_compress_image(
+        file=file,
+        content_type=file.content_type or "image/jpeg",
+    )
+    s3_key = f"{prefix}/{uuid4()}{WEBP_EXTENSION}"
+    upload_bytes(
+        bucket_name=get("AWS_BUCKET_NAME"),
+        s3_key=s3_key,
+        file=compressed_image,
+        content_type=WEBP_CONTENT_TYPE,
+    )
+    return s3_key
+
+
+def _discard(*s3_keys: Optional[str]) -> None:
+    """Drop objects nothing points at any more. Best effort: an orphan left in
+    the bucket is not worth failing a request that has already committed."""
+    for s3_key in s3_keys:
+        if not s3_key:
+            continue
+        try:
+            delete_file(s3_key)
+        except Exception:
+            logger.error(f"Failed to delete orphaned media: {s3_key}", exc_info=True)
+
+
+def _apply_media_update(
+    db,
+    timer_audio: TimerAudio,
+    name: Optional[str],
+    audio_file: Optional[UploadFile],
+    image_file: Optional[UploadFile],
+    audio_prefix: str,
+    image_prefix: str,
+) -> TimerAudioDTO:
+    """Replaced objects leave the bucket, but only once the row that stopped
+    pointing at them has committed. If anything fails first, the replacements
+    are the orphans and they go instead."""
+    replaced_keys: List[Optional[str]] = []
+    uploaded_keys: List[str] = []
+
+    try:
+        if name is not None:
+            timer_audio.name = name
+        if audio_file is not None:
+            _validate_audio_file(audio_file)
+            replaced_keys.append(timer_audio.audio_s3_key)
+            timer_audio.audio_s3_key = _upload(audio_file, audio_prefix)
+            uploaded_keys.append(timer_audio.audio_s3_key)
+        if image_file is not None:
+            replaced_keys.append(timer_audio.image_s3_key)
+            timer_audio.image_s3_key = _upload_image(image_file, image_prefix)
+            uploaded_keys.append(timer_audio.image_s3_key)
+
+        dto = convert_timer_audio_to_dto(update_timer_audio(db, timer_audio))
+    except Exception:
+        _discard(*uploaded_keys)
+        raise
+
+    _discard(*replaced_keys)
+    return dto
+
+
 def _owned_upload(db, timer_audio_id: UUID, user_id: UUID, forbidden_message: str) -> TimerAudio:
     """An audio the caller may modify: their own upload. Presets are Studio's."""
     timer_audio = get_timer_audio_by_id(db, timer_audio_id)
@@ -154,7 +227,12 @@ def create_timer_audio_service(
     _validate_audio_file(audio_file)
 
     audio_s3_key = _upload(audio_file, "audio/timer_audios")
-    image_s3_key = _upload(image_file, "images/timer_audios") if image_file else None
+    try:
+        image_s3_key = _upload_image(image_file, "images/timer_audios") if image_file else None
+    except Exception:
+        # A rejected cover must not leave the audio behind.
+        _discard(audio_s3_key)
+        raise
 
     with SessionLocal() as db:
         try:
@@ -173,9 +251,7 @@ def create_timer_audio_service(
             )
         except Exception:
             # Do not leave the uploaded objects behind if the row never lands.
-            delete_file(audio_s3_key)
-            if image_s3_key:
-                delete_file(image_s3_key)
+            _discard(audio_s3_key, image_s3_key)
             raise
 
 
@@ -193,15 +269,15 @@ def update_timer_audio_service(
             db, timer_audio_id, current_user.id, TIMER_AUDIO_UPDATE_NOT_ALLOWED
         )
 
-        if name is not None:
-            timer_audio.name = name
-        if audio_file is not None:
-            _validate_audio_file(audio_file)
-            timer_audio.audio_s3_key = _upload(audio_file, "audio/timer_audios")
-        if image_file is not None:
-            timer_audio.image_s3_key = _upload(image_file, "images/timer_audios")
-
-        return convert_timer_audio_to_dto(update_timer_audio(db, timer_audio))
+        return _apply_media_update(
+            db,
+            timer_audio,
+            name=name,
+            audio_file=audio_file,
+            image_file=image_file,
+            audio_prefix="audio/timer_audios",
+            image_prefix="images/timer_audios",
+        )
 
 
 def delete_timer_audio_service(token: str, timer_audio_id: UUID) -> None:
@@ -211,8 +287,12 @@ def delete_timer_audio_service(token: str, timer_audio_id: UUID) -> None:
         timer_audio = _owned_upload(
             db, timer_audio_id, current_user.id, TIMER_AUDIO_DELETE_NOT_ALLOWED
         )
+        orphaned_keys = (timer_audio.audio_s3_key, timer_audio.image_s3_key)
         # Timers referencing it keep working; the FK is ON DELETE SET NULL.
         delete_timer_audio(db, timer_audio)
+
+    # Only once the row is gone: nothing can reach these objects any more.
+    _discard(*orphaned_keys)
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +321,11 @@ def create_preset_timer_audio_service(
     _validate_audio_file(audio_file)
 
     audio_s3_key = _upload(audio_file, "audio/timer_audio_presets")
-    image_s3_key = _upload(image_file, "images/timer_audio_presets") if image_file else None
+    try:
+        image_s3_key = _upload_image(image_file, "images/timer_audio_presets") if image_file else None
+    except Exception:
+        _discard(audio_s3_key)
+        raise
 
     with SessionLocal() as db:
         try:
@@ -259,9 +343,7 @@ def create_preset_timer_audio_service(
                 )
             )
         except Exception:
-            delete_file(audio_s3_key)
-            if image_s3_key:
-                delete_file(image_s3_key)
+            _discard(audio_s3_key, image_s3_key)
             raise
 
 
@@ -277,19 +359,23 @@ def update_preset_timer_audio_service(
     with SessionLocal() as db:
         timer_audio = _preset(db, timer_audio_id)
 
-        if name is not None:
-            timer_audio.name = name
-        if audio_file is not None:
-            _validate_audio_file(audio_file)
-            timer_audio.audio_s3_key = _upload(audio_file, "audio/timer_audio_presets")
-        if image_file is not None:
-            timer_audio.image_s3_key = _upload(image_file, "images/timer_audio_presets")
-
-        return convert_timer_audio_to_dto(update_timer_audio(db, timer_audio))
+        return _apply_media_update(
+            db,
+            timer_audio,
+            name=name,
+            audio_file=audio_file,
+            image_file=image_file,
+            audio_prefix="audio/timer_audio_presets",
+            image_prefix="images/timer_audio_presets",
+        )
 
 
 def delete_preset_timer_audio_service(token: str, timer_audio_id: UUID) -> None:
     _validate_admin(token)
 
     with SessionLocal() as db:
-        delete_timer_audio(db, _preset(db, timer_audio_id))
+        timer_audio = _preset(db, timer_audio_id)
+        orphaned_keys = (timer_audio.audio_s3_key, timer_audio.image_s3_key)
+        delete_timer_audio(db, timer_audio)
+
+    _discard(*orphaned_keys)
