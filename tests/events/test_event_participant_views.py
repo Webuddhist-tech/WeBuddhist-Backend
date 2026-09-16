@@ -46,7 +46,9 @@ def test_join_event_returns_204():
 
     assert response.status_code == status.HTTP_204_NO_CONTENT
     assert response.content == b""
-    mock_service.assert_called_once_with(token="test-token", event_id=event_id)
+    mock_service.assert_called_once_with(
+        token="test-token", event_id=event_id, participation_type=None
+    )
 
 
 def test_join_event_requires_token():
@@ -152,3 +154,89 @@ def test_cms_list_returns_participants():
 def test_cms_list_requires_token():
     response = client.get(f"/cms/events/{uuid4()}/participants")
     assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+# --- participation type on join / PATCH ---
+
+def test_join_event_forwards_participation_type():
+    event_id = uuid4()
+    with patch(
+        "pecha_api.events.event_views.join_event_service",
+        return_value=None,
+    ) as mock_service:
+        response = client.post(
+            f"/events/{event_id}/participants",
+            headers=_AUTH,
+            json={"participation_type": "offline"},
+        )
+
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    assert mock_service.call_args.kwargs["participation_type"] == "offline"
+
+
+def test_join_event_without_body_sends_no_participation_type():
+    event_id = uuid4()
+    with patch(
+        "pecha_api.events.event_views.join_event_service",
+        return_value=None,
+    ) as mock_service:
+        response = client.post(f"/events/{event_id}/participants", headers=_AUTH)
+
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    assert mock_service.call_args.kwargs["participation_type"] is None
+
+
+def test_update_participation_type_returns_204():
+    event_id = uuid4()
+    with patch(
+        "pecha_api.events.event_views.update_participation_type_service",
+        return_value=None,
+    ) as mock_service:
+        response = client.patch(
+            f"/events/{event_id}/participants/me",
+            headers=_AUTH,
+            json={"participation_type": "online"},
+        )
+
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    assert response.content == b""
+    kwargs = mock_service.call_args.kwargs
+    assert kwargs["token"] == "test-token"
+    assert kwargs["event_id"] == event_id
+    assert kwargs["participation_type"] == "online"
+
+
+def test_update_participation_type_requires_token():
+    response = client.patch(
+        f"/events/{uuid4()}/participants/me",
+        json={"participation_type": "online"},
+    )
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_update_participation_type_rejects_unknown_value():
+    with patch(
+        "pecha_api.events.event_views.update_participation_type_service",
+        return_value=None,
+    ) as mock_service:
+        response = client.patch(
+            f"/events/{uuid4()}/participants/me",
+            headers=_AUTH,
+            json={"participation_type": "hybrid"},
+        )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    mock_service.assert_not_called()
+
+
+def test_update_participation_type_requires_body():
+    with patch(
+        "pecha_api.events.event_views.update_participation_type_service",
+        return_value=None,
+    ) as mock_service:
+        response = client.patch(
+            f"/events/{uuid4()}/participants/me", headers=_AUTH
+        )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    mock_service.assert_not_called()

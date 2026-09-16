@@ -46,7 +46,7 @@ def _get_event_name(db: Session, event_id: UUID) -> str:
     return "Your event"
 
 
-def _build_reminder_copy(*, reminder_type: str, event_name: str, minutes_before: int) -> str:
+def _build_reminder_copy(*, reminder_type: str, minutes_before: int) -> str:
     template = _REMINDER_COPY.get(reminder_type, "Starting now")
     return template.format(minutes=minutes_before)
 
@@ -134,7 +134,6 @@ def get_event_reminder_targets(
         title = event_name
         body = _build_reminder_copy(
             reminder_type=reminder_type,
-            event_name=event_name,
             minutes_before=minutes_before,
         )
 
@@ -147,7 +146,7 @@ def get_event_reminder_targets(
             limit=limit,
             notification_type=NotificationType.EVENT_REMINDER,
         )
-        recipient_ids = [user.id for user, _ in participant_rows]
+        recipient_ids = [row[0].id for row in participant_rows]
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)
         recipients: list[EventNotificationRecipientDTO] = []

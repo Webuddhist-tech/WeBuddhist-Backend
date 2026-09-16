@@ -13,11 +13,13 @@ from pecha_api.plans.shared.permissions import require_can_read_group_content
 from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
+from .event_enums import ParticipationType
 from .event_repository import get_event_by_id
 from .event_response_models import EventParticipantDTO, EventParticipantsResponse
 from .event_participant_repository import (
     get_event_participants_paginated,
     remove_event_participant,
+    set_event_participation_type,
     upsert_event_participant,
 )
 
@@ -40,12 +42,15 @@ def _fullname(user: Users) -> Optional[str]:
     return " ".join(parts) or None
 
 
-def _participant_to_dto(user: Users, created_at) -> EventParticipantDTO:
+def _participant_to_dto(
+    user: Users, created_at, participation_type: Optional[str] = None
+) -> EventParticipantDTO:
     return EventParticipantDTO(
         user_id=user.id,
         username=user.username,
         fullname=_fullname(user),
         avatar_url=_safe_avatar_url(user),
+        participation_type=participation_type,
         created_at=created_at,
     )
 
@@ -68,7 +73,8 @@ def _participants_response(
     )
     return EventParticipantsResponse(
         participants=[
-            _participant_to_dto(user, created_at) for user, created_at in rows
+            _participant_to_dto(user, created_at, participation_type)
+            for user, created_at, participation_type in rows
         ],
         skip=skip,
         limit=limit,
@@ -76,16 +82,55 @@ def _participants_response(
     )
 
 
-def join_event_service(token: str, event_id: UUID) -> None:
+def _resolve_participation_type(
+    event,
+    requested: Optional[ParticipationType],
+) -> Optional[str]:
+    """Reconcile what the user asked for with what the event actually offers.
+
+    An online-only or offline-only event leaves no choice, so a missing value
+    is filled in from the event and a contradicting one is rejected rather
+    than silently corrected. A hybrid event accepts either, and stays unset
+    when the user does not pick."""
+    event_format = getattr(event, "event_format", None) or "hybrid"
+
+    if event_format == "hybrid":
+        return requested.value if requested is not None else None
+
+    if requested is not None and requested.value != event_format:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Event '{event.id}' is {event_format}-only; "
+                f"participation_type '{requested.value}' is not available"
+            ),
+        )
+    return event_format
+
+
+def join_event_service(
+    token: str,
+    event_id: UUID,
+    participation_type: Optional[ParticipationType] = None,
+) -> None:
     """Join an event. Idempotent: joining again is a no-op.
+
+    Passing `participation_type` on a re-join switches how the user attends,
+    so the client can treat join as an upsert instead of joining twice.
 
     Also puts the user into the event's chat room when one exists, so the room
     shows up in their inbox before they ever type in it."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
-        _get_event_or_404(db, event_id)
-        upsert_event_participant(db=db, event_id=event_id, user_id=current_user.id)
+        event = _get_event_or_404(db, event_id)
+        resolved = _resolve_participation_type(event, participation_type)
+        upsert_event_participant(
+            db=db,
+            event_id=event_id,
+            user_id=current_user.id,
+            participation_type=resolved,
+        )
         try:
             # Deferred: chat imports events at module level, so events cannot
             # import chat back at module level.
@@ -123,6 +168,30 @@ def leave_event_service(token: str, event_id: UUID) -> None:
         except Exception:
             logging.exception(
                 f"Failed to remove user {current_user.id} from chat room for event {event_id}"
+            )
+
+
+def update_participation_type_service(
+    token: str,
+    event_id: UUID,
+    participation_type: ParticipationType,
+) -> None:
+    """Switch how a participant attends. 404 when the caller had not joined."""
+    current_user = validate_and_extract_user_details(token=token)
+
+    with SessionLocal() as db:
+        event = _get_event_or_404(db, event_id)
+        resolved = _resolve_participation_type(event, participation_type)
+        updated = set_event_participation_type(
+            db=db,
+            event_id=event_id,
+            user_id=current_user.id,
+            participation_type=resolved,
+        )
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"You have not joined event '{event_id}'",
             )
 
 

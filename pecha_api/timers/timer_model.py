@@ -16,7 +16,9 @@ class Timer(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     duration = Column(Integer, nullable=False)
-    audio_url = Column(String(1000), nullable=True)
+    # The background sound, picked from the ambient sound catalogue. SET NULL:
+    # retiring a sound must not take the timers that used it (and their
+    # history) with it.
     ambient_sound_id = Column(
         UUID(as_uuid=True),
         ForeignKey("ambient_sounds.id", ondelete="SET NULL"),

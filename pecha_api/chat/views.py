@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.chat.chat_websocket import get_broadcaster
@@ -76,7 +77,7 @@ async def _broadcast_reactions_safe(room_id: UUID, message_id: UUID, reactions) 
             room_id=room_id, message_id=message_id, reactions=reactions
         )
     except Exception as e:
-        logger.error(f"Failed to broadcast reactions for message {message_id}: {e}")
+        logger.exception("Failed to broadcast reactions for message %s: %s", message_id, e)
 
 
 @chat_router.get(
@@ -182,7 +183,7 @@ async def _broadcast_message_deleted_safe(
             deleted_at=deleted_at,
         )
     except Exception as e:
-        logger.error(f"Failed to broadcast deletion for message {message_id}: {e}")
+        logger.exception("Failed to broadcast deletion for message %s: %s", message_id, e)
 
 
 @chat_router.delete(
@@ -406,7 +407,7 @@ async def _broadcast_prayers_safe(room_id: UUID, prayers: list) -> None:
         broadcaster = get_broadcaster()
         await broadcaster.broadcast_prayers(room_id=room_id, prayers=prayers)
     except Exception as e:
-        logger.error(f"Failed to broadcast prayers for room {room_id}: {e}")
+        logger.exception("Failed to broadcast prayers for room %s: %s", room_id, e)
 
 
 @chat_router.post(
@@ -573,15 +574,15 @@ async def websocket_chat_live(
     try:
         broadcaster = get_broadcaster()
     except RuntimeError as e:
-        logger.error(f"Broadcaster not initialized: {e}")
+        logger.exception("Broadcaster not initialized: %s", e)
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
     try:
         try:
-            user = validate_and_extract_user_details(token=token)
+            user = await run_in_threadpool(validate_and_extract_user_details, token=token)
         except HTTPException as auth_error:
-            logger.error(f"WebSocket auth failed: {auth_error.detail}")
+            logger.warning("WebSocket auth failed: %s", auth_error.detail)
             await websocket.accept()
             await websocket.send_json({
                 "type": "error",
@@ -600,7 +601,9 @@ async def websocket_chat_live(
             resolve_or_create_private_room,
         )
 
-        try:
+        # Synchronous SQLAlchemy: offloaded so a slow room lookup cannot stall
+        # every other socket sharing this event loop.
+        def _resolve_room_id() -> UUID:
             with SessionLocal() as db:
                 if group_id is not None:
                     room = resolve_or_create_group_room(db=db, group_id=group_id, user=user)
@@ -608,7 +611,10 @@ async def websocket_chat_live(
                     room = resolve_or_create_event_room(db=db, event_id=event_id, user=user)
                 else:
                     room = resolve_or_create_private_room(db=db, user=user, receiver_id=receiver_id)
-                room_id = room.id
+                return room.id
+
+        try:
+            room_id = await run_in_threadpool(_resolve_room_id)
         except HTTPException as resolve_error:
             await websocket.accept()
             await websocket.send_json({
@@ -648,7 +654,7 @@ async def websocket_chat_live(
                         except (ValueError, TypeError):
                             pass
             except Exception as e:
-                logger.error(f"Error listening to Redis: {e}")
+                logger.exception("Error listening to Redis: %s", e)
 
         redis_task = asyncio.create_task(listen_redis())
 
@@ -670,11 +676,14 @@ async def websocket_chat_live(
                 data = receive_task.result()
 
                 if data.get("type") == "typing":
-                    try:
+                    def _assert_room_reachable() -> None:
                         with SessionLocal() as db:
                             # Carries the group-publication gate.
                             _get_room_or_404(db=db, room_id=room_id)
                             _require_active_member(db=db, room_id=room_id, user_id=user.id)
+
+                    try:
+                        await run_in_threadpool(_assert_room_reachable)
                         await broadcaster.broadcast_typing(
                             room_id,
                             user.id,
@@ -691,7 +700,7 @@ async def websocket_chat_live(
                         room_unreachable = True
                         break
                     except Exception as e:
-                        logger.error(f"Failed to broadcast typing indicator: {e}")
+                        logger.exception("Failed to broadcast typing indicator: %s", e)
                     continue
 
                 if data.get("type") != "message":
@@ -717,33 +726,46 @@ async def websocket_chat_live(
                     data.get("message_type") or ChatMessageType.TEXT.value
                 ).upper()
 
-                try:
+                # Persisting a message is a synchronous DB write plus a profanity
+                # scan; run it off the loop so one send cannot pause every socket.
+                def _persist_message(
+                    body: str,
+                    parent_id: Optional[UUID],
+                    kind: str,
+                ) -> ChatMessageDTO:
                     if group_id is not None:
-                        message_dto = send_group_message_service(
+                        return send_group_message_service(
                             group_id=group_id,
                             user=user,
-                            body=data.get("body", ""),
-                            parent_message_id=parent_message_id,
-                            message_type=message_type,
+                            body=body,
+                            parent_message_id=parent_id,
+                            message_type=kind,
                         )
-                    elif event_id is not None:
-                        message_dto = send_event_message_service(
+                    if event_id is not None:
+                        return send_event_message_service(
                             event_id=event_id,
                             user=user,
-                            body=data.get("body", ""),
-                            parent_message_id=parent_message_id,
-                            message_type=message_type,
+                            body=body,
+                            parent_message_id=parent_id,
+                            message_type=kind,
                         )
-                    else:
-                        message_dto = send_direct_message_service(
-                            receiver_id=receiver_id,
-                            user=user,
-                            body=data.get("body", ""),
-                            parent_message_id=parent_message_id,
-                            message_type=message_type,
-                        )
+                    return send_direct_message_service(
+                        receiver_id=receiver_id,
+                        user=user,
+                        body=body,
+                        parent_message_id=parent_id,
+                        message_type=kind,
+                    )
+
+                try:
+                    message_dto = await run_in_threadpool(
+                        _persist_message,
+                        data.get("body", ""),
+                        parent_message_id,
+                        message_type,
+                    )
                 except HTTPException as e:
-                    logger.error(f"Message send failed: {e.detail}")
+                    logger.warning("Message send failed: %s", e.detail)
                     if isinstance(e.detail, dict) and "code" in e.detail:
                         # Structured rejection (e.g. INAPPROPRIATE_LANGUAGE) with
                         # its own code/message fields
@@ -764,7 +786,7 @@ async def websocket_chat_live(
                 try:
                     await broadcaster.broadcast_message(room_id, message_dto)
                 except Exception as e:
-                    logger.error(f"Failed to broadcast message {message_dto.id} to Redis: {e}")
+                    logger.exception("Failed to broadcast message %s to Redis: %s", message_dto.id, e)
                     await websocket.send_json({
                         "type": "error",
                         "code": "BROADCAST_ERROR",
@@ -776,7 +798,7 @@ async def websocket_chat_live(
             try:
                 await pubsub.unsubscribe(f"chat:room:{room_id}:messages")
             except Exception as e:
-                logger.error(f"Error unsubscribing from Redis: {e}")
+                logger.exception("Error unsubscribing from Redis: %s", e)
             if room_unreachable:
                 # Ended by eviction, not by the client, so close it here.
                 try:
@@ -785,7 +807,7 @@ async def websocket_chat_live(
                     pass
 
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.exception("WebSocket error: %s", e)
         try:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         except Exception:

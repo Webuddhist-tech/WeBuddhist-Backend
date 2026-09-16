@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated, Optional
 from uuid import UUID
+from starlette.concurrency import run_in_threadpool
 from starlette import status
 
 from .timer_service import (
@@ -35,18 +36,23 @@ async def get_all_timers(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return"),
 ):
-    return get_all_timers_service(group_id=group_id, skip=skip, limit=limit)
+    return await run_in_threadpool(
+        get_all_timers_service, group_id=group_id, skip=skip, limit=limit
+    )
 
 
 @timer_router.get("/user", response_model=TimersResponse)
 async def get_user_timers(
-    group_id: Optional[UUID] = Query(None, description="Group ID to filter timers"),
+    group_id: Optional[UUID] = Query(None, description="Optional group filter. Omit to return every timer the caller created."),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return"),
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)] = None
 ):
-    current_user = validate_and_extract_user_details(token=credentials.credentials)
-    return get_user_timers_service(
+    current_user = await run_in_threadpool(
+        validate_and_extract_user_details, token=credentials.credentials
+    )
+    return await run_in_threadpool(
+        get_user_timers_service,
         user_id=current_user.id,
         group_id=group_id,
         skip=skip,
@@ -59,7 +65,8 @@ async def create_user_timer(
     request: CreateTimerRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return create_timer_service(
+    return await run_in_threadpool(
+        create_timer_service,
         token=credentials.credentials,
         request=request
     )
@@ -71,7 +78,8 @@ async def update_user_timer(
     request: UpdateTimerRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return update_timer_service(
+    return await run_in_threadpool(
+        update_timer_service,
         token=credentials.credentials,
         timer_id=timer_id,
         request=request
@@ -83,7 +91,8 @@ async def delete_user_timer(
     timer_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    delete_timer_service(
+    await run_in_threadpool(
+        delete_timer_service,
         token=credentials.credentials,
         timer_id=timer_id
     )
@@ -94,7 +103,8 @@ async def restore_user_timer(
     timer_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return restore_timer_service(
+    return await run_in_threadpool(
+        restore_timer_service,
         token=credentials.credentials,
         timer_id=timer_id
     )
@@ -105,7 +115,8 @@ async def record_timer_stop(
     request: RecordTimerStopRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return record_timer_stop_service(
+    return await run_in_threadpool(
+        record_timer_stop_service,
         token=credentials.credentials,
         request=request
     )
@@ -117,7 +128,8 @@ async def get_user_timer_history(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return")
 ):
-    return get_timer_history_service(
+    return await run_in_threadpool(
+        get_timer_history_service,
         token=credentials.credentials,
         skip=skip,
         limit=limit

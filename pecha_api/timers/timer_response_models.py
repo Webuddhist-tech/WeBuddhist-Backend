@@ -13,7 +13,7 @@ class TimerDTO(BaseModel):
     name: str
     description: Optional[str] = None
     duration: int
-    audio_url: Optional[str] = None
+    # The background sound, chosen from the ambient sound catalogue.
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: bool
     bell_at_end: bool
@@ -34,7 +34,6 @@ class CreateTimerRequest(BaseModel):
     name: str
     description: Optional[str] = None
     duration: int
-    audio_url: Optional[str] = None
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: bool = True
     bell_at_end: bool = True
@@ -45,7 +44,6 @@ class UpdateTimerRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     duration: Optional[int] = None
-    audio_url: Optional[str] = None
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: Optional[bool] = None
     bell_at_end: Optional[bool] = None

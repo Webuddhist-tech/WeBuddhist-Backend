@@ -9,7 +9,7 @@ from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.timezone_utils import normalize_timezone_name
 from .location_response_models import LocationDTO
-from .event_enums import RecurrenceFrequency, RecurrenceDateSystem, EventLinkType
+from .event_enums import RecurrenceFrequency, RecurrenceDateSystem, EventLinkType, ParticipationType
 
 
 EventFormat = Literal["online", "offline", "hybrid"]
@@ -227,6 +227,14 @@ class EventDTO(BaseModel):
         None,
         description="Whether the authenticated user has joined (null when unauthenticated)",
     )
+    my_participation_type: Optional[ParticipationType] = Field(
+        None,
+        description=(
+            "How the authenticated user attends this event: 'online' or "
+            "'offline' (null when unauthenticated, not joined, or joined "
+            "without picking)"
+        ),
+    )
     created_at: datetime
     created_by: str
     updated_at: Optional[datetime] = None
@@ -246,6 +254,7 @@ class EventParticipantDTO(BaseModel):
     username: Optional[str] = None
     fullname: Optional[str] = None
     avatar_url: Optional[str] = None
+    participation_type: Optional[ParticipationType] = None
     created_at: datetime
 
 
@@ -254,6 +263,18 @@ class EventParticipantsResponse(BaseModel):
     skip: int
     limit: int
     total: int
+
+
+class JoinEventRequest(BaseModel):
+    """Optional body on join. Omitting participation_type keeps the old
+    bodyless behaviour: the type is inferred for online-only and offline-only
+    events and left unset on hybrid ones."""
+
+    participation_type: Optional[ParticipationType] = None
+
+
+class UpdateParticipationTypeRequest(BaseModel):
+    participation_type: ParticipationType
 
 
 class CreateEventRequest(BaseModel):

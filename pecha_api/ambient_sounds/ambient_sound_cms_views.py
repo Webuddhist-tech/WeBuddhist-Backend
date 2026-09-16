@@ -21,14 +21,16 @@ async def create_ambient_sound(
     name: str = Form(...),
     display_order: int = Form(0),
     is_default: bool = Form(False),
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    image_file: Optional[UploadFile] = File(None)
 ):
     return create_ambient_sound_service(
         token=credentials.credentials,
         name=name,
         display_order=display_order,
         is_default=is_default,
-        file=file
+        file=file,
+        image_file=image_file
     )
 
 
@@ -39,7 +41,8 @@ async def update_ambient_sound(
     name: Optional[str] = Form(None),
     display_order: Optional[int] = Form(None),
     is_default: Optional[bool] = Form(None),
-    file: Optional[UploadFile] = File(None)
+    file: Optional[UploadFile] = File(None),
+    image_file: Optional[UploadFile] = File(None)
 ):
     return update_ambient_sound_service(
         token=credentials.credentials,
@@ -47,7 +50,8 @@ async def update_ambient_sound(
         name=name,
         display_order=display_order,
         is_default=is_default,
-        file=file
+        file=file,
+        image_file=image_file
     )
 
 

@@ -7,8 +7,7 @@ from _datetime import datetime, timedelta
 from fastapi import HTTPException
 from starlette import status
 from ..db.database import SessionLocal
-from ..uploads.S3_utils import generate_presigned_access_url
-from ..config import get, get_int
+from ..config import get_int
 from ..users.users_service import validate_and_extract_user_details
 from pecha_api.daily_log.daily_log_cache_service import schedule_invalidate_user_stats_cache
 from pecha_api.ambient_sounds.ambient_sound_repository import get_ambient_sound_by_id
@@ -55,15 +54,6 @@ from .response_message import (
 logger = logging.getLogger(__name__)
 
 
-def generate_audio_presigned_url(audio_url: Optional[str]) -> Optional[str]:
-    if not audio_url:
-        return None
-    try:
-        bucket_name = get("AWS_BUCKET_NAME")
-        return generate_presigned_access_url(bucket_name, audio_url)
-    except Exception as e:
-        logger.error(f"Failed to generate presigned URL for audio: {audio_url}", exc_info=True)
-        return None
 
 
 def convert_timer_to_dto(timer: Timer) -> TimerDTO:
@@ -76,7 +66,6 @@ def convert_timer_to_dto(timer: Timer) -> TimerDTO:
         name=timer.name,
         description=timer.description,
         duration=timer.duration,
-        audio_url=generate_audio_presigned_url(timer.audio_url),
         ambient_sound_id=timer.ambient_sound_id,
         bell_at_start=timer.bell_at_start,
         bell_at_end=timer.bell_at_end,
@@ -165,7 +154,6 @@ def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
             name=request.name,
             description=request.description,
             duration=request.duration,
-            audio_url=request.audio_url,
             ambient_sound_id=request.ambient_sound_id,
             bell_at_start=request.bell_at_start,
             bell_at_end=request.bell_at_end,
@@ -210,14 +198,15 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             timer.description = request.description
         if request.duration is not None:
             timer.duration = request.duration
-        if request.audio_url is not None:
-            timer.audio_url = request.audio_url
+        # Distinguish "omitted" from an explicit null, so the sound can be
+        # detached from a timer as well as swapped.
         if ambient_sound_id_provided:
             timer.ambient_sound_id = request.ambient_sound_id
         if request.bell_at_start is not None:
             timer.bell_at_start = request.bell_at_start
         if request.bell_at_end is not None:
             timer.bell_at_end = request.bell_at_end
+
 
         updated_timer = update_timer(db, timer)
         return convert_timer_to_dto(updated_timer)

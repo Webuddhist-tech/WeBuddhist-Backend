@@ -18,8 +18,24 @@ from pecha_api.events.recurrence_service import (
 
 client = TestClient(api)
 M = "pecha_api.events.event_service"
+R = "pecha_api.events.recurrence_service"
 AUTH = {"Authorization": "Bearer token"}
 GROUP = str(uuid4())
+
+
+class _FixedToday(date):
+    """`date` with today() pinned, for patching into recurrence_service.
+
+    Recurrence resolution starts from date.today() and returns the next
+    occurrence on or after it, so a test asserting a concrete resolved date
+    has to pin today - otherwise the assertion quietly changes meaning once
+    the real calendar moves past the date it hardcoded."""
+
+    _TODAY = date(2026, 9, 1)
+
+    @classmethod
+    def today(cls) -> date:
+        return cls._TODAY
 
 
 def test_combine_date_with_time_of_day_applies_utc_time_to_new_date():
@@ -148,7 +164,10 @@ def test_update_recurring_event_without_times_keeps_existing_time_of_day():
     )
     assert request.start_date is None and request.end_date is None
 
-    with patch(f"{M}.validate_cms_author_details",
+    # today is pinned so the resolved occurrence is 2026-09-15 whatever the
+    # real calendar date is.
+    with patch(f"{R}.date", _FixedToday), \
+         patch(f"{M}.validate_cms_author_details",
                return_value=SimpleNamespace(id=uuid4(), email="a@e.com")), \
          patch(f"{M}._require_can_edit_event"), patch(f"{M}.SessionLocal"), \
          patch(f"{M}.get_event_by_id", return_value=existing), \

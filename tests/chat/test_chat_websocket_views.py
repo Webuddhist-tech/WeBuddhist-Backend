@@ -66,6 +66,18 @@ def _ws_url(group_id=None, receiver_id=None, event_id=None, token="test-token"):
     return f"/chat/live?token={token}"
 
 
+def _sync(websocket):
+    """Wait until the server has finished handling everything sent so far.
+
+    The receive loop handles frames one at a time, in order, so a reply to this
+    frame proves every earlier frame was fully processed. Without this, a test
+    that sends and then closes races the handler, because handling a frame now
+    yields to the event loop (the DB work runs in a thread).
+    """
+    websocket.send_json({"type": "__sync__"})
+    websocket.receive_json()
+
+
 @contextmanager
 def _websocket_env(
     user=None,
@@ -261,6 +273,7 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "message", "body": "Hello"})
+                _sync(websocket)
 
         mock_send_group.assert_called_once_with(
             group_id=group_id,
@@ -282,6 +295,7 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(receiver_id=receiver_id)) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "message", "body": "Hey"})
+                _sync(websocket)
 
         mock_send_direct.assert_called_once_with(
             receiver_id=receiver_id,
@@ -344,6 +358,7 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "typing", "is_typing": True})
+                _sync(websocket)
 
         broadcaster.broadcast_typing.assert_awaited_once_with(
             room.id, user.id, user.email, is_typing=True
@@ -500,6 +515,7 @@ class TestWebSocketEventRoomsAndPrayers:
                 with client.websocket_connect(_ws_url(event_id=event_id)) as websocket:
                     websocket.receive_json()
                     websocket.send_json({"type": "message", "body": "Tashi delek"})
+                    _sync(websocket)
 
         mock_send_event.assert_called_once_with(
             event_id=event_id,
@@ -527,6 +543,7 @@ class TestWebSocketEventRoomsAndPrayers:
                         "message_type": "PRAYER",
                     }
                 )
+                _sync(websocket)
 
         assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
 
@@ -542,6 +559,7 @@ class TestWebSocketEventRoomsAndPrayers:
                 websocket.send_json(
                     {"type": "message", "body": "hi", "message_type": "prayer"}
                 )
+                _sync(websocket)
 
         assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
 
