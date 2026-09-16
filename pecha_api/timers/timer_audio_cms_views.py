@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated, Optional
 from uuid import UUID
+from starlette.concurrency import run_in_threadpool
 from starlette import status
 
 from .timer_audio_service import (
@@ -23,7 +24,8 @@ async def list_preset_timer_audios(
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return")
 ):
     """The preset catalogue only. Users' own uploads never appear here."""
-    return list_preset_timer_audios_service(
+    return await run_in_threadpool(
+        list_preset_timer_audios_service,
         token=credentials.credentials,
         skip=skip,
         limit=limit
@@ -38,7 +40,8 @@ async def create_preset_timer_audio(
     image_file: Optional[UploadFile] = File(None)
 ):
     """Publish a timer audio preset, visible to every user. Image optional."""
-    return create_preset_timer_audio_service(
+    return await run_in_threadpool(
+        create_preset_timer_audio_service,
         token=credentials.credentials,
         name=name,
         audio_file=audio_file,
@@ -54,7 +57,8 @@ async def update_preset_timer_audio(
     audio_file: Optional[UploadFile] = File(None),
     image_file: Optional[UploadFile] = File(None)
 ):
-    return update_preset_timer_audio_service(
+    return await run_in_threadpool(
+        update_preset_timer_audio_service,
         token=credentials.credentials,
         timer_audio_id=timer_audio_id,
         name=name,
@@ -68,7 +72,8 @@ async def delete_preset_timer_audio(
     timer_audio_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    delete_preset_timer_audio_service(
+    await run_in_threadpool(
+        delete_preset_timer_audio_service,
         token=credentials.credentials,
         timer_audio_id=timer_audio_id
     )

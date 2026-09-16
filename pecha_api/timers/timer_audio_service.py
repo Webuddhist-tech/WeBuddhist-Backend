@@ -31,6 +31,7 @@ from .timer_audio_enums import TimerAudioType
 from .timer_audio_model import TimerAudio
 from .timer_audio_repository import (
     count_preset_timer_audios,
+    count_timer_audios_using_media,
     count_visible_timer_audios,
     delete_timer_audio,
     get_timer_audio_by_id,
@@ -129,12 +130,34 @@ def _upload_image(file: UploadFile, prefix: str) -> str:
 
 
 def _discard(*s3_keys: Optional[str]) -> None:
-    """Drop objects nothing points at any more. Best effort: an orphan left in
-    the bucket is not worth failing a request that has already committed."""
+    """Drop objects we uploaded moments ago and then failed to attach to a row.
+    Their keys are freshly minted, so nothing else can be pointing at them.
+    Best effort: an orphan in the bucket is not worth failing a request over."""
     for s3_key in s3_keys:
         if not s3_key:
             continue
         try:
+            delete_file(s3_key)
+        except Exception:
+            logger.error(f"Failed to delete orphaned media: {s3_key}", exc_info=True)
+
+
+def _discard_if_unreferenced(db, *s3_keys: Optional[str]) -> None:
+    """Drop stored objects that the row just detached from or deleted.
+
+    Those keys are not necessarily exclusive: the backfill grouped by
+    (user, audio key), so two users who shared a legacy audio key hold the same
+    audio_s3_key, and a cover picked with MIN(image_url) can be shared between
+    audio rows. Deleting on that shared key would blank out media another
+    catalogue entry still shows, so an object only goes once the last row
+    referencing it is gone. Callers run this after the write has committed, so
+    the count reflects the new state."""
+    for s3_key in s3_keys:
+        if not s3_key:
+            continue
+        try:
+            if count_timer_audios_using_media(db, s3_key) > 0:
+                continue
             delete_file(s3_key)
         except Exception:
             logger.error(f"Failed to delete orphaned media: {s3_key}", exc_info=True)
@@ -173,7 +196,7 @@ def _apply_media_update(
         _discard(*uploaded_keys)
         raise
 
-    _discard(*replaced_keys)
+    _discard_if_unreferenced(db, *replaced_keys)
     return dto
 
 
@@ -290,9 +313,8 @@ def delete_timer_audio_service(token: str, timer_audio_id: UUID) -> None:
         orphaned_keys = (timer_audio.audio_s3_key, timer_audio.image_s3_key)
         # Timers referencing it keep working; the FK is ON DELETE SET NULL.
         delete_timer_audio(db, timer_audio)
-
-    # Only once the row is gone: nothing can reach these objects any more.
-    _discard(*orphaned_keys)
+        # Only once the row is gone, and only if no other row shares the key.
+        _discard_if_unreferenced(db, *orphaned_keys)
 
 
 # --------------------------------------------------------------------------
@@ -377,5 +399,4 @@ def delete_preset_timer_audio_service(token: str, timer_audio_id: UUID) -> None:
         timer_audio = _preset(db, timer_audio_id)
         orphaned_keys = (timer_audio.audio_s3_key, timer_audio.image_s3_key)
         delete_timer_audio(db, timer_audio)
-
-    _discard(*orphaned_keys)
+        _discard_if_unreferenced(db, *orphaned_keys)

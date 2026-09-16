@@ -35,6 +35,80 @@ TIMER_AUDIO_TYPE = postgresql.ENUM(
 )
 
 
+NAME_MAX_LENGTH = 255
+
+
+def _unique_name(name: str, taken: set[str]) -> str:
+    """Timer names were never unique per user, so the backfill can be handed the
+    same name twice and collide on uq_timer_audios_user_name. A suffixed name
+    can itself already be in use -- a user with ``Bell``, ``Bell`` and
+    ``Bell (2)`` would otherwise produce ``Bell (2)`` twice -- so keep counting
+    until the candidate is one nothing has claimed. Names are truncated to fit
+    the column, suffix included."""
+    candidate = name[:NAME_MAX_LENGTH]
+    suffix = 1
+    while candidate in taken:
+        suffix += 1
+        marker = f" ({suffix})"
+        candidate = f"{name[:NAME_MAX_LENGTH - len(marker)]}{marker}"
+    taken.add(candidate)
+    return candidate
+
+
+def _backfill_timer_audios() -> None:
+    """One row per (user, audio key), named after the timer it came from."""
+    bind = op.get_bind()
+    grouped = bind.execute(
+        sa.text(
+            """
+            SELECT t.user_id        AS user_id,
+                   t.audio_url      AS audio_s3_key,
+                   MIN(t.name)      AS name,
+                   MIN(t.image_url) AS image_s3_key
+              FROM timers t
+             WHERE t.audio_url IS NOT NULL
+               AND t.user_id IS NOT NULL
+             GROUP BY t.user_id, t.audio_url
+             ORDER BY t.user_id, t.audio_url
+            """
+        )
+    ).mappings().all()
+
+    taken_per_user: dict[str, set[str]] = {}
+    rows = []
+    for group in grouped:
+        user_id = str(group["user_id"])
+        taken = taken_per_user.setdefault(user_id, set())
+        rows.append(
+            {
+                "user_id": user_id,
+                "name": _unique_name(group["name"], taken),
+                "audio_s3_key": group["audio_s3_key"],
+                "image_s3_key": group["image_s3_key"],
+            }
+        )
+
+    if not rows:
+        return
+
+    bind.execute(
+        sa.text(
+            """
+            INSERT INTO timer_audios
+                   (id, user_id, type, name, audio_s3_key, image_s3_key, created_at)
+            VALUES (gen_random_uuid(),
+                    CAST(:user_id AS uuid),
+                    'user_uploaded'::timeraudiotype,
+                    :name,
+                    :audio_s3_key,
+                    :image_s3_key,
+                    NOW())
+            """
+        ),
+        rows,
+    )
+
+
 def upgrade() -> None:
     TIMER_AUDIO_TYPE.create(op.get_bind(), checkfirst=True)
 
@@ -73,50 +147,8 @@ def upgrade() -> None:
     # Backfill every timer that has an audio key. The image is optional now, so
     # a timer with audio but no image migrates fine, image_s3_key just stays
     # NULL. The audio is named after the timer it came from.
-    #
-    # Timer names were never unique per user, so two different audio keys can
-    # arrive carrying the same name and collide on uq_timer_audios_user_name.
-    # The second and later of each name gets a " (n)" suffix, trimmed so the
-    # result still fits the 255-character column.
     if column_exists("timers", "audio_url"):
-        op.execute(
-            """
-            WITH grouped AS (
-                SELECT t.user_id          AS user_id,
-                       t.audio_url        AS audio_s3_key,
-                       MIN(t.name)        AS name,
-                       MIN(t.image_url)   AS image_s3_key
-                  FROM timers t
-                 WHERE t.audio_url IS NOT NULL
-                   AND t.user_id IS NOT NULL
-                 GROUP BY t.user_id, t.audio_url
-            ),
-            numbered AS (
-                SELECT g.*,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY g.user_id, g.name
-                           ORDER BY g.audio_s3_key
-                       ) AS name_rank
-                  FROM grouped g
-            )
-            INSERT INTO timer_audios
-                   (id, user_id, type, name, audio_s3_key, image_s3_key, created_at)
-            SELECT gen_random_uuid(),
-                   n.user_id,
-                   'user_uploaded'::timeraudiotype,
-                   CASE
-                       WHEN n.name_rank = 1 THEN n.name
-                       ELSE left(
-                                n.name,
-                                255 - 3 - length(n.name_rank::text)
-                            ) || ' (' || n.name_rank::text || ')'
-                   END,
-                   n.audio_s3_key,
-                   n.image_s3_key,
-                   NOW()
-              FROM numbered n
-            """
-        )
+        _backfill_timer_audios()
         op.execute(
             """
             UPDATE timers t

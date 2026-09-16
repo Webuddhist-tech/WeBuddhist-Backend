@@ -67,6 +67,22 @@ def count_preset_timer_audios(db: Session) -> int:
     return db.query(TimerAudio).filter(TimerAudio.type == TimerAudioType.PRESET).count()
 
 
+def count_timer_audios_using_media(db: Session, s3_key: str) -> int:
+    """How many rows still point at this object, as their audio or as their
+    cover. The backfill could hand two rows the same key, so an object is only
+    unreachable once this reaches zero."""
+    return (
+        db.query(TimerAudio)
+        .filter(
+            or_(
+                TimerAudio.audio_s3_key == s3_key,
+                TimerAudio.image_s3_key == s3_key,
+            )
+        )
+        .count()
+    )
+
+
 def save_timer_audio(db: Session, timer_audio: TimerAudio) -> TimerAudio:
     try:
         db.add(timer_audio)

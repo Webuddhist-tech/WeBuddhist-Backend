@@ -298,13 +298,15 @@ class TestUpdateAndDeleteOwnUpload:
 
         mock_delete.assert_called_once_with(mock_db, audio)
 
+    @patch(f"{SERVICE}.count_timer_audios_using_media", return_value=0)
     @patch(f"{SERVICE}.delete_file")
     @patch(f"{SERVICE}.delete_timer_audio")
     @patch(f"{SERVICE}.get_timer_audio_by_id")
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_deleting_an_upload_takes_its_objects_with_it(
-        self, mock_validate, mock_session, mock_get, _mock_delete_row, mock_delete_file
+        self, mock_validate, mock_session, mock_get, _mock_delete_row,
+        mock_delete_file, _mock_refs
     ):
         """Nothing points at them once the row is gone."""
         user_id = uuid4()
@@ -320,6 +322,7 @@ class TestUpdateAndDeleteOwnUpload:
             "images/bell.png",
         }
 
+    @patch(f"{SERVICE}.count_timer_audios_using_media", return_value=0)
     @patch(f"{SERVICE}.delete_file")
     @patch(f"{SERVICE}._presign", return_value=None)
     @patch(f"{SERVICE}.update_timer_audio", side_effect=_stamped_update)
@@ -329,7 +332,7 @@ class TestUpdateAndDeleteOwnUpload:
     @patch(f"{SERVICE}.validate_and_extract_user_details")
     def test_replacing_the_audio_drops_the_object_it_replaced(
         self, mock_validate, mock_session, mock_get, _mock_upload,
-        _mock_update, _presign, mock_delete_file
+        _mock_update, _presign, mock_delete_file, _mock_refs
     ):
         user_id = uuid4()
         mock_validate.return_value = _user(user_id=user_id)
@@ -343,6 +346,28 @@ class TestUpdateAndDeleteOwnUpload:
 
         mock_delete_file.assert_called_once_with("audio/bell.mp3")
         assert audio.audio_s3_key != "audio/bell.mp3"
+
+    @patch(f"{SERVICE}.count_timer_audios_using_media", return_value=1)
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.delete_timer_audio")
+    @patch(f"{SERVICE}.get_timer_audio_by_id")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_an_object_another_row_still_uses_is_kept(
+        self, mock_validate, mock_session, mock_get, _mock_delete_row,
+        mock_delete_file, _mock_refs
+    ):
+        """The backfill grouped by (user, audio key), so two rows can share an
+        object. Deleting one must not blank out the other."""
+        user_id = uuid4()
+        mock_validate.return_value = _user(user_id=user_id)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        audio = _audio(user_id=user_id)
+        mock_get.return_value = audio
+
+        delete_timer_audio_service(token="valid", timer_audio_id=audio.id)
+
+        mock_delete_file.assert_not_called()
 
     @patch(f"{SERVICE}.delete_file")
     @patch(f"{SERVICE}.update_timer_audio", side_effect=RuntimeError("db down"))
