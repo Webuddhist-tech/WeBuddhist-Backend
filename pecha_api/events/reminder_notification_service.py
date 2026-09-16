@@ -46,7 +46,7 @@ def _get_event_name(db: Session, event_id: UUID) -> str:
     return "Your event"
 
 
-def _build_reminder_copy(*, reminder_type: str, event_name: str, minutes_before: int) -> str:
+def _build_reminder_copy(*, reminder_type: str, minutes_before: int) -> str:
     template = _REMINDER_COPY.get(reminder_type, "Starting now")
     return template.format(minutes=minutes_before)
 
@@ -134,7 +134,6 @@ def get_event_reminder_targets(
         title = event_name
         body = _build_reminder_copy(
             reminder_type=reminder_type,
-            event_name=event_name,
             minutes_before=minutes_before,
         )
 

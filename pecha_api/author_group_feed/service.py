@@ -95,6 +95,32 @@ def _build_group_card_map(
     }
 
 
+def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
+    """The current (active) or next upcoming occurrence per recurring template.
+
+    Templates with no occurrence in the resolver's horizon are dropped, so the
+    result is not parallel to the input.
+    """
+    expanded_recurring = []
+    for template in recurring_templates:
+        result = resolve_current_or_next_occurrence(template, after=today)
+        if not result:
+            continue
+        start_d, end_d, is_active = result
+        # Carry the template's own time-of-day onto the occurrence,
+        # instead of defaulting to midnight / end-of-day.
+        occurrence_start, occurrence_end = combine_occurrence_window(
+            start_d, end_d, template.start_date, template.end_date
+        )
+        expanded_recurring.append({
+            'event': template,
+            'start_date': occurrence_start,
+            'end_date': occurrence_end,
+            'is_active': is_active,
+        })
+    return expanded_recurring
+
+
 def _get_author_group_feed(
     db: Session,
     token: Optional[str],
@@ -163,22 +189,7 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
     
-    expanded_recurring = []
-    for template in recurring_templates:
-        result = resolve_current_or_next_occurrence(template, after=today)
-        if result:
-            start_d, end_d, is_active = result
-            # Carry the template's own time-of-day onto the occurrence,
-            # instead of defaulting to midnight / end-of-day.
-            occurrence_start, occurrence_end = combine_occurrence_window(
-                start_d, end_d, template.start_date, template.end_date
-            )
-            expanded_recurring.append({
-                'event': template,
-                'start_date': occurrence_start,
-                'end_date': occurrence_end,
-                'is_active': is_active,
-            })
+    expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
     
     # Combine one-shot events with next occurrences of recurring templates
     events = one_shot_events

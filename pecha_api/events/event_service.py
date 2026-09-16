@@ -2,7 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -561,6 +561,29 @@ class EventContentFilter:
     event_format: Optional[EventFormat] = None
 
 
+def _expand_earliest_occurrences(recurring_templates, from_date_obj, to_date_obj) -> List[Dict]:
+    """Each template's earliest occurrence within the window, one row per
+    template. Templates with no occurrence in the window are dropped."""
+    expanded_occurrences = []
+    for template in recurring_templates:
+        occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
+        if not occurrences:
+            continue
+        start_d, end_d = occurrences[0]
+        # Carry the template's own time-of-day onto the occurrence,
+        # instead of defaulting to midnight / end-of-day.
+        occurrence_start, occurrence_end = combine_occurrence_window(
+            start_d, end_d, template.start_date, template.end_date
+        )
+        expanded_occurrences.append({
+            'event': template,
+            'start_date': occurrence_start,
+            'end_date': occurrence_end,
+            'occurrence_date': occurrence_start,
+        })
+    return expanded_occurrences
+
+
 def get_events_service(
     content_filter: Optional[EventContentFilter] = None,
     from_date: Optional[datetime] = None,
@@ -630,23 +653,9 @@ def get_events_service(
         # occurrence within the window so a single recurring event surfaces
         # once per listing instead of once per occurrence (e.g. 12 rows for
         # a monthly recurrence over the default 12-month window).
-        expanded_occurrences = []
-        for template in recurring_templates:
-            occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
-            if not occurrences:
-                continue
-            start_d, end_d = occurrences[0]
-            # Carry the template's own time-of-day onto the occurrence,
-            # instead of defaulting to midnight / end-of-day.
-            occurrence_start, occurrence_end = combine_occurrence_window(
-                start_d, end_d, template.start_date, template.end_date
-            )
-            expanded_occurrences.append({
-                'event': template,
-                'start_date': occurrence_start,
-                'end_date': occurrence_end,
-                'occurrence_date': occurrence_start,
-            })
+        expanded_occurrences = _expand_earliest_occurrences(
+            recurring_templates, from_date_obj, to_date_obj
+        )
         
         # Merge one-shot events and expanded occurrences
         all_event_items = [

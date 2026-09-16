@@ -119,7 +119,7 @@ async def websocket_post_comments(
     try:
         broadcaster = get_broadcaster()
     except RuntimeError as e:
-        logger.error(f"Broadcaster not initialized: {e}")
+        logger.exception("Broadcaster not initialized: %s", e)
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
@@ -128,7 +128,7 @@ async def websocket_post_comments(
         try:
             user = await run_in_threadpool(validate_and_extract_user_details, token=token)
         except HTTPException as auth_error:
-            logger.error(f"WebSocket auth failed: {auth_error.detail}")
+            logger.warning("WebSocket auth failed: %s", auth_error.detail)
             await websocket.accept()
             await websocket.send_json({
                 "type": "error",
@@ -167,7 +167,7 @@ async def websocket_post_comments(
                         except (ConnectionClosedOK, ConnectionClosedError):
                             break
             except Exception as e:
-                logger.error(f"Error listening to Redis: {e}")
+                logger.exception("Error listening to Redis: %s", e)
 
         redis_task = asyncio.create_task(listen_redis())
 
@@ -203,7 +203,7 @@ async def websocket_post_comments(
                         if isinstance(e, HTTPException)
                         else "Invalid parent_comment_id"
                     )
-                    logger.error(f"Comment creation failed: {detail}")
+                    logger.warning("Comment creation failed: %s", detail)
                     await websocket.send_json({
                         "type": "error",
                         "code": detail if isinstance(detail, str) else "ERROR",
@@ -215,7 +215,7 @@ async def websocket_post_comments(
                 try:
                     await broadcaster.broadcast_comment(post_id, comment_dto)
                 except Exception as e:
-                    logger.error(f"Failed to broadcast comment {comment_dto.id} to Redis: {e}")
+                    logger.exception("Failed to broadcast comment %s to Redis: %s", comment_dto.id, e)
                     await websocket.send_json({
                         "type": "error",
                         "code": "BROADCAST_ERROR",
@@ -227,10 +227,10 @@ async def websocket_post_comments(
             try:
                 await pubsub.unsubscribe(f"post:{post_id}:comments")
             except Exception as e:
-                logger.error(f"Error unsubscribing from Redis: {e}")
+                logger.exception("Error unsubscribing from Redis: %s", e)
 
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.exception("WebSocket error: %s", e)
         try:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         except Exception:

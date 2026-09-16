@@ -77,7 +77,7 @@ async def _broadcast_reactions_safe(room_id: UUID, message_id: UUID, reactions) 
             room_id=room_id, message_id=message_id, reactions=reactions
         )
     except Exception as e:
-        logger.error(f"Failed to broadcast reactions for message {message_id}: {e}")
+        logger.exception("Failed to broadcast reactions for message %s: %s", message_id, e)
 
 
 @chat_router.get(
@@ -183,7 +183,7 @@ async def _broadcast_message_deleted_safe(
             deleted_at=deleted_at,
         )
     except Exception as e:
-        logger.error(f"Failed to broadcast deletion for message {message_id}: {e}")
+        logger.exception("Failed to broadcast deletion for message %s: %s", message_id, e)
 
 
 @chat_router.delete(
@@ -407,7 +407,7 @@ async def _broadcast_prayers_safe(room_id: UUID, prayers: list) -> None:
         broadcaster = get_broadcaster()
         await broadcaster.broadcast_prayers(room_id=room_id, prayers=prayers)
     except Exception as e:
-        logger.error(f"Failed to broadcast prayers for room {room_id}: {e}")
+        logger.exception("Failed to broadcast prayers for room %s: %s", room_id, e)
 
 
 @chat_router.post(
@@ -574,7 +574,7 @@ async def websocket_chat_live(
     try:
         broadcaster = get_broadcaster()
     except RuntimeError as e:
-        logger.error(f"Broadcaster not initialized: {e}")
+        logger.exception("Broadcaster not initialized: %s", e)
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
@@ -582,7 +582,7 @@ async def websocket_chat_live(
         try:
             user = await run_in_threadpool(validate_and_extract_user_details, token=token)
         except HTTPException as auth_error:
-            logger.error(f"WebSocket auth failed: {auth_error.detail}")
+            logger.warning("WebSocket auth failed: %s", auth_error.detail)
             await websocket.accept()
             await websocket.send_json({
                 "type": "error",
@@ -654,7 +654,7 @@ async def websocket_chat_live(
                         except (ValueError, TypeError):
                             pass
             except Exception as e:
-                logger.error(f"Error listening to Redis: {e}")
+                logger.exception("Error listening to Redis: %s", e)
 
         redis_task = asyncio.create_task(listen_redis())
 
@@ -700,7 +700,7 @@ async def websocket_chat_live(
                         room_unreachable = True
                         break
                     except Exception as e:
-                        logger.error(f"Failed to broadcast typing indicator: {e}")
+                        logger.exception("Failed to broadcast typing indicator: %s", e)
                     continue
 
                 if data.get("type") != "message":
@@ -765,7 +765,7 @@ async def websocket_chat_live(
                         message_type,
                     )
                 except HTTPException as e:
-                    logger.error(f"Message send failed: {e.detail}")
+                    logger.warning("Message send failed: %s", e.detail)
                     if isinstance(e.detail, dict) and "code" in e.detail:
                         # Structured rejection (e.g. INAPPROPRIATE_LANGUAGE) with
                         # its own code/message fields
@@ -786,7 +786,7 @@ async def websocket_chat_live(
                 try:
                     await broadcaster.broadcast_message(room_id, message_dto)
                 except Exception as e:
-                    logger.error(f"Failed to broadcast message {message_dto.id} to Redis: {e}")
+                    logger.exception("Failed to broadcast message %s to Redis: %s", message_dto.id, e)
                     await websocket.send_json({
                         "type": "error",
                         "code": "BROADCAST_ERROR",
@@ -798,7 +798,7 @@ async def websocket_chat_live(
             try:
                 await pubsub.unsubscribe(f"chat:room:{room_id}:messages")
             except Exception as e:
-                logger.error(f"Error unsubscribing from Redis: {e}")
+                logger.exception("Error unsubscribing from Redis: %s", e)
             if room_unreachable:
                 # Ended by eviction, not by the client, so close it here.
                 try:
@@ -807,7 +807,7 @@ async def websocket_chat_live(
                     pass
 
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.exception("WebSocket error: %s", e)
         try:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         except Exception:

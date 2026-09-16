@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from typing import Optional, List
 from uuid import UUID, uuid4
@@ -39,6 +40,16 @@ logger = logging.getLogger(__name__)
 AUDIO_PREFIX = "audio/ambient_sounds"
 IMAGE_PREFIX = "images/ambient_sounds"
 
+# A storage key ends with an extension taken from a user-supplied filename, so
+# it is user-influenced data. Anything outside this allowlist -- a newline
+# above all -- could forge a second log line, so it is replaced before the key
+# reaches the log (S5145).
+_UNSAFE_LOG_CHARS = re.compile(r"[^\w./-]")
+
+
+def _sanitize_for_log(value: Optional[str]) -> str:
+    return _UNSAFE_LOG_CHARS.sub("_", str(value))
+
 
 def generate_ambient_sound_presigned_url(s3_key: Optional[str]) -> Optional[str]:
     if not s3_key:
@@ -47,7 +58,10 @@ def generate_ambient_sound_presigned_url(s3_key: Optional[str]) -> Optional[str]
         bucket_name = get("AWS_BUCKET_NAME")
         return generate_presigned_access_url(bucket_name, s3_key)
     except Exception:
-        logger.error(f"Failed to generate presigned URL for ambient sound: {s3_key}", exc_info=True)
+        logger.exception(
+            "Failed to generate presigned URL for ambient sound: %s",
+            _sanitize_for_log(s3_key),
+        )
         return None
 
 
@@ -119,7 +133,10 @@ def _discard(*s3_keys: Optional[str]) -> None:
         try:
             delete_file(s3_key)
         except Exception:
-            logger.error(f"Failed to delete orphaned ambient sound media: {s3_key}", exc_info=True)
+            logger.exception(
+                "Failed to delete orphaned ambient sound media: %s",
+                _sanitize_for_log(s3_key),
+            )
 
 
 def get_all_ambient_sounds_service() -> AmbientSoundsResponse:

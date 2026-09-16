@@ -143,17 +143,17 @@ class TestGetEventName:
 class TestBuildReminderCopy:
     def test_t_minus_10_includes_minutes(self):
         assert _build_reminder_copy(
-            reminder_type=REMINDER_TYPE_T_MINUS_10, event_name="Full Moon", minutes_before=10,
+            reminder_type=REMINDER_TYPE_T_MINUS_10, minutes_before=10,
         ) == "Starting in 10 minutes"
 
     def test_t_zero_says_starting_now(self):
         assert _build_reminder_copy(
-            reminder_type=REMINDER_TYPE_T_ZERO, event_name="Full Moon", minutes_before=10,
+            reminder_type=REMINDER_TYPE_T_ZERO, minutes_before=10,
         ) == "Starting now"
 
     def test_unknown_type_falls_back_to_starting_now(self):
         assert _build_reminder_copy(
-            reminder_type="SOMETHING_ELSE", event_name="Full Moon", minutes_before=10,
+            reminder_type="SOMETHING_ELSE", minutes_before=10,
         ) == "Starting now"
 
 
