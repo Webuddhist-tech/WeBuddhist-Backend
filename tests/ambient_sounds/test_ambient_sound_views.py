@@ -60,6 +60,7 @@ class TestCreateAmbientSoundView:
             display_order=0,
             is_default=True,
             file=file,
+            image_file=None,
         )
 
         assert result == expected
@@ -69,6 +70,36 @@ class TestCreateAmbientSoundView:
             display_order=0,
             is_default=True,
             file=file,
+            image_file=None,
+        )
+
+    @patch('pecha_api.ambient_sounds.ambient_sound_cms_views.create_ambient_sound_service')
+    @pytest.mark.asyncio
+    async def test_create_ambient_sound_forwards_cover(self, mock_service):
+        """The cover is optional, so it only reaches the service when sent."""
+        token = "admin_token"
+        auth_credentials = create_auth_credentials(token=token)
+        file = MagicMock()
+        image_file = MagicMock()
+        expected = create_ambient_sound_dto()
+        mock_service.return_value = expected
+
+        await create_ambient_sound(
+            credentials=auth_credentials,
+            name="Sea waves",
+            display_order=0,
+            is_default=True,
+            file=file,
+            image_file=image_file,
+        )
+
+        mock_service.assert_called_once_with(
+            token=token,
+            name="Sea waves",
+            display_order=0,
+            is_default=True,
+            file=file,
+            image_file=image_file,
         )
 
     @patch('pecha_api.ambient_sounds.ambient_sound_cms_views.create_ambient_sound_service')
@@ -88,6 +119,7 @@ class TestCreateAmbientSoundView:
                 display_order=0,
                 is_default=True,
                 file=file,
+                image_file=None,
             )
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
@@ -110,6 +142,7 @@ class TestUpdateAmbientSoundView:
             display_order=None,
             is_default=None,
             file=None,
+            image_file=None,
         )
 
         assert result == expected
@@ -120,6 +153,37 @@ class TestUpdateAmbientSoundView:
             display_order=None,
             is_default=None,
             file=None,
+            image_file=None,
+        )
+
+    @patch('pecha_api.ambient_sounds.ambient_sound_cms_views.update_ambient_sound_service')
+    @pytest.mark.asyncio
+    async def test_update_ambient_sound_replaces_cover_only(self, mock_service):
+        """A cover can be swapped without resending the audio."""
+        token = "admin_token"
+        ambient_sound_id = uuid4()
+        auth_credentials = create_auth_credentials(token=token)
+        image_file = MagicMock()
+        mock_service.return_value = create_ambient_sound_dto()
+
+        await update_ambient_sound(
+            ambient_sound_id=ambient_sound_id,
+            credentials=auth_credentials,
+            name=None,
+            display_order=None,
+            is_default=None,
+            file=None,
+            image_file=image_file,
+        )
+
+        mock_service.assert_called_once_with(
+            token=token,
+            ambient_sound_id=ambient_sound_id,
+            name=None,
+            display_order=None,
+            is_default=None,
+            file=None,
+            image_file=image_file,
         )
 
     @patch('pecha_api.ambient_sounds.ambient_sound_cms_views.update_ambient_sound_service')
@@ -139,6 +203,7 @@ class TestUpdateAmbientSoundView:
                 display_order=None,
                 is_default=None,
                 file=None,
+                image_file=None,
             )
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND

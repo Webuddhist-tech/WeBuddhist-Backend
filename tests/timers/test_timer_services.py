@@ -17,7 +17,6 @@ from pecha_api.timers.timer_service import (
     record_timer_stop_service,
     get_timer_history_service
 )
-from pecha_api.timers.timer_audio_service import _presign
 from pecha_api.timers.timer_response_models import (
     TimersResponse,
     TimerDTO,
@@ -29,8 +28,6 @@ from pecha_api.timers.timer_response_models import (
     TimerSessionDTO
 )
 from pecha_api.timers.timer_model import Timer
-from pecha_api.timers.timer_audio_model import TimerAudio
-from pecha_api.timers.timer_audio_enums import TimerAudioType
 from pecha_api.timers.timer_history_model import TimerHistory
 from pecha_api.timers.timer_enums import TimerType
 
@@ -47,8 +44,6 @@ class TestDataFactory:
         name="Test Timer",
         duration=300,
         description=None,
-        timer_audio_id=None,
-        timer_audio=None,
         ambient_sound_id=None,
         bell_at_start=True,
         bell_at_end=True,
@@ -64,8 +59,6 @@ class TestDataFactory:
         timer.name = name
         timer.description = description
         timer.duration = duration
-        timer.timer_audio_id = timer_audio_id
-        timer.timer_audio = timer_audio
         timer.ambient_sound_id = ambient_sound_id
         timer.bell_at_start = bell_at_start
         timer.bell_at_end = bell_at_end
@@ -89,7 +82,7 @@ class TestDataFactory:
         name="New Timer",
         duration=600,
         description=None,
-        timer_audio_id=None
+        ambient_sound_id=None
     ) -> CreateTimerRequest:
         """Create a CreateTimerRequest."""
         return CreateTimerRequest(
@@ -97,7 +90,7 @@ class TestDataFactory:
             name=name,
             description=description,
             duration=duration,
-            timer_audio_id=timer_audio_id
+            ambient_sound_id=ambient_sound_id
         )
 
     @staticmethod
@@ -105,37 +98,16 @@ class TestDataFactory:
         name=None,
         duration=None,
         description=None,
-        timer_audio_id=None
+        ambient_sound_id=None
     ) -> UpdateTimerRequest:
         """Create an UpdateTimerRequest."""
         return UpdateTimerRequest(
             name=name,
             description=description,
             duration=duration,
-            timer_audio_id=timer_audio_id
+            ambient_sound_id=ambient_sound_id
         )
 
-    @staticmethod
-    def create_mock_timer_audio(
-        timer_audio_id=None,
-        user_id=None,
-        name="Bell",
-        audio_type=TimerAudioType.USER,
-        audio_s3_key="audio/bell.mp3",
-        image_s3_key="images/timer_covers/bell.png"
-    ):
-        """Create a mock TimerAudio model."""
-        timer_audio = MagicMock(spec=TimerAudio)
-        timer_audio.id = timer_audio_id or uuid4()
-        timer_audio.user_id = user_id or uuid4()
-        timer_audio.type = audio_type
-        timer_audio.name = name
-        timer_audio.audio_s3_key = audio_s3_key
-        timer_audio.image_s3_key = image_s3_key
-        timer_audio.created_at = datetime.utcnow()
-        timer_audio.updated_at = datetime.utcnow()
-        return timer_audio
-    
     @staticmethod
     def create_mock_timer_history(
         history_id=None,
@@ -365,30 +337,31 @@ class TestCreateTimerService:
         
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
     
-    @patch('pecha_api.timers.timer_audio_service._presign', side_effect=lambda key: f"https://cdn.example/{key}" if key else None)
+    @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.save_timer')
     @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
-    def test_create_timer_service_with_optional_fields(self, mock_validate, mock_save, mock_session, _mock_presign):
+    def test_create_timer_service_with_optional_fields(self, mock_validate, mock_save, mock_session, mock_get_sound):
         """Test creating timer with optional fields."""
         user_id = uuid4()
         group_id = uuid4()
+        ambient_sound_id = uuid4()
         token = "valid_token"
-        
+
         mock_user = TestDataFactory.create_mock_user(user_id=user_id)
         mock_validate.return_value = mock_user
-        
+
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        
-        timer_audio = TestDataFactory.create_mock_timer_audio(user_id=user_id)
+
+        mock_get_sound.return_value = MagicMock(id=ambient_sound_id)
 
         request = TestDataFactory.create_timer_request(
             group_id=group_id,
             name="Timer with Options",
             duration=300,
             description="Meditation timer",
-            timer_audio_id=timer_audio.id
+            ambient_sound_id=ambient_sound_id
         )
 
         created_timer = TestDataFactory.create_mock_timer(
@@ -397,17 +370,15 @@ class TestCreateTimerService:
             name="Timer with Options",
             duration=300,
             description="Meditation timer",
-            timer_audio_id=timer_audio.id,
-            timer_audio=timer_audio
+            ambient_sound_id=ambient_sound_id
         )
         mock_save.return_value = created_timer
 
         result = create_timer_service(token=token, request=request)
 
         assert result.description == "Meditation timer"
-        assert result.timer_audio_id == timer_audio.id
-        assert result.audio.audio_url == "https://cdn.example/audio/bell.mp3"
-        assert result.audio.image_url == "https://cdn.example/images/timer_covers/bell.png"
+        assert result.ambient_sound_id == ambient_sound_id
+        mock_get_sound.assert_called_once_with(mock_db, ambient_sound_id)
 
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.save_timer')
@@ -898,62 +869,12 @@ class TestRestoreTimerService:
 class TestHelperFunctions:
     """Test cases for helper functions."""
     
-    @patch('pecha_api.timers.timer_audio_service.generate_presigned_access_url')
-    @patch('pecha_api.timers.timer_audio_service.get')
-    def test_presign_success(self, mock_get, mock_generate_url):
-        """Test successful generation of presigned URL for audio."""
-        audio_url = "audio/timer_sounds/bell.mp3"
-        bucket_name = "test-bucket"
-        presigned_url = "https://presigned-url.com/audio/timer_sounds/bell.mp3"
-
-        mock_get.return_value = bucket_name
-        mock_generate_url.return_value = presigned_url
-
-        result = _presign(audio_url)
-
-        assert result == presigned_url
-        mock_get.assert_called_once_with("AWS_BUCKET_NAME")
-        mock_generate_url.assert_called_once_with(bucket_name, audio_url)
-
-    def test_presign_none(self):
-        """Test _presign with None input."""
-        result = _presign(None)
-        assert result is None
-
-    @patch('pecha_api.timers.timer_audio_service.generate_presigned_access_url')
-    @patch('pecha_api.timers.timer_audio_service.get')
-    def test_presign_error(self, mock_get, mock_generate_url):
-        """Test _presign when error occurs."""
-        audio_url = "audio/timer_sounds/bell.mp3"
-
-        mock_get.return_value = "test-bucket"
-        mock_generate_url.side_effect = Exception("S3 error")
-
-        result = _presign(audio_url)
-
-        assert result is None
-
-    @patch('pecha_api.timers.timer_audio_service._presign')
-    def test_convert_timer_to_dto(self, mock_presign):
+    def test_convert_timer_to_dto(self):
         """Test conversion of Timer model to TimerDTO."""
         timer_id = uuid4()
         user_id = uuid4()
         group_id = uuid4()
-        audio_key = "audio/bell.mp3"
-        image_key = "images/timer_covers/bell.png"
-        presigned_audio = "https://presigned-url.com/audio/bell.mp3"
-        presigned_image = "https://presigned-url.com/images/timer_covers/bell.png"
-
-        mock_presign.side_effect = lambda key: {
-            audio_key: presigned_audio,
-            image_key: presigned_image,
-        }.get(key)
-
-        timer_audio = TestDataFactory.create_mock_timer_audio(
-            user_id=user_id,
-            audio_s3_key=audio_key,
-            image_s3_key=image_key
-        )
+        ambient_sound_id = uuid4()
 
         timer = TestDataFactory.create_mock_timer(
             timer_id=timer_id,
@@ -962,8 +883,7 @@ class TestHelperFunctions:
             name="Test Timer",
             duration=300,
             description="Test description",
-            timer_audio_id=timer_audio.id,
-            timer_audio=timer_audio,
+            ambient_sound_id=ambient_sound_id,
             timer_type=TimerType.USER
         )
 
@@ -976,23 +896,32 @@ class TestHelperFunctions:
         assert result.name == "Test Timer"
         assert result.duration == 300
         assert result.description == "Test description"
-        assert result.timer_audio_id == timer_audio.id
-        assert result.audio.audio_url == presigned_audio
-        assert result.audio.image_url == presigned_image
+        assert result.ambient_sound_id == ambient_sound_id
         assert result.type == TimerType.USER
 
-        mock_presign.assert_any_call(audio_key)
-        mock_presign.assert_any_call(image_key)
-
-    def test_convert_timer_to_dto_without_audio(self):
-        """A timer with no audio serialises with audio omitted."""
+    def test_convert_timer_to_dto_without_ambient_sound(self):
+        """A timer with no background sound serialises with it omitted."""
         timer = TestDataFactory.create_mock_timer(timer_type=TimerType.USER)
 
         result = convert_timer_to_dto(timer)
 
-        assert result.timer_audio_id is None
-        assert result.audio is None
-    
+        assert result.ambient_sound_id is None
+
+    def test_convert_timer_to_dto_keeps_bells_independent(self):
+        """The bells are their own flags: they do not follow the sound."""
+        timer = TestDataFactory.create_mock_timer(
+            timer_type=TimerType.USER,
+            ambient_sound_id=None,
+            bell_at_start=True,
+            bell_at_end=False
+        )
+
+        result = convert_timer_to_dto(timer)
+
+        assert result.ambient_sound_id is None
+        assert result.bell_at_start is True
+        assert result.bell_at_end is False
+
     def test_is_user_created_timer_user_type(self):
         """Test is_user_created_timer returns True for USER type."""
         timer = TestDataFactory.create_mock_timer(timer_type=TimerType.USER)

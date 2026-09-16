@@ -76,7 +76,7 @@ from pecha_api.verse_of_day import verse_of_day_notification_internal_views
 from pecha_api.calendar import calendar_views
 from pecha_api.poems import views as poems_views
 from pecha_api.poems import cms_views as cms_poems_views
-from pecha_api.timers import timer_router, timer_audio_cms_router
+from pecha_api.timers import timer_router
 from pecha_api.ambient_sounds import ambient_sound_router, ambient_sound_cms_router
 from pecha_api.accumulator import accumulator_router, accumulator_cms_router
 from pecha_api.group_accumulator import group_accumulator_router, group_accumulator_cms_router
@@ -197,7 +197,6 @@ api.include_router(calendar_views.calendar_router)
 api.include_router(poems_views.poems_router)
 api.include_router(cms_poems_views.cms_poems_router)
 api.include_router(timer_router)
-api.include_router(timer_audio_cms_router)
 api.include_router(ambient_sound_router)
 api.include_router(ambient_sound_cms_router)
 api.include_router(accumulator_router)

@@ -22,6 +22,7 @@ class TestDataFactory:
         ambient_sound_id=None,
         name="Sea waves",
         s3_key="audio/ambient_sounds/sea-waves.mp3",
+        image_s3_key=None,
         is_default=False,
         display_order=0,
     ):
@@ -29,6 +30,7 @@ class TestDataFactory:
         sound.id = ambient_sound_id or uuid4()
         sound.name = name
         sound.s3_key = s3_key
+        sound.image_s3_key = image_s3_key
         sound.is_default = is_default
         sound.display_order = display_order
         sound.created_at = datetime.utcnow()
@@ -365,4 +367,33 @@ class TestDeleteAmbientSoundService:
         delete_ambient_sound_service(token="admin_token", ambient_sound_id=existing.id)
 
         mock_delete_repo.assert_called_once_with(mock_db, existing)
+        # No cover on this row, so only the audio object goes.
         mock_delete_file.assert_called_once_with(s3_key)
+
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.delete_file')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.SessionLocal')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.get_ambient_sound_by_id')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.delete_ambient_sound')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    def test_delete_also_removes_the_cover(
+        self, mock_require_super_admin, mock_validate_author, mock_delete_repo, mock_get,
+        mock_session, mock_delete_file
+    ):
+        """The cover belongs to the sound, so it goes with it."""
+        mock_validate_author.return_value = TestDataFactory.create_mock_author()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        s3_key = "audio/ambient_sounds/rain.mp3"
+        image_s3_key = "images/ambient_sounds/rain.webp"
+        existing = TestDataFactory.create_mock_ambient_sound(
+            s3_key=s3_key, image_s3_key=image_s3_key
+        )
+        mock_get.return_value = existing
+
+        delete_ambient_sound_service(token="admin_token", ambient_sound_id=existing.id)
+
+        assert mock_delete_file.call_count == 2
+        deleted = {call.args[0] for call in mock_delete_file.call_args_list}
+        assert deleted == {s3_key, image_s3_key}

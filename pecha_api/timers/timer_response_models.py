@@ -3,27 +3,6 @@ from typing import Optional, List
 from datetime import datetime
 from uuid import UUID
 from .timer_enums import TimerType
-from .timer_audio_enums import TimerAudioType
-
-
-class TimerAudioDTO(BaseModel):
-    """A named audio with its optional cover image, both as presigned URLs."""
-    id: UUID
-    # NULL for presets, which belong to the catalogue rather than a person.
-    user_id: Optional[UUID] = None
-    type: TimerAudioType
-    name: str
-    audio_url: Optional[str] = None
-    image_url: Optional[str] = None
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-
-
-class TimerAudiosResponse(BaseModel):
-    audios: List[TimerAudioDTO]
-    total: int
-    skip: int
-    limit: int
 
 
 class TimerDTO(BaseModel):
@@ -34,9 +13,7 @@ class TimerDTO(BaseModel):
     name: str
     description: Optional[str] = None
     duration: int
-    timer_audio_id: Optional[UUID] = None
-    # Inlined so listing timers does not need a second call per timer.
-    audio: Optional[TimerAudioDTO] = None
+    # The background sound, chosen from the ambient sound catalogue.
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: bool
     bell_at_end: bool
@@ -57,7 +34,6 @@ class CreateTimerRequest(BaseModel):
     name: str
     description: Optional[str] = None
     duration: int
-    timer_audio_id: Optional[UUID] = None
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: bool = True
     bell_at_end: bool = True
@@ -68,7 +44,6 @@ class UpdateTimerRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     duration: Optional[int] = None
-    timer_audio_id: Optional[UUID] = None
     ambient_sound_id: Optional[UUID] = None
     bell_at_start: Optional[bool] = None
     bell_at_end: Optional[bool] = None

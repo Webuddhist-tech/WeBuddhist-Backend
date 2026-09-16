@@ -33,8 +33,6 @@ from .timer_response_models import (
     TimerHistoryDTO,
     TimerSessionDTO
 )
-from .timer_audio_repository import get_visible_timer_audio_by_id
-from .timer_audio_service import convert_timer_audio_to_dto
 from .timer_model import Timer
 from .timer_history_model import TimerHistory
 from .timer_enums import TimerType
@@ -48,7 +46,6 @@ from .response_message import (
     ONLY_USER_TIMERS_CAN_BE_UPDATED,
     ONLY_USER_TIMERS_CAN_BE_DELETED,
     AMBIENT_SOUND_NOT_FOUND,
-    TIMER_AUDIO_NOT_FOUND,
     PARENT_PRESET_NOT_FOUND,
     TIMER_NOT_DELETED,
     TIMER_RESTORE_WINDOW_EXPIRED
@@ -69,8 +66,6 @@ def convert_timer_to_dto(timer: Timer) -> TimerDTO:
         name=timer.name,
         description=timer.description,
         duration=timer.duration,
-        timer_audio_id=timer.timer_audio_id,
-        audio=convert_timer_audio_to_dto(timer.timer_audio),
         ambient_sound_id=timer.ambient_sound_id,
         bell_at_start=timer.bell_at_start,
         bell_at_end=timer.bell_at_end,
@@ -97,18 +92,6 @@ def _validate_ambient_sound(db, ambient_sound_id: Optional[UUID]) -> None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": NOT_FOUND, "message": AMBIENT_SOUND_NOT_FOUND}
-        )
-
-
-def _validate_timer_audio(db, timer_audio_id: Optional[UUID], user_id: UUID) -> None:
-    """A user may attach a preset or one of their own uploads. Someone else's
-    upload reads as missing, so ids cannot be probed by guessing."""
-    if timer_audio_id is None:
-        return
-    if not get_visible_timer_audio_by_id(db, timer_audio_id, user_id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": NOT_FOUND, "message": TIMER_AUDIO_NOT_FOUND}
         )
 
 
@@ -161,7 +144,6 @@ def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
 
     with SessionLocal() as db:
         _validate_ambient_sound(db, request.ambient_sound_id)
-        _validate_timer_audio(db, request.timer_audio_id, current_user.id)
         _validate_parent_preset(db, request.parent_preset_id)
 
         new_timer = Timer(
@@ -172,7 +154,6 @@ def create_timer_service(token: str, request: CreateTimerRequest) -> TimerDTO:
             name=request.name,
             description=request.description,
             duration=request.duration,
-            timer_audio_id=request.timer_audio_id,
             ambient_sound_id=request.ambient_sound_id,
             bell_at_start=request.bell_at_start,
             bell_at_end=request.bell_at_end,
@@ -208,11 +189,8 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             )
 
         ambient_sound_id_provided = "ambient_sound_id" in request.model_fields_set
-        timer_audio_id_provided = "timer_audio_id" in request.model_fields_set
         if ambient_sound_id_provided and request.ambient_sound_id is not None:
             _validate_ambient_sound(db, request.ambient_sound_id)
-        if timer_audio_id_provided and request.timer_audio_id is not None:
-            _validate_timer_audio(db, request.timer_audio_id, current_user.id)
 
         if request.name is not None:
             timer.name = request.name
@@ -220,10 +198,8 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
             timer.description = request.description
         if request.duration is not None:
             timer.duration = request.duration
-        # Distinguish "omitted" from an explicit null, so the audio can be
+        # Distinguish "omitted" from an explicit null, so the sound can be
         # detached from a timer as well as swapped.
-        if timer_audio_id_provided:
-            timer.timer_audio_id = request.timer_audio_id
         if ambient_sound_id_provided:
             timer.ambient_sound_id = request.ambient_sound_id
         if request.bell_at_start is not None:
