@@ -156,6 +156,54 @@ On `PUT`, `ambient_sound_id` is only touched when the key is actually present in
 the body — omitting it keeps the current sound, whereas sending an explicit
 `null` detaches it. An id that is not in the catalogue is `404`.
 
+### Where the choice lives, and how long it lasts
+
+The choice is stored on the **timer row** (`timers.ambient_sound_id`), and that
+row belongs to one person (`timers.user_id`). So a user's pick persists
+indefinitely — across sessions and devices — and is theirs alone: editing a
+timer you do not own is `403`, not a silent no-op.
+
+Two things follow, and clients regularly get them wrong:
+
+**It is per timer, not per user.** A user with three timers has three
+independent choices. Changing one does not touch the others, and there is no
+user-level "my ambient sound" setting to fall back on — nothing in the schema
+stores a preference outside a timer. A client that wants one sound everywhere
+has to write it to each timer.
+
+**Only your own user-created timers can be changed.** Curated preset timers
+(`type: preset`) are read-only to everybody: a `PUT` against one is
+`403 Only user-created timers can be updated`, even for the caller who is
+looking at it. To customize a preset, create your own timer from it and set
+`parent_preset_id` — the copy is yours, and its sound is yours to change.
+
+**`is_default` is not the user's default.** It marks the catalogue entry Studio
+wants preselected for everyone, and at most one entry carries it. It is a
+starting point for a client building a picker, not a per-user setting, and a
+user changing their timer's sound never changes it.
+
+#### Two users, two picks
+
+```
+Ani:  POST /timers/user {"name":"Quick sit","duration":5000,"ambient_sound_id":"green-…"}
+      → t1  user_id=Ani   ambient_sound_id=green-…
+
+Dawa: POST /timers/user {"name":"Quick sit","duration":5000,"ambient_sound_id":"rain-…"}
+      → t2  user_id=Dawa  ambient_sound_id=rain-…
+```
+
+Dawa switching to Sea waves is `PUT /timers/user/t2` and rewrites one column on
+one row; `t1` is a different row and is untouched. A `PUT` Dawa aims at `t1` is
+`403` before anything is assigned, and `GET /timers/user` is filtered by
+`user_id`, so Dawa never sees `t1` at all. The same is true of the cover: each
+picks an entry, and each entry brings its own `image_url`.
+
+**The one thing that is shared** is the catalogue entry itself. Two users who
+both pick "Green" hear the same audio and see the same cover, and a super admin
+editing that entry in Studio changes it for both of them at once. Users own
+*which entry they point at*, not the entry's contents — that is the trade for
+having one curated catalogue instead of per-user uploads.
+
 ### The bells are not this sound
 
 `bell_at_start` and `bell_at_end` are independent booleans on the timer. They do
@@ -173,8 +221,17 @@ or play a background sound with both bells off.
 | 400 | `Invalid audio file format` | Extension outside `.mp3 .m4a .wav .aac .ogg` |
 | 400 | image error | The cover is not an image, or could not be processed |
 | 403 | forbidden | Non-super-admin calling a `/cms` endpoint |
-| 404 | `Ambient sound not found` | No such catalogue entry |
+| 404 | `Ambient sound not found` | No such catalogue entry, on the CMS routes or when attaching one to a timer |
 | 413 | `Audio file is too large` | Over `MAX_AUDIO_FILE_SIZE` (default 50 MB) |
 | 413 | image size error | Cover over `MAX_FILE_SIZE_MB` (default 1 MB) |
 
 Error bodies from this module are shaped `{"detail": {"error": …, "message": …}}`.
+
+Attaching a sound goes through the timers API, so it can also fail with that
+module's errors:
+
+| Status | Message | Meaning |
+|--------|---------|---------|
+| 403 | `You don't have permission to update this timer` | The timer belongs to someone else |
+| 403 | `Only user-created timers can be updated` | The timer is a curated preset; copy it first |
+| 404 | `Timer not found` | No such timer |

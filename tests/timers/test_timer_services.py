@@ -555,7 +555,104 @@ class TestUpdateTimerService:
             update_timer_service(token=token, timer_id=timer_id, request=request)
         
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
-    
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_update_timer_service_sets_the_background_sound(
+        self, mock_validate, mock_get, mock_get_sound, mock_update, mock_session
+    ):
+        """Picking a catalogue entry stores it on the caller's own timer."""
+        user_id = uuid4()
+        old_sound_id = uuid4()
+        new_sound_id = uuid4()
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get_sound.return_value = MagicMock(id=new_sound_id)
+
+        my_timer = TestDataFactory.create_mock_timer(
+            user_id=user_id,
+            ambient_sound_id=old_sound_id,
+            timer_type=TimerType.USER
+        )
+        mock_get.return_value = my_timer
+        mock_update.return_value = my_timer
+
+        request = TestDataFactory.create_update_request(ambient_sound_id=new_sound_id)
+        update_timer_service(token="valid_token", timer_id=my_timer.id, request=request)
+
+        # The id is checked against the catalogue before it is stored.
+        mock_get_sound.assert_called_once_with(mock_db, new_sound_id)
+        assert my_timer.ambient_sound_id == new_sound_id
+        mock_update.assert_called_once_with(mock_db, my_timer)
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_update_timer_service_cannot_change_another_users_sound(
+        self, mock_validate, mock_get, mock_update, mock_session
+    ):
+        """One person's background sound is not another's to change: the
+        ownership check fires before the assignment, so their pick stands."""
+        user_id = uuid4()
+        other_user_id = uuid4()
+        their_sound_id = uuid4()
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        their_timer = TestDataFactory.create_mock_timer(
+            user_id=other_user_id,
+            ambient_sound_id=their_sound_id,
+            timer_type=TimerType.USER
+        )
+        mock_get.return_value = their_timer
+
+        request = TestDataFactory.create_update_request(ambient_sound_id=uuid4())
+
+        with pytest.raises(HTTPException) as exc_info:
+            update_timer_service(
+                token="valid_token", timer_id=their_timer.id, request=request
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        assert their_timer.ambient_sound_id == their_sound_id
+        mock_update.assert_not_called()
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_update_timer_service_leaves_the_sound_alone_when_omitted(
+        self, mock_validate, mock_get, mock_update, mock_session
+    ):
+        """Editing the name must not clear the sound the user already chose."""
+        user_id = uuid4()
+        chosen_sound_id = uuid4()
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        my_timer = TestDataFactory.create_mock_timer(
+            user_id=user_id,
+            ambient_sound_id=chosen_sound_id,
+            timer_type=TimerType.USER
+        )
+        mock_get.return_value = my_timer
+        mock_update.return_value = my_timer
+
+        request = UpdateTimerRequest(name="Quick sit")
+        update_timer_service(token="valid_token", timer_id=my_timer.id, request=request)
+
+        assert my_timer.ambient_sound_id == chosen_sound_id
+
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.get_timer_by_id')
     @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
