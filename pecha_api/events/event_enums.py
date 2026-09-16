@@ -18,3 +18,8 @@ class EventLinkType(str, Enum):
     ZOOM = "zoom"
     VIDEO = "video"
     YOUTUBE = "youtube"
+
+
+class ParticipationType(str, Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"

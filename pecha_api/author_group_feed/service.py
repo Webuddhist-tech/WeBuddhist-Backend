@@ -9,6 +9,7 @@ from pecha_api.config import get
 from pecha_api.events.event_participant_repository import (
     get_event_participant_counts,
     get_joined_event_ids_by_user,
+    get_participation_types_by_user,
 )
 from pecha_api.events.event_repository import get_events, get_recurring_events
 from pecha_api.events.event_service import _event_to_dto
@@ -185,6 +186,7 @@ def _get_author_group_feed(
     event_ids = [event.id for event in events] + [item['event'].id for item in expanded_recurring]
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     joined_event_ids: Set[UUID] = set()
+    participation_types: Dict[UUID, str] = {}
     if current_user:
         joined_event_ids = set(
             get_joined_event_ids_by_user(
@@ -193,6 +195,12 @@ def _get_author_group_feed(
                 event_ids=event_ids,
             )
         )
+        if joined_event_ids:
+            participation_types = get_participation_types_by_user(
+                db=db,
+                user_id=current_user.id,
+                event_ids=list(joined_event_ids),
+            )
 
     page_group_ids = list({
         *[post.group_id for post in posts],
@@ -242,6 +250,7 @@ def _get_author_group_feed(
                         language=language,
                         participant_count=counts_by_event.get(event.id, 0),
                         is_joined=event.id in joined_event_ids,
+                        my_participation_type=participation_types.get(event.id),
                     ),
                 ),
             )
@@ -287,6 +296,7 @@ def _get_author_group_feed(
                         language=language,
                         participant_count=counts_by_event.get(event.id, 0),
                         is_joined=event.id in joined_event_ids,
+                        my_participation_type=participation_types.get(event.id),
                         occurrence_date=item['start_date'],
                     ),
                 ),

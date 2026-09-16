@@ -82,6 +82,8 @@ from .event_participant_repository import (
     get_event_participant_count,
     get_event_participant_counts,
     get_joined_event_ids_by_user,
+    get_participation_types_by_user,
+    get_user_participation_type,
     is_user_joined_event,
 )
 from .location_repository import get_location_without_group_filter
@@ -423,6 +425,7 @@ def _event_to_dto(
     fallback: bool = False,
     participant_count: int = 0,
     is_joined: Optional[bool] = None,
+    my_participation_type: Optional[str] = None,
     group_name: Optional[str] = None,
     group_avatar_url: Optional[str] = None,
     occurrence_date: Optional[datetime] = None,
@@ -488,6 +491,7 @@ def _event_to_dto(
         group_avatar_url=group_avatar_url,
         participant_count=participant_count,
         is_joined=is_joined,
+        my_participation_type=my_participation_type,
         created_at=event.created_at,
         created_by=event.created_by,
         updated_at=event.updated_at,
@@ -665,6 +669,7 @@ def get_events_service(
         group_cards = _group_card_map(db, group_ids)
 
         joined_ids: set[UUID] = set()
+        participation_types: dict[UUID, str] = {}
         if current_user:
             joined_ids = set(
                 get_joined_event_ids_by_user(
@@ -673,6 +678,12 @@ def get_events_service(
                     event_ids=event_ids,
                 )
             )
+            if joined_ids:
+                participation_types = get_participation_types_by_user(
+                    db=db,
+                    user_id=current_user.id,
+                    event_ids=list(joined_ids),
+                )
 
         # Build DTOs with occurrence-specific dates
         event_dtos = []
@@ -685,6 +696,7 @@ def get_events_service(
                     fallback=fallback,
                     participant_count=counts_by_event.get(event.id, 0),
                     is_joined=(event.id in joined_ids) if current_user else None,
+                    my_participation_type=participation_types.get(event.id),
                     group_name=group_cards.get(event.group_id, (None, None))[0],
                     group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
                     occurrence_date=item['occurrence_date'],
@@ -808,11 +820,16 @@ def get_event_by_id_service(
             )
         participant_count = get_event_participant_count(db=db, event_id=event_id)
         is_joined = None
+        my_participation_type = None
         if token:
             current_user = validate_and_extract_user_details(token=token)
             is_joined = is_user_joined_event(
                 db=db, event_id=event_id, user_id=current_user.id
             )
+            if is_joined:
+                my_participation_type = get_user_participation_type(
+                    db=db, event_id=event_id, user_id=current_user.id
+                )
         group_name, group_avatar_url = _group_card_map(db, [event.group_id]).get(
             event.group_id, (None, None)
         )
@@ -823,6 +840,7 @@ def get_event_by_id_service(
             fallback=True,
             participant_count=participant_count,
             is_joined=is_joined,
+            my_participation_type=my_participation_type,
             group_name=group_name,
             group_avatar_url=group_avatar_url,
             occurrence_date=occurrence_date,
@@ -1236,6 +1254,7 @@ def get_featured_events_service(
         group_cards = _group_card_map(db, [item['event'].group_id for item in paginated_items])
 
         joined_ids: set[UUID] = set()
+        participation_types: dict[UUID, str] = {}
         if token:
             current_user = validate_and_extract_user_details(token=token)
             joined_ids = set(
@@ -1245,6 +1264,12 @@ def get_featured_events_service(
                     event_ids=event_ids,
                 )
             )
+            if joined_ids:
+                participation_types = get_participation_types_by_user(
+                    db=db,
+                    user_id=current_user.id,
+                    event_ids=list(joined_ids),
+                )
 
         result = []
         for item in paginated_items:
@@ -1256,6 +1281,7 @@ def get_featured_events_service(
                     fallback=True,
                     participant_count=counts_by_event.get(event.id, 0),
                     is_joined=(event.id in joined_ids) if token else None,
+                    my_participation_type=participation_types.get(event.id),
                     group_name=group_cards.get(event.group_id, (None, None))[0],
                     group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
                     occurrence_date=item['occurrence_date'],

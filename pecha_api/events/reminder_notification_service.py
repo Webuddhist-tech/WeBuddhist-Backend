@@ -147,7 +147,7 @@ def get_event_reminder_targets(
             limit=limit,
             notification_type=NotificationType.EVENT_REMINDER,
         )
-        recipient_ids = [user.id for user, _ in participant_rows]
+        recipient_ids = [row[0].id for row in participant_rows]
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)
         recipients: list[EventNotificationRecipientDTO] = []
