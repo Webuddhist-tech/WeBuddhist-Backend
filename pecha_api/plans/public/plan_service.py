@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 import asyncio
 import logging
 from uuid import UUID
@@ -445,17 +445,47 @@ from pecha_api.plans.audio.dto_helpers import (
 )
 
 
-async def build_task_dto(task, language=None) -> TaskDTO:
+def resolve_day_references(db, tasks, language=None) -> Dict[UUID, Any]:
+    """Hydrate every reference subtask across a day's tasks, keyed by subtask id.
+
+    Callers run this in the threaded query phase, while the session is still
+    open. build_task_dto() would otherwise reach for the resolver from the event
+    loop, where it opens a session of its own and runs SQLAlchemy queries --
+    blocking every unrelated request on the worker for the duration. Batching
+    the whole day here also collapses one resolver call per task into a single
+    pass: still one query per referenced content type, now for the day rather
+    than for each task.
+
+    Subtasks that are not references, and references whose target has been
+    deleted, are simply absent from the map; both read back as None.
+    """
     from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 
+    subtasks = [subtask for task in tasks for subtask in task.sub_tasks]
+    if not subtasks:
+        return {}
+
+    resolved = resolve_subtask_references(subtasks=subtasks, db=db, language=language)
+    return {
+        subtask.id: reference
+        for subtask, reference in zip(subtasks, resolved)
+        if reference is not None
+    }
+
+
+async def build_task_dto(task, language=None, references=None) -> TaskDTO:
     ordered_subtasks = sorted(task.sub_tasks, key=lambda st: st.display_order)
     resolved_contents = await resolve_subtasks_content(ordered_subtasks)
-    resolved_references = resolve_subtask_references(
-        subtasks=ordered_subtasks, language=language
-    )
+    if references is None:
+        # No caller-supplied map, so resolve this task's own references -- but
+        # in a worker thread, never inline on the loop.
+        references = await run_in_threadpool(
+            resolve_day_references, None, [task], language
+        )
 
     subtasks = []
-    for subtask, resolved_content, reference in zip(ordered_subtasks, resolved_contents, resolved_references):
+    for subtask, resolved_content in zip(ordered_subtasks, resolved_contents):
+        reference = references.get(subtask.id)
         start_ms, end_ms = build_subtask_timestamp_fields(subtask)
         audio_url = (
             generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=subtask.audio_url)
@@ -490,14 +520,18 @@ async def build_task_dto(task, language=None) -> TaskDTO:
     )
 
 
-async def _build_plan_day_dto(plan_item, language=None) -> PlanDayDTO:
+async def _build_plan_day_dto(plan_item, language=None, references=None) -> PlanDayDTO:
     audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
     thumbnail_url, _, shareable_image_url, _ = build_plan_day_shareable_image_fields(
         getattr(plan_item, "shareable_images", None)
     )
+    if references is None:
+        references = await run_in_threadpool(
+            resolve_day_references, None, plan_item.tasks, language
+        )
     tasks = await asyncio.gather(
         *[
-            build_task_dto(task, language=language)
+            build_task_dto(task, language=language, references=references)
             for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
         ]
     )
@@ -537,14 +571,17 @@ async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
             cached.series_id = await run_in_threadpool(_get_plan_series_id, plan_id)
         return cached
 
-    # Every query runs in one worker thread; the DTO builder then does its Mongo
-    # lookups on the loop, after the session is closed. Safe because the
-    # repository eager-loads tasks, sub-tasks and timestamps.
-    plan_item, plan_language, series_id = await run_in_threadpool(
+    # Every query runs in one worker thread, subtask references included; the
+    # DTO builder then does its Mongo lookups on the loop, after the session is
+    # closed. Safe because the repository eager-loads tasks, sub-tasks and
+    # timestamps.
+    plan_item, plan_language, series_id, references = await run_in_threadpool(
         _load_plan_day, plan_id, day_number
     )
 
-    response = await _build_plan_day_dto(plan_item, language=plan_language)
+    response = await _build_plan_day_dto(
+        plan_item, language=plan_language, references=references
+    )
     response.series_id = series_id
 
     await set_plan_day_detail_cache(plan_id=plan_id, day_number=day_number, data=response)
@@ -558,7 +595,10 @@ def _load_plan_day(plan_id: UUID, day_number: int):
         )
         plan_language = db.query(Plan.language).filter(Plan.id == plan_id).scalar()
         series_id = db.query(Plan.series_id).filter(Plan.id == plan_id).scalar()
-        return plan_item, plan_language, series_id
+        references = resolve_day_references(
+            db, plan_item.tasks if plan_item else [], plan_language
+        )
+        return plan_item, plan_language, series_id, references
 
 
 def _filter_series_metadata_by_language(metadata_entries, language: Optional[str]):
@@ -657,10 +697,10 @@ async def get_plan_daily_content(
     requested_date: Optional[DateType] = None,
     language: Optional[str] = None,
 ) -> DailyPlanResponse:
-    # Phase 1: every query off the loop. Phase 2 resolves task content from
-    # Mongo once the session is closed — safe because the day's tasks and
-    # sub-tasks are eager-loaded.
-    response, plan_item, plan_language = await run_in_threadpool(
+    # Phase 1: every query off the loop, subtask references included. Phase 2
+    # resolves task content from Mongo once the session is closed — safe
+    # because the day's tasks and sub-tasks are eager-loaded.
+    response, plan_item, plan_language, references = await run_in_threadpool(
         _load_plan_daily_content,
         plan_id=plan_id,
         requested_date=requested_date,
@@ -669,7 +709,7 @@ async def get_plan_daily_content(
 
     response.tasks = await asyncio.gather(
         *[
-            build_task_dto(task, language=plan_language)
+            build_task_dto(task, language=plan_language, references=references)
             for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
         ]
     )
@@ -831,8 +871,12 @@ def _load_plan_daily_content(
             audio_duration_ms=audio_duration_ms,
             tasks=[],
         )
-        # Tasks are filled in by the caller, off the session.
-        return response, plan_item, plan.language
+        # Tasks are filled in by the caller, off the session -- so their
+        # references are resolved here, while the session is still open.
+        references = resolve_day_references(
+            db, plan_item.tasks if plan_item else [], plan.language
+        )
+        return response, plan_item, plan.language, references
 
 
 def get_tags(language: str = "en") -> TagsResponse:
