@@ -46,7 +46,9 @@ def test_join_event_returns_204():
 
     assert response.status_code == status.HTTP_204_NO_CONTENT
     assert response.content == b""
-    mock_service.assert_called_once_with(token="test-token", event_id=event_id)
+    mock_service.assert_called_once_with(
+        token="test-token", event_id=event_id, participation_type=None
+    )
 
 
 def test_join_event_requires_token():
