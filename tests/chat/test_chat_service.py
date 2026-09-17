@@ -335,7 +335,7 @@ class TestLeaveGroupChatRoom:
         leave_group_chat_room(db=db, group_id=uuid4(), user_id=user_id)
 
         mock_get_active_member.assert_called_once_with(db=db, room_id=room.id, user_id=user_id)
-        mock_leave_member.assert_called_once_with(db=db, member=member)
+        mock_leave_member.assert_called_once_with(db=db, member=member, commit=True)
 
     @patch('pecha_api.chat.service.leave_member')
     @patch('pecha_api.chat.service.get_active_member')

@@ -1109,6 +1109,7 @@ class TestJoinGroupAccumulatorService:
     @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulator_by_id')
     @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_by_id')
     @patch('pecha_api.group_accumulator.group_accumulator_service._assert_group_allows_join')
+    @patch('pecha_api.group_accumulator.group_accumulator_service.assert_user_not_banned_from_group')
     @patch('pecha_api.group_accumulator.group_accumulator_service.upsert_group_join')
     @patch('pecha_api.group_accumulator.group_accumulator_service.upsert_group_accumulator_join')
     @patch('pecha_api.group_accumulator.group_accumulator_service.get_or_create_active_user_group_accumulator')
@@ -1117,6 +1118,7 @@ class TestJoinGroupAccumulatorService:
         mock_create_session,
         mock_accumulator_join,
         mock_group_join,
+        mock_assert_not_banned,
         mock_assert_join,
         mock_get_group,
         mock_get_acc,

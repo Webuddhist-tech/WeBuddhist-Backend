@@ -24,6 +24,11 @@ from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 from pecha_api.group_accumulator.group_accumulator_response_models import GroupAccumulatorDTO
 from pecha_api.group_recitation_collection.response_models import GroupRecitationCollectionDTO
 
+# Removing a joined user from a group blocks them from rejoining. The moderator
+# may pick a different length, but this is what Studio sends when they don't.
+DEFAULT_GROUP_BAN_DURATION_DAYS = 7
+MAX_GROUP_BAN_DURATION_DAYS = 365
+
 
 class GroupSeriesListItemDTO(SeriesListItemDTO):
     is_group_enrolled: Optional[bool] = None
@@ -381,3 +386,71 @@ class GroupPermissionDTO(BaseModel):
     role: Optional[AuthorGroupMemberRole] = None
     is_super_admin: bool
     author_id: Optional[UUID] = None
+
+
+class GroupJoinedUserDTO(BaseModel):
+    """A community user who joined the group, as listed in Studio.
+
+    Unlike the public `AuthorGroupMemberProfileDTO` this carries `user_id`,
+    because Studio needs it to act on the user (remove/ban).
+    """
+
+    user_id: UUID
+    username: Optional[str] = None
+    fullname: str
+    avatar_url: Optional[str] = None
+    joined_at: Optional[datetime] = None
+
+
+class GroupJoinedUsersListResponse(BaseModel):
+    users: List[GroupJoinedUserDTO]
+    skip: int
+    limit: int
+    total: int
+
+
+class RemoveGroupUserRequest(BaseModel):
+    """Remove a joined user and block them from rejoining for a while."""
+
+    ban_duration_days: int = Field(
+        default=DEFAULT_GROUP_BAN_DURATION_DAYS,
+        ge=1,
+        le=MAX_GROUP_BAN_DURATION_DAYS,
+        description=(
+            "How many days the user is blocked from rejoining. "
+            f"Defaults to {DEFAULT_GROUP_BAN_DURATION_DAYS}."
+        ),
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional note shown to other moderators in the banned list.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class GroupBanDTO(BaseModel):
+    id: UUID
+    user_id: UUID
+    username: Optional[str] = None
+    fullname: str
+    avatar_url: Optional[str] = None
+    reason: Optional[str] = None
+    expires_at: datetime
+    lifted_at: Optional[datetime] = None
+    created_at: datetime
+    is_active: bool
+
+
+class GroupBanListResponse(BaseModel):
+    bans: List[GroupBanDTO]
+    skip: int
+    limit: int
+    total: int

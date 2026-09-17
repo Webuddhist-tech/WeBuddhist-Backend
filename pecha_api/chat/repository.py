@@ -159,9 +159,12 @@ def count_active_members(db: Session, room_id: UUID) -> int:
     )
 
 
-def leave_member(db: Session, member: ChatRoomMember) -> None:
+def leave_member(db: Session, member: ChatRoomMember, *, commit: bool = True) -> None:
+    """Mark a member as having left. Pass commit=False to keep an enclosing
+    transaction open, so the caller can land this with its own changes."""
     member.left_at = datetime.now(timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def mark_read(db: Session, member: ChatRoomMember) -> None:
