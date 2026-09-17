@@ -679,6 +679,28 @@ async def test_create_verse_of_day_missing_required_fields():
 
 
 @pytest.mark.asyncio
+async def test_create_verse_of_day_source_exceeds_max_length():
+    """Test creation rejects source values longer than the 255-character column."""
+    mock_author = MagicMock()
+    mock_author.email = "test@example.com"
+
+    with patch("pecha_api.verse_of_day.verse_of_day_views.validate_cms_author_details", return_value=mock_author):
+        request_data = {
+            "verses": {"en": "May all beings be happy."},
+            "source": "a" * 256,
+            "date": "2025-06-06"
+        }
+
+        response = client.post(
+            "/cms/verse-of-day",
+            json=request_data,
+            headers={"Authorization": "Bearer valid-token"}
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.asyncio
 async def test_create_verse_of_day_invalid_token():
     """Test creation with invalid authentication token."""
     with patch("pecha_api.verse_of_day.verse_of_day_views.validate_cms_author_details", side_effect=HTTPException(status_code=401, detail="Invalid token")) as mock_validate:
@@ -1144,6 +1166,23 @@ async def test_cms_update_verse_of_day_partial(sample_verse_dto):
         assert response.status_code == status.HTTP_200_OK
         mock_validate.assert_called_once_with("valid-token")
         mock_update.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cms_update_verse_of_day_source_exceeds_max_length():
+    """Test update rejects source values longer than the 255-character column."""
+    mock_author = MagicMock()
+    mock_author.email = "test@example.com"
+    verse_id = uuid4()
+
+    with patch("pecha_api.verse_of_day.verse_of_day_views.validate_cms_author_details", return_value=mock_author):
+        response = client.put(
+            f"/cms/verse-of-day/{verse_id}",
+            json={"source": "a" * 256},
+            headers={"Authorization": "Bearer valid-token"}
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
 @pytest.mark.asyncio

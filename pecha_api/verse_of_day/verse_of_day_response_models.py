@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from uuid import UUID
 import datetime
@@ -80,7 +80,7 @@ class CreateVerseOfDayRequest(BaseModel):
     image_urls: Optional[List[str]] = None
     verse_id: Optional[str] = None
     ref_id: Optional[str] = None
-    source: Optional[str] = None
+    source: Optional[str] = Field(default=None, max_length=255)
     ref_type: Optional[str] = None
     group_id: Optional[UUID] = None
     date: datetime.date
@@ -91,7 +91,7 @@ class UpdateVerseOfDayRequest(BaseModel):
     image_urls: Optional[List[str]] = None
     verse_id: Optional[str] = None
     ref_id: Optional[str] = None
-    source: Optional[str] = None
+    source: Optional[str] = Field(default=None, max_length=255)
     ref_type: Optional[str] = None
     group_id: Optional[UUID] = None
     date: Optional[datetime.date] = None
