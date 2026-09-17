@@ -570,37 +570,70 @@ def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
+_CMS_RECURRENCE_LOOKBACK_DAYS = 365 * 5
+
+
+def _occurrence_item(
+    template: Event, start_d: date, end_d: date
+) -> Dict:
+    occurrence_start, occurrence_end = combine_occurrence_window(
+        start_d, end_d, template.start_date, template.end_date
+    )
+    return {
+        "event": template,
+        "start_date": occurrence_start,
+        "end_date": occurrence_end,
+        "occurrence_date": occurrence_start,
+    }
+
+
 def _expand_earliest_occurrences(
     recurring_templates: Sequence[Event],
     from_date_obj: date,
     to_date_obj: date,
     not_ended_before: Optional[datetime] = None,
+    prefer_current_or_last: bool = False,
+    reference: Optional[datetime] = None,
 ) -> List[Dict]:
-    """Each template's earliest occurrence within the window, one row per
+    """Each template's display occurrence within the window, one row per
     template. Templates with no occurrence in the window are dropped.
 
     When not_ended_before is set (public listings), skip occurrences whose
     end datetime is already past that cutoff so a historical from_date cannot
     surface a finished occurrence as the earliest in the window.
+
+    When prefer_current_or_last is set (CMS with no from_date), keep upcoming
+    or in-progress dates on the card, and fall back to the most recent past
+    occurrence so finished series still appear in Studio.
     """
     expanded_occurrences = []
     for template in recurring_templates:
         occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
+        chosen = None
+        last_in_window = None
         for start_d, end_d in occurrences:
-            # Carry the template's own time-of-day onto the occurrence,
-            # instead of defaulting to midnight / end-of-day.
-            occurrence_start, occurrence_end = combine_occurrence_window(
-                start_d, end_d, template.start_date, template.end_date
-            )
-            if not_ended_before is not None and occurrence_end < not_ended_before:
+            item = _occurrence_item(template, start_d, end_d)
+            if not_ended_before is not None:
+                if item["end_date"] < not_ended_before:
+                    continue
+                chosen = item
+                break
+            if prefer_current_or_last:
+                last_in_window = item
+                if (
+                    reference is not None
+                    and chosen is None
+                    and item["end_date"] >= reference
+                ):
+                    chosen = item
                 continue
-            expanded_occurrences.append({
-                'event': template,
-                'start_date': occurrence_start,
-                'end_date': occurrence_end,
-                'occurrence_date': occurrence_start,
-            })
+            chosen = item
             break
+        if chosen is None:
+            chosen = last_in_window
+        if chosen is None:
+            continue
+        expanded_occurrences.append(chosen)
     return expanded_occurrences
 
 
@@ -643,8 +676,13 @@ def get_events_service(
         # Recurrence expansion still needs a start even when CMS has no from_date.
         # Public listings clamp to now so a historical from_date cannot expand
         # a finished occurrence as the earliest in the window.
+        # CMS with no from_date looks back so finished series still appear.
+        prefer_current_or_last = False
         expansion_from = from_date or now
-        if not_ended_before is not None and expansion_from < not_ended_before:
+        if should_include_past and from_date is None:
+            expansion_from = now - timedelta(days=_CMS_RECURRENCE_LOOKBACK_DAYS)
+            prefer_current_or_last = True
+        elif not_ended_before is not None and expansion_from < not_ended_before:
             expansion_from = not_ended_before
         from_date_obj = expansion_from.date() if isinstance(expansion_from, datetime) else expansion_from
         to_date_obj = to_date.date() if isinstance(to_date, datetime) else to_date
@@ -690,6 +728,8 @@ def get_events_service(
             from_date_obj,
             to_date_obj,
             not_ended_before=not_ended_before,
+            prefer_current_or_last=prefer_current_or_last,
+            reference=now if prefer_current_or_last else None,
         )
         
         # Merge one-shot events and expanded occurrences

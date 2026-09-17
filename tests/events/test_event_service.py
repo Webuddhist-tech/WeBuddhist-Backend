@@ -223,12 +223,66 @@ def test_get_events_service_includes_past_when_requested():
     ), patch(
         "pecha_api.events.event_service.get_event_participant_counts",
         return_value={},
-    ):
+    ), patch(
+        "pecha_api.events.event_service._expand_earliest_occurrences",
+        return_value=[],
+    ) as mock_expand:
         mock_session.return_value.__enter__.return_value = MagicMock()
         get_events_service(should_include_past=True)
 
     assert mock_get_events.call_args.kwargs["not_ended_before"] is None
     assert mock_get_events.call_args.kwargs["from_date"] is None
+    from_date_obj = mock_expand.call_args.args[1]
+    assert from_date_obj < datetime.now(timezone.utc).date()
+    assert mock_expand.call_args.kwargs["prefer_current_or_last"] is True
+
+
+def test_expand_earliest_occurrences_cms_prefers_upcoming_then_last_past():
+    template = MagicMock()
+    template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    finished = date(2026, 1, 1)
+    upcoming = date(2026, 1, 8)
+    reference = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+
+    with patch(
+        "pecha_api.events.event_service.expand_occurrences",
+        return_value=[(finished, finished), (upcoming, upcoming)],
+    ):
+        result = _expand_earliest_occurrences(
+            [template],
+            finished,
+            upcoming,
+            prefer_current_or_last=True,
+            reference=reference,
+        )
+
+    assert len(result) == 1
+    assert result[0]["start_date"].date() == upcoming
+
+
+def test_expand_earliest_occurrences_cms_keeps_last_past_when_none_upcoming():
+    template = MagicMock()
+    template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    older = date(2025, 12, 25)
+    finished = date(2026, 1, 1)
+    reference = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+
+    with patch(
+        "pecha_api.events.event_service.expand_occurrences",
+        return_value=[(older, older), (finished, finished)],
+    ):
+        result = _expand_earliest_occurrences(
+            [template],
+            older,
+            finished,
+            prefer_current_or_last=True,
+            reference=reference,
+        )
+
+    assert len(result) == 1
+    assert result[0]["start_date"].date() == finished
 
 
 def test_get_events_service_accepts_naive_from_date():
