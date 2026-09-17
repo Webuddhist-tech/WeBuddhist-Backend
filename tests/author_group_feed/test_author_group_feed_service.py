@@ -167,6 +167,7 @@ class TestGetAuthorGroupFeedService:
         _, event_kwargs = mock_get_events.call_args
         assert event_kwargs["restrict_group_ids"] == [joined_id]
         assert event_kwargs["should_sort_newest_first"] is True
+        assert event_kwargs["exclude_plan_linked"] is True
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
@@ -355,6 +356,8 @@ class TestGetAuthorGroupFeedService:
             soon_template.id,
             old_one_shot.id,
         ]
+        assert mock_get_events.call_args.kwargs["exclude_plan_linked"] is True
+        assert mock_get_recurring.call_args.kwargs["exclude_plan_linked"] is True
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")

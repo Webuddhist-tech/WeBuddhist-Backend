@@ -630,6 +630,8 @@ def get_filtered_series(
             published_only=True,
             group_ids=[group_id] if group_id is not None else None,
             language_fallback=True,
+            # Series holding a plan merged into an event are reached through the event.
+            exclude_event_linked=True,
         )
         rows = filter_items_for_timezone(
             rows,

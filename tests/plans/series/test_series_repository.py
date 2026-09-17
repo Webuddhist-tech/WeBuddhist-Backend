@@ -641,7 +641,7 @@ def test_get_random_featured_published_series_ignores_language_parameter():
     filtered = db.query.return_value.options.return_value.filter
     assert filtered.call_count == 1
     filter_args = filtered.call_args[0]
-    assert len(filter_args) == 3
+    assert len(filter_args) == 4
 
 
 def test_get_random_featured_published_series_without_language_uses_base_filters():
@@ -657,7 +657,7 @@ def test_get_random_featured_published_series_without_language_uses_base_filters
     filtered = db.query.return_value.options.return_value.filter
     assert filtered.call_count == 1
     filter_args = filtered.call_args[0]
-    assert len(filter_args) == 3
+    assert len(filter_args) == 4
     filtered = db.query.return_value.options.return_value.filter
     assert filtered.call_count == 1
 

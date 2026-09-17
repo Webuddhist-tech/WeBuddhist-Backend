@@ -103,6 +103,7 @@ def test_get_filtered_series_maps_rows_to_response():
     assert call_kwargs["order_by_field"] == Series.created_at
     assert call_kwargs["order_desc"] is True
     assert call_kwargs["status"] == PlanStatus.PUBLISHED
+    assert call_kwargs["exclude_event_linked"] is True
 
     assert isinstance(result, SeriesListResponse)
     assert result.skip == 2
