@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 from typing import List
 from typing import Set
@@ -935,7 +936,7 @@ def _resolve_series_partner_id(
     return series_partner.id
 
 
-def _assert_may_join_partner_group(db, group_id: UUID, user_id: UUID) -> None:
+def _assert_may_join_partner_group(db: Session, group_id: UUID, user_id: UUID) -> None:
     """Enrolling in a series joins its partner group, so the same ban applies.
 
     Picking a partner group here is an ordinary membership write, and it is the

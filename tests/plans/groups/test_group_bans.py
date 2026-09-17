@@ -85,14 +85,14 @@ def _make_ban(
 # --- the guard -------------------------------------------------------------
 
 
-def test_guard_allows_user_with_no_ban():
+def test_guard_allows_user_with_no_ban() -> None:
     with patch(GUARD, return_value=None):
         assert_user_not_banned_from_group(
             db=MagicMock(), group_id=uuid4(), user_id=uuid4()
         )
 
 
-def test_guard_blocks_banned_user_and_reports_expiry():
+def test_guard_blocks_banned_user_and_reports_expiry() -> None:
     group_id, user_id = uuid4(), uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     ban = _make_ban(group_id=group_id, user_id=user_id, expires_at=expires_at)
@@ -107,7 +107,7 @@ def test_guard_blocks_banned_user_and_reports_expiry():
     assert exc.value.detail["expires_at"] == expires_at.isoformat()
 
 
-def test_guard_treats_naive_expiry_as_utc():
+def test_guard_treats_naive_expiry_as_utc() -> None:
     """Postgres can hand back a naive datetime; it must not crash isoformat()."""
     naive = (datetime.now(timezone.utc) + timedelta(days=3)).replace(tzinfo=None)
     ban = _make_ban(group_id=uuid4(), user_id=uuid4(), expires_at=naive)
@@ -123,7 +123,7 @@ def test_guard_treats_naive_expiry_as_utc():
 # --- removal ---------------------------------------------------------------
 
 
-def test_remove_defaults_to_a_seven_day_ban():
+def test_remove_defaults_to_a_seven_day_ban() -> None:
     group = _make_group()
     author = _make_author()
     user_id = uuid4()
@@ -164,7 +164,7 @@ def test_remove_defaults_to_a_seven_day_ban():
     assert result.user_id == user_id
 
 
-def test_remove_honours_a_custom_duration_and_reason():
+def test_remove_honours_a_custom_duration_and_reason() -> None:
     group = _make_group()
     user_id = uuid4()
     ban = _make_ban(group_id=group.id, user_id=user_id)
@@ -203,7 +203,7 @@ def test_remove_honours_a_custom_duration_and_reason():
     assert mock_create.call_args.kwargs["reason"] == "spam"
 
 
-def test_remove_clears_accumulator_joins_and_chat():
+def test_remove_clears_accumulator_joins_and_chat() -> None:
     group = _make_group()
     user_id = uuid4()
 
@@ -240,7 +240,7 @@ def test_remove_clears_accumulator_joins_and_chat():
     mock_chat.assert_called_once()
 
 
-def test_remove_keeps_chat_room_when_user_still_follows_the_group():
+def test_remove_keeps_chat_room_when_user_still_follows_the_group() -> None:
     """Chat is granted to joiners AND followers, so a follower keeps the room."""
     group = _make_group()
     user_id = uuid4()
@@ -276,7 +276,7 @@ def test_remove_keeps_chat_room_when_user_still_follows_the_group():
     mock_chat.assert_not_called()
 
 
-def test_remove_rejects_a_user_who_never_joined():
+def test_remove_rejects_a_user_who_never_joined() -> None:
     group = _make_group()
     user_id = uuid4()
 
@@ -305,7 +305,7 @@ def test_remove_rejects_a_user_who_never_joined():
     mock_create.assert_not_called()
 
 
-def test_remove_rejects_an_unknown_group():
+def test_remove_rejects_an_unknown_group() -> None:
     with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
         f"{SERVICE}.validate_and_extract_author_details", return_value=_make_author()
     ), patch(f"{SERVICE}.get_group_by_id", return_value=None):
@@ -323,19 +323,19 @@ def test_remove_rejects_an_unknown_group():
 
 
 @pytest.mark.parametrize("days", [0, -1, MAX_GROUP_BAN_DURATION_DAYS + 1])
-def test_ban_duration_outside_the_allowed_range_is_rejected(days):
+def test_ban_duration_outside_the_allowed_range_is_rejected(days: int) -> None:
     with pytest.raises(ValueError):
         RemoveGroupUserRequest(ban_duration_days=days)
 
 
-def test_blank_reason_becomes_none():
+def test_blank_reason_becomes_none() -> None:
     assert RemoveGroupUserRequest(reason="   ").reason is None
 
 
 # --- listing and lifting ---------------------------------------------------
 
 
-def test_list_bans_marks_an_expired_row_inactive():
+def test_list_bans_marks_an_expired_row_inactive() -> None:
     group = _make_group()
     expired = _make_ban(
         group_id=group.id,
@@ -361,7 +361,7 @@ def test_list_bans_marks_an_expired_row_inactive():
     assert result.bans[0].is_active is False
 
 
-def test_list_bans_marks_a_lifted_row_inactive():
+def test_list_bans_marks_a_lifted_row_inactive() -> None:
     group = _make_group()
     lifted = _make_ban(
         group_id=group.id,
@@ -385,7 +385,7 @@ def test_list_bans_marks_a_lifted_row_inactive():
     assert result.bans[0].lifted_at is not None
 
 
-def test_lift_ban_stamps_the_row():
+def test_lift_ban_stamps_the_row() -> None:
     group = _make_group()
     author = _make_author()
     ban = _make_ban(group_id=group.id, user_id=uuid4())
@@ -409,7 +409,7 @@ def test_lift_ban_stamps_the_row():
     assert result.is_active is False
 
 
-def test_lift_ban_rejects_a_ban_from_another_group():
+def test_lift_ban_rejects_a_ban_from_another_group() -> None:
     group = _make_group()
     foreign = _make_ban(group_id=uuid4(), user_id=uuid4())
 
@@ -428,7 +428,7 @@ def test_lift_ban_rejects_a_ban_from_another_group():
     assert exc.value.detail == GROUP_BAN_NOT_FOUND
 
 
-def test_lift_ban_rejects_an_already_lifted_ban():
+def test_lift_ban_rejects_an_already_lifted_ban() -> None:
     group = _make_group()
     ban = _make_ban(
         group_id=group.id, user_id=uuid4(), lifted_at=datetime.now(timezone.utc)
@@ -451,7 +451,7 @@ def test_lift_ban_rejects_an_already_lifted_ban():
     mock_lift.assert_not_called()
 
 
-def test_lift_ban_rejects_an_expired_ban():
+def test_lift_ban_rejects_an_expired_ban() -> None:
     group = _make_group()
     ban = _make_ban(
         group_id=group.id,
@@ -476,7 +476,7 @@ def test_lift_ban_rejects_an_expired_ban():
     mock_lift.assert_not_called()
 
 
-def test_joined_users_list_carries_user_ids():
+def test_joined_users_list_carries_user_ids() -> None:
     group = _make_group()
     user = _make_user()
     joined_at = datetime.now(timezone.utc) - timedelta(days=2)
@@ -510,7 +510,7 @@ def test_joined_users_list_carries_user_ids():
 # is still there. Delete the guard and these fail, not just the integration.
 
 
-def test_join_group_consults_the_ban_guard():
+def test_join_group_consults_the_ban_guard() -> None:
     group = _make_group()
     user = _make_user()
 
@@ -534,7 +534,7 @@ def test_join_group_consults_the_ban_guard():
     assert mock_guard.call_args.kwargs["user_id"] == user.id
 
 
-def test_join_group_request_consults_the_ban_guard():
+def test_join_group_request_consults_the_ban_guard() -> None:
     from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
 
     group = _make_group()
@@ -578,7 +578,7 @@ def test_join_group_request_consults_the_ban_guard():
     assert mock_guard.call_args.kwargs["user_id"] == user.id
 
 
-def test_accumulator_join_consults_the_ban_guard():
+def test_accumulator_join_consults_the_ban_guard() -> None:
     """Joining an accumulator joins the parent group, so it must check too."""
     accumulator_service = "pecha_api.group_accumulator.group_accumulator_service"
     group = _make_group()
@@ -622,7 +622,7 @@ def test_accumulator_join_consults_the_ban_guard():
 # --- removal is one transaction, ordered against a concurrent join ---------
 
 
-def test_remove_lands_the_membership_the_chat_room_and_the_ban_in_one_commit():
+def test_remove_lands_the_membership_the_chat_room_and_the_ban_in_one_commit() -> None:
     """A failure part way through must not leave the user removed but unbanned:
     a retry would then 404 on "not joined", with the moderation left half done."""
     group = _make_group()
@@ -663,7 +663,7 @@ def test_remove_lands_the_membership_the_chat_room_and_the_ban_in_one_commit():
     mock_db.commit.assert_called_once_with()
 
 
-def test_remove_locks_the_group_before_it_reads_the_membership():
+def test_remove_locks_the_group_before_it_reads_the_membership() -> None:
     """The lock is what stops a join slipping between the delete and the ban."""
     group = _make_group()
     user_id = uuid4()
@@ -705,7 +705,7 @@ def test_remove_locks_the_group_before_it_reads_the_membership():
     assert calls == ["lock", "joined"]
 
 
-def test_join_group_takes_the_same_lock_before_reading_the_ban():
+def test_join_group_takes_the_same_lock_before_reading_the_ban() -> None:
     group = _make_group()
     user = _make_user()
     calls = []
@@ -747,7 +747,7 @@ def _make_pending_join_request(*, group_id: UUID, user_id: UUID) -> MagicMock:
     return join_request
 
 
-def test_approving_a_join_request_refuses_a_banned_applicant():
+def test_approving_a_join_request_refuses_a_banned_applicant() -> None:
     """A request can outlive the membership it was made for: a series enrolment
     can join the user while it is pending, and they can then be banned."""
     from pecha_api.plans.groups.groups_service import (
@@ -787,7 +787,7 @@ def test_approving_a_join_request_refuses_a_banned_applicant():
     mock_save.assert_not_called()
 
 
-def test_publishing_a_group_leaves_a_banned_applicant_pending():
+def test_publishing_a_group_leaves_a_banned_applicant_pending() -> None:
     """The publish sweep admits everyone waiting, so it has to skip bans too."""
     from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
     from pecha_api.plans.groups.groups_service import (
@@ -820,7 +820,7 @@ def test_publishing_a_group_leaves_a_banned_applicant_pending():
     assert banned.status == AuthorGroupJoinRequestStatus.PENDING.value
 
 
-def test_series_enrolment_into_a_partner_group_consults_the_ban_guard():
+def test_series_enrolment_into_a_partner_group_consults_the_ban_guard() -> None:
     """Enrolling in a series joins its partner group, banned user or not."""
     from types import SimpleNamespace
 
