@@ -13,6 +13,7 @@ from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id, \
     find_author_by_user_id
 from pecha_api.auth.auth_repository import validate_token
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details, validate_cms_author_details
 from pecha_api.plans.shared.permissions import (
     _STATUS_CHANGE_ROLES,
@@ -41,6 +42,7 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_models import (
     AuthorGroup,
+    AuthorGroupBan,
     AuthorGroupInvite,
     AuthorGroupJoinRequest,
     AuthorGroupMember,
@@ -60,9 +62,14 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
 )
 from pecha_api.chat.service import leave_group_chat_room
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.group_ban_guard import (
+    assert_user_not_banned_from_group,
+    get_group_ban_expiry,
+)
 from pecha_api.plans.groups.groups_repository import (
     add_group_member,
     create_group,
+    create_group_ban,
     create_group_invite,
     create_group_join_request,
     get_followers_count_map,
@@ -72,8 +79,10 @@ from pecha_api.plans.groups.groups_repository import (
     is_user_following_group,
     is_group_published,
     is_user_joined_group,
+    lock_group_membership_changes,
     lock_group_status,
     lock_group_visibility,
+    get_group_ban_by_id,
     get_group_by_id,
     get_group_by_slug,
     get_groups_by_ids,
@@ -94,8 +103,11 @@ from pecha_api.plans.groups.groups_repository import (
     has_pending_invite,
     has_pending_join_request,
     leave_group_membership,
+    lift_group_ban,
     list_invites_by_group,
+    list_group_bans_paginated,
     list_group_joiners_paginated,
+    list_group_joiners_with_join_date_paginated,
     list_group_member_ids_by_roles,
     list_join_requests_by_group,
     list_pending_invites_by_email,
@@ -147,9 +159,13 @@ from pecha_api.plans.groups.groups_response_models import (
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupBanDTO,
+    GroupBanListResponse,
     GroupInviteCreatedResponse,
     GroupInviteDTO,
     GroupInviteListResponse,
+    GroupJoinedUserDTO,
+    GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
     GroupJoinRequestUserDTO,
@@ -170,6 +186,7 @@ from pecha_api.plans.groups.groups_response_models import (
     UserFollowedAuthorGroupListResponse,
     UserJoinedAuthorGroupDTO,
     UserJoinedAuthorGroupListResponse,
+    RemoveGroupUserRequest,
     ReplaceGroupPlansRequest,
     ReplaceGroupSeriesRequest,
     ReplaceGroupSocialLinksRequest,
@@ -209,6 +226,11 @@ OWNER_ROLE_NOT_ASSIGNABLE = (
 GROUP_ALREADY_HAS_OWNER = "This group already has an owner"
 JOIN_REQUEST_NOT_FOUND = "Join request not found"
 GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
+GROUP_BAN_NOT_FOUND = "Ban not found"
+USER_NOT_JOINED_GROUP = "This user has not joined the group"
+USER_BANNED_FROM_GROUP = (
+    "This user is banned from the group; lift the ban before admitting them"
+)
 NOTIFICATION_CATEGORY_GROUP_INVITE = "group_invite"
 NOTIFICATION_CATEGORY_GROUP_JOIN_REQUEST = "group_join_request"
 _PRACTICES_FETCH_LIMIT = 1000
@@ -1590,6 +1612,11 @@ def join_group(token: str, group_id: UUID) -> None:
         if not group or not is_group_published(group):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
         _assert_group_allows_engagement(group=group, action="join")
+        # Locked before the ban is read: a removal that is mid-flight holds this
+        # lock until its ban has committed, so the check below cannot miss it
+        # and re-create the membership it just deleted.
+        lock_group_membership_changes(db=db, group_id=group_id)
+        assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user.id)
         if not group.is_public:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1763,9 +1790,12 @@ def submit_group_join_request(
         _assert_group_allows_engagement(group=group, action="join")
         # Lock the group so a concurrent publish cannot flip it public after we
         # read it, which would strand this request as PENDING on a public group.
+        # It is the same lock membership writes take, so reading the ban after
+        # it also orders this against a moderator removal still committing.
         is_public = lock_group_visibility(db=db, group_id=group_id)
         if is_public is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user.id)
         if is_public:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1853,10 +1883,24 @@ def approve_group_join_request(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
         _assert_can_manage_join_requests(db, group_id=group_id, author=author)
 
+        # Taken before the join request row lock, matching the order the publish
+        # sweep uses (group first, then its requests), so the two cannot
+        # deadlock. It also orders this against a moderator removal, so the ban
+        # read below cannot miss one that is still committing.
+        lock_group_membership_changes(db=db, group_id=group_id)
         join_request = _get_join_request_for_group_or_404(
             db, group_id=group_id, request_id=request_id, for_update=True
         )
         _assert_join_request_pending(join_request)
+        # A request can outlive the applicant's membership: a series enrolment
+        # can join them to a partner group while their request is still pending,
+        # and they can then be removed and banned. Approving would put a banned
+        # user back in, so the ban has to be lifted first.
+        if get_group_ban_expiry(db=db, group_id=group_id, user_id=join_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=USER_BANNED_FROM_GROUP,
+            )
 
         # One transaction: the row lock taken above must hold until both the
         # membership and the APPROVED status are committed together.
@@ -1929,6 +1973,11 @@ def _approve_pending_join_requests_on_publish(db, *, group_id: UUID) -> None:
         db=db, group_id=group_id, for_update=True
     )
     for join_request in pending:
+        # Same reasoning as moderator approval: a banned applicant is left
+        # PENDING rather than admitted, for a moderator to decide once the ban
+        # has lifted.
+        if get_group_ban_expiry(db=db, group_id=group_id, user_id=join_request.user_id):
+            continue
         # commit=False keeps the row locks held until every membership and
         # status change lands in the same transaction, as moderator approval does.
         upsert_group_join(
@@ -2677,3 +2726,181 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
             is_super_admin=author_is_super_admin,
             author_id=author.id,
         )
+
+
+def _ban_to_dto(ban: AuthorGroupBan) -> GroupBanDTO:
+    user = ban.user
+    expires_at = _as_aware_utc(ban.expires_at)
+    return GroupBanDTO(
+        id=ban.id,
+        user_id=ban.user_id,
+        username=user.username if user else None,
+        fullname=_user_fullname(user) if user else "",
+        avatar_url=_user_avatar_url(user) if user else None,
+        reason=ban.reason,
+        expires_at=expires_at,
+        lifted_at=_as_aware_utc(ban.lifted_at) if ban.lifted_at else None,
+        created_at=_as_aware_utc(ban.created_at),
+        is_active=ban.lifted_at is None and expires_at > datetime.now(timezone.utc),
+    )
+
+
+def _assert_can_moderate_group_users(db: Session, *, group_id: UUID, author: Author) -> None:
+    """Same bar as reviewing join requests: group OWNER/ADMIN, or a super admin."""
+    if is_super_admin(author):
+        return
+    member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
+    _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
+
+
+def list_cms_group_joined_users(
+    token: str,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+) -> GroupJoinedUsersListResponse:
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        if not is_reviewer(author):
+            _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+        rows, total = list_group_joiners_with_join_date_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+        )
+        return GroupJoinedUsersListResponse(
+            users=[
+                GroupJoinedUserDTO(
+                    user_id=user.id,
+                    username=user.username,
+                    fullname=_user_fullname(user),
+                    avatar_url=_user_avatar_url(user),
+                    joined_at=_as_aware_utc(joined_at) if joined_at else None,
+                )
+                for user, joined_at in rows
+            ],
+            skip=skip,
+            limit=limit,
+            total=total,
+        )
+
+
+def remove_and_ban_group_user(
+    token: str,
+    group_id: UUID,
+    user_id: UUID,
+    request: RemoveGroupUserRequest,
+) -> GroupBanDTO:
+    """Remove a joined user from a group and block them from rejoining.
+
+    Removal mirrors what `leave_group` does for a user leaving on their own --
+    accumulator joins and chat room membership go too -- so a moderator removal
+    and a self-leave cannot drift apart. The ban is the only extra: it outlives
+    the join row and is what stops the user coming straight back.
+
+    All of it lands in one transaction, so a failure part way through cannot
+    leave the user removed but unbanned (a retry would then 404 on "not
+    joined", with no way to finish the moderation), or banned but still holding
+    chat access.
+    """
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+
+        # Raises 404 on an unknown user id.
+        get_user_by_id(db=db, user_id=user_id)
+        # Held until this transaction commits, so a join by the same user either
+        # runs before the delete below or reads the ban and is refused. Without
+        # it a join could read "not banned", then insert its row after the
+        # delete, leaving the user both banned and joined.
+        lock_group_membership_changes(db=db, group_id=group_id)
+        if not is_user_joined_group(db=db, group_id=group_id, user_id=user_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=USER_NOT_JOINED_GROUP,
+            )
+
+        # commit=False throughout: the removal and the ban are one unit, and the
+        # chat room lives in the same database, so all of it commits together.
+        remove_group_accumulator_joins_for_group(db=db, user_id=user_id, group_id=group_id)
+        leave_group_membership(db=db, user_id=user_id, group_id=group_id, commit=False)
+        # Chat access is granted to joiners AND followers, so a removed user who
+        # still follows the group keeps the room. Dropping the follow as well is
+        # deliberately out of scope: the ban blocks rejoining, not following.
+        if not is_user_following_group(db=db, group_id=group_id, user_id=user_id):
+            leave_group_chat_room(db=db, group_id=group_id, user_id=user_id, commit=False)
+
+        ban = create_group_ban(
+            db=db,
+            group_id=group_id,
+            user_id=user_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=request.ban_duration_days),
+            reason=request.reason,
+            created_by=author.id,
+            commit=False,
+        )
+        db.commit()
+        db.refresh(ban)
+        return _ban_to_dto(ban)
+
+
+def list_group_bans(
+    token: str,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    active_only: bool = True,
+) -> GroupBanListResponse:
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        if not is_reviewer(author):
+            _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+        bans, total = list_group_bans_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+            active_only=active_only,
+        )
+        return GroupBanListResponse(
+            bans=[_ban_to_dto(ban) for ban in bans],
+            skip=skip,
+            limit=limit,
+            total=total,
+        )
+
+
+def lift_group_ban_by_id(token: str, group_id: UUID, ban_id: UUID) -> GroupBanDTO:
+    """Let a removed user back in early. The row stays, stamped as lifted."""
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+
+        ban = get_group_ban_by_id(db=db, ban_id=ban_id)
+        if not ban or ban.group_id != group_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_BAN_NOT_FOUND)
+        if ban.lifted_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This ban has already been lifted",
+            )
+        if _as_aware_utc(ban.expires_at) <= datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This ban has already expired",
+            )
+        lifted = lift_group_ban(db=db, ban=ban, lifted_by=author.id)
+        return _ban_to_dto(lifted)
