@@ -35,6 +35,7 @@ class VerseOfDayDTO(BaseModel):
     image_urls: Optional[List[str]] = None
     verse_id: Optional[str] = None
     ref_id: Optional[str] = None
+    source: Optional[str] = None
     ref_type: Optional[str] = None
     group_id: Optional[UUID] = None
     date: datetime.date
@@ -53,6 +54,7 @@ class VerseOfDayPublicDTO(BaseModel):
     verse: Optional[str] = None
     image_url: Optional[str] = None  
     ref_id: Optional[str] = None
+    source: Optional[str] = None
     ref_type: Optional[str] = None
     date: datetime.date
     group_id: Optional[UUID] = None
@@ -78,6 +80,7 @@ class CreateVerseOfDayRequest(BaseModel):
     image_urls: Optional[List[str]] = None
     verse_id: Optional[str] = None
     ref_id: Optional[str] = None
+    source: Optional[str] = None
     ref_type: Optional[str] = None
     group_id: Optional[UUID] = None
     date: datetime.date
@@ -88,6 +91,7 @@ class UpdateVerseOfDayRequest(BaseModel):
     image_urls: Optional[List[str]] = None
     verse_id: Optional[str] = None
     ref_id: Optional[str] = None
+    source: Optional[str] = None
     ref_type: Optional[str] = None
     group_id: Optional[UUID] = None
     date: Optional[datetime.date] = None
