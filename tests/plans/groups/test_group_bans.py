@@ -1,8 +1,9 @@
 """Removing a joined user from a group, and the rejoin block that follows."""
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -29,14 +30,14 @@ GUARD = "pecha_api.plans.groups.group_ban_guard.get_active_group_ban"
 SERVICE = "pecha_api.plans.groups.groups_service"
 
 
-def _session(mock_session_local):
+def _session(mock_session_local: MagicMock) -> MagicMock:
     mock_db = MagicMock()
     mock_session_local.return_value.__enter__.return_value = mock_db
     mock_session_local.return_value.__exit__.return_value = False
     return mock_db
 
 
-def _make_group():
+def _make_group() -> MagicMock:
     group = MagicMock()
     group.id = uuid4()
     group.group_type = AuthorGroupType.COMMUNITY
@@ -44,14 +45,14 @@ def _make_group():
     return group
 
 
-def _make_author(author_id=None):
+def _make_author(author_id: Optional[UUID] = None) -> MagicMock:
     author = MagicMock()
     author.id = author_id or uuid4()
     author.email = "admin@example.org"
     return author
 
 
-def _make_user(user_id=None):
+def _make_user(user_id: Optional[UUID] = None) -> MagicMock:
     user = MagicMock()
     user.id = user_id or uuid4()
     user.username = "dawa"
@@ -61,7 +62,14 @@ def _make_user(user_id=None):
     return user
 
 
-def _make_ban(*, group_id, user_id, expires_at=None, lifted_at=None, reason=None):
+def _make_ban(
+    *,
+    group_id: UUID,
+    user_id: UUID,
+    expires_at: Optional[datetime] = None,
+    lifted_at: Optional[datetime] = None,
+    reason: Optional[str] = None,
+) -> MagicMock:
     ban = MagicMock()
     ban.id = uuid4()
     ban.group_id = group_id
@@ -728,7 +736,7 @@ def test_join_group_takes_the_same_lock_before_reading_the_ban():
 # --- the other paths that write author_group_joins -------------------------
 
 
-def _make_pending_join_request(*, group_id, user_id):
+def _make_pending_join_request(*, group_id: UUID, user_id: UUID) -> MagicMock:
     from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
 
     join_request = MagicMock()
@@ -791,7 +799,7 @@ def test_publishing_a_group_leaves_a_banned_applicant_pending():
     allowed = _make_pending_join_request(group_id=group_id, user_id=uuid4())
     banned = _make_pending_join_request(group_id=group_id, user_id=banned_user_id)
 
-    def _expiry(db, *, group_id, user_id):
+    def _expiry(db: MagicMock, *, group_id: UUID, user_id: UUID) -> Optional[datetime]:
         if user_id == banned_user_id:
             return datetime.now(timezone.utc) + timedelta(days=3)
         return None
