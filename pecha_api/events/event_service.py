@@ -2,7 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -561,26 +561,79 @@ class EventContentFilter:
     event_format: Optional[EventFormat] = None
 
 
-def _expand_earliest_occurrences(recurring_templates, from_date_obj, to_date_obj) -> List[Dict]:
-    """Each template's earliest occurrence within the window, one row per
-    template. Templates with no occurrence in the window are dropped."""
+def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Treat offset-less datetimes as UTC so they can be compared with now()."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+_CMS_RECURRENCE_LOOKBACK_DAYS = 365 * 5
+
+
+def _occurrence_item(
+    template: Event, start_d: date, end_d: date
+) -> Dict:
+    occurrence_start, occurrence_end = combine_occurrence_window(
+        start_d, end_d, template.start_date, template.end_date
+    )
+    return {
+        "event": template,
+        "start_date": occurrence_start,
+        "end_date": occurrence_end,
+        "occurrence_date": occurrence_start,
+    }
+
+
+def _expand_earliest_occurrences(
+    recurring_templates: Sequence[Event],
+    from_date_obj: date,
+    to_date_obj: date,
+    not_ended_before: Optional[datetime] = None,
+    prefer_current_or_last: bool = False,
+    reference: Optional[datetime] = None,
+) -> List[Dict]:
+    """Each template's display occurrence within the window, one row per
+    template. Templates with no occurrence in the window are dropped.
+
+    When not_ended_before is set (public listings), skip occurrences whose
+    end datetime is already past that cutoff so a historical from_date cannot
+    surface a finished occurrence as the earliest in the window.
+
+    When prefer_current_or_last is set (CMS with no from_date), keep upcoming
+    or in-progress dates on the card, and fall back to the most recent past
+    occurrence so finished series still appear in Studio.
+    """
     expanded_occurrences = []
     for template in recurring_templates:
         occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
-        if not occurrences:
+        chosen = None
+        last_in_window = None
+        for start_d, end_d in occurrences:
+            item = _occurrence_item(template, start_d, end_d)
+            if not_ended_before is not None:
+                if item["end_date"] < not_ended_before:
+                    continue
+                chosen = item
+                break
+            if prefer_current_or_last:
+                last_in_window = item
+                if (
+                    reference is not None
+                    and chosen is None
+                    and item["end_date"] >= reference
+                ):
+                    chosen = item
+                continue
+            chosen = item
+            break
+        if chosen is None:
+            chosen = last_in_window
+        if chosen is None:
             continue
-        start_d, end_d = occurrences[0]
-        # Carry the template's own time-of-day onto the occurrence,
-        # instead of defaulting to midnight / end-of-day.
-        occurrence_start, occurrence_end = combine_occurrence_window(
-            start_d, end_d, template.start_date, template.end_date
-        )
-        expanded_occurrences.append({
-            'event': template,
-            'start_date': occurrence_start,
-            'end_date': occurrence_end,
-            'occurrence_date': occurrence_start,
-        })
+        expanded_occurrences.append(chosen)
     return expanded_occurrences
 
 
@@ -592,11 +645,14 @@ def get_events_service(
     restrict_group_ids: Optional[List[UUID]] = None,
     fallback: bool = False,
     should_include_unfollowed: bool = False,
+    should_include_past: bool = False,
     skip: int = 0,
     limit: int = 20,
     token: Optional[str] = None,
 ) -> EventsResponse:
     content_filter = content_filter or EventContentFilter()
+    from_date = _as_aware_utc(from_date)
+    to_date = _as_aware_utc(to_date)
     with SessionLocal() as db:
         current_user = None
         if token:
@@ -608,14 +664,27 @@ def get_events_service(
                     should_include_unfollowed=should_include_unfollowed,
                 )
 
-        # Default expansion window: rolling 12 months from today
-        if from_date is None:
-            from_date = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        not_ended_before = None if should_include_past else now
+        # Public listings default to "from now" so finished events drop out of
+        # the window. CMS keeps from_date unset so past events remain listed.
+        if from_date is None and not should_include_past:
+            from_date = now
         if to_date is None:
-            to_date = from_date + timedelta(days=365)
-        
-        # Convert to date objects for recurrence expansion
-        from_date_obj = from_date.date() if isinstance(from_date, datetime) else from_date
+            to_date = (from_date or now) + timedelta(days=365)
+
+        # Recurrence expansion still needs a start even when CMS has no from_date.
+        # Public listings clamp to now so a historical from_date cannot expand
+        # a finished occurrence as the earliest in the window.
+        # CMS with no from_date looks back so finished series still appear.
+        prefer_current_or_last = False
+        expansion_from = from_date or now
+        if should_include_past and from_date is None:
+            expansion_from = now - timedelta(days=_CMS_RECURRENCE_LOOKBACK_DAYS)
+            prefer_current_or_last = True
+        elif not_ended_before is not None and expansion_from < not_ended_before:
+            expansion_from = not_ended_before
+        from_date_obj = expansion_from.date() if isinstance(expansion_from, datetime) else expansion_from
         to_date_obj = to_date.date() if isinstance(to_date, datetime) else to_date
 
         # Get all one-shot events for merged pagination with recurring occurrences
@@ -632,6 +701,7 @@ def get_events_service(
             from_date=from_date,
             to_date=to_date,
             restrict_group_ids=restrict_group_ids,
+            not_ended_before=not_ended_before,
             skip=0,
             limit=None,
         )
@@ -654,7 +724,12 @@ def get_events_service(
         # once per listing instead of once per occurrence (e.g. 12 rows for
         # a monthly recurrence over the default 12-month window).
         expanded_occurrences = _expand_earliest_occurrences(
-            recurring_templates, from_date_obj, to_date_obj
+            recurring_templates,
+            from_date_obj,
+            to_date_obj,
+            not_ended_before=not_ended_before,
+            prefer_current_or_last=prefer_current_or_last,
+            reference=now if prefer_current_or_last else None,
         )
         
         # Merge one-shot events and expanded occurrences
@@ -762,6 +837,7 @@ def get_cms_events_service(
         to_date=to_date,
         language=language,
         restrict_group_ids=restrict_group_ids,
+        should_include_past=True,
         skip=skip,
         limit=limit,
     )
@@ -1198,16 +1274,16 @@ def get_featured_events_service(
     token: Optional[str] = None,
 ) -> List[EventDTO]:
     with SessionLocal() as db:
-        # Get featured one-shot events
-        one_shot_events = get_featured_events(db, limit=None)
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Get featured one-shot events that have not already ended
+        one_shot_events = get_featured_events(db, limit=None, not_ended_before=now)
         
         # Get featured recurring events and find current/next occurrence for each
         # Use resolve_current_or_next_occurrence (5-year horizon) to include active
         # multi-day occurrences and handle sparse yearly recurrences like Feb 29
         recurring_templates = get_featured_recurring_events(db)
-        
-        now = datetime.now(timezone.utc)
-        today = now.date()
         
         expanded_occurrences = []
         for template in recurring_templates:

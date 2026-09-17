@@ -209,6 +209,7 @@ def _apply_event_filters(
     from_date: Optional = None,
     to_date: Optional = None,
     restrict_group_ids: Optional[List[UUID]] = None,
+    not_ended_before: Optional[datetime] = None,
     exclude_plan_or_series_linked: bool = False,
 ):
     if restrict_group_ids is not None:
@@ -233,6 +234,8 @@ def _apply_event_filters(
         query = query.filter(Event.event_format == event_format)
     if from_date is not None:
         query = query.filter(Event.end_date >= from_date)
+    if not_ended_before is not None:
+        query = query.filter(Event.end_date >= not_ended_before)
     if to_date is not None:
         query = query.filter(Event.start_date <= to_date)
     return query
@@ -250,6 +253,7 @@ def get_events(
     from_date: Optional = None,
     to_date: Optional = None,
     restrict_group_ids: Optional[List[UUID]] = None,
+    not_ended_before: Optional[datetime] = None,
     skip: int = 0,
     limit: Optional[int] = 20,
     should_sort_newest_first: bool = False,
@@ -270,6 +274,7 @@ def get_events(
         from_date=from_date,
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
+        not_ended_before=not_ended_before,
         exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     )
     total = count_query.scalar()
@@ -291,6 +296,7 @@ def get_events(
         from_date=from_date,
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
+        not_ended_before=not_ended_before,
         exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     )
     order_by = (
@@ -308,6 +314,7 @@ def get_events(
 def get_featured_events(
     db: Session,
     limit: Optional[int] = 10,
+    not_ended_before: Optional[datetime] = None,
 ) -> List[Event]:
     """Get featured one-shot events."""
     query = (
@@ -322,6 +329,8 @@ def get_featured_events(
         .filter(Event.is_recurring == False)
         .order_by(Event.start_date.desc())
     )
+    if not_ended_before is not None:
+        query = query.filter(Event.end_date >= not_ended_before)
     if limit is not None:
         query = query.limit(limit)
     return query.all()
