@@ -14,7 +14,7 @@ The server sends two frames on connect:
 
 ```json
 {"type": "session_info", "event_id": "550e…", "is_operator": false}
-{"type": "position", "event_id": "550e…", "text_id": "abc…", "segment_id": "e47b…", "index": 12, "round_number": 3, "server_time": "2026-09-17T09:30:00Z"}
+{"type": "position", "event_id": "550e…", "text_id": "abc…", "segment_id": "e47b…", "index": 12, "round_number": 3, "server_time": "2026-09-17T09:30:00Z", "revision": 57}
 ```
 
 The `position` frame is sent **only if the operator has already set one** — that is how a late joiner or a reconnecting phone lands on the live line.
@@ -42,6 +42,8 @@ The `position` frame is sent **only if the operator has already set one** — th
 ## Rendering a `position`
 
 `segment_id` is the key — **not** `index`. Resolve it to the segment in the user's chosen language through the segment's existing `mappings`, scroll that line into focus and highlight it. `index` is advisory, kept so the current OBS overlays keep working; do not key off it in new clients.
+
+`revision` is a counter from Redis that increases with every position in the event, and it — not `server_time` — is what orders frames: the timestamp is stamped by whichever instance served the operator, and two instances' clocks need not agree. The server already drops frames older than what it sent you; a client that buffers can use it to do the same.
 
 `text_id` says which liturgy that segment belongs to. An event's recitation collection holds several texts and the operator works through them in order, so **when `text_id` changes, load that text and carry on** — that is how the second and third recitations of a session reach the room. Everything stays on one socket; there is no reconnect between texts. A `position` whose `text_id` is not the text you have loaded is a cue to switch, not an error.
 

@@ -24,6 +24,10 @@ def position_state_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:state"
 
 
+def position_revision_key(event_id: UUID) -> str:
+    return f"recitation:event:{event_id}:rev"
+
+
 class RecitationBroadcaster:
     """Manages WebSocket connections and Redis pub/sub for live recitation
     position, plus the current-position snapshot each new subscriber is sent.
@@ -96,6 +100,27 @@ class RecitationBroadcaster:
         await pubsub.subscribe(position_channel(event_id))
         return pubsub
 
+    async def next_revision(self, event_id: UUID) -> Optional[int]:
+        """The next position revision for an event, from Redis.
+
+        Ordering cannot come from `server_time`: that is stamped by whichever
+        instance served the operator's socket, and two instances' clocks need
+        not agree, so a genuinely newer frame could look older than a snapshot
+        written elsewhere. One counter in the shared store is the only value
+        every instance agrees on.
+
+        None when Redis cannot answer - callers then fall back to relaying
+        rather than dropping frames they cannot order.
+        """
+        key = position_revision_key(event_id)
+        try:
+            revision = await self.redis.incr(key)
+            await self.redis.expire(key, POSITION_TTL_SECONDS)
+            return int(revision)
+        except Exception as e:
+            logger.error(f"Failed to take a recitation revision from Redis: {e}")
+            return None
+
     async def save_position(
         self,
         event_id: UUID,
@@ -104,6 +129,7 @@ class RecitationBroadcaster:
         index: Optional[int],
         round_number: Optional[int],
         server_time: str,
+        revision: Optional[int] = None,
     ) -> None:
         """Mirror the current position into Redis so connects and redeploys can
         resync. Best-effort: a snapshot failure must not swallow the broadcast,
@@ -118,6 +144,7 @@ class RecitationBroadcaster:
                     "index": "" if index is None else str(index),
                     "round_number": "" if round_number is None else str(round_number),
                     "updated_at": server_time,
+                    "revision": "" if revision is None else str(revision),
                 },
             )
             await self.redis.expire(key, POSITION_TTL_SECONDS)
@@ -152,11 +179,17 @@ class RecitationBroadcaster:
             "index": _as_int(state.get("index")),
             "round_number": _as_int(state.get("round_number")),
             "server_time": state.get("updated_at"),
+            "revision": _as_int(state.get("revision")),
         }
 
     async def clear_position(self, event_id: UUID) -> None:
         """Forget the position when the operator ends the session, so the next
-        puja on the same event does not start mid-liturgy."""
+        puja on the same event does not start mid-liturgy.
+
+        The revision counter is deliberately left alone: it must keep rising
+        across sessions, or a reconnecting client holding the old high-water
+        mark would discard the new session's opening frames.
+        """
         try:
             await self.redis.delete(position_state_key(event_id))
         except Exception as e:
@@ -171,7 +204,9 @@ class RecitationBroadcaster:
         round_number: Optional[int],
         server_time: str,
     ) -> None:
-        """Snapshot, then publish the position to every server via Redis pub/sub."""
+        """Stamp a revision, snapshot, then publish to every server via pub/sub."""
+        revision = await self.next_revision(event_id)
+
         await self.save_position(
             event_id=event_id,
             text_id=text_id,
@@ -179,6 +214,7 @@ class RecitationBroadcaster:
             index=index,
             round_number=round_number,
             server_time=server_time,
+            revision=revision,
         )
 
         payload = {
@@ -189,6 +225,7 @@ class RecitationBroadcaster:
             "index": index,
             "round_number": round_number,
             "server_time": server_time,
+            "revision": revision,
         }
 
         try:

@@ -56,7 +56,7 @@ class TestRecitationViewerPages:
         assert 'type: "set"' not in viewer
 
         # The viewer is the page that follows a text change across liturgies.
-        assert "frame.text_id !== loadedTextId" in viewer
+        assert "frame.text_id !== displayedTextId" in viewer
 
     def test_both_pages_heartbeat_and_reconnect(self):
         event_id = uuid4()
@@ -72,9 +72,37 @@ class TestRecitationViewerPages:
         slower one wins and puts the earlier liturgy back on screen."""
         page = client.get(f"/view/events/{uuid4()}/recitation").text
 
-        assert "let positionGeneration = 0;" in page
-        assert "const generation = ++positionGeneration;" in page
-        assert page.count("if (generation !== positionGeneration) return;") == 3
+        assert "let displayedTextId = null, desiredTextId = null;" in page
+        # A superseded load must not render, and a superseded frame must not
+        # paint over the text the room actually moved to.
+        assert page.count("if (desiredTextId !== textId) return;") == 2
+        assert "if (latestPosition !== frame) return;" in page
+        assert "if (displayedTextId !== frame.text_id) return;" in page
+
+    def test_every_frame_states_the_desired_text(self):
+        """Operator goes T1 -> T2 -> back to T1 while T2 is still downloading.
+        Only recording intent when a load starts would let T2 paint on arrival,
+        leaving the screen on a text the room already left."""
+        page = client.get(f"/view/events/{uuid4()}/recitation").text
+
+        assert "if (frame.text_id) desiredTextId = frame.text_id;" in page
+
+    def test_viewer_never_blanks_the_text_it_is_still_showing(self):
+        """Clearing the list before the new text arrived left the page stuck on
+        a loading message whenever that load was superseded - and a position for
+        the text still notionally loaded had no row to highlight."""
+        page = client.get(f"/view/events/{uuid4()}/recitation").text
+
+        assert "Loading text…</div>" not in page
+        assert 'Could not load this text.</div>' not in page
+        # The list is only replaced once the new text is in hand.
+        assert "renderSegments(data.segments || []);" in page
+        assert "displayedTextId = textId;" in page
+
+    def test_viewer_fetches_each_text_once_while_in_flight(self):
+        page = client.get(f"/view/events/{uuid4()}/recitation").text
+
+        assert "if (inFlightTextId === textId && inFlightRequest) return inFlightRequest;" in page
 
     def test_reconnecting_cancels_a_queued_reconnect(self):
         """Connect while a backoff timer is pending: the timer would otherwise

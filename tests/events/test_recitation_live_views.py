@@ -205,11 +205,10 @@ class TestRecitationConnection:
             "index": 9,
             "round_number": 1,
             "server_time": "2026-09-14T09:30:05Z",
+            "revision": 57,
         }
-        stale = {**snapshot, "segment_id": "seg-older", "index": 4,
-                 "server_time": "2026-09-14T09:30:01Z"}
-        fresh = {**snapshot, "segment_id": "seg-next", "index": 10,
-                 "server_time": "2026-09-14T09:30:09Z"}
+        stale = {**snapshot, "segment_id": "seg-older", "index": 4, "revision": 55}
+        fresh = {**snapshot, "segment_id": "seg-next", "index": 10, "revision": 58}
         pubsub = FakePubSub([
             {"type": "message", "data": json.dumps(stale)},
             {"type": "message", "data": json.dumps(fresh)},
@@ -220,6 +219,54 @@ class TestRecitationConnection:
                 websocket.receive_json()                      # session_info
                 assert websocket.receive_json() == snapshot   # connect-time position
                 assert websocket.receive_json() == fresh      # stale one skipped
+
+    def test_ordering_ignores_wall_clocks(self):
+        """A frame stamped by another instance can carry an earlier clock time
+        and still be newer. The revision is what decides."""
+        event_id = uuid4()
+        snapshot = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-1",
+            "index": 1,
+            "round_number": None,
+            "server_time": "2026-09-14T09:30:05Z",
+            "revision": 57,
+        }
+        # Older clock, higher revision: a skewed instance published it later.
+        skewed = {**snapshot, "segment_id": "seg-2", "index": 2,
+                  "server_time": "2026-09-14T09:29:59Z", "revision": 58}
+        pubsub = FakePubSub([{"type": "message", "data": json.dumps(skewed)}])
+
+        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()
+                assert websocket.receive_json() == snapshot
+                assert websocket.receive_json() == skewed
+
+    def test_unnumbered_frames_are_relayed(self):
+        """During a rolling deploy an instance may still publish without a
+        revision. Unorderable is not a reason to drop the live position."""
+        event_id = uuid4()
+        snapshot = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-1",
+            "index": 1,
+            "round_number": None,
+            "server_time": "2026-09-14T09:30:05Z",
+            "revision": 57,
+        }
+        unnumbered = {**snapshot, "segment_id": "seg-2", "revision": None}
+        pubsub = FakePubSub([{"type": "message", "data": json.dumps(unnumbered)}])
+
+        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()
+                assert websocket.receive_json() == snapshot
+                assert websocket.receive_json() == unnumbered
 
     def test_duplicate_of_the_snapshot_is_not_relayed(self):
         """The snapshot is written before its own publish, so a connect landing
@@ -233,8 +280,9 @@ class TestRecitationConnection:
             "index": 1,
             "round_number": None,
             "server_time": "2026-09-14T09:30:05Z",
+            "revision": 57,
         }
-        later = {**snapshot, "segment_id": "seg-2", "server_time": "2026-09-14T09:30:06Z"}
+        later = {**snapshot, "segment_id": "seg-2", "revision": 58}
         pubsub = FakePubSub([
             {"type": "message", "data": json.dumps(snapshot)},
             {"type": "message", "data": json.dumps(later)},
@@ -256,6 +304,7 @@ class TestRecitationConnection:
             "index": 0,
             "round_number": None,
             "server_time": "2026-09-14T09:30:01Z",
+            "revision": 1,
         }
         pubsub = FakePubSub([{"type": "message", "data": json.dumps(first)}])
 

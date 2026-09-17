@@ -190,11 +190,16 @@ __SHARED_CSS__
 const EVENT_ID = "__EVENT_ID__";
 const API = window.location.origin + "/api/v1";
 
-let ws = null, loadedTextId = null, rowsById = {}, currentRow = -1;
+let ws = null, rowsById = {}, currentRow = -1;
 let manualScroll = false, retry = 0, ended = false, reconnectTimer = null;
-/* Bumped on every position frame. A frame that awaits a text load and comes
-   back to find a newer one has arrived must not overwrite it with its own. */
-let positionGeneration = 0;
+/* displayedTextId is what is actually rendered; desiredTextId is what the
+   newest frame asked for. Keeping them apart is what lets a frame decide
+   whether its own (possibly slow) load is still the one the room wants. */
+let displayedTextId = null, desiredTextId = null;
+let latestPosition = null;
+/* One fetch per text: frames arriving while a load is in flight wait on it
+   rather than starting a second identical request. */
+let inFlightTextId = null, inFlightRequest = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -214,29 +219,45 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-async function loadText(textId) {
-    const generation = positionGeneration;
-    notice("");
-    $("segments").innerHTML = '<div class="empty">Loading text…</div>';
+function fetchText(textId) {
+    if (inFlightTextId === textId && inFlightRequest) return inFlightRequest;
     const language = $("language").value;
-    try {
-        const response = await fetch(`${API}/recitations/${encodeURIComponent(textId)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ language, recitation: [language], translations: [] }),
-        });
+    inFlightTextId = textId;
+    inFlightRequest = fetch(`${API}/recitations/${encodeURIComponent(textId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language, recitation: [language], translations: [] }),
+    }).then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        if (generation !== positionGeneration) return;
+        return response.json();
+    }).finally(() => {
+        if (inFlightTextId === textId) { inFlightTextId = null; inFlightRequest = null; }
+    });
+    return inFlightRequest;
+}
+
+/* Never clears the segment list before the new text arrives. The old text
+   stays on screen and stays highlightable, so a position for it landing
+   mid-load still lands somewhere - wiping first left the page stuck on a
+   loading message whenever that load was then superseded. */
+async function loadText(textId) {
+    desiredTextId = textId;
+    $("state").textContent = "Loading text…";
+    try {
+        const data = await fetchText(textId);
+        if (desiredTextId !== textId) return;
         renderSegments(data.segments || []);
-        loadedTextId = textId;
+        displayedTextId = textId;
         currentRow = -1;
         $("textBadge").textContent = data.title || textId;
+        notice("");
     } catch (error) {
-        if (generation !== positionGeneration) return;
-        $("segments").innerHTML = '<div class="empty">Could not load this text.</div>';
+        if (desiredTextId !== textId) return;
         notice(`Could not load text ${textId}: ${error.message}`);
-        loadedTextId = null;
+    } finally {
+        if (desiredTextId === textId) {
+            setStatus(ws && ws.readyState === WebSocket.OPEN, ended ? "Session ended" : "Connected");
+        }
     }
 }
 
@@ -265,6 +286,7 @@ function highlight(segmentId) {
         notice("Out of sync: that line is not in the text you have loaded.");
         return;
     }
+    if (!$(`row-${row}`)) return;
     notice("");
     if (currentRow >= 0) {
         const previous = $(`row-${currentRow}`);
@@ -280,13 +302,21 @@ function highlight(segmentId) {
 }
 
 async function onPosition(frame) {
-    const generation = ++positionGeneration;
-    if (frame.text_id && frame.text_id !== loadedTextId) {
+    latestPosition = frame;
+    // Every frame states the room's intent, not just the ones that start a
+    // load: if the operator goes back to the text already on screen while the
+    // next one is still downloading, that download must not render on arrival.
+    if (frame.text_id) desiredTextId = frame.text_id;
+
+    if (frame.text_id && frame.text_id !== displayedTextId) {
         await loadText(frame.text_id);
         // A newer frame landed while that fetch was in flight - it owns the
         // display now, and finishing here would put an older liturgy back.
-        if (generation !== positionGeneration) return;
+        // Its own call paints, including when it wants the text we just left.
+        if (latestPosition !== frame) return;
+        if (displayedTextId !== frame.text_id) return;
     }
+
     if (frame.round_number) {
         $("roundBadge").style.display = "";
         $("roundBadge").textContent = `round ${frame.round_number}`;

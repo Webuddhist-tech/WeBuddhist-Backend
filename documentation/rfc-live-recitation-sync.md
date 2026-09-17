@@ -46,7 +46,7 @@ Server → all subscribers, on every change **and once on connect** so late join
 ```json
 { "type": "position", "event_id": "550e8400-…", "text_id": "abc…",
   "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3,
-  "server_time": "2026-09-14T09:30:00Z" }
+  "server_time": "2026-09-14T09:30:00Z", "revision": 57 }
 ```
 
 Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR`, `FORBIDDEN`, `SERVER_ERROR`, as in the comments WS), and `session_ended` when the operator closes the puja. Malformed JSON and unknown types are ignored; a `set` from a non-operator gets a `FORBIDDEN` error frame but keeps its socket.
@@ -55,7 +55,9 @@ Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR
 
 New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster`: local map `{event_id: {user_id: ws}}`, channel `recitation:event:{event_id}:position`, `broadcast_position(...)` publishes and each instance relays locally.
 
-**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` also writes a Redis hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`; 12h TTL, refreshed on write), and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
+**Ordering is the shared counter, not the clock.** Frames queued between a subscribe and the snapshot read have to be compared against what was just sent, and `server_time` cannot do it: it comes from whichever instance served the operator's socket. `revision` is the one value every instance agrees on. A frame without one (a rolling deploy mid-flight) is relayed rather than dropped.
+
+**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` takes a revision from `INCR recitation:event:{event_id}:rev` and writes a Redis hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`, `revision`; 12h TTL, refreshed on write), and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
 
 ## 6. App behavior on `position`
 

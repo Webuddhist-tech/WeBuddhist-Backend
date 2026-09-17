@@ -28,20 +28,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _parse_server_time(value: Optional[str]) -> Optional[datetime]:
-    """Parse a frame's server_time, or None when it is missing/unreadable.
-
-    Compared as datetimes rather than strings: isoformat drops the microseconds
-    on an exact second, so "…:00Z" would sort after "…:00.123456Z".
-    """
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-
-
 def _error(code: str, message: str) -> dict:
     return {"type": "error", "code": code, "message": message}
 
@@ -72,7 +58,7 @@ async def websocket_recitation_live(
     Server -> client events:
       {"type": "session_info", "event_id": "...", "is_operator": true|false}  (once, on connect)
       {"type": "position", "event_id": "...", "text_id": "...", "segment_id": "...",
-       "index": 12, "round_number": 3, "server_time": "..."}
+       "index": 12, "round_number": 3, "server_time": "...", "revision": 57}
           (on connect when a position exists, then on every change)
       {"type": "session_ended", "event_id": "..."}
       {"type": "pong"}
@@ -131,10 +117,12 @@ async def websocket_recitation_live(
         # already queued on the pubsub, and the snapshot may be newer than some
         # of them. Relaying those as-is would scroll the room backwards before
         # it caught up, so anything not newer than what we just sent is dropped.
-        last_position_time = None
+        # Newer means a higher Redis revision, never a wall clock: the clocks
+        # belong to whichever instance served the operator and need not agree.
+        last_revision = None
         if current_position is not None:
             await websocket.send_json(current_position)
-            last_position_time = _parse_server_time(current_position.get("server_time"))
+            last_revision = current_position.get("revision")
 
         ended_remotely = asyncio.Event()
         # Set when the session ends from elsewhere (the operator's `end`, on
@@ -143,7 +131,7 @@ async def websocket_recitation_live(
         session_over = False
 
         async def listen_redis() -> None:
-            nonlocal last_position_time
+            nonlocal last_revision
             try:
                 async for message in pubsub.listen():
                     if message["type"] != "message":
@@ -155,14 +143,16 @@ async def websocket_recitation_live(
                         frame = None
 
                     if isinstance(frame, dict) and frame.get("type") == "position":
-                        server_time = _parse_server_time(frame.get("server_time"))
-                        if (
-                            last_position_time is not None
-                            and server_time is not None
-                            and server_time <= last_position_time
-                        ):
-                            continue
-                        last_position_time = server_time or last_position_time
+                        revision = frame.get("revision")
+                        # An unnumbered frame cannot be ordered - during a
+                        # rolling deploy one instance may still be publishing
+                        # without a revision - so relay it rather than risk
+                        # dropping the live position.
+                        if isinstance(revision, int) and isinstance(last_revision, int):
+                            if revision <= last_revision:
+                                continue
+                        if isinstance(revision, int):
+                            last_revision = revision
 
                     try:
                         await websocket.send_text(message["data"])

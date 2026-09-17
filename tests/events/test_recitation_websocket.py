@@ -1,5 +1,5 @@
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 from uuid import uuid4
 
 import pytest
@@ -11,6 +11,7 @@ from pecha_api.events.recitation_websocket import (
     get_broadcaster,
     init_broadcaster,
     position_channel,
+    position_revision_key,
     position_state_key,
 )
 
@@ -100,6 +101,7 @@ class TestRecitationPositionSnapshot:
     @pytest.mark.asyncio
     async def test_broadcast_position_snapshots_then_publishes(self):
         broadcaster = _broadcaster()
+        broadcaster.redis.incr.return_value = 57
         event_id = uuid4()
 
         await broadcaster.broadcast_position(
@@ -119,11 +121,13 @@ class TestRecitationPositionSnapshot:
                 "index": "12",
                 "round_number": "3",
                 "updated_at": "2026-09-14T09:30:00Z",
+                "revision": "57",
             },
         )
-        broadcaster.redis.expire.assert_awaited_once_with(
-            position_state_key(event_id), POSITION_TTL_SECONDS
-        )
+        assert broadcaster.redis.expire.await_args_list == [
+            call(position_revision_key(event_id), POSITION_TTL_SECONDS),
+            call(position_state_key(event_id), POSITION_TTL_SECONDS),
+        ]
 
         channel, raw = broadcaster.redis.publish.await_args.args
         assert channel == position_channel(event_id)
@@ -135,6 +139,7 @@ class TestRecitationPositionSnapshot:
             "index": 12,
             "round_number": 3,
             "server_time": "2026-09-14T09:30:00Z",
+            "revision": 57,
         }
 
     @pytest.mark.asyncio
@@ -163,6 +168,7 @@ class TestRecitationPositionSnapshot:
             "index": "4",
             "round_number": "2",
             "updated_at": "2026-09-14T09:30:00Z",
+            "revision": "57",
         }
 
         assert await broadcaster.get_position(event_id) == {
@@ -173,6 +179,7 @@ class TestRecitationPositionSnapshot:
             "index": 4,
             "round_number": 2,
             "server_time": "2026-09-14T09:30:00Z",
+            "revision": 57,
         }
 
     @pytest.mark.asyncio
@@ -237,6 +244,52 @@ class TestRecitationPositionSnapshot:
         channel, raw = broadcaster.redis.publish.await_args.args
         assert channel == position_channel(event_id)
         assert json.loads(raw) == {"type": "session_ended", "event_id": str(event_id)}
+
+
+class TestRecitationRevision:
+
+    @pytest.mark.asyncio
+    async def test_revision_comes_from_redis_not_the_clock(self):
+        """Ordering has to hold across instances, and two instances' clocks need
+        not agree - only the shared counter does."""
+        broadcaster = _broadcaster()
+        broadcaster.redis.incr.return_value = 58
+        event_id = uuid4()
+
+        assert await broadcaster.next_revision(event_id) == 58
+        broadcaster.redis.incr.assert_awaited_once_with(position_revision_key(event_id))
+
+    @pytest.mark.asyncio
+    async def test_revision_is_none_when_redis_fails(self):
+        """None means unorderable, and the reader relays rather than dropping."""
+        broadcaster = _broadcaster()
+        broadcaster.redis.incr.side_effect = Exception("redis down")
+
+        assert await broadcaster.next_revision(uuid4()) is None
+
+    @pytest.mark.asyncio
+    async def test_ending_a_session_keeps_the_counter(self):
+        """Resetting it would let a reconnecting client's old high-water mark
+        swallow the next session's opening frames."""
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+
+        await broadcaster.clear_position(event_id)
+
+        broadcaster.redis.delete.assert_awaited_once_with(position_state_key(event_id))
+
+    @pytest.mark.asyncio
+    async def test_get_position_tolerates_snapshot_without_revision(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.hgetall.return_value = {
+            "text_id": "text-7",
+            "segment_id": "seg-9",
+            "index": "4",
+            "round_number": "2",
+            "updated_at": "2026-09-14T09:30:00Z",
+        }
+
+        assert (await broadcaster.get_position(uuid4()))["revision"] is None
 
 
 class TestRecitationRateLimit:
