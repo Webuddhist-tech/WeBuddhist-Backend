@@ -1143,25 +1143,6 @@ def get_active_group_ban(
     )
 
 
-def get_active_ban_user_ids(
-    db: Session,
-    *,
-    group_id: UUID,
-    user_ids: Sequence[UUID],
-) -> set[UUID]:
-    if not user_ids:
-        return set()
-    rows = db.execute(
-        select(AuthorGroupBan.user_id).where(
-            AuthorGroupBan.group_id == group_id,
-            AuthorGroupBan.user_id.in_(list(user_ids)),
-            AuthorGroupBan.lifted_at.is_(None),
-            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
-        )
-    ).all()
-    return {row[0] for row in rows}
-
-
 def list_group_bans_paginated(
     db: Session,
     *,
