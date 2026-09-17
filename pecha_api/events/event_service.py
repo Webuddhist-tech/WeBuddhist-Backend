@@ -592,6 +592,7 @@ def get_events_service(
     restrict_group_ids: Optional[List[UUID]] = None,
     fallback: bool = False,
     should_include_unfollowed: bool = False,
+    should_include_past: bool = False,
     skip: int = 0,
     limit: int = 20,
     token: Optional[str] = None,
@@ -608,14 +609,18 @@ def get_events_service(
                     should_include_unfollowed=should_include_unfollowed,
                 )
 
-        # Default expansion window: rolling 12 months from today
-        if from_date is None:
-            from_date = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        not_ended_before = None if should_include_past else now
+        # Public listings default to "from now" so finished events drop out of
+        # the window. CMS keeps from_date unset so past events remain listed.
+        if from_date is None and not should_include_past:
+            from_date = now
         if to_date is None:
-            to_date = from_date + timedelta(days=365)
-        
-        # Convert to date objects for recurrence expansion
-        from_date_obj = from_date.date() if isinstance(from_date, datetime) else from_date
+            to_date = (from_date or now) + timedelta(days=365)
+
+        # Recurrence expansion still needs a start even when CMS has no from_date.
+        expansion_from = from_date or now
+        from_date_obj = expansion_from.date() if isinstance(expansion_from, datetime) else expansion_from
         to_date_obj = to_date.date() if isinstance(to_date, datetime) else to_date
 
         # Get all one-shot events for merged pagination with recurring occurrences
@@ -632,6 +637,7 @@ def get_events_service(
             from_date=from_date,
             to_date=to_date,
             restrict_group_ids=restrict_group_ids,
+            not_ended_before=not_ended_before,
             skip=0,
             limit=None,
         )
@@ -762,6 +768,7 @@ def get_cms_events_service(
         to_date=to_date,
         language=language,
         restrict_group_ids=restrict_group_ids,
+        should_include_past=True,
         skip=skip,
         limit=limit,
     )
@@ -1198,16 +1205,16 @@ def get_featured_events_service(
     token: Optional[str] = None,
 ) -> List[EventDTO]:
     with SessionLocal() as db:
-        # Get featured one-shot events
-        one_shot_events = get_featured_events(db, limit=None)
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Get featured one-shot events that have not already ended
+        one_shot_events = get_featured_events(db, limit=None, not_ended_before=now)
         
         # Get featured recurring events and find current/next occurrence for each
         # Use resolve_current_or_next_occurrence (5-year horizon) to include active
         # multi-day occurrences and handle sparse yearly recurrences like Feb 29
         recurring_templates = get_featured_recurring_events(db)
-        
-        now = datetime.now(timezone.utc)
-        today = now.date()
         
         expanded_occurrences = []
         for template in recurring_templates:

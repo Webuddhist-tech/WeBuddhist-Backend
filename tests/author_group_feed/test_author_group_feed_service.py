@@ -167,6 +167,7 @@ class TestGetAuthorGroupFeedService:
         _, event_kwargs = mock_get_events.call_args
         assert event_kwargs["restrict_group_ids"] == [joined_id]
         assert event_kwargs["should_sort_newest_first"] is True
+        assert event_kwargs["not_ended_before"] is not None
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")

@@ -116,3 +116,48 @@ def test_get_events_service_can_include_unfollowed_public_groups():
 
     assert mock_scope.call_args.kwargs["should_include_unfollowed"] is True
     assert mock_get_events.call_args.kwargs["restrict_group_ids"] == public_group_ids
+
+
+def test_get_events_service_hides_finished_events_even_when_from_date_is_in_the_past():
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    with patch(
+        "pecha_api.events.event_service.SessionLocal"
+    ) as mock_session, patch(
+        "pecha_api.events.event_service.get_events",
+        return_value=([], 0),
+    ) as mock_get_events, patch(
+        "pecha_api.events.event_service.get_recurring_events",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service.get_event_participant_counts",
+        return_value={},
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        get_events_service(from_date=past)
+
+    cutoff = mock_get_events.call_args.kwargs["not_ended_before"]
+    assert cutoff is not None
+    assert cutoff > past
+    assert mock_get_events.call_args.kwargs["from_date"] == past
+
+
+def test_get_events_service_includes_past_when_requested():
+    with patch(
+        "pecha_api.events.event_service.SessionLocal"
+    ) as mock_session, patch(
+        "pecha_api.events.event_service.get_events",
+        return_value=([], 0),
+    ) as mock_get_events, patch(
+        "pecha_api.events.event_service.get_recurring_events",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service.get_event_participant_counts",
+        return_value={},
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        get_events_service(should_include_past=True)
+
+    assert mock_get_events.call_args.kwargs["not_ended_before"] is None
+    assert mock_get_events.call_args.kwargs["from_date"] is None
+
