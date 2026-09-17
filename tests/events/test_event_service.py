@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from pecha_api.events.event_response_models import EventDTO, EventsResponse
 from pecha_api.events.event_service import (
     EventContentFilter,
+    _expand_earliest_occurrences,
     get_events_service,
     get_events_today_service,
 )
@@ -140,6 +141,74 @@ def test_get_events_service_hides_finished_events_even_when_from_date_is_in_the_
     assert cutoff is not None
     assert cutoff > past
     assert mock_get_events.call_args.kwargs["from_date"] == past
+
+
+def test_get_events_service_does_not_expand_recurring_from_historical_from_date():
+    past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    with patch(
+        "pecha_api.events.event_service.SessionLocal"
+    ) as mock_session, patch(
+        "pecha_api.events.event_service.get_events",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.events.event_service.get_recurring_events",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service.get_event_participant_counts",
+        return_value={},
+    ), patch(
+        "pecha_api.events.event_service._expand_earliest_occurrences",
+        return_value=[],
+    ) as mock_expand:
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        get_events_service(from_date=past)
+
+    from_date_obj = mock_expand.call_args.args[1]
+    cutoff = mock_expand.call_args.kwargs["not_ended_before"]
+    assert from_date_obj != past.date()
+    assert from_date_obj == cutoff.date()
+    assert cutoff > past
+
+
+def test_expand_earliest_occurrences_skips_finished_occurrence_when_cutoff_set():
+    template = MagicMock()
+    template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    finished = date(2026, 1, 1)
+    upcoming = date(2026, 1, 8)
+    cutoff = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    with patch(
+        "pecha_api.events.event_service.expand_occurrences",
+        return_value=[(finished, finished), (upcoming, upcoming)],
+    ):
+        result = _expand_earliest_occurrences(
+            [template],
+            finished,
+            upcoming,
+            not_ended_before=cutoff,
+        )
+
+    assert len(result) == 1
+    assert result[0]["start_date"].date() == upcoming
+
+
+def test_expand_earliest_occurrences_keeps_past_occurrence_without_cutoff():
+    template = MagicMock()
+    template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+    template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    finished = date(2026, 1, 1)
+    upcoming = date(2026, 1, 8)
+
+    with patch(
+        "pecha_api.events.event_service.expand_occurrences",
+        return_value=[(finished, finished), (upcoming, upcoming)],
+    ):
+        result = _expand_earliest_occurrences([template], finished, upcoming)
+
+    assert len(result) == 1
+    assert result[0]["start_date"].date() == finished
 
 
 def test_get_events_service_includes_past_when_requested():
