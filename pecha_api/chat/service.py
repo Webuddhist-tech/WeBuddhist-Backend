@@ -481,17 +481,23 @@ def resolve_or_create_private_room(db: Session, user: Users, receiver_id: UUID) 
     return room
 
 
-def leave_group_chat_room(db: Session, group_id: UUID, user_id: UUID) -> None:
+def leave_group_chat_room(
+    db: Session, group_id: UUID, user_id: UUID, *, commit: bool = True
+) -> None:
     """Mark the caller as having left the group's chat room, if one exists and
     they were an active member. Called whenever a user's group membership ends
     so the chat room list (list_my_active_rooms) stops showing it. No-op if
-    the group has no room yet or the user was never in it."""
+    the group has no room yet or the user was never in it.
+
+    Pass commit=False when the caller is already inside a transaction that must
+    include this, so losing chat access and losing the membership cannot land
+    separately."""
     room = get_room_by_group_id(db=db, group_id=group_id)
     if room is None:
         return
     member = get_active_member(db=db, room_id=room.id, user_id=user_id)
     if member is not None:
-        leave_member(db=db, member=member)
+        leave_member(db=db, member=member, commit=commit)
 
 
 def _get_room_or_404(db: Session, room_id: UUID) -> ChatRoom:

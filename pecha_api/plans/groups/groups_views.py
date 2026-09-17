@@ -411,7 +411,7 @@ def get_cms_group_joined_users(
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-):
+) -> GroupJoinedUsersListResponse:
     """Community users who joined this group, newest first.
 
     Distinct from `/members`, which lists the group's staff authors and roles.
@@ -435,7 +435,7 @@ def post_cms_remove_group_joined_user(
     user_id: UUID,
     request: RemoveGroupUserRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> GroupBanDTO:
     """Remove a joined user and block them from rejoining for `ban_duration_days`."""
     return remove_and_ban_group_user(
         token=authentication_credential.credentials,
@@ -459,7 +459,7 @@ def get_cms_group_bans(
     ] = True,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-):
+) -> GroupBanListResponse:
     return list_group_bans(
         token=authentication_credential.credentials,
         group_id=group_id,
@@ -478,7 +478,7 @@ def post_cms_lift_group_ban(
     group_id: UUID,
     ban_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> GroupBanDTO:
     """End a ban early. The user may rejoin, but is not re-added automatically."""
     return lift_group_ban_by_id(
         token=authentication_credential.credentials,

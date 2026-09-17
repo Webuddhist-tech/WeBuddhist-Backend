@@ -5137,6 +5137,11 @@ def test_approve_group_join_request_adds_joiner():
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
     ), patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
         "pecha_api.plans.groups.groups_service.save_join_request",
@@ -5294,6 +5299,11 @@ def test_flipping_group_public_approves_pending_join_requests():
         "pecha_api.plans.groups.groups_service.list_pending_join_requests_by_group",
         return_value=pending,
     ) as mock_list, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join:
         _approve_pending_join_requests_on_publish(mock_db, group_id=group_id)
@@ -5451,6 +5461,11 @@ def test_approve_join_request_keeps_row_lock_until_commit():
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
     ) as mock_get, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
         "pecha_api.plans.groups.groups_service.save_join_request",

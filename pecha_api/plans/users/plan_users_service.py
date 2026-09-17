@@ -114,8 +114,10 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_ids_by_plan_ids,
     get_group_ids_by_series_ids,
     get_user_series_enrollment_partner_map,
+    lock_group_membership_changes,
     upsert_group_join,
 )
+from pecha_api.plans.groups.group_ban_guard import assert_user_not_banned_from_group
 from pecha_api.plans.groups.groups_service import get_group_summaries_by_ids
 from pecha_api.plans.groups.group_summary_models import AuthorGroupSummaryDTO
 from pecha_api.plans.series.series_service import (
@@ -933,6 +935,17 @@ def _resolve_series_partner_id(
     return series_partner.id
 
 
+def _assert_may_join_partner_group(db, group_id: UUID, user_id: UUID) -> None:
+    """Enrolling in a series joins its partner group, so the same ban applies.
+
+    Picking a partner group here is an ordinary membership write, and it is the
+    one the group's moderators cannot see coming, so it goes through the same
+    lock-then-check the direct join paths use.
+    """
+    lock_group_membership_changes(db=db, group_id=group_id)
+    assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user_id)
+
+
 def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -> None:
     """Enroll user in a series, or update partner group when already enrolled."""
     current_user = validate_and_extract_user_details(token=token)
@@ -954,6 +967,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
             new_partner_id = _resolve_series_partner_id(
                 db, enroll_request.series_id, enroll_request.group_id
             )
+            # Checked before anything is written, so a banned user is turned
+            # away rather than left with the partner switched and no membership.
+            if enroll_request.group_id is not None:
+                _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
             if existing_enrollment.series_partner_id != new_partner_id:
                 existing_enrollment.series_partner_id = new_partner_id
                 update_user_series_enrollment(db, existing_enrollment)
@@ -965,6 +982,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
         new_partner_id = _resolve_series_partner_id(
             db, enroll_request.series_id, enroll_request.group_id
         )
+        # Before the enrolment is written: a ban refuses the whole call, so it
+        # cannot leave an enrolment behind that never joined its partner group.
+        if enroll_request.group_id is not None:
+            _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
 
         first_plan = None
         if enroll_request.start_immediately:

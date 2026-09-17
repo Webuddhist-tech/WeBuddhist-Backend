@@ -202,7 +202,10 @@ def leave_group_membership(
     db: Session,
     user_id: UUID,
     group_id: UUID,
+    *,
+    commit: bool = True,
 ) -> None:
+    """Drop a membership. Pass commit=False to keep an enclosing transaction open."""
     db.execute(
         delete(author_group_joins).where(
             author_group_joins.c.group_id == group_id,
@@ -212,7 +215,8 @@ def leave_group_membership(
     _clear_user_series_partner_ids_for_group(
         db=db, user_id=user_id, group_id=group_id
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_series_by_group_id(db: Session, group_id: UUID) -> List[Series]:
@@ -316,6 +320,23 @@ def lock_group_status(db: Session, group_id: UUID) -> None:
     db.query(AuthorGroup.id).filter(
         AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None)
     ).with_for_update().first()
+
+
+def lock_group_membership_changes(db: Session, group_id: UUID) -> None:
+    """Take the group row lock that serialises membership writes.
+
+    Joining writes `author_group_joins` while a moderator removal deletes that
+    row and writes a ban row in another table, so no row lock or unique
+    constraint can order the two on its own: a join reading "not banned" just
+    before the removal commits would otherwise re-create the membership of a
+    banned user. Every path that adds or removes a membership takes this lock
+    before reading the ban, so the two run one after the other.
+
+    This is the same row lock `lock_group_visibility` takes, so the paths that
+    already hold that one need nothing extra. Always taken before any join
+    request row lock, to keep a single lock order across the module.
+    """
+    lock_group_visibility(db=db, group_id=group_id)
 
 
 def lock_group_visibility(db: Session, group_id: UUID) -> Optional[bool]:
@@ -1105,7 +1126,9 @@ def create_group_ban(
     expires_at: datetime,
     reason: Optional[str],
     created_by: Optional[UUID],
+    commit: bool = True,
 ) -> AuthorGroupBan:
+    """Record a ban. Pass commit=False to keep an enclosing transaction open."""
     ban = AuthorGroupBan(
         group_id=group_id,
         user_id=user_id,
@@ -1114,8 +1137,9 @@ def create_group_ban(
         created_by=created_by,
     )
     db.add(ban)
-    db.commit()
-    db.refresh(ban)
+    if commit:
+        db.commit()
+        db.refresh(ban)
     return ban
 
 

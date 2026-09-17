@@ -609,3 +609,244 @@ def test_accumulator_join_consults_the_ban_guard():
 
     assert mock_guard.call_args.kwargs["group_id"] == group.id
     assert mock_guard.call_args.kwargs["user_id"] == user.id
+
+
+# --- removal is one transaction, ordered against a concurrent join ---------
+
+
+def test_remove_lands_the_membership_the_chat_room_and_the_ban_in_one_commit():
+    """A failure part way through must not leave the user removed but unbanned:
+    a retry would then 404 on "not joined", with the moderation left half done."""
+    group = _make_group()
+    user_id = uuid4()
+
+    with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
+        f"{SERVICE}.validate_and_extract_author_details", return_value=_make_author()
+    ), patch(f"{SERVICE}.get_group_by_id", return_value=group), patch(
+        f"{SERVICE}._assert_can_moderate_group_users"
+    ), patch(
+        f"{SERVICE}.get_user_by_id", return_value=_make_user(user_id)
+    ), patch(
+        f"{SERVICE}.is_user_joined_group", return_value=True
+    ), patch(
+        f"{SERVICE}.remove_group_accumulator_joins_for_group"
+    ), patch(
+        f"{SERVICE}.leave_group_membership"
+    ) as mock_leave, patch(
+        f"{SERVICE}.is_user_following_group", return_value=False
+    ), patch(
+        f"{SERVICE}.leave_group_chat_room"
+    ) as mock_chat, patch(
+        f"{SERVICE}.create_group_ban",
+        return_value=_make_ban(group_id=group.id, user_id=user_id),
+    ) as mock_create:
+        mock_db = _session(mock_session)
+        remove_and_ban_group_user(
+            token="t",
+            group_id=group.id,
+            user_id=user_id,
+            request=RemoveGroupUserRequest(),
+        )
+
+    assert mock_leave.call_args.kwargs["commit"] is False
+    assert mock_chat.call_args.kwargs["commit"] is False
+    assert mock_create.call_args.kwargs["commit"] is False
+    # One commit for the whole removal, not one per step.
+    mock_db.commit.assert_called_once_with()
+
+
+def test_remove_locks_the_group_before_it_reads_the_membership():
+    """The lock is what stops a join slipping between the delete and the ban."""
+    group = _make_group()
+    user_id = uuid4()
+    calls = []
+
+    with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
+        f"{SERVICE}.validate_and_extract_author_details", return_value=_make_author()
+    ), patch(f"{SERVICE}.get_group_by_id", return_value=group), patch(
+        f"{SERVICE}._assert_can_moderate_group_users"
+    ), patch(
+        f"{SERVICE}.get_user_by_id", return_value=_make_user(user_id)
+    ), patch(
+        f"{SERVICE}.lock_group_membership_changes",
+        side_effect=lambda **kwargs: calls.append("lock"),
+    ) as mock_lock, patch(
+        f"{SERVICE}.is_user_joined_group",
+        side_effect=lambda **kwargs: calls.append("joined") or True,
+    ), patch(
+        f"{SERVICE}.remove_group_accumulator_joins_for_group"
+    ), patch(
+        f"{SERVICE}.leave_group_membership"
+    ), patch(
+        f"{SERVICE}.is_user_following_group", return_value=False
+    ), patch(
+        f"{SERVICE}.leave_group_chat_room"
+    ), patch(
+        f"{SERVICE}.create_group_ban",
+        return_value=_make_ban(group_id=group.id, user_id=user_id),
+    ):
+        _session(mock_session)
+        remove_and_ban_group_user(
+            token="t",
+            group_id=group.id,
+            user_id=user_id,
+            request=RemoveGroupUserRequest(),
+        )
+
+    assert mock_lock.call_args.kwargs["group_id"] == group.id
+    assert calls == ["lock", "joined"]
+
+
+def test_join_group_takes_the_same_lock_before_reading_the_ban():
+    group = _make_group()
+    user = _make_user()
+    calls = []
+
+    with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
+        f"{SERVICE}.validate_and_extract_user_details", return_value=user
+    ), patch(f"{SERVICE}.get_group_by_id", return_value=group), patch(
+        f"{SERVICE}.is_group_published", return_value=True
+    ), patch(
+        f"{SERVICE}._assert_group_allows_engagement"
+    ), patch(
+        f"{SERVICE}.lock_group_membership_changes",
+        side_effect=lambda **kwargs: calls.append("lock"),
+    ), patch(
+        f"{SERVICE}.assert_user_not_banned_from_group",
+        side_effect=lambda **kwargs: calls.append("ban"),
+    ), patch(
+        f"{SERVICE}.upsert_group_join"
+    ):
+        _session(mock_session)
+        from pecha_api.plans.groups.groups_service import join_group
+
+        join_group(token="t", group_id=group.id)
+
+    assert calls == ["lock", "ban"]
+
+
+# --- the other paths that write author_group_joins -------------------------
+
+
+def _make_pending_join_request(*, group_id, user_id):
+    from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
+
+    join_request = MagicMock()
+    join_request.id = uuid4()
+    join_request.group_id = group_id
+    join_request.user_id = user_id
+    join_request.status = AuthorGroupJoinRequestStatus.PENDING.value
+    return join_request
+
+
+def test_approving_a_join_request_refuses_a_banned_applicant():
+    """A request can outlive the membership it was made for: a series enrolment
+    can join the user while it is pending, and they can then be banned."""
+    from pecha_api.plans.groups.groups_service import (
+        USER_BANNED_FROM_GROUP,
+        approve_group_join_request,
+    )
+
+    group = _make_group()
+    user_id = uuid4()
+    join_request = _make_pending_join_request(group_id=group.id, user_id=user_id)
+
+    with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
+        f"{SERVICE}.validate_and_extract_author_details", return_value=_make_author()
+    ), patch(f"{SERVICE}.get_group_by_id", return_value=group), patch(
+        f"{SERVICE}._assert_can_manage_join_requests"
+    ), patch(
+        f"{SERVICE}.lock_group_membership_changes"
+    ), patch(
+        f"{SERVICE}.get_join_request_by_id", return_value=join_request
+    ), patch(
+        f"{SERVICE}.get_group_ban_expiry",
+        return_value=datetime.now(timezone.utc) + timedelta(days=3),
+    ), patch(
+        f"{SERVICE}.upsert_group_join"
+    ) as mock_join, patch(
+        f"{SERVICE}.save_join_request"
+    ) as mock_save:
+        _session(mock_session)
+        with pytest.raises(HTTPException) as exc:
+            approve_group_join_request(
+                token="t", group_id=group.id, request_id=join_request.id
+            )
+
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc.value.detail == USER_BANNED_FROM_GROUP
+    mock_join.assert_not_called()
+    mock_save.assert_not_called()
+
+
+def test_publishing_a_group_leaves_a_banned_applicant_pending():
+    """The publish sweep admits everyone waiting, so it has to skip bans too."""
+    from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
+    from pecha_api.plans.groups.groups_service import (
+        _approve_pending_join_requests_on_publish,
+    )
+
+    group_id = uuid4()
+    banned_user_id = uuid4()
+    allowed = _make_pending_join_request(group_id=group_id, user_id=uuid4())
+    banned = _make_pending_join_request(group_id=group_id, user_id=banned_user_id)
+
+    def _expiry(db, *, group_id, user_id):
+        if user_id == banned_user_id:
+            return datetime.now(timezone.utc) + timedelta(days=3)
+        return None
+
+    with patch(
+        f"{SERVICE}.list_pending_join_requests_by_group", return_value=[allowed, banned]
+    ), patch(
+        f"{SERVICE}.get_group_ban_expiry", side_effect=_expiry
+    ), patch(
+        f"{SERVICE}.upsert_group_join"
+    ) as mock_join:
+        _approve_pending_join_requests_on_publish(MagicMock(), group_id=group_id)
+
+    assert mock_join.call_count == 1
+    assert mock_join.call_args.kwargs["user_id"] == allowed.user_id
+    assert allowed.status == AuthorGroupJoinRequestStatus.APPROVED.value
+    # Left for a moderator to decide once the ban has lifted.
+    assert banned.status == AuthorGroupJoinRequestStatus.PENDING.value
+
+
+def test_series_enrolment_into_a_partner_group_consults_the_ban_guard():
+    """Enrolling in a series joins its partner group, banned user or not."""
+    from types import SimpleNamespace
+
+    from pecha_api.plans.users.plan_users_response_models import UserSeriesEnrollRequest
+
+    plan_users = "pecha_api.plans.users.plan_users_service"
+    user = _make_user()
+    series_id = uuid4()
+    group_id = uuid4()
+
+    with patch(f"{plan_users}.SessionLocal") as mock_session, patch(
+        f"{plan_users}.validate_and_extract_user_details",
+        return_value=SimpleNamespace(id=user.id),
+    ), patch(
+        f"{plan_users}.get_user_series_enrollment_by_user_and_series", return_value=None
+    ), patch(
+        f"{plan_users}.get_series_partner",
+        return_value=SimpleNamespace(id=uuid4(), series_id=series_id, group_id=group_id),
+    ), patch(
+        f"{plan_users}.save_user_series_enrollment"
+    ), patch(
+        f"{plan_users}.lock_group_membership_changes"
+    ), patch(
+        f"{plan_users}.upsert_group_join"
+    ), patch(
+        f"{plan_users}.assert_user_not_banned_from_group"
+    ) as mock_guard:
+        _session(mock_session)
+        from pecha_api.plans.users.plan_users_service import enroll_user_in_series
+
+        enroll_user_in_series(
+            token="t",
+            enroll_request=UserSeriesEnrollRequest(series_id=series_id, group_id=group_id),
+        )
+
+    assert mock_guard.call_args.kwargs["group_id"] == group_id
+    assert mock_guard.call_args.kwargs["user_id"] == user.id
