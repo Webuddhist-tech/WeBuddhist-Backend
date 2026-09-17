@@ -13,6 +13,7 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_models import (
     AuthorGroup,
+    AuthorGroupBan,
     AuthorGroupInvite,
     AuthorGroupJoinRequest,
     AuthorGroupMember,
@@ -1094,3 +1095,145 @@ def update_group(db: Session, group: AuthorGroup) -> AuthorGroup:
     db.commit()
     db.refresh(group)
     return group
+
+
+def create_group_ban(
+    db: Session,
+    *,
+    group_id: UUID,
+    user_id: UUID,
+    expires_at: datetime,
+    reason: Optional[str],
+    created_by: Optional[UUID],
+) -> AuthorGroupBan:
+    ban = AuthorGroupBan(
+        group_id=group_id,
+        user_id=user_id,
+        expires_at=expires_at,
+        reason=reason,
+        created_by=created_by,
+    )
+    db.add(ban)
+    db.commit()
+    db.refresh(ban)
+    return ban
+
+
+def get_active_group_ban(
+    db: Session,
+    *,
+    group_id: UUID,
+    user_id: UUID,
+) -> Optional[AuthorGroupBan]:
+    """The user's live ban on this group, or None.
+
+    Expired and lifted rows are kept for the audit trail, so "banned" is a
+    query on `lifted_at`/`expires_at`, never on the row existing.
+    """
+    return (
+        db.query(AuthorGroupBan)
+        .filter(
+            AuthorGroupBan.group_id == group_id,
+            AuthorGroupBan.user_id == user_id,
+            AuthorGroupBan.lifted_at.is_(None),
+            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
+        )
+        .order_by(AuthorGroupBan.expires_at.desc())
+        .first()
+    )
+
+
+def get_active_ban_user_ids(
+    db: Session,
+    *,
+    group_id: UUID,
+    user_ids: Sequence[UUID],
+) -> set[UUID]:
+    if not user_ids:
+        return set()
+    rows = db.execute(
+        select(AuthorGroupBan.user_id).where(
+            AuthorGroupBan.group_id == group_id,
+            AuthorGroupBan.user_id.in_(list(user_ids)),
+            AuthorGroupBan.lifted_at.is_(None),
+            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
+        )
+    ).all()
+    return {row[0] for row in rows}
+
+
+def list_group_bans_paginated(
+    db: Session,
+    *,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    active_only: bool = True,
+) -> Tuple[List[AuthorGroupBan], int]:
+    query = (
+        db.query(AuthorGroupBan)
+        .options(joinedload(AuthorGroupBan.user))
+        .filter(AuthorGroupBan.group_id == group_id)
+    )
+    if active_only:
+        query = query.filter(
+            AuthorGroupBan.lifted_at.is_(None),
+            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
+        )
+    total = query.count()
+    bans = (
+        query.order_by(AuthorGroupBan.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return bans, total
+
+
+def get_group_ban_by_id(
+    db: Session,
+    *,
+    ban_id: UUID,
+) -> Optional[AuthorGroupBan]:
+    return (
+        db.query(AuthorGroupBan)
+        .options(joinedload(AuthorGroupBan.user))
+        .filter(AuthorGroupBan.id == ban_id)
+        .first()
+    )
+
+
+def lift_group_ban(
+    db: Session,
+    *,
+    ban: AuthorGroupBan,
+    lifted_by: Optional[UUID],
+) -> AuthorGroupBan:
+    ban.lifted_at = datetime.now(timezone.utc)
+    ban.lifted_by = lifted_by
+    db.commit()
+    db.refresh(ban)
+    return ban
+
+
+def list_group_joiners_with_join_date_paginated(
+    db: Session,
+    *,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+) -> Tuple[List[Tuple[Users, datetime]], int]:
+    """Joiners plus when they joined, for the Studio moderation list."""
+    query = (
+        db.query(Users, author_group_joins.c.created_at)
+        .join(author_group_joins, Users.id == author_group_joins.c.user_id)
+        .filter(author_group_joins.c.group_id == group_id)
+    )
+    total = query.count()
+    rows = (
+        query.order_by(author_group_joins.c.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return [(row[0], row[1]) for row in rows], total
