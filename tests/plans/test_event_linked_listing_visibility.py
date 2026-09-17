@@ -11,6 +11,7 @@ compiling them needs no database.
 """
 
 import uuid
+from typing import Callable, Iterator, List, Optional, Tuple
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -36,31 +37,31 @@ EVENT_SERIES_GATE = "events.series_id IS NULL"
 class _CapturingQuery(Query):
     """Records the SQL of every query the repository runs, then short-circuits."""
 
-    captured: list = []
+    captured: List[str] = []
 
-    def _capture(self):
+    def _capture(self) -> None:
         sql = str(self.statement.compile(dialect=postgresql.dialect()))
         _CapturingQuery.captured.append(sql.replace("\n", " "))
 
-    def all(self):
+    def all(self) -> list:
         self._capture()
         return []
 
-    def first(self):
+    def first(self) -> Optional[object]:
         self._capture()
         return None
 
-    def scalar(self):
+    def scalar(self) -> int:
         self._capture()
         return 0
 
-    def count(self):
+    def count(self) -> int:
         self._capture()
         return 0
 
 
 @pytest.fixture
-def db():
+def db() -> Iterator[Session]:
     _CapturingQuery.captured = []
     # Unbound: nothing is executed, the statements are only compiled.
     session = Session(query_cls=_CapturingQuery)
@@ -68,7 +69,7 @@ def db():
     session.close()
 
 
-def _sql(db) -> str:
+def _sql(db: Session) -> str:
     assert _CapturingQuery.captured, "repository built no query"
     return " ".join(_CapturingQuery.captured)
 
@@ -102,7 +103,12 @@ def _sql(db) -> str:
         ),
     ],
 )
-def test_public_series_and_practice_listings_exclude_event_linked_content(db, name, run, gates):
+def test_public_series_and_practice_listings_exclude_event_linked_content(
+    db: Session,
+    name: str,
+    run: Callable[[Session], object],
+    gates: Tuple[str, ...],
+) -> None:
     run(db)
 
     for sql in _CapturingQuery.captured:
@@ -110,7 +116,7 @@ def test_public_series_and_practice_listings_exclude_event_linked_content(db, na
             assert gate in sql, f"{name} is missing {gate!r}: {sql}"
 
 
-def test_cms_series_listing_keeps_event_linked_series(db):
+def test_cms_series_listing_keeps_event_linked_series(db: Session) -> None:
     get_series_paginated(db=db, search=None, skip=0, limit=10)
 
     sql = _sql(db)
@@ -118,7 +124,7 @@ def test_cms_series_listing_keeps_event_linked_series(db):
     assert "events.series_id" not in sql
 
 
-def test_feed_events_exclude_plan_or_series_linked_events(db):
+def test_feed_events_exclude_plan_or_series_linked_events(db: Session) -> None:
     get_events(
         db=db,
         restrict_group_ids=[uuid.uuid4()],
@@ -134,7 +140,7 @@ def test_feed_events_exclude_plan_or_series_linked_events(db):
         assert EVENT_SERIES_GATE in sql
 
 
-def test_feed_recurring_events_exclude_plan_or_series_linked_events(db):
+def test_feed_recurring_events_exclude_plan_or_series_linked_events(db: Session) -> None:
     get_recurring_events(
         db=db, restrict_group_ids=[uuid.uuid4()], exclude_plan_or_series_linked=True
     )
@@ -144,7 +150,7 @@ def test_feed_recurring_events_exclude_plan_or_series_linked_events(db):
     assert EVENT_SERIES_GATE in sql
 
 
-def test_event_listings_keep_plan_or_series_linked_events_by_default(db):
+def test_event_listings_keep_plan_or_series_linked_events_by_default(db: Session) -> None:
     get_events(db=db, restrict_group_ids=[uuid.uuid4()])
     get_recurring_events(db=db, restrict_group_ids=[uuid.uuid4()])
 

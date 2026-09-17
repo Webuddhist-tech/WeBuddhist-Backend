@@ -7,7 +7,7 @@ stays fetchable by id while disappearing from every "here are the plans"
 surface.
 """
 
-from sqlalchemy import and_, column, exists, select, table
+from sqlalchemy import ColumnElement, and_, column, exists, select, table
 
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_model import Series
@@ -19,14 +19,14 @@ from pecha_api.plans.series.series_model import Series
 _events = table("events", column("plan_id"), column("series_id"))
 
 
-def plan_not_linked_to_event():
+def plan_not_linked_to_event() -> ColumnElement[bool]:
     """SQL filter: no event points at this plan."""
     return ~exists(
         select(1).where(_events.c.plan_id == Plan.id).correlate(Plan)
     )
 
 
-def series_not_linked_to_event():
+def series_not_linked_to_event() -> ColumnElement[bool]:
     """SQL filter: no event points at this series, nor at any of its
     (non-deleted) plans."""
     return and_(
