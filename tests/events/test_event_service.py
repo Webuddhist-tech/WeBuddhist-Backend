@@ -230,3 +230,29 @@ def test_get_events_service_includes_past_when_requested():
     assert mock_get_events.call_args.kwargs["not_ended_before"] is None
     assert mock_get_events.call_args.kwargs["from_date"] is None
 
+
+def test_get_events_service_accepts_naive_from_date():
+    naive = datetime(2026, 9, 17, 0, 0, 0)
+
+    with patch(
+        "pecha_api.events.event_service.SessionLocal"
+    ) as mock_session, patch(
+        "pecha_api.events.event_service.get_events",
+        return_value=([], 0),
+    ) as mock_get_events, patch(
+        "pecha_api.events.event_service.get_recurring_events",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service.get_event_participant_counts",
+        return_value={},
+    ), patch(
+        "pecha_api.events.event_service._expand_earliest_occurrences",
+        return_value=[],
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        get_events_service(from_date=naive)
+
+    passed = mock_get_events.call_args.kwargs["from_date"]
+    assert passed.tzinfo is not None
+    assert passed == datetime(2026, 9, 17, 0, 0, 0, tzinfo=timezone.utc)
+

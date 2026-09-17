@@ -2,7 +2,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -561,10 +561,19 @@ class EventContentFilter:
     event_format: Optional[EventFormat] = None
 
 
+def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Treat offset-less datetimes as UTC so they can be compared with now()."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _expand_earliest_occurrences(
-    recurring_templates,
-    from_date_obj,
-    to_date_obj,
+    recurring_templates: Sequence[Event],
+    from_date_obj: date,
+    to_date_obj: date,
     not_ended_before: Optional[datetime] = None,
 ) -> List[Dict]:
     """Each template's earliest occurrence within the window, one row per
@@ -609,6 +618,8 @@ def get_events_service(
     token: Optional[str] = None,
 ) -> EventsResponse:
     content_filter = content_filter or EventContentFilter()
+    from_date = _as_aware_utc(from_date)
+    to_date = _as_aware_utc(to_date)
     with SessionLocal() as db:
         current_user = None
         if token:
