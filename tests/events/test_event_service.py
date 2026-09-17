@@ -11,7 +11,7 @@ from pecha_api.events.event_service import (
 )
 
 
-def test_get_events_today_service_uses_day_bounds():
+def test_get_events_today_service_uses_day_bounds() -> None:
     start = datetime(2026, 6, 23, 0, 0, tzinfo=timezone.utc)
     end = datetime(2026, 6, 23, 23, 59, 59, 999999, tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
@@ -52,7 +52,7 @@ def test_get_events_today_service_uses_day_bounds():
     assert result == expected
 
 
-def test_get_events_service_limits_authenticated_user_to_followed_groups():
+def test_get_events_service_limits_authenticated_user_to_followed_groups() -> None:
     user = MagicMock(id=uuid4())
     followed_group_id = uuid4()
 
@@ -86,7 +86,7 @@ def test_get_events_service_limits_authenticated_user_to_followed_groups():
     ]
 
 
-def test_get_events_service_can_include_unfollowed_public_groups():
+def test_get_events_service_can_include_unfollowed_public_groups() -> None:
     user = MagicMock(id=uuid4())
     public_group_ids = [uuid4(), uuid4()]
 
@@ -119,7 +119,7 @@ def test_get_events_service_can_include_unfollowed_public_groups():
     assert mock_get_events.call_args.kwargs["restrict_group_ids"] == public_group_ids
 
 
-def test_get_events_service_hides_finished_events_even_when_from_date_is_in_the_past():
+def test_get_events_service_hides_finished_events_even_when_from_date_is_in_the_past() -> None:
     past = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
     with patch(
@@ -143,7 +143,7 @@ def test_get_events_service_hides_finished_events_even_when_from_date_is_in_the_
     assert mock_get_events.call_args.kwargs["from_date"] == past
 
 
-def test_get_events_service_does_not_expand_recurring_from_historical_from_date():
+def test_get_events_service_does_not_expand_recurring_from_historical_from_date() -> None:
     past = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
     with patch(
@@ -171,7 +171,7 @@ def test_get_events_service_does_not_expand_recurring_from_historical_from_date(
     assert cutoff > past
 
 
-def test_expand_earliest_occurrences_skips_finished_occurrence_when_cutoff_set():
+def test_expand_earliest_occurrences_skips_finished_occurrence_when_cutoff_set() -> None:
     template = MagicMock()
     template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
@@ -194,7 +194,7 @@ def test_expand_earliest_occurrences_skips_finished_occurrence_when_cutoff_set()
     assert result[0]["start_date"].date() == upcoming
 
 
-def test_expand_earliest_occurrences_keeps_past_occurrence_without_cutoff():
+def test_expand_earliest_occurrences_keeps_past_occurrence_without_cutoff() -> None:
     template = MagicMock()
     template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
@@ -211,7 +211,7 @@ def test_expand_earliest_occurrences_keeps_past_occurrence_without_cutoff():
     assert result[0]["start_date"].date() == finished
 
 
-def test_get_events_service_includes_past_when_requested():
+def test_get_events_service_includes_past_when_requested() -> None:
     with patch(
         "pecha_api.events.event_service.SessionLocal"
     ) as mock_session, patch(
@@ -237,7 +237,7 @@ def test_get_events_service_includes_past_when_requested():
     assert mock_expand.call_args.kwargs["prefer_current_or_last"] is True
 
 
-def test_expand_earliest_occurrences_cms_prefers_upcoming_then_last_past():
+def test_expand_earliest_occurrences_cms_prefers_upcoming_then_last_past() -> None:
     template = MagicMock()
     template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
@@ -261,7 +261,7 @@ def test_expand_earliest_occurrences_cms_prefers_upcoming_then_last_past():
     assert result[0]["start_date"].date() == upcoming
 
 
-def test_expand_earliest_occurrences_cms_keeps_last_past_when_none_upcoming():
+def test_expand_earliest_occurrences_cms_keeps_last_past_when_none_upcoming() -> None:
     template = MagicMock()
     template.start_date = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
     template.end_date = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
@@ -285,7 +285,7 @@ def test_expand_earliest_occurrences_cms_keeps_last_past_when_none_upcoming():
     assert result[0]["start_date"].date() == finished
 
 
-def test_get_events_service_accepts_naive_from_date():
+def test_get_events_service_accepts_naive_from_date() -> None:
     naive = datetime(2026, 9, 17, 0, 0, 0)
 
     with patch(
