@@ -10,7 +10,7 @@ from pecha_api.plans.series.series_model import Series
 from pecha_api.plans.series.series_metadata_model import SeriesMetadata
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.items.plan_items_models import PlanItem
-from pecha_api.plans.shared.event_linkage import series_without_event_linked_plan
+from pecha_api.plans.shared.event_linkage import series_not_linked_to_event
 from pecha_api.plans.users.plan_user_series_repository import ensure_series_partner
 from pecha_api.plans.users.plan_users_models import SeriesPartner, UserSeriesEnrollment
 
@@ -698,7 +698,7 @@ def get_series_paginated(
     if not include_deleted:
         filters.append(Series.deleted_at.is_(None))
     if exclude_event_linked:
-        filters.append(series_without_event_linked_plan())
+        filters.append(series_not_linked_to_event())
     if search:
         filters.append(
             exists(
@@ -784,7 +784,7 @@ def get_random_featured_published_series(
         Series.deleted_at.is_(None),
         Series.featured.is_(True),
         Series.status == PlanStatus.PUBLISHED,
-        series_without_event_linked_plan(),
+        series_not_linked_to_event(),
     ]
     query = (
         db.query(Series, plan_count)

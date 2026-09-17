@@ -1,10 +1,10 @@
 """Plans merged into an event must not surface in the public listing APIs.
 
-- ``GET /series`` and ``GET /series/featured`` drop a series when any of its
-  plans is linked to an event.
+- ``GET /series`` and ``GET /series/featured`` drop a series when an event
+  links it directly or links any of its plans.
 - ``GET /author/groups/practices`` drops those series and event-linked
   standalone plans.
-- ``GET /author/groups/feeds`` drops events that link a plan.
+- ``GET /author/groups/feeds`` drops events that link a plan or a series.
 
 The queries are compiled rather than executed: the gates are a SQL concern, and
 compiling them needs no database.
@@ -28,7 +28,9 @@ from pecha_api.plans.series.series_repository import (
 )
 
 PLAN_EVENT_GATE = "events.plan_id = plans.id"
+SERIES_EVENT_GATE = "events.series_id = series.id"
 EVENT_PLAN_GATE = "events.plan_id IS NULL"
+EVENT_SERIES_GATE = "events.series_id IS NULL"
 
 
 class _CapturingQuery(Query):
@@ -72,63 +74,80 @@ def _sql(db) -> str:
 
 
 @pytest.mark.parametrize(
-    "name,run",
+    "name,run,gates",
     [
         (
             "GET /series",
             lambda db: get_series_paginated(
                 db=db, search=None, skip=0, limit=10, exclude_event_linked=True
             ),
+            (PLAN_EVENT_GATE, SERIES_EVENT_GATE),
         ),
-        ("GET /series/featured", lambda db: get_random_featured_published_series(db=db)),
+        (
+            "GET /series/featured",
+            lambda db: get_random_featured_published_series(db=db),
+            (PLAN_EVENT_GATE, SERIES_EVENT_GATE),
+        ),
         (
             "GET /author/groups/practices series",
             lambda db: get_series_for_group_ids(db=db, group_ids=[uuid.uuid4()], limit=20),
+            (PLAN_EVENT_GATE, SERIES_EVENT_GATE),
         ),
         (
             "GET /author/groups/practices plans",
             lambda db: get_standalone_plans_for_group_ids(
                 db=db, group_ids=[uuid.uuid4()], limit=20
             ),
+            (PLAN_EVENT_GATE,),
         ),
     ],
 )
-def test_public_series_and_practice_listings_exclude_event_linked_plans(db, name, run):
+def test_public_series_and_practice_listings_exclude_event_linked_content(db, name, run, gates):
     run(db)
 
     for sql in _CapturingQuery.captured:
-        assert PLAN_EVENT_GATE in sql, f"{name} is missing the event gate: {sql}"
+        for gate in gates:
+            assert gate in sql, f"{name} is missing {gate!r}: {sql}"
 
 
 def test_cms_series_listing_keeps_event_linked_series(db):
     get_series_paginated(db=db, search=None, skip=0, limit=10)
 
-    assert "events.plan_id" not in _sql(db)
+    sql = _sql(db)
+    assert "events.plan_id" not in sql
+    assert "events.series_id" not in sql
 
 
-def test_feed_events_exclude_plan_linked_events(db):
+def test_feed_events_exclude_plan_or_series_linked_events(db):
     get_events(
         db=db,
         restrict_group_ids=[uuid.uuid4()],
         limit=20,
         should_sort_newest_first=True,
-        exclude_plan_linked=True,
+        exclude_plan_or_series_linked=True,
     )
 
     # Both the count and the page query carry the gate, so the total matches.
     assert len(_CapturingQuery.captured) == 2
     for sql in _CapturingQuery.captured:
         assert EVENT_PLAN_GATE in sql
+        assert EVENT_SERIES_GATE in sql
 
 
-def test_feed_recurring_events_exclude_plan_linked_events(db):
-    get_recurring_events(db=db, restrict_group_ids=[uuid.uuid4()], exclude_plan_linked=True)
+def test_feed_recurring_events_exclude_plan_or_series_linked_events(db):
+    get_recurring_events(
+        db=db, restrict_group_ids=[uuid.uuid4()], exclude_plan_or_series_linked=True
+    )
 
-    assert EVENT_PLAN_GATE in _sql(db)
+    sql = _sql(db)
+    assert EVENT_PLAN_GATE in sql
+    assert EVENT_SERIES_GATE in sql
 
 
-def test_event_listings_keep_plan_linked_events_by_default(db):
+def test_event_listings_keep_plan_or_series_linked_events_by_default(db):
     get_events(db=db, restrict_group_ids=[uuid.uuid4()])
     get_recurring_events(db=db, restrict_group_ids=[uuid.uuid4()])
 
-    assert EVENT_PLAN_GATE not in _sql(db)
+    sql = _sql(db)
+    assert EVENT_PLAN_GATE not in sql
+    assert EVENT_SERIES_GATE not in sql

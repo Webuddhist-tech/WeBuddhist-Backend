@@ -28,7 +28,7 @@ from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_model import Series
 from pecha_api.plans.shared.event_linkage import (
     plan_not_linked_to_event,
-    series_without_event_linked_plan,
+    series_not_linked_to_event,
 )
 from pecha_api.plans.tags.tag_model import Tag
 from pecha_api.plans.users.plan_users_models import SeriesPartner, UserSeriesEnrollment
@@ -259,7 +259,7 @@ def get_series_for_group_ids(
         Series.group_id.in_(group_ids),
         Series.deleted_at.is_(None),
         Series.status == PlanStatus.PUBLISHED,
-        series_without_event_linked_plan(),
+        series_not_linked_to_event(),
     )
     if exclude_ids:
         query = query.filter(Series.id.not_in(exclude_ids))
