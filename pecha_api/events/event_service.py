@@ -561,26 +561,37 @@ class EventContentFilter:
     event_format: Optional[EventFormat] = None
 
 
-def _expand_earliest_occurrences(recurring_templates, from_date_obj, to_date_obj) -> List[Dict]:
+def _expand_earliest_occurrences(
+    recurring_templates,
+    from_date_obj,
+    to_date_obj,
+    not_ended_before: Optional[datetime] = None,
+) -> List[Dict]:
     """Each template's earliest occurrence within the window, one row per
-    template. Templates with no occurrence in the window are dropped."""
+    template. Templates with no occurrence in the window are dropped.
+
+    When not_ended_before is set (public listings), skip occurrences whose
+    end datetime is already past that cutoff so a historical from_date cannot
+    surface a finished occurrence as the earliest in the window.
+    """
     expanded_occurrences = []
     for template in recurring_templates:
         occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
-        if not occurrences:
-            continue
-        start_d, end_d = occurrences[0]
-        # Carry the template's own time-of-day onto the occurrence,
-        # instead of defaulting to midnight / end-of-day.
-        occurrence_start, occurrence_end = combine_occurrence_window(
-            start_d, end_d, template.start_date, template.end_date
-        )
-        expanded_occurrences.append({
-            'event': template,
-            'start_date': occurrence_start,
-            'end_date': occurrence_end,
-            'occurrence_date': occurrence_start,
-        })
+        for start_d, end_d in occurrences:
+            # Carry the template's own time-of-day onto the occurrence,
+            # instead of defaulting to midnight / end-of-day.
+            occurrence_start, occurrence_end = combine_occurrence_window(
+                start_d, end_d, template.start_date, template.end_date
+            )
+            if not_ended_before is not None and occurrence_end < not_ended_before:
+                continue
+            expanded_occurrences.append({
+                'event': template,
+                'start_date': occurrence_start,
+                'end_date': occurrence_end,
+                'occurrence_date': occurrence_start,
+            })
+            break
     return expanded_occurrences
 
 
@@ -619,7 +630,11 @@ def get_events_service(
             to_date = (from_date or now) + timedelta(days=365)
 
         # Recurrence expansion still needs a start even when CMS has no from_date.
+        # Public listings clamp to now so a historical from_date cannot expand
+        # a finished occurrence as the earliest in the window.
         expansion_from = from_date or now
+        if not_ended_before is not None and expansion_from < not_ended_before:
+            expansion_from = not_ended_before
         from_date_obj = expansion_from.date() if isinstance(expansion_from, datetime) else expansion_from
         to_date_obj = to_date.date() if isinstance(to_date, datetime) else to_date
 
@@ -660,7 +675,10 @@ def get_events_service(
         # once per listing instead of once per occurrence (e.g. 12 rows for
         # a monthly recurrence over the default 12-month window).
         expanded_occurrences = _expand_earliest_occurrences(
-            recurring_templates, from_date_obj, to_date_obj
+            recurring_templates,
+            from_date_obj,
+            to_date_obj,
+            not_ended_before=not_ended_before,
         )
         
         # Merge one-shot events and expanded occurrences
