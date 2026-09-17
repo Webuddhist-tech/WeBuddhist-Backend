@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -27,11 +28,25 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_server_time(value: Optional[str]) -> Optional[datetime]:
+    """Parse a frame's server_time, or None when it is missing/unreadable.
+
+    Compared as datetimes rather than strings: isoformat drops the microseconds
+    on an exact second, so "…:00Z" would sort after "…:00.123456Z".
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 def _error(code: str, message: str) -> dict:
     return {"type": "error", "code": code, "message": message}
 
 
-def _detail_code(detail) -> str:
+def _detail_code(detail: object) -> str:
     return detail if isinstance(detail, str) else "ERROR"
 
 
@@ -40,7 +55,7 @@ async def websocket_recitation_live(
     websocket: WebSocket,
     event_id: UUID,
     token: str = Query(...),
-):
+) -> None:
     """Live recitation position for an event (WebSocket).
 
     One operator advances the puja; every subscriber - phones in the room and
@@ -112,8 +127,14 @@ async def websocket_recitation_live(
         # A late joiner is the normal case, not the exception: send whatever the
         # operator's last click was so the phone lands on the live line.
         current_position = await broadcaster.get_position(event_id)
+        # Frames published between subscribing and reading the snapshot are
+        # already queued on the pubsub, and the snapshot may be newer than some
+        # of them. Relaying those as-is would scroll the room backwards before
+        # it caught up, so anything not newer than what we just sent is dropped.
+        last_position_time = None
         if current_position is not None:
             await websocket.send_json(current_position)
+            last_position_time = _parse_server_time(current_position.get("server_time"))
 
         ended_remotely = asyncio.Event()
         # Set when the session ends from elsewhere (the operator's `end`, on
@@ -121,21 +142,36 @@ async def websocket_recitation_live(
         # socket rather than leave a client waiting on a dead puja.
         session_over = False
 
-        async def listen_redis():
+        async def listen_redis() -> None:
+            nonlocal last_position_time
             try:
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
+
+                    try:
+                        frame = json.loads(message["data"])
+                    except (ValueError, TypeError):
+                        frame = None
+
+                    if isinstance(frame, dict) and frame.get("type") == "position":
+                        server_time = _parse_server_time(frame.get("server_time"))
+                        if (
+                            last_position_time is not None
+                            and server_time is not None
+                            and server_time <= last_position_time
+                        ):
+                            continue
+                        last_position_time = server_time or last_position_time
+
                     try:
                         await websocket.send_text(message["data"])
                     except (ConnectionClosedOK, ConnectionClosedError):
                         break
-                    try:
-                        if json.loads(message["data"]).get("type") == "session_ended":
-                            ended_remotely.set()
-                            break
-                    except (ValueError, TypeError):
-                        pass
+
+                    if isinstance(frame, dict) and frame.get("type") == "session_ended":
+                        ended_remotely.set()
+                        break
             except Exception as e:
                 logger.exception("Error listening to Redis: %s", e)
 

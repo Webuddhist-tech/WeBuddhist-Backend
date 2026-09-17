@@ -192,6 +192,78 @@ class TestRecitationConnection:
                 websocket.receive_json()
                 assert websocket.receive_json() == published
 
+    def test_queued_frames_older_than_the_snapshot_are_dropped(self):
+        """Frames published between subscribe and the snapshot read are already
+        queued, and the snapshot can be newer than some of them. Relaying those
+        would scroll the room backwards before it caught up."""
+        event_id = uuid4()
+        snapshot = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-newest",
+            "index": 9,
+            "round_number": 1,
+            "server_time": "2026-09-14T09:30:05Z",
+        }
+        stale = {**snapshot, "segment_id": "seg-older", "index": 4,
+                 "server_time": "2026-09-14T09:30:01Z"}
+        fresh = {**snapshot, "segment_id": "seg-next", "index": 10,
+                 "server_time": "2026-09-14T09:30:09Z"}
+        pubsub = FakePubSub([
+            {"type": "message", "data": json.dumps(stale)},
+            {"type": "message", "data": json.dumps(fresh)},
+        ])
+
+        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()                      # session_info
+                assert websocket.receive_json() == snapshot   # connect-time position
+                assert websocket.receive_json() == fresh      # stale one skipped
+
+    def test_duplicate_of_the_snapshot_is_not_relayed(self):
+        """The snapshot is written before its own publish, so a connect landing
+        between the two sees the same position twice."""
+        event_id = uuid4()
+        snapshot = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-1",
+            "index": 1,
+            "round_number": None,
+            "server_time": "2026-09-14T09:30:05Z",
+        }
+        later = {**snapshot, "segment_id": "seg-2", "server_time": "2026-09-14T09:30:06Z"}
+        pubsub = FakePubSub([
+            {"type": "message", "data": json.dumps(snapshot)},
+            {"type": "message", "data": json.dumps(later)},
+        ])
+
+        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()
+                assert websocket.receive_json() == snapshot
+                assert websocket.receive_json() == later
+
+    def test_frames_relay_normally_when_no_snapshot_exists(self):
+        event_id = uuid4()
+        first = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-1",
+            "index": 0,
+            "round_number": None,
+            "server_time": "2026-09-14T09:30:01Z",
+        }
+        pubsub = FakePubSub([{"type": "message", "data": json.dumps(first)}])
+
+        with _ws_env(pubsub=pubsub, position=None, is_operator=False):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()
+                assert websocket.receive_json() == first
+
     def test_session_ended_frame_releases_the_socket(self):
         event_id = uuid4()
         ended = {"type": "session_ended", "event_id": str(event_id)}

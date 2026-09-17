@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
 
+from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.plans.groups.groups_repository import (
     is_group_id_published,
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 NOT_ELIGIBLE = "Only joined or following members of this event's group can follow its recitation"
 
 
-def load_live_event(db: Session, event_id: UUID):
+def load_live_event(db: Session, event_id: UUID) -> Event:
     """The event behind a recitation session, or 404.
 
     Deliberately not `chat.service.load_open_event`: that one also requires
@@ -32,7 +33,7 @@ def load_live_event(db: Session, event_id: UUID):
     return event
 
 
-def require_subscriber(db: Session, event, user_id: UUID) -> None:
+def require_subscriber(db: Session, event: Event, user_id: UUID) -> None:
     """Anyone who can see the event can follow along: same joiner/follower rule
     the event's chat room uses, so this introduces no new permission concept."""
     eligible = is_user_joined_group(
@@ -42,7 +43,7 @@ def require_subscriber(db: Session, event, user_id: UUID) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=NOT_ELIGIBLE)
 
 
-def is_event_operator(db: Session, event, token: str) -> bool:
+def is_event_operator(db: Session, event: Event, token: str) -> bool:
     """True when the caller may drive this event's recitation.
 
     v1 operator == whoever may edit the event in the CMS (group owner, admin or
@@ -78,10 +79,18 @@ def resolve_recitation_access(event_id: UUID, user_id: UUID, token: str) -> bool
 
     Raises 404 for an unreachable event and 403 for an ineligible viewer;
     returns True when the caller is the operator.
+
+    The operator check runs first, and passing it is enough on its own: CMS
+    rights live on the Author, while joining or following is something the
+    person does in the app, and the one driving the puja often has the former
+    without the latter. Gating them on a join would lock the group's own admins
+    out of their event.
     """
     from pecha_api.db.database import SessionLocal
 
     with SessionLocal() as db:
         event = load_live_event(db=db, event_id=event_id)
+        if is_event_operator(db=db, event=event, token=token):
+            return True
         require_subscriber(db=db, event=event, user_id=user_id)
-        return is_event_operator(db=db, event=event, token=token)
+        return False

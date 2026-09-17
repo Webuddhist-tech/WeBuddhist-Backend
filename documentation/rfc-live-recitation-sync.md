@@ -69,7 +69,7 @@ New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster
 
 ## 7. Permissions and hosting
 
-Subscribe: caller is joined to or following the event's group (the same rule the event's chat room uses). Publish `set`: whoever may edit the event in the CMS — group owner, admin or author, plus super admins — so there is no second permission model to keep in step. Publishes throttled ~10/s per event, excess dropped. An unknown or unpublished `event_id` closes the socket.
+Subscribe: caller is joined to or following the event's group (the same rule the event's chat room uses), **or** passes the operator check. Publish `set`: whoever may edit the event in the CMS — group owner, admin or author, plus super admins — so there is no second permission model to keep in step. Operator rights stand alone deliberately: they live on the Author while joining is an app action, and requiring both would lock a group's own admins out of their event. Publishes throttled ~10/s per event, excess dropped. An unknown or unpublished `event_id` closes the socket.
 
 Render imposes no connection limit; a few hundred phones at ~200 bytes a few times a minute sits far below Standard (`1c-2g`). Two operational facts matter more: **a deploy drops every socket**, so freeze deploys during a live puja and treat client reconnect as mandatory; and set `perMessageDeflate: false` on any Node overlay bridge, since per-connection zlib buffers dwarf our payload.
 

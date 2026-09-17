@@ -15,6 +15,7 @@ from .timer_repository import (
     get_timers_by_group,
     get_user_timers_by_group,
     get_user_timer_by_parent_preset,
+    lock_timer_row,
     save_timer,
     get_timer_by_id,
     update_timer,
@@ -126,6 +127,14 @@ def _customize_preset_timer(db, user_id: UUID, preset: Timer, request: UpdateTim
     _validate_update_ambient_sound(db, request)
 
     personal_timer = get_user_timer_by_parent_preset(db, user_id, preset.id)
+    if personal_timer is None:
+        # Two PUTs customizing the same preset can both reach this point before
+        # either commits, and nothing in the schema stops both inserting - the
+        # user would then see the same customized preset twice. Serialize on
+        # the preset row and look again before creating.
+        lock_timer_row(db, preset.id)
+        personal_timer = get_user_timer_by_parent_preset(db, user_id, preset.id)
+
     if personal_timer is None:
         personal_timer = _personal_copy_from_preset(user_id, preset)
         _apply_timer_field_updates(personal_timer, request)

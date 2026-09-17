@@ -8,7 +8,7 @@ One WebSocket. The operator publishes a position; every phone and overlay in the
 wss://{host}/api/v1/events/{event_id}/recitation/live?token={auth_token}
 ```
 
-`token` is the normal bearer token. Anyone joined to or following the event's group may connect; whoever may edit the event in the CMS (group owner / admin / author, or a super admin) also gets `is_operator: true` and may publish.
+`token` is the normal bearer token. Anyone joined to or following the event's group may connect. Whoever may edit the event in the CMS (group owner / admin / author, or a super admin) gets `is_operator: true` and may publish — and connects on that basis alone, without having joined or followed the group in the app, since the person driving the puja usually never tapped "join".
 
 The server sends two frames on connect:
 

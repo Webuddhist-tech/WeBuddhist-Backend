@@ -4,6 +4,7 @@ from typing import Dict, Optional
 from uuid import UUID
 
 from redis.asyncio import Redis
+from redis.asyncio.client import PubSub
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class RecitationBroadcaster:
     waiting for the operator's next click.
     """
 
-    def __init__(self, redis_url: str):
+    def __init__(self, redis_url: str) -> None:
         self.redis_url = redis_url
         self.redis: Optional[Redis] = None
         # Track local WebSocket connections: {event_id: {user_id: websocket}}
@@ -89,7 +90,7 @@ class RecitationBroadcaster:
             if not self.connections[event_id]:
                 del self.connections[event_id]
 
-    async def subscribe_to_event(self, event_id: UUID):
+    async def subscribe_to_event(self, event_id: UUID) -> PubSub:
         """Subscribe to the position stream for an event."""
         pubsub = self.redis.pubsub()
         await pubsub.subscribe(position_channel(event_id))

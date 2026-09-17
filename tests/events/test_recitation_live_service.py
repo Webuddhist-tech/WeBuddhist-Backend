@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -109,25 +110,59 @@ class TestIsEventOperator:
 
 class TestResolveRecitationAccess:
 
-    def test_returns_operator_flag_after_gating(self):
-        with patch("pecha_api.db.database.SessionLocal"), \
-             patch(f"{MODULE}.load_live_event", return_value=_event()) as mock_load, \
-             patch(f"{MODULE}.require_subscriber") as mock_require, \
-             patch(f"{MODULE}.is_event_operator", return_value=True):
+    @staticmethod
+    def _patched(is_operator, require_error=None, load_error=None):
+        stack = ExitStack()
+        stack.enter_context(patch("pecha_api.db.database.SessionLocal"))
+        mock_load = stack.enter_context(patch(f"{MODULE}.load_live_event", return_value=_event()))
+        if load_error is not None:
+            mock_load.side_effect = load_error
+        mock_require = stack.enter_context(patch(f"{MODULE}.require_subscriber"))
+        if require_error is not None:
+            mock_require.side_effect = require_error
+        mock_operator = stack.enter_context(
+            patch(f"{MODULE}.is_event_operator", return_value=is_operator)
+        )
+        return stack, mock_load, mock_require, mock_operator
+
+    def test_operator_is_allowed_without_joining_the_group(self):
+        """CMS rights live on the Author and joining is an app action, so the
+        person driving the puja often has one without the other. Requiring both
+        would lock a group's own admins out of their event."""
+        stack, _, mock_require, _ = self._patched(is_operator=True)
+        with stack:
             assert resolve_recitation_access(uuid4(), uuid4(), "t") is True
+
+        mock_require.assert_not_called()
+
+    def test_non_operator_must_be_a_subscriber(self):
+        stack, mock_load, mock_require, _ = self._patched(is_operator=False)
+        with stack:
+            assert resolve_recitation_access(uuid4(), uuid4(), "t") is False
 
         mock_load.assert_called_once()
         mock_require.assert_called_once()
 
-    def test_subscriber_gate_runs_before_operator_check(self):
-        with patch("pecha_api.db.database.SessionLocal"), \
-             patch(f"{MODULE}.load_live_event", return_value=_event()), \
-             patch(
-                 f"{MODULE}.require_subscriber",
-                 side_effect=HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no"),
-             ), \
-             patch(f"{MODULE}.is_event_operator") as mock_operator:
-            with pytest.raises(HTTPException):
+    def test_ineligible_non_operator_is_rejected(self):
+        stack, _, _, _ = self._patched(
+            is_operator=False,
+            require_error=HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no"),
+        )
+        with stack:
+            with pytest.raises(HTTPException) as exc:
                 resolve_recitation_access(uuid4(), uuid4(), "t")
 
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_unreachable_event_is_rejected_before_any_permission_check(self):
+        stack, _, mock_require, mock_operator = self._patched(
+            is_operator=True,
+            load_error=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found"),
+        )
+        with stack:
+            with pytest.raises(HTTPException) as exc:
+                resolve_recitation_access(uuid4(), uuid4(), "t")
+
+        assert exc.value.status_code == status.HTTP_404_NOT_FOUND
         mock_operator.assert_not_called()
+        mock_require.assert_not_called()

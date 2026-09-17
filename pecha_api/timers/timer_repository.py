@@ -129,6 +129,16 @@ def get_user_timers_by_group(
     return timers, total
 
 
+def lock_timer_row(db: Session, timer_id: UUID) -> None:
+    """Take a row lock on a timer, serializing writers keyed to that timer.
+
+    Used before creating a user's personal copy of a preset: nothing enforces
+    uniqueness on (user_id, parent_preset_id), so two first-time customizations
+    of the same preset can otherwise both find nothing and both insert.
+    """
+    db.query(Timer.id).filter(Timer.id == timer_id).with_for_update().first()
+
+
 def get_user_timer_by_parent_preset(
     db: Session,
     user_id: UUID,

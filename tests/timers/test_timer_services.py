@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, call, MagicMock
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
@@ -678,13 +678,14 @@ class TestUpdateTimerService:
 
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.save_timer')
+    @patch('pecha_api.timers.timer_service.lock_timer_row')
     @patch('pecha_api.timers.timer_service._personal_copy_from_preset')
     @patch('pecha_api.timers.timer_service.get_user_timer_by_parent_preset')
     @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
     @patch('pecha_api.timers.timer_service.get_timer_by_id')
     @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
     def test_update_timer_service_preset_creates_personal_copy(
-        self, mock_validate, mock_get, mock_get_sound, mock_get_copy, mock_copy_from_preset, mock_save, mock_session
+        self, mock_validate, mock_get, mock_get_sound, mock_get_copy, mock_copy_from_preset, mock_lock, mock_save, mock_session
     ):
         """Picking a sound on a shared preset writes a personal copy, not the catalogue row."""
         user_id = uuid4()
@@ -727,10 +728,64 @@ class TestUpdateTimerService:
         assert result.parent_preset_id == preset.id
         assert result.ambient_sound_id == new_sound_id
         assert preset.ambient_sound_id == original_sound_id
-        mock_get_copy.assert_called_once_with(mock_db, user_id, preset.id)
+        # Looked up twice: once optimistically, then again under the preset's
+        # row lock, which is what stops two concurrent PUTs both inserting.
+        assert mock_get_copy.call_args_list == [
+            call(mock_db, user_id, preset.id),
+            call(mock_db, user_id, preset.id),
+        ]
+        mock_lock.assert_called_once_with(mock_db, preset.id)
         mock_copy_from_preset.assert_called_once_with(user_id, preset)
         mock_save.assert_called_once_with(mock_db, personal_copy)
         assert personal_copy.ambient_sound_id == new_sound_id
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.save_timer')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.lock_timer_row')
+    @patch('pecha_api.timers.timer_service.get_user_timer_by_parent_preset')
+    @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_update_timer_service_preset_race_updates_the_row_the_winner_created(
+        self, mock_validate, mock_get, mock_get_sound, mock_get_copy, mock_lock, mock_update, mock_save, mock_session
+    ):
+        """Two PUTs customize the same preset at once. The loser's first lookup
+        misses, but the re-read under the lock sees the winner's committed row,
+        so it updates that instead of inserting a duplicate."""
+        user_id = uuid4()
+        new_sound_id = uuid4()
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get_sound.return_value = MagicMock(id=new_sound_id)
+
+        preset = TestDataFactory.create_mock_timer(
+            user_id=uuid4(), ambient_sound_id=uuid4(), timer_type=TimerType.PRESET
+        )
+        mock_get.return_value = preset
+
+        winners_copy = TestDataFactory.create_mock_timer(
+            user_id=user_id,
+            name=preset.name,
+            duration=preset.duration,
+            ambient_sound_id=preset.ambient_sound_id,
+            timer_type=TimerType.USER,
+            parent_preset_id=preset.id,
+        )
+        # Miss, then hit once the lock is held.
+        mock_get_copy.side_effect = [None, winners_copy]
+        mock_update.return_value = winners_copy
+
+        request = TestDataFactory.create_update_request(ambient_sound_id=new_sound_id)
+        result = update_timer_service(token="valid_token", timer_id=preset.id, request=request)
+
+        mock_lock.assert_called_once_with(mock_db, preset.id)
+        mock_save.assert_not_called()
+        mock_update.assert_called_once_with(mock_db, winners_copy)
+        assert result.id == winners_copy.id
+        assert result.ambient_sound_id == new_sound_id
 
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.save_timer')

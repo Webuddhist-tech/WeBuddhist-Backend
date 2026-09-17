@@ -27,7 +27,7 @@ recitation_viewer_router = APIRouter(
     response_class=HTMLResponse,
     include_in_schema=False,
 )
-def view_recitation(event_id: UUID):
+def view_recitation(event_id: UUID) -> str:
     """Follower page: auto-scrolls the liturgy to the operator's position."""
     return _VIEWER_HTML.replace("__EVENT_ID__", str(event_id))
 
@@ -37,7 +37,7 @@ def view_recitation(event_id: UUID):
     response_class=HTMLResponse,
     include_in_schema=False,
 )
-def view_recitation_emitter(event_id: UUID):
+def view_recitation_emitter(event_id: UUID) -> str:
     """Operator page: click a line (or press space) to advance the room."""
     return _EMITTER_HTML.replace("__EVENT_ID__", str(event_id))
 
@@ -191,7 +191,10 @@ const EVENT_ID = "__EVENT_ID__";
 const API = window.location.origin + "/api/v1";
 
 let ws = null, loadedTextId = null, rowsById = {}, currentRow = -1;
-let manualScroll = false, retry = 0, ended = false;
+let manualScroll = false, retry = 0, ended = false, reconnectTimer = null;
+/* Bumped on every position frame. A frame that awaits a text load and comes
+   back to find a newer one has arrived must not overwrite it with its own. */
+let positionGeneration = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -212,6 +215,7 @@ function escapeHtml(text) {
 }
 
 async function loadText(textId) {
+    const generation = positionGeneration;
     notice("");
     $("segments").innerHTML = '<div class="empty">Loading text…</div>';
     const language = $("language").value;
@@ -223,10 +227,13 @@ async function loadText(textId) {
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
+        if (generation !== positionGeneration) return;
         renderSegments(data.segments || []);
         loadedTextId = textId;
+        currentRow = -1;
         $("textBadge").textContent = data.title || textId;
     } catch (error) {
+        if (generation !== positionGeneration) return;
         $("segments").innerHTML = '<div class="empty">Could not load this text.</div>';
         notice(`Could not load text ${textId}: ${error.message}`);
         loadedTextId = null;
@@ -273,8 +280,12 @@ function highlight(segmentId) {
 }
 
 async function onPosition(frame) {
+    const generation = ++positionGeneration;
     if (frame.text_id && frame.text_id !== loadedTextId) {
         await loadText(frame.text_id);
+        // A newer frame landed while that fetch was in flight - it owns the
+        // display now, and finishing here would put an older liturgy back.
+        if (generation !== positionGeneration) return;
     }
     if (frame.round_number) {
         $("roundBadge").style.display = "";
@@ -291,6 +302,12 @@ function connect() {
     if (!token) { notice("Paste a bearer token first."); return; }
     localStorage.setItem("recitation_token", token);
     ended = false;
+
+    // A reconnect already queued by an earlier socket would replace `ws` a few
+    // seconds from now and orphan the one we are about to open - still live on
+    // the server, no longer reachable from here.
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.close(); }
 
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(
@@ -312,7 +329,7 @@ function connect() {
         $("resync").disabled = true;
         if (ended) return;
         retry = Math.min(retry + 1, 5);
-        setTimeout(connect, 1000 * Math.pow(2, retry - 1));
+        reconnectTimer = setTimeout(connect, 1000 * Math.pow(2, retry - 1));
     };
 
     ws.onerror = () => setStatus(false, "Connection error");
@@ -332,7 +349,7 @@ $("resync").addEventListener("click", () => {
     if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
 });
 
-$("connect").addEventListener("click", () => { if (ws) ws.close(); connect(); });
+$("connect").addEventListener("click", connect);
 
 setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
@@ -408,6 +425,7 @@ const EVENT_ID = "__EVENT_ID__";
 const API = window.location.origin + "/api/v1";
 
 let ws = null, segments = [], currentIndex = -1, isOperator = false, ended = false, retry = 0;
+let reconnectTimer = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -492,6 +510,12 @@ function connect() {
     localStorage.setItem("recitation_token", token);
     ended = false;
 
+    // A reconnect already queued by an earlier socket would replace `ws` a few
+    // seconds from now and orphan the one we are about to open - still live on
+    // the server, no longer reachable from here.
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws) { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.close(); }
+
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(
         `${scheme}//${window.location.host}/api/v1/events/${EVENT_ID}/recitation/live?token=${encodeURIComponent(token)}`
@@ -522,7 +546,7 @@ function connect() {
         setStatus(false, ended ? "Session ended" : "Reconnecting…");
         if (ended) return;
         retry = Math.min(retry + 1, 5);
-        setTimeout(connect, 1000 * Math.pow(2, retry - 1));
+        reconnectTimer = setTimeout(connect, 1000 * Math.pow(2, retry - 1));
     };
 
     ws.onerror = () => setStatus(false, "Connection error");
@@ -547,7 +571,7 @@ document.addEventListener("keydown", (event) => {
 $("roundUp").addEventListener("click", () => { $("round").value = Number($("round").value) + 1; });
 $("roundDown").addEventListener("click", () => { $("round").value = Math.max(1, Number($("round").value) - 1); });
 $("load").addEventListener("click", loadText);
-$("connect").addEventListener("click", () => { if (ws) ws.close(); connect(); });
+$("connect").addEventListener("click", connect);
 $("end").addEventListener("click", () => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "end" }));
 });

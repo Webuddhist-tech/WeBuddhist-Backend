@@ -67,6 +67,30 @@ class TestRecitationViewerPages:
             assert '{ type: "ping" }' in page
             assert "Math.pow(2, retry - 1)" in page
 
+    def test_viewer_guards_against_overlapping_text_loads(self):
+        """Two position frames in flight each fetch a text; without a guard the
+        slower one wins and puts the earlier liturgy back on screen."""
+        page = client.get(f"/view/events/{uuid4()}/recitation").text
+
+        assert "let positionGeneration = 0;" in page
+        assert "const generation = ++positionGeneration;" in page
+        assert page.count("if (generation !== positionGeneration) return;") == 3
+
+    def test_reconnecting_cancels_a_queued_reconnect(self):
+        """Connect while a backoff timer is pending: the timer would otherwise
+        fire later, replace `ws`, and orphan the socket still open server-side."""
+        event_id = uuid4()
+
+        for path in (f"/view/events/{event_id}/recitation",
+                     f"/view/events/{event_id}/recitation/emitter"):
+            page = client.get(path).text
+            assert "reconnectTimer = setTimeout(connect," in page
+            assert "clearTimeout(reconnectTimer); reconnectTimer = null;" in page
+            assert "ws.onclose = null;" in page
+            # The old click handler closed the socket itself, which fired
+            # onclose and queued the very reconnect this guards against.
+            assert "if (ws) ws.close(); connect();" not in page
+
     def test_viewer_pages_are_hidden_from_the_schema(self):
         paths = api.openapi()["paths"]
 
