@@ -210,6 +210,7 @@ def _apply_event_filters(
     to_date: Optional = None,
     restrict_group_ids: Optional[List[UUID]] = None,
     not_ended_before: Optional[datetime] = None,
+    exclude_plan_or_series_linked: bool = False,
 ):
     if restrict_group_ids is not None:
         query = query.filter(Event.group_id.in_(restrict_group_ids))
@@ -217,6 +218,8 @@ def _apply_event_filters(
         query = query.filter(Event.group_id == group_id)
     if plan_id:
         query = query.filter(Event.plan_id == plan_id)
+    if exclude_plan_or_series_linked:
+        query = query.filter(Event.plan_id.is_(None), Event.series_id.is_(None))
     if accumulator_id:
         query = query.filter(Event.accumulator_id == accumulator_id)
     if mantra_id:
@@ -254,6 +257,7 @@ def get_events(
     skip: int = 0,
     limit: Optional[int] = 20,
     should_sort_newest_first: bool = False,
+    exclude_plan_or_series_linked: bool = False,
 ) -> Tuple[List[Event], int]:
     if restrict_group_ids is not None and not restrict_group_ids:
         return [], 0
@@ -271,6 +275,7 @@ def get_events(
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
         not_ended_before=not_ended_before,
+        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     )
     total = count_query.scalar()
 
@@ -292,6 +297,7 @@ def get_events(
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
         not_ended_before=not_ended_before,
+        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     )
     order_by = (
         (Event.created_at.desc(), Event.id.desc())
@@ -358,6 +364,7 @@ def get_recurring_events(
     group_recitation_collection_id: Optional[UUID] = None,
     event_format: Optional[str] = None,
     restrict_group_ids: Optional[List[UUID]] = None,
+    exclude_plan_or_series_linked: bool = False,
 ) -> List[Event]:
     """Get all recurring event templates matching the filters."""
     query = db.query(Event).options(
@@ -377,4 +384,5 @@ def get_recurring_events(
         group_recitation_collection_id=group_recitation_collection_id,
         event_format=event_format,
         restrict_group_ids=restrict_group_ids,
+        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     ).all()

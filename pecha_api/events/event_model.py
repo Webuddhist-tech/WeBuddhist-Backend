@@ -88,6 +88,7 @@ class Event(Base):
     __table_args__ = (
         Index("idx_events_group_id", "group_id"),
         Index("idx_events_location_id", "location_id"),
+        Index("idx_events_plan_id", "plan_id"),
         Index("idx_events_start_date", "start_date"),
         Index("idx_events_end_date", "end_date"),
         Index("idx_events_series_id", "series_id"),
