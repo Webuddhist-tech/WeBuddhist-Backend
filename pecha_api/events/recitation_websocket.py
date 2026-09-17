@@ -191,9 +191,13 @@ class RecitationBroadcaster:
             "revision": _as_int(state.get("revision")),
         }
 
-    async def clear_position(self, event_id: UUID) -> None:
+    async def clear_position(self, event_id: UUID) -> bool:
         """Forget the position when the operator ends the session, so the next
         puja on the same event does not start mid-liturgy.
+
+        Returns whether the snapshot was actually cleared, so a caller that can
+        report failure - and retry - is not told the session ended when a stale
+        position is still sitting in Redis waiting to greet the next joiner.
 
         The revision counter is deliberately left alone: it must keep rising
         across sessions, or a reconnecting client holding the old high-water
@@ -201,8 +205,10 @@ class RecitationBroadcaster:
         """
         try:
             await self.redis.delete(position_state_key(event_id))
+            return True
         except Exception as e:
             logger.error(f"Failed to clear recitation position in Redis: {e}")
+            return False
 
     async def broadcast_position(
         self,
@@ -247,14 +253,21 @@ class RecitationBroadcaster:
 
         return revision
 
-    async def broadcast_session_ended(self, event_id: UUID) -> None:
+    async def broadcast_session_ended(self, event_id: UUID) -> bool:
         """Tell every server holding a socket for this event that the operator
-        closed the puja, so clients stop auto-scrolling and release."""
+        closed the puja, so clients stop auto-scrolling and release.
+
+        Returns whether the notice was published. A silent failure here leaves
+        the room following a puja that is over, which the caller should be able
+        to see and retry.
+        """
         payload = {"type": "session_ended", "event_id": str(event_id)}
         try:
             await self.redis.publish(position_channel(event_id), json.dumps(payload))
+            return True
         except Exception as e:
             logger.error(f"Failed to broadcast recitation session end to Redis: {e}")
+            return False
 
     async def allow_set(self, event_id: UUID) -> bool:
         """Fleet-wide throttle for operator publishes: at most

@@ -174,11 +174,34 @@ class TestEndSessionOverHttp:
     def test_ends_the_session(self):
         event_id = uuid4()
         with _http_env() as broadcaster:
+            broadcaster.clear_position.return_value = True
+            broadcaster.broadcast_session_ended.return_value = True
             response = client.post(_url(event_id, "end"), headers=AUTH)
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
         broadcaster.clear_position.assert_awaited_once_with(event_id)
         broadcaster.broadcast_session_ended.assert_awaited_once_with(event_id)
+
+    def test_failing_to_clear_the_snapshot_is_reported(self):
+        """204 would tell the controller the puja ended while a stale position
+        sits in Redis waiting for the next joiner."""
+        broadcaster = AsyncMock()
+        broadcaster.clear_position.return_value = False
+        broadcaster.broadcast_session_ended.return_value = True
+        with _http_env(broadcaster=broadcaster):
+            response = client.post(_url(uuid4(), "end"), headers=AUTH)
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+    def test_failing_to_announce_the_end_is_reported(self):
+        """Clients would keep following a puja that is over."""
+        broadcaster = AsyncMock()
+        broadcaster.clear_position.return_value = True
+        broadcaster.broadcast_session_ended.return_value = False
+        with _http_env(broadcaster=broadcaster):
+            response = client.post(_url(uuid4(), "end"), headers=AUTH)
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
 
     def test_end_needs_the_secret_too(self):
         with _http_env() as broadcaster:

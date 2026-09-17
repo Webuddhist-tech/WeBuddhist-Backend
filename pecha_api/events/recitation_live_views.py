@@ -127,8 +127,19 @@ async def end_recitation_session(event_id: UUID) -> Response:
     broadcaster = _require_broadcaster()
     await run_in_threadpool(assert_live_event, event_id=event_id)
 
-    await broadcaster.clear_position(event_id)
-    await broadcaster.broadcast_session_ended(event_id)
+    cleared = await broadcaster.clear_position(event_id)
+    announced = await broadcaster.broadcast_session_ended(event_id)
+
+    # Both steps swallow their Redis errors so a failing socket path keeps
+    # serving; an HTTP caller has somewhere to put the failure, and ending a
+    # session is idempotent, so tell it to try again rather than reporting a
+    # session that may still be live for every phone in the room.
+    if not (cleared and announced):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to end the recitation session; retry",
+        )
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -308,8 +319,12 @@ async def websocket_recitation_live(
                     continue
 
                 if frame_type == "end":
-                    await broadcaster.clear_position(event_id)
-                    await broadcaster.broadcast_session_ended(event_id)
+                    cleared = await broadcaster.clear_position(event_id)
+                    announced = await broadcaster.broadcast_session_ended(event_id)
+                    if not (cleared and announced):
+                        await websocket.send_json(
+                            _error("SERVER_ERROR", "Failed to end the session; try again")
+                        )
                     continue
 
                 try:

@@ -463,6 +463,19 @@ class TestOperatorPublishing:
         broadcaster.clear_position.assert_awaited_once_with(event_id)
         broadcaster.broadcast_session_ended.assert_awaited_once_with(event_id)
 
+    def test_operator_is_told_when_ending_fails(self):
+        broadcaster = AsyncMock()
+        broadcaster.clear_position.return_value = True
+        broadcaster.broadcast_session_ended.return_value = False
+        with _ws_env(is_operator=True, broadcaster=broadcaster):
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "end"})
+                message = websocket.receive_json()
+
+        assert message["type"] == "error"
+        assert message["code"] == "SERVER_ERROR"
+
     def test_subscriber_end_is_rejected(self):
         with _ws_env(is_operator=False) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:

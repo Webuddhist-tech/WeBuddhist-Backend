@@ -136,8 +136,12 @@ DEFAULTS = dict(
     # (controller/pedal/OBS -> backend). Empty disables those endpoints.
     RECITATION_EMIT_SECRET_TOKEN="",
 
-    # Internal routine notification dispatch (worker -> backend)
-    NOTIFICATION_DISPATCH_SECRET_TOKEN="SecretTokenForNotificationDispatch",
+    # Internal routine notification dispatch (worker -> backend). Empty on
+    # purpose: this is the whole credential for the /internal/* routes, which
+    # are mounted on the public API and both expose recipient data and mutate
+    # dispatch state. A value here would be a published password for any
+    # deployment that forgot to set the env var, so it fails closed instead.
+    NOTIFICATION_DISPATCH_SECRET_TOKEN="",
     NOTIFICATION_DEFAULT_TITLE="WebBuddhist",
     NOTIFICATION_DEFAULT_BODY="Time for your daily practice.",
 

@@ -55,7 +55,7 @@ X-Recitation-Token: <shared secret>
   "round_number": 3, "server_time": "2026-09-17T09:30:00Z", "revision": 58 }
 ```
 
-`POST /api/v1/events/{event_id}/recitation/end` (204) is the `end` frame's twin — without it, a session started over HTTP would hold every client in follow mode until the snapshot's 12h TTL ran out.
+`POST /api/v1/events/{event_id}/recitation/end` (204) is the `end` frame's twin — without it, a session started over HTTP would hold every client in follow mode until the snapshot's 12h TTL ran out. It answers `503` if the snapshot could not be cleared or the notice could not be published; ending is idempotent, so retry.
 
 | Status | Meaning |
 |--------|---------|
@@ -64,7 +64,7 @@ X-Recitation-Token: <shared secret>
 | `404` | No such event, or its group is unpublished |
 | `422` | Header missing, or `text_id`/`segment_id` missing or blank |
 | `429` | Past the 10/s per-event ceiling — the socket drops these silently, HTTP tells you |
-| `503` | `RECITATION_EMIT_SECRET_TOKEN` unset (the endpoints are off), or Redis unavailable; nothing was published |
+| `503` | `RECITATION_EMIT_SECRET_TOKEN` unset (the endpoints are off), or Redis unavailable; nothing was published. On `/end` it also means the session may still be live for the room — retry |
 
 The throttle budget is shared with the socket, so alternating routes does not double it.
 

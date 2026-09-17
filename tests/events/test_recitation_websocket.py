@@ -224,16 +224,32 @@ class TestRecitationPositionSnapshot:
         broadcaster = _broadcaster()
         event_id = uuid4()
 
-        await broadcaster.clear_position(event_id)
+        assert await broadcaster.clear_position(event_id) is True
 
         broadcaster.redis.delete.assert_awaited_once_with(position_state_key(event_id))
+
+    @pytest.mark.asyncio
+    async def test_clear_position_reports_failure(self):
+        """The caller has to be able to tell a cleared snapshot from a stale one
+        still waiting to greet the next joiner."""
+        broadcaster = _broadcaster()
+        broadcaster.redis.delete.side_effect = Exception("redis down")
+
+        assert await broadcaster.clear_position(uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_session_ended_reports_failure(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.publish.side_effect = Exception("redis down")
+
+        assert await broadcaster.broadcast_session_ended(uuid4()) is False
 
     @pytest.mark.asyncio
     async def test_broadcast_session_ended_publishes(self):
         broadcaster = _broadcaster()
         event_id = uuid4()
 
-        await broadcaster.broadcast_session_ended(event_id)
+        assert await broadcaster.broadcast_session_ended(event_id) is True
 
         channel, raw = broadcaster.redis.publish.await_args.args
         assert channel == position_channel(event_id)
@@ -302,7 +318,7 @@ class TestRecitationRevision:
         broadcaster = _broadcaster()
         event_id = uuid4()
 
-        await broadcaster.clear_position(event_id)
+        assert await broadcaster.clear_position(event_id) is True
 
         broadcaster.redis.delete.assert_awaited_once_with(position_state_key(event_id))
 
