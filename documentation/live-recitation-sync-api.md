@@ -29,6 +29,45 @@ The `position` frame is sent **only if the operator has already set one** — th
 
 `set` or `end` from a non-operator gets an `error` frame with code `FORBIDDEN`; the socket stays open. Malformed JSON and unknown `type` values are ignored silently. Publishes are throttled to 10/s per event, and anything beyond that is dropped.
 
+## Emitting without a socket (HTTP)
+
+A controller that cannot hold a WebSocket open — a script, a foot-pedal, an OBS action, a cron — publishes over HTTP instead. Same validation, same per-event throttle, same fan-out: a phone cannot tell which route a position arrived by.
+
+These callers are machines with no user session, so they authenticate with the `X-Recitation-Token` shared secret (`RECITATION_EMIT_SECRET_TOKEN`) rather than a bearer token — the same way the worker reaches the internal dispatch endpoints with `X-Dispatch-Token`. **The secret is the whole authorization**: there is no user or Author behind the request, so anything holding it can drive any event's recitation. Keep it in the controller's configuration, not in a browser.
+
+```bash
+# dev, matching the convention NOTIFICATION_DISPATCH_SECRET_TOKEN follows
+RECITATION_EMIT_SECRET_TOKEN=SecretTokenForNotificationDispatch
+```
+
+The code default is empty, which switches both endpoints off (`503`) — an unset secret must never mean "any token works". Every deployment past dev sets its own value.
+
+```http
+POST /api/v1/events/{event_id}/recitation/position
+X-Recitation-Token: <shared secret>
+
+{ "text_id": "abc…", "segment_id": "e47b…", "index": 12, "round_number": 3 }
+```
+
+```json
+202 Accepted
+{ "event_id": "550e…", "text_id": "abc…", "segment_id": "e47b…", "index": 12,
+  "round_number": 3, "server_time": "2026-09-17T09:30:00Z", "revision": 58 }
+```
+
+`POST /api/v1/events/{event_id}/recitation/end` (204) is the `end` frame's twin — without it, a session started over HTTP would hold every client in follow mode until the snapshot's 12h TTL ran out.
+
+| Status | Meaning |
+|--------|---------|
+| `202` | Published; the body is the position as the room received it |
+| `401` | Wrong `X-Recitation-Token` |
+| `404` | No such event, or its group is unpublished |
+| `422` | Header missing, or `text_id`/`segment_id` missing or blank |
+| `429` | Past the 10/s per-event ceiling — the socket drops these silently, HTTP tells you |
+| `503` | `RECITATION_EMIT_SECRET_TOKEN` unset (the endpoints are off), or Redis unavailable; nothing was published |
+
+The throttle budget is shared with the socket, so alternating routes does not double it.
+
 ## Server → client
 
 | Frame | When |

@@ -132,8 +132,12 @@ DEFAULTS = dict(
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
 
+    # Shared secret for machines emitting live recitation positions over HTTP
+    # (controller/pedal/OBS -> backend). Empty disables those endpoints.
+    RECITATION_EMIT_SECRET_TOKEN="",
+
     # Internal routine notification dispatch (worker -> backend)
-    NOTIFICATION_DISPATCH_SECRET_TOKEN="",
+    NOTIFICATION_DISPATCH_SECRET_TOKEN="SecretTokenForNotificationDispatch",
     NOTIFICATION_DEFAULT_TITLE="WebBuddhist",
     NOTIFICATION_DEFAULT_BODY="Time for your daily practice.",
 

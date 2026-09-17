@@ -5,15 +5,20 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from pecha_api.events.recitation_live_models import SetPositionFrame
-from pecha_api.events.recitation_live_service import resolve_recitation_access
-from pecha_api.events.recitation_websocket import get_broadcaster, position_channel
+from pecha_api.events.recitation_dependencies import verify_recitation_emit_token
+from pecha_api.events.recitation_live_models import PositionAcceptedResponse, SetPositionFrame
+from pecha_api.events.recitation_live_service import assert_live_event, resolve_recitation_access
+from pecha_api.events.recitation_websocket import (
+    RecitationBroadcaster,
+    get_broadcaster,
+    position_channel,
+)
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
@@ -34,6 +39,97 @@ def _error(code: str, message: str) -> dict:
 
 def _detail_code(detail: object) -> str:
     return detail if isinstance(detail, str) else "ERROR"
+
+
+def _require_broadcaster() -> RecitationBroadcaster:
+    """The broadcaster, or 503 - Redis being down is not the caller's fault."""
+    try:
+        return get_broadcaster()
+    except RuntimeError as e:
+        logger.exception("Recitation broadcaster not initialized: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Live recitation is unavailable",
+        )
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/position",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PositionAcceptedResponse,
+    summary="Publish a recitation position over HTTP",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def publish_recitation_position(
+    event_id: UUID,
+    frame: SetPositionFrame,
+) -> PositionAcceptedResponse:
+    """Emit a position without holding a socket.
+
+    For a controller that cannot keep a WebSocket open - a script, a pedal, an
+    OBS action, a cron. Authenticated by the `X-Recitation-Token` shared secret
+    rather than a bearer token, because those controllers have no user session
+    to carry one. Everything downstream is identical to a `set` frame: same
+    validation, same per-event throttle, same fan-out, so phones and overlays
+    cannot tell which route a position came in by.
+    """
+    broadcaster = _require_broadcaster()
+    await run_in_threadpool(assert_live_event, event_id=event_id)
+
+    # Shared budget with the socket: one operator clicking fast should not be
+    # able to double it by alternating routes.
+    if not await broadcaster.allow_set(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many positions for this event; slow down",
+        )
+
+    server_time = _utc_now_iso()
+    try:
+        revision = await broadcaster.broadcast_position(
+            event_id=event_id,
+            text_id=frame.text_id,
+            segment_id=frame.segment_id,
+            index=frame.index,
+            round_number=frame.round_number,
+            server_time=server_time,
+        )
+    except Exception as e:
+        logger.exception("Failed to broadcast recitation position: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to broadcast position",
+        )
+
+    return PositionAcceptedResponse(
+        event_id=event_id,
+        text_id=frame.text_id,
+        segment_id=frame.segment_id,
+        index=frame.index,
+        round_number=frame.round_number,
+        server_time=server_time,
+        revision=revision,
+    )
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/end",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="End a recitation session over HTTP",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def end_recitation_session(event_id: UUID) -> Response:
+    """The `end` frame's HTTP twin.
+
+    A socket-less controller needs this: without it a session it started would
+    hold every client in follow mode until the snapshot's 12h TTL expires.
+    """
+    broadcaster = _require_broadcaster()
+    await run_in_threadpool(assert_live_event, event_id=event_id)
+
+    await broadcaster.clear_position(event_id)
+    await broadcaster.broadcast_session_ended(event_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @recitation_live_router.websocket("/{event_id}/recitation/live")

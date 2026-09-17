@@ -1,4 +1,5 @@
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,3 +29,18 @@ class SetPositionFrame(BaseModel):
         if not value or not value.strip():
             raise ValueError(f"{info.field_name} must not be empty")
         return value.strip()
+
+
+class PositionAcceptedResponse(BaseModel):
+    """What an HTTP emitter gets back: the position as the room received it."""
+
+    event_id: UUID
+    text_id: str
+    segment_id: str
+    index: Optional[int] = None
+    round_number: Optional[int] = None
+    server_time: str
+    revision: Optional[int] = Field(
+        None,
+        description="Ordering key the position was stored under; None when the snapshot could not be written",
+    )

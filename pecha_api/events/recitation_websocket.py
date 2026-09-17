@@ -212,8 +212,13 @@ class RecitationBroadcaster:
         index: Optional[int],
         round_number: Optional[int],
         server_time: str,
-    ) -> None:
-        """Snapshot under a fresh revision, then publish via Redis pub/sub."""
+    ) -> Optional[int]:
+        """Snapshot under a fresh revision, then publish via Redis pub/sub.
+
+        Returns the revision the position was stored under (None when the
+        snapshot could not be written), so an HTTP caller can be told where its
+        click landed in the ordering.
+        """
         revision = await self.save_position(
             event_id=event_id,
             text_id=text_id,
@@ -239,6 +244,8 @@ class RecitationBroadcaster:
         except Exception as e:
             logger.error(f"Failed to broadcast recitation position to Redis: {e}")
             raise
+
+        return revision
 
     async def broadcast_session_ended(self, event_id: UUID) -> None:
         """Tell every server holding a socket for this event that the operator

@@ -51,6 +51,10 @@ Server → all subscribers, on every change **and once on connect** so late join
 
 Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR`, `FORBIDDEN`, `SERVER_ERROR`, as in the comments WS), and `session_ended` when the operator closes the puja. Malformed JSON and unknown types are ignored; a `set` from a non-operator gets a `FORBIDDEN` error frame but keeps its socket.
 
+### 4.4 HTTP emit
+
+`POST /events/{event_id}/recitation/position` publishes one position without a socket, for controllers that cannot hold one open (a script, a pedal, an OBS action). It reuses the socket's frame model, throttle and fan-out, so there is one contract and one code path; only the failure reporting differs, since HTTP can answer (`429` for a throttled call, which the socket drops silently). Auth does differ by necessity: these callers have no user session, so they carry the `X-Recitation-Token` shared secret instead of a bearer token, and the operator/Author check has nothing to run against - the secret is the authorization, and all that is left to verify is that the event exists and its group is published. `POST …/recitation/end` is the `end` frame's twin.
+
 ## 5. `RecitationBroadcaster`
 
 New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster`: local map `{event_id: {user_id: ws}}`, channel `recitation:event:{event_id}:position`, `broadcast_position(...)` publishes and each instance relays locally.

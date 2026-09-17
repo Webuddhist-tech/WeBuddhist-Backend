@@ -74,6 +74,19 @@ def is_event_operator(db: Session, event: Event, token: str) -> bool:
         return False
 
 
+def assert_live_event(event_id: UUID) -> None:
+    """404 unless the event exists and its group is published.
+
+    All a token-authenticated machine can be checked against: there is no user
+    or Author behind a shared-secret request, so this is about the event being
+    a real, reachable target - not about who is driving it.
+    """
+    from pecha_api.db.database import SessionLocal
+
+    with SessionLocal() as db:
+        load_live_event(db=db, event_id=event_id)
+
+
 def resolve_recitation_access(event_id: UUID, user_id: UUID, token: str) -> bool:
     """Gate a connecting socket and say whether it may publish.
 
