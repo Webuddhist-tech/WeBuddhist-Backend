@@ -168,19 +168,21 @@ def _get_author_group_feed(
         db, posts, user_id=current_user.id if current_user else None
     )
 
-    # Get one-shot events
+    # Get one-shot events. Events merged with a plan or series are left out of the feed.
     one_shot_events, one_shot_total = get_events(
         db=db,
         restrict_group_ids=group_ids,
         skip=0,
         limit=fetch_limit,
         should_sort_newest_first=True,
+        exclude_plan_or_series_linked=True,
     )
-    
+
     # Get recurring events and find next occurrence for each template
     recurring_templates = get_recurring_events(
         db=db,
         restrict_group_ids=group_ids,
+        exclude_plan_or_series_linked=True,
     )
     
     # For feed context, show the current (active) or next upcoming occurrence per template.
