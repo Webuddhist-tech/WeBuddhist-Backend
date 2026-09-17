@@ -28,6 +28,27 @@ def position_revision_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:rev"
 
 
+# Allocating the revision and writing the snapshot have to be one step. As two
+# round trips they interleave: with two operators publishing at once, the lower
+# revision's write can land last and leave the snapshot holding an older
+# position than the counter claims, so the next viewer to connect starts behind
+# the room and stays there until the next click. Redis runs a script
+# atomically, so nothing can come between the INCR and the HSET.
+_SAVE_POSITION_SCRIPT = """
+local revision = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1],
+    'text_id', ARGV[1],
+    'segment_id', ARGV[2],
+    'index', ARGV[3],
+    'round_number', ARGV[4],
+    'updated_at', ARGV[5],
+    'revision', revision)
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+redis.call('EXPIRE', KEYS[2], ARGV[6])
+return revision
+"""
+
+
 class RecitationBroadcaster:
     """Manages WebSocket connections and Redis pub/sub for live recitation
     position, plus the current-position snapshot each new subscriber is sent.
@@ -100,27 +121,6 @@ class RecitationBroadcaster:
         await pubsub.subscribe(position_channel(event_id))
         return pubsub
 
-    async def next_revision(self, event_id: UUID) -> Optional[int]:
-        """The next position revision for an event, from Redis.
-
-        Ordering cannot come from `server_time`: that is stamped by whichever
-        instance served the operator's socket, and two instances' clocks need
-        not agree, so a genuinely newer frame could look older than a snapshot
-        written elsewhere. One counter in the shared store is the only value
-        every instance agrees on.
-
-        None when Redis cannot answer - callers then fall back to relaying
-        rather than dropping frames they cannot order.
-        """
-        key = position_revision_key(event_id)
-        try:
-            revision = await self.redis.incr(key)
-            await self.redis.expire(key, POSITION_TTL_SECONDS)
-            return int(revision)
-        except Exception as e:
-            logger.error(f"Failed to take a recitation revision from Redis: {e}")
-            return None
-
     async def save_position(
         self,
         event_id: UUID,
@@ -129,27 +129,36 @@ class RecitationBroadcaster:
         index: Optional[int],
         round_number: Optional[int],
         server_time: str,
-        revision: Optional[int] = None,
-    ) -> None:
-        """Mirror the current position into Redis so connects and redeploys can
-        resync. Best-effort: a snapshot failure must not swallow the broadcast,
-        which is what the people in the room are actually waiting on."""
-        key = position_state_key(event_id)
+    ) -> Optional[int]:
+        """Take the next revision and mirror the position into Redis, atomically.
+
+        Returns the revision the position was stored under, or None when Redis
+        could not be written: the caller still broadcasts, and an unnumbered
+        frame is relayed rather than dropped, so a snapshot failure costs
+        resync-on-connect but never the live position.
+
+        Ordering cannot come from `server_time` - that is stamped by whichever
+        instance served the operator's socket, and two instances' clocks need
+        not agree. The counter in the shared store is the only value every
+        instance agrees on.
+        """
         try:
-            await self.redis.hset(
-                key,
-                mapping={
-                    "text_id": text_id,
-                    "segment_id": segment_id,
-                    "index": "" if index is None else str(index),
-                    "round_number": "" if round_number is None else str(round_number),
-                    "updated_at": server_time,
-                    "revision": "" if revision is None else str(revision),
-                },
+            revision = await self.redis.eval(
+                _SAVE_POSITION_SCRIPT,
+                2,
+                position_state_key(event_id),
+                position_revision_key(event_id),
+                text_id,
+                segment_id,
+                "" if index is None else str(index),
+                "" if round_number is None else str(round_number),
+                server_time,
+                str(POSITION_TTL_SECONDS),
             )
-            await self.redis.expire(key, POSITION_TTL_SECONDS)
+            return int(revision)
         except Exception as e:
             logger.error(f"Failed to save recitation position to Redis: {e}")
+            return None
 
     async def get_position(self, event_id: UUID) -> Optional[dict]:
         """The current position for an event, or None when nothing has been set
@@ -204,17 +213,14 @@ class RecitationBroadcaster:
         round_number: Optional[int],
         server_time: str,
     ) -> None:
-        """Stamp a revision, snapshot, then publish to every server via pub/sub."""
-        revision = await self.next_revision(event_id)
-
-        await self.save_position(
+        """Snapshot under a fresh revision, then publish via Redis pub/sub."""
+        revision = await self.save_position(
             event_id=event_id,
             text_id=text_id,
             segment_id=segment_id,
             index=index,
             round_number=round_number,
             server_time=server_time,
-            revision=revision,
         )
 
         payload = {

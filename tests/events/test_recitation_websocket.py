@@ -101,7 +101,7 @@ class TestRecitationPositionSnapshot:
     @pytest.mark.asyncio
     async def test_broadcast_position_snapshots_then_publishes(self):
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.return_value = 57
+        broadcaster.redis.eval.return_value = 57
         event_id = uuid4()
 
         await broadcaster.broadcast_position(
@@ -113,21 +113,15 @@ class TestRecitationPositionSnapshot:
             server_time="2026-09-14T09:30:00Z",
         )
 
-        broadcaster.redis.hset.assert_awaited_once_with(
-            position_state_key(event_id),
-            mapping={
-                "text_id": "text-7",
-                "segment_id": "seg-1",
-                "index": "12",
-                "round_number": "3",
-                "updated_at": "2026-09-14T09:30:00Z",
-                "revision": "57",
-            },
-        )
-        assert broadcaster.redis.expire.await_args_list == [
-            call(position_revision_key(event_id), POSITION_TTL_SECONDS),
-            call(position_state_key(event_id), POSITION_TTL_SECONDS),
-        ]
+        # One atomic script, not INCR-then-HSET: interleaved round trips let a
+        # lower revision's write land last and leave the snapshot behind.
+        script, key_count, *args = broadcaster.redis.eval.await_args.args
+        assert "INCR" in script and "HSET" in script
+        assert key_count == 2
+        assert args[:2] == [position_state_key(event_id), position_revision_key(event_id)]
+        assert args[2:] == ["text-7", "seg-1", "12", "3", "2026-09-14T09:30:00Z",
+                            str(POSITION_TTL_SECONDS)]
+        broadcaster.redis.hset.assert_not_awaited()
 
         channel, raw = broadcaster.redis.publish.await_args.args
         assert channel == position_channel(event_id)
@@ -145,7 +139,7 @@ class TestRecitationPositionSnapshot:
     @pytest.mark.asyncio
     async def test_snapshot_failure_does_not_block_broadcast(self):
         broadcaster = _broadcaster()
-        broadcaster.redis.hset.side_effect = Exception("redis down")
+        broadcaster.redis.eval.side_effect = Exception("redis down")
 
         await broadcaster.broadcast_position(
             event_id=uuid4(),
@@ -253,19 +247,53 @@ class TestRecitationRevision:
         """Ordering has to hold across instances, and two instances' clocks need
         not agree - only the shared counter does."""
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.return_value = 58
-        event_id = uuid4()
+        broadcaster.redis.eval.return_value = 58
 
-        assert await broadcaster.next_revision(event_id) == 58
-        broadcaster.redis.incr.assert_awaited_once_with(position_revision_key(event_id))
+        revision = await broadcaster.save_position(
+            event_id=uuid4(),
+            text_id="text-7",
+            segment_id="seg-1",
+            index=None,
+            round_number=None,
+            server_time="2026-09-14T09:30:00Z",
+        )
+
+        assert revision == 58
+
+    @pytest.mark.asyncio
+    async def test_allocation_and_snapshot_are_one_atomic_step(self):
+        """Two operators publishing at once must not be able to leave the
+        snapshot holding the lower revision's position."""
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = 12
+
+        await broadcaster.save_position(
+            event_id=uuid4(),
+            text_id="text-7",
+            segment_id="seg-1",
+            index=None,
+            round_number=None,
+            server_time="2026-09-14T09:30:00Z",
+        )
+
+        broadcaster.redis.eval.assert_awaited_once()
+        broadcaster.redis.incr.assert_not_awaited()
+        broadcaster.redis.hset.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_revision_is_none_when_redis_fails(self):
         """None means unorderable, and the reader relays rather than dropping."""
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.side_effect = Exception("redis down")
+        broadcaster.redis.eval.side_effect = Exception("redis down")
 
-        assert await broadcaster.next_revision(uuid4()) is None
+        assert await broadcaster.save_position(
+            event_id=uuid4(),
+            text_id="text-7",
+            segment_id="seg-1",
+            index=None,
+            round_number=None,
+            server_time="2026-09-14T09:30:00Z",
+        ) is None
 
     @pytest.mark.asyncio
     async def test_ending_a_session_keeps_the_counter(self):

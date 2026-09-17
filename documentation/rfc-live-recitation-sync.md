@@ -57,7 +57,7 @@ New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster
 
 **Ordering is the shared counter, not the clock.** Frames queued between a subscribe and the snapshot read have to be compared against what was just sent, and `server_time` cannot do it: it comes from whichever instance served the operator's socket. `revision` is the one value every instance agrees on. A frame without one (a rolling deploy mid-flight) is relayed rather than dropped.
 
-**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` takes a revision from `INCR recitation:event:{event_id}:rev` and writes a Redis hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`, `revision`; 12h TTL, refreshed on write), and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
+**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` runs one small Lua script that takes a revision from `recitation:event:{event_id}:rev` and writes the hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`, `revision`; 12h TTL, refreshed on write) in the same atomic step - as two round trips they interleave, and with two operators publishing at once the lower revision's write can land last, leaving the snapshot behind the room, and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
 
 ## 6. App behavior on `position`
 
