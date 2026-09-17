@@ -28,6 +28,7 @@ from ..users.users_service import validate_and_extract_user_details
 
 timer_router = APIRouter(prefix="/timers", tags=["Timers"])
 oauth2_scheme = HTTPBearer()
+optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
 
 @timer_router.get("", response_model=TimersResponse)
@@ -35,9 +36,22 @@ async def get_all_timers(
     group_id: Optional[UUID] = Query(None, description="Group ID to filter timers"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return"),
+    credentials: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
 ):
+    user_id = None
+    if credentials is not None:
+        current_user = await run_in_threadpool(
+            validate_and_extract_user_details, token=credentials.credentials
+        )
+        user_id = current_user.id
     return await run_in_threadpool(
-        get_all_timers_service, group_id=group_id, skip=skip, limit=limit
+        get_all_timers_service,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        user_id=user_id,
     )
 
 

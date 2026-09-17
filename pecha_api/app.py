@@ -83,7 +83,13 @@ from pecha_api.group_accumulator import group_accumulator_router, group_accumula
 from pecha_api.daily_log import daily_log_views
 from pecha_api.mantra import mantra_views
 from pecha_api.mantra.mantra_count_views import user_mantra_count_router
-from pecha_api.events import events_router, cms_events_router, cms_locations_router
+from pecha_api.events import (
+    events_router,
+    cms_events_router,
+    cms_locations_router,
+    recitation_live_router,
+    recitation_viewer_router,
+)
 from pecha_api.events import notification_internal_views as event_notification_internal_views
 from pecha_api.traditions import tradition_views
 from pecha_api.languages import language_views
@@ -208,6 +214,8 @@ api.include_router(mantra_views.mantra_router)
 api.include_router(mantra_views.cms_mantra_router)
 api.include_router(user_mantra_count_router)
 api.include_router(events_router)
+api.include_router(recitation_live_router)
+api.include_router(recitation_viewer_router)
 api.include_router(cms_events_router)
 api.include_router(event_notification_internal_views.internal_event_notifications_router)
 api.include_router(cms_locations_router)
