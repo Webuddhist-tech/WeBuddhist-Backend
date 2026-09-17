@@ -144,7 +144,9 @@ class TestGetAllTimers:
         assert result.timers[0].name == "Timer 1"
         assert result.timers[1].name == "Timer 2"
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=0, limit=20, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
@@ -166,7 +168,9 @@ class TestGetAllTimers:
         assert len(result.timers) == 0
         assert result.total == 0
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=0, limit=20, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
@@ -189,7 +193,9 @@ class TestGetAllTimers:
         assert result.limit == 1
         assert result.total == 10
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=5, limit=1)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=5, limit=1, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
@@ -212,7 +218,32 @@ class TestGetAllTimers:
         assert len(result.timers) == 2
         assert result.total == 2
         
-        mock_service.assert_called_once_with(group_id=None, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=None, skip=0, limit=20, user_id=None
+        )
+
+    @patch('pecha_api.timers.timer_views.validate_and_extract_user_details')
+    @patch('pecha_api.timers.timer_views.get_all_timers_service')
+    @pytest.mark.asyncio
+    async def test_get_all_timers_with_token_passes_user_id(
+        self, mock_service, mock_validate
+    ):
+        """A bearer token lets the catalogue drop presets this caller already customized."""
+        user_id = uuid4()
+        mock_user = MagicMock()
+        mock_user.id = user_id
+        mock_validate.return_value = mock_user
+        mock_service.return_value = TestDataFactory.create_timers_response()
+        credentials = TestDataFactory.create_auth_credentials()
+
+        await get_all_timers(
+            group_id=None, skip=0, limit=20, credentials=credentials
+        )
+
+        mock_validate.assert_called_once_with(token="valid_token")
+        mock_service.assert_called_once_with(
+            group_id=None, skip=0, limit=20, user_id=user_id
+        )
 
 
 class TestGetUserTimers:
@@ -608,27 +639,38 @@ class TestUpdateUserTimer:
     
     @patch('pecha_api.timers.timer_views.update_timer_service')
     @pytest.mark.asyncio
-    async def test_update_user_timer_preset_forbidden(self, mock_service):
-        """Test update_user_timer when trying to update preset timer."""
+    async def test_update_user_timer_preset_returns_personal_copy(self, mock_service):
+        """Updating a preset returns the caller's personal copy, not 403."""
         token = "valid_token"
-        timer_id = uuid4()
-        
+        preset_id = uuid4()
+        user_id = uuid4()
+        ambient_sound_id = uuid4()
+
         auth_credentials = TestDataFactory.create_auth_credentials(token=token)
-        request = TestDataFactory.create_update_request(name="Updated")
-        
-        mock_service.side_effect = HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "FORBIDDEN", "message": "Only user-created timers can be updated"}
+        request = TestDataFactory.create_update_request(ambient_sound_id=ambient_sound_id)
+
+        personal_copy = TestDataFactory.create_timer_dto(
+            user_id=user_id,
+            timer_type=TimerType.USER,
+            ambient_sound_id=ambient_sound_id,
+            parent_preset_id=preset_id
         )
-        
-        with pytest.raises(HTTPException) as exc_info:
-            await update_user_timer(
-                timer_id=timer_id,
-                request=request,
-                credentials=auth_credentials
-            )
-        
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_service.return_value = personal_copy
+
+        result = await update_user_timer(
+            timer_id=preset_id,
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.type == TimerType.USER
+        assert result.parent_preset_id == preset_id
+        assert result.ambient_sound_id == ambient_sound_id
+        mock_service.assert_called_once_with(
+            token=token,
+            timer_id=preset_id,
+            request=request
+        )
     
     @patch('pecha_api.timers.timer_views.update_timer_service')
     @pytest.mark.asyncio

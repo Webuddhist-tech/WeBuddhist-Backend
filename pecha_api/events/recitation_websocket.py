@@ -28,10 +28,10 @@ class RecitationBroadcaster:
     position, plus the current-position snapshot each new subscriber is sent.
 
     Unlike chat, which is a stream of events, a recitation has exactly one
-    interesting value: where the operator is right now. That value is mirrored
-    into a Redis hash on every set, so a phone joining 40 minutes in - or an
-    instance restarted by a deploy - lands on the live line instead of waiting
-    for the operator's next click.
+    interesting value: which text the operator is in, and where. That value is
+    mirrored into a Redis hash on every set, so a phone joining 40 minutes in -
+    or an instance restarted by a deploy - lands on the live line instead of
+    waiting for the operator's next click.
     """
 
     def __init__(self, redis_url: str):
@@ -98,6 +98,7 @@ class RecitationBroadcaster:
     async def save_position(
         self,
         event_id: UUID,
+        text_id: str,
         segment_id: str,
         index: Optional[int],
         round_number: Optional[int],
@@ -111,6 +112,7 @@ class RecitationBroadcaster:
             await self.redis.hset(
                 key,
                 mapping={
+                    "text_id": text_id,
                     "segment_id": segment_id,
                     "index": "" if index is None else str(index),
                     "round_number": "" if round_number is None else str(round_number),
@@ -144,6 +146,7 @@ class RecitationBroadcaster:
         return {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": state.get("text_id") or None,
             "segment_id": state["segment_id"],
             "index": _as_int(state.get("index")),
             "round_number": _as_int(state.get("round_number")),
@@ -161,6 +164,7 @@ class RecitationBroadcaster:
     async def broadcast_position(
         self,
         event_id: UUID,
+        text_id: str,
         segment_id: str,
         index: Optional[int],
         round_number: Optional[int],
@@ -169,6 +173,7 @@ class RecitationBroadcaster:
         """Snapshot, then publish the position to every server via Redis pub/sub."""
         await self.save_position(
             event_id=event_id,
+            text_id=text_id,
             segment_id=segment_id,
             index=index,
             round_number=round_number,
@@ -178,6 +183,7 @@ class RecitationBroadcaster:
         payload = {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": text_id,
             "segment_id": segment_id,
             "index": index,
             "round_number": round_number,

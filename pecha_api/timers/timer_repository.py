@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import func, and_
 from typing import List, Tuple, Optional, Dict
 from uuid import UUID
 from datetime import datetime
@@ -9,6 +9,7 @@ from starlette import status
 import _datetime
 from .timer_model import Timer
 from .timer_history_model import TimerHistory
+from .timer_enums import TimerType
 
 
 def save_timer(db: Session, timer: Timer) -> Timer:
@@ -71,17 +72,43 @@ def get_timers_by_group(
     db: Session,
     group_id: Optional[UUID] = None,
     skip: int = 0,
-    limit: int = 20
+    limit: int = 20,
+    user_id: Optional[UUID] = None,
 ) -> Tuple[List[Timer], int]:
 
     query = db.query(Timer).filter(Timer.deleted_at.is_(None))
     if group_id:
         query = query.filter(Timer.group_id == group_id)
+    if user_id is not None:
+        query = _exclude_customized_presets(query, db, user_id)
 
     total = query.count()
     timers = query.order_by(Timer.created_at.desc()).offset(skip).limit(limit).all()
 
     return timers, total
+
+
+def _exclude_customized_presets(query, db: Session, user_id: UUID):
+    """Drop the shared preset (and this user's copy of it) so a customized
+    sit does not appear twice when GET /timers is merged with GET /timers/user."""
+    copied_preset_ids = (
+        db.query(Timer.parent_preset_id)
+        .filter(
+            Timer.user_id == user_id,
+            Timer.parent_preset_id.isnot(None),
+            Timer.deleted_at.is_(None),
+        )
+    )
+    return query.filter(
+        ~and_(
+            Timer.type == TimerType.PRESET,
+            Timer.id.in_(copied_preset_ids),
+        ),
+        ~and_(
+            Timer.user_id == user_id,
+            Timer.parent_preset_id.isnot(None),
+        ),
+    )
 
 
 def get_user_timers_by_group(
@@ -100,6 +127,22 @@ def get_user_timers_by_group(
     timers = query.order_by(Timer.created_at.desc()).offset(skip).limit(limit).all()
     
     return timers, total
+
+
+def get_user_timer_by_parent_preset(
+    db: Session,
+    user_id: UUID,
+    parent_preset_id: UUID,
+) -> Optional[Timer]:
+    return (
+        db.query(Timer)
+        .filter(
+            Timer.user_id == user_id,
+            Timer.parent_preset_id == parent_preset_id,
+            Timer.deleted_at.is_(None),
+        )
+        .first()
+    )
 
 
 def get_user_total_duration(db: Session, user_id: UUID) -> int:

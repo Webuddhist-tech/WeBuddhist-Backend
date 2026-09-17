@@ -46,17 +46,19 @@ async def websocket_recitation_live(
     One operator advances the puja; every subscriber - phones in the room and
     the OBS language overlays - receives the current segment. The socket
     carries a position, never text: clients resolve `segment_id` into their own
-    language through the segment's existing mappings.
+    language through the segment's existing mappings, and follow `text_id` when
+    the operator moves on to the next liturgy in the event's collection.
 
     Client -> server messages:
-      {"type": "set", "segment_id": "...", "index": 12, "round_number": 3}  (operator only)
+      {"type": "set", "text_id": "...", "segment_id": "...", "index": 12, "round_number": 3}  (operator only)
       {"type": "end"}                                                       (operator only)
       {"type": "ping"}
 
     Server -> client events:
       {"type": "session_info", "event_id": "...", "is_operator": true|false}  (once, on connect)
-      {"type": "position", "event_id": "...", "segment_id": "...", "index": 12,
-       "round_number": 3, "server_time": "..."}   (on connect when a position exists, then on every change)
+      {"type": "position", "event_id": "...", "text_id": "...", "segment_id": "...",
+       "index": 12, "round_number": 3, "server_time": "..."}
+          (on connect when a position exists, then on every change)
       {"type": "session_ended", "event_id": "..."}
       {"type": "pong"}
       {"type": "error", "code": "...", "message": "..."}
@@ -205,6 +207,7 @@ async def websocket_recitation_live(
                 try:
                     await broadcaster.broadcast_position(
                         event_id=event_id,
+                        text_id=frame.text_id,
                         segment_id=frame.segment_id,
                         index=frame.index,
                         round_number=frame.round_number,

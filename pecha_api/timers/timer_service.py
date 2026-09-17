@@ -14,6 +14,7 @@ from pecha_api.ambient_sounds.ambient_sound_repository import get_ambient_sound_
 from .timer_repository import (
     get_timers_by_group,
     get_user_timers_by_group,
+    get_user_timer_by_parent_preset,
     save_timer,
     get_timer_by_id,
     update_timer,
@@ -43,7 +44,6 @@ from .response_message import (
     TIMER_NOT_FOUND,
     TIMER_UPDATE_NOT_ALLOWED,
     TIMER_DELETE_NOT_ALLOWED,
-    ONLY_USER_TIMERS_CAN_BE_UPDATED,
     ONLY_USER_TIMERS_CAN_BE_DELETED,
     AMBIENT_SOUND_NOT_FOUND,
     PARENT_PRESET_NOT_FOUND,
@@ -84,6 +84,57 @@ def is_user_created_timer(timer: Timer) -> bool:
     return timer_type == TimerType.USER.value
 
 
+def _apply_timer_field_updates(timer: Timer, request: UpdateTimerRequest) -> None:
+    if request.name is not None:
+        timer.name = request.name
+    if request.description is not None:
+        timer.description = request.description
+    if request.duration is not None:
+        timer.duration = request.duration
+    # Distinguish "omitted" from an explicit null, so the sound can be
+    # detached from a timer as well as swapped.
+    if "ambient_sound_id" in request.model_fields_set:
+        timer.ambient_sound_id = request.ambient_sound_id
+    if request.bell_at_start is not None:
+        timer.bell_at_start = request.bell_at_start
+    if request.bell_at_end is not None:
+        timer.bell_at_end = request.bell_at_end
+
+
+def _validate_update_ambient_sound(db, request: UpdateTimerRequest) -> None:
+    if "ambient_sound_id" in request.model_fields_set and request.ambient_sound_id is not None:
+        _validate_ambient_sound(db, request.ambient_sound_id)
+
+
+def _personal_copy_from_preset(user_id: UUID, preset: Timer) -> Timer:
+    return Timer(
+        id=uuid4(),
+        user_id=user_id,
+        group_id=preset.group_id,
+        type=TimerType.USER,
+        name=preset.name,
+        description=preset.description,
+        duration=preset.duration,
+        ambient_sound_id=preset.ambient_sound_id,
+        bell_at_start=preset.bell_at_start,
+        bell_at_end=preset.bell_at_end,
+        parent_preset_id=preset.id,
+    )
+
+
+def _customize_preset_timer(db, user_id: UUID, preset: Timer, request: UpdateTimerRequest) -> TimerDTO:
+    _validate_update_ambient_sound(db, request)
+
+    personal_timer = get_user_timer_by_parent_preset(db, user_id, preset.id)
+    if personal_timer is None:
+        personal_timer = _personal_copy_from_preset(user_id, preset)
+        _apply_timer_field_updates(personal_timer, request)
+        return convert_timer_to_dto(save_timer(db, personal_timer))
+
+    _apply_timer_field_updates(personal_timer, request)
+    return convert_timer_to_dto(update_timer(db, personal_timer))
+
+
 def _validate_ambient_sound(db, ambient_sound_id: Optional[UUID]) -> None:
     if ambient_sound_id is None:
         return
@@ -111,10 +162,13 @@ def _validate_parent_preset(db, parent_preset_id: Optional[UUID]) -> None:
 def get_all_timers_service(
     group_id: Optional[UUID] = None,
     skip: int = 0,
-    limit: int = 20
+    limit: int = 20,
+    user_id: Optional[UUID] = None,
 ) -> TimersResponse:
     with SessionLocal() as db:
-        timers, total = get_timers_by_group(db, group_id, skip, limit)
+        timers, total = get_timers_by_group(
+            db, group_id, skip, limit, user_id=user_id
+        )
         return TimersResponse(
             timers=convert_timers_to_dtos(timers),
             total=total,
@@ -175,39 +229,21 @@ def update_timer_service(token: str, timer_id: UUID, request: UpdateTimerRequest
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": NOT_FOUND, "message": TIMER_NOT_FOUND}
             )
-        
+
+        # Presets are shared. A PUT never mutates the catalogue row; it writes
+        # the caller's personal copy (parent_preset_id) instead, so each user
+        # can pick their own ambient sound without changing it for everyone.
+        if not is_user_created_timer(timer):
+            return _customize_preset_timer(db, current_user.id, timer, request)
+
         if timer.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"error": FORBIDDEN, "message": TIMER_UPDATE_NOT_ALLOWED}
             )
-        
-        if not is_user_created_timer(timer):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error": FORBIDDEN, "message": ONLY_USER_TIMERS_CAN_BE_UPDATED}
-            )
 
-        ambient_sound_id_provided = "ambient_sound_id" in request.model_fields_set
-        if ambient_sound_id_provided and request.ambient_sound_id is not None:
-            _validate_ambient_sound(db, request.ambient_sound_id)
-
-        if request.name is not None:
-            timer.name = request.name
-        if request.description is not None:
-            timer.description = request.description
-        if request.duration is not None:
-            timer.duration = request.duration
-        # Distinguish "omitted" from an explicit null, so the sound can be
-        # detached from a timer as well as swapped.
-        if ambient_sound_id_provided:
-            timer.ambient_sound_id = request.ambient_sound_id
-        if request.bell_at_start is not None:
-            timer.bell_at_start = request.bell_at_start
-        if request.bell_at_end is not None:
-            timer.bell_at_end = request.bell_at_end
-
-
+        _validate_update_ambient_sound(db, request)
+        _apply_timer_field_updates(timer, request)
         updated_timer = update_timer(db, timer)
         return convert_timer_to_dto(updated_timer)
 

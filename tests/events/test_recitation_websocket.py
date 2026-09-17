@@ -104,6 +104,7 @@ class TestRecitationPositionSnapshot:
 
         await broadcaster.broadcast_position(
             event_id=event_id,
+            text_id="text-7",
             segment_id="seg-1",
             index=12,
             round_number=3,
@@ -113,6 +114,7 @@ class TestRecitationPositionSnapshot:
         broadcaster.redis.hset.assert_awaited_once_with(
             position_state_key(event_id),
             mapping={
+                "text_id": "text-7",
                 "segment_id": "seg-1",
                 "index": "12",
                 "round_number": "3",
@@ -128,6 +130,7 @@ class TestRecitationPositionSnapshot:
         assert json.loads(raw) == {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": "text-7",
             "segment_id": "seg-1",
             "index": 12,
             "round_number": 3,
@@ -141,6 +144,7 @@ class TestRecitationPositionSnapshot:
 
         await broadcaster.broadcast_position(
             event_id=uuid4(),
+            text_id="text-7",
             segment_id="seg-1",
             index=None,
             round_number=None,
@@ -154,6 +158,7 @@ class TestRecitationPositionSnapshot:
         broadcaster = _broadcaster()
         event_id = uuid4()
         broadcaster.redis.hgetall.return_value = {
+            "text_id": "text-7",
             "segment_id": "seg-9",
             "index": "4",
             "round_number": "2",
@@ -163,6 +168,7 @@ class TestRecitationPositionSnapshot:
         assert await broadcaster.get_position(event_id) == {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": "text-7",
             "segment_id": "seg-9",
             "index": 4,
             "round_number": 2,
@@ -173,6 +179,7 @@ class TestRecitationPositionSnapshot:
     async def test_get_position_handles_blank_and_unparsable_numbers(self):
         broadcaster = _broadcaster()
         broadcaster.redis.hgetall.return_value = {
+            "text_id": "text-7",
             "segment_id": "seg-9",
             "index": "",
             "round_number": "not-a-number",
@@ -196,6 +203,20 @@ class TestRecitationPositionSnapshot:
 
         broadcaster.redis.hgetall.side_effect = Exception("redis down")
         assert await broadcaster.get_position(uuid4()) is None
+
+    @pytest.mark.asyncio
+    async def test_get_position_tolerates_snapshot_without_text_id(self):
+        """A hash written before text_id existed still resyncs a client; the
+        text is simply unknown until the operator's next click."""
+        broadcaster = _broadcaster()
+        broadcaster.redis.hgetall.return_value = {
+            "segment_id": "seg-9",
+            "index": "4",
+            "round_number": "2",
+            "updated_at": "2026-09-14T09:30:00Z",
+        }
+
+        assert (await broadcaster.get_position(uuid4()))["text_id"] is None
 
     @pytest.mark.asyncio
     async def test_clear_position_deletes_snapshot(self):

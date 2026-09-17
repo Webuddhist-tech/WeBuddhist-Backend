@@ -171,11 +171,21 @@ user-level "my ambient sound" setting to fall back on — nothing in the schema
 stores a preference outside a timer. A client that wants one sound everywhere
 has to write it to each timer.
 
-**Only your own user-created timers can be changed.** Curated preset timers
-(`type: preset`) are read-only to everybody: a `PUT` against one is
-`403 Only user-created timers can be updated`, even for the caller who is
-looking at it. To customize a preset, create your own timer from it and set
-`parent_preset_id` — the copy is yours, and its sound is yours to change.
+**A preset is never mutated.** Curated preset timers (`type: preset`) stay
+as Studio published them. A `PUT /timers/user/{preset_id}` still works: it
+writes the caller's personal copy (`type: user_created`, `parent_preset_id`
+set to that preset) and returns that copy. A second `PUT` against the same
+preset id updates the existing copy. Two users picking different sounds on
+the same preset therefore get two rows; the catalogue row is untouched.
+
+You can still `POST /timers/user` with `parent_preset_id` yourself if you
+want to create the copy up front. Either way the sound lives on *your* row.
+
+**Lists do not show both.** Send the same token on `GET /timers` that you
+use for `GET /timers/user`. The catalogue then omits any preset you have
+already copied, and omits the copy itself (that row lives on
+`GET /timers/user`). Concatenating the two lists therefore yields one
+row per sit: the preset until you customize it, your copy afterwards.
 
 **`is_default` is not the user's default.** It marks the catalogue entry Studio
 wants preselected for everyone, and at most one entry carries it. It is a
@@ -232,6 +242,5 @@ module's errors:
 
 | Status | Message | Meaning |
 |--------|---------|---------|
-| 403 | `You don't have permission to update this timer` | The timer belongs to someone else |
-| 403 | `Only user-created timers can be updated` | The timer is a curated preset; copy it first |
+| 403 | `You don't have permission to update this timer` | The timer is someone else's user-created copy |
 | 404 | `Timer not found` | No such timer |

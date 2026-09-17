@@ -21,6 +21,8 @@ Per `segments.md`, every segment already has a stable UUID and a `mappings` list
 
 `index` stays in the payload as an **advisory** ordinal so existing OBS overlays keep working during migration. New clients key off `segment_id`.
 
+**`text_id` rides along.** An event links a recitation collection, and a collection holds several texts in order, so a session is normally two or three liturgies one after another. Naming the text in every frame is what lets a client load the next one when the operator moves on, instead of quietly failing to find the segment. It is data, not an address: the channel stays keyed by event, so nobody is stranded on a silent per-text channel when the operator advances.
+
 **Naming:** the prototype's loop counter `pass` is a Python keyword and cannot be a field name. Use `round_number` (not `round` — a builtin), renamed here before clients bake it in.
 
 ## 3. Architecture
@@ -36,14 +38,15 @@ wss://{host}/api/v1/events/{event_id}/recitation/live?token={auth_token}
 Operator → server:
 
 ```json
-{ "type": "set", "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3 }
+{ "type": "set", "text_id": "abc…", "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3 }
 ```
 
 Server → all subscribers, on every change **and once on connect** so late joiners land on the live line:
 
 ```json
-{ "type": "position", "event_id": "550e8400-…", "segment_id": "e47b3b6a-…",
-  "index": 12, "round_number": 3, "server_time": "2026-09-14T09:30:00Z" }
+{ "type": "position", "event_id": "550e8400-…", "text_id": "abc…",
+  "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3,
+  "server_time": "2026-09-14T09:30:00Z" }
 ```
 
 Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR`, `FORBIDDEN`, `SERVER_ERROR`, as in the comments WS), and `session_ended` when the operator closes the puja. Malformed JSON and unknown types are ignored; a `set` from a non-operator gets a `FORBIDDEN` error frame but keeps its socket.
@@ -52,11 +55,12 @@ Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR
 
 New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster`: local map `{event_id: {user_id: ws}}`, channel `recitation:event:{event_id}:position`, `broadcast_position(...)` publishes and each instance relays locally.
 
-**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` also writes a Redis hash `recitation:event:{event_id}:state` (`segment_id`, `index`, `round_number`, `updated_at`; 12h TTL, refreshed on write), and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
+**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` also writes a Redis hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`; 12h TTL, refreshed on write), and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
 
 ## 6. App behavior on `position`
 
 - Scroll `segment_id` into focus, smooth-animated; highlight it, dim the rest.
+- When `text_id` changes, load that text and keep following - that is how the session's second and third recitations arrive, on the same socket.
 - Show `round_number` during the 21-Taras loop — the segments repeat there, so the id alone is ambiguous.
 - Operator jumps arrive as an ordinary `position`; never assume position advances monotonically.
 - **Follow toggle:** if the user scrolls away to read ahead, leave follow mode and show a resync button. Auto-scrolling someone deliberately reading ahead is the worst failure mode here.
@@ -71,7 +75,7 @@ Render imposes no connection limit; a few hundred phones at ~200 bytes a few tim
 
 ## 8. Non-goals (v1)
 
-Audio/word-level karaoke timing; multiple or handed-off operators; persisting or replaying a past puja; per-user position; serving liturgy text over the socket (the app loads it through the existing segment APIs).
+Audio/word-level karaoke timing; two recitations running at the same moment in one event (one position per event - sequential texts are the supported shape); multiple or handed-off operators; persisting or replaying a past puja; per-user position; serving liturgy text over the socket (the app loads it through the existing segment APIs).
 
 ## 9. Acceptance criteria
 

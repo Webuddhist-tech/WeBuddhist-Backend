@@ -158,6 +158,7 @@ class TestRecitationConnection:
         position = {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": "text-7",
             "segment_id": "seg-7",
             "index": 12,
             "round_number": 3,
@@ -179,6 +180,7 @@ class TestRecitationConnection:
         published = {
             "type": "position",
             "event_id": str(event_id),
+            "text_id": "text-7",
             "segment_id": "seg-3",
             "index": 1,
             "round_number": None,
@@ -211,6 +213,7 @@ class TestOperatorPublishing:
                 websocket.receive_json()
                 websocket.send_json({
                     "type": "set",
+                    "text_id": "text-7",
                     "segment_id": "seg-42",
                     "index": 12,
                     "round_number": 3,
@@ -219,6 +222,7 @@ class TestOperatorPublishing:
 
         kwargs = broadcaster.broadcast_position.await_args.kwargs
         assert kwargs["event_id"] == event_id
+        assert kwargs["text_id"] == "text-7"
         assert kwargs["segment_id"] == "seg-42"
         assert kwargs["index"] == 12
         assert kwargs["round_number"] == 3
@@ -228,7 +232,7 @@ class TestOperatorPublishing:
         with _ws_env(is_operator=True) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "seg-1"})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1"})
                 _sync(websocket)
 
         kwargs = broadcaster.broadcast_position.await_args.kwargs
@@ -239,7 +243,7 @@ class TestOperatorPublishing:
         with _ws_env(is_operator=False) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "seg-1"})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1"})
                 message = websocket.receive_json()
                 _sync(websocket)
 
@@ -251,7 +255,7 @@ class TestOperatorPublishing:
         with _ws_env(is_operator=True) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "   "})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "   "})
                 message = websocket.receive_json()
                 _sync(websocket)
 
@@ -262,18 +266,55 @@ class TestOperatorPublishing:
         with _ws_env(is_operator=True) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "seg-1", "round_number": 0})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1", "round_number": 0})
                 message = websocket.receive_json()
                 _sync(websocket)
 
         assert message["code"] == "VALIDATION_ERROR"
         broadcaster.broadcast_position.assert_not_awaited()
 
+    def test_set_without_text_id_is_rejected(self):
+        """The event's collection holds several texts, so a position that does
+        not say which one it belongs to is not resolvable by a client."""
+        with _ws_env(is_operator=True) as (broadcaster, _):
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "set", "segment_id": "seg-1"})
+                message = websocket.receive_json()
+                _sync(websocket)
+
+        assert message["code"] == "VALIDATION_ERROR"
+        broadcaster.broadcast_position.assert_not_awaited()
+
+    def test_blank_text_id_is_rejected(self):
+        with _ws_env(is_operator=True) as (broadcaster, _):
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "set", "text_id": "  ", "segment_id": "seg-1"})
+                message = websocket.receive_json()
+                _sync(websocket)
+
+        assert message["code"] == "VALIDATION_ERROR"
+        broadcaster.broadcast_position.assert_not_awaited()
+
+    def test_operator_moving_to_the_next_text_is_broadcast(self):
+        """Sequential recitations: the operator finishes one liturgy and starts
+        the next on the same socket, and the text change rides along."""
+        with _ws_env(is_operator=True) as (broadcaster, _):
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "set", "text_id": "text-a", "segment_id": "seg-9"})
+                websocket.send_json({"type": "set", "text_id": "text-b", "segment_id": "seg-1"})
+                _sync(websocket)
+
+        texts = [call.kwargs["text_id"] for call in broadcaster.broadcast_position.await_args_list]
+        assert texts == ["text-a", "text-b"]
+
     def test_throttled_set_is_dropped_silently(self):
         with _ws_env(is_operator=True, allow_set=False) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "seg-1"})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1"})
                 _sync(websocket)
 
         broadcaster.broadcast_position.assert_not_awaited()
@@ -285,7 +326,7 @@ class TestOperatorPublishing:
         with _ws_env(is_operator=True, broadcaster=broadcaster):
             with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.receive_json()
-                websocket.send_json({"type": "set", "segment_id": "seg-1"})
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1"})
                 message = websocket.receive_json()
 
         assert message["code"] == "SERVER_ERROR"

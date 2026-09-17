@@ -152,7 +152,9 @@ class TestGetAllTimersService:
         assert result.skip == 0
         assert result.limit == 20
         
-        mock_get_timers.assert_called_once_with(mock_db, group_id, 0, 20)
+        mock_get_timers.assert_called_once_with(
+            mock_db, group_id, 0, 20, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.get_timers_by_group')
@@ -188,7 +190,9 @@ class TestGetAllTimersService:
         assert result.limit == 1
         assert result.total == 10
         
-        mock_get_timers.assert_called_once_with(mock_db, group_id, 5, 1)
+        mock_get_timers.assert_called_once_with(
+            mock_db, group_id, 5, 1, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_service.SessionLocal')
     @patch('pecha_api.timers.timer_service.get_timers_by_group')
@@ -208,7 +212,26 @@ class TestGetAllTimersService:
         assert len(result.timers) == 2
         assert result.total == 2
         
-        mock_get_timers.assert_called_once_with(mock_db, None, 0, 20)
+        mock_get_timers.assert_called_once_with(
+            mock_db, None, 0, 20, user_id=None
+        )
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.get_timers_by_group')
+    def test_get_all_timers_service_hides_customized_presets_for_user(
+        self, mock_get_timers, mock_session
+    ):
+        """An authenticated catalogue list is asked to drop presets the caller already copied."""
+        user_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get_timers.return_value = ([], 0)
+
+        get_all_timers_service(group_id=None, skip=0, limit=20, user_id=user_id)
+
+        mock_get_timers.assert_called_once_with(
+            mock_db, None, 0, 20, user_id=user_id
+        )
 
 
 class TestGetUserTimersService:
@@ -654,34 +677,106 @@ class TestUpdateTimerService:
         assert my_timer.ambient_sound_id == chosen_sound_id
 
     @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.save_timer')
+    @patch('pecha_api.timers.timer_service._personal_copy_from_preset')
+    @patch('pecha_api.timers.timer_service.get_user_timer_by_parent_preset')
+    @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
     @patch('pecha_api.timers.timer_service.get_timer_by_id')
     @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
-    def test_update_timer_service_preset_timer(self, mock_validate, mock_get, mock_session):
-        """Test update_timer_service when trying to update preset timer."""
+    def test_update_timer_service_preset_creates_personal_copy(
+        self, mock_validate, mock_get, mock_get_sound, mock_get_copy, mock_copy_from_preset, mock_save, mock_session
+    ):
+        """Picking a sound on a shared preset writes a personal copy, not the catalogue row."""
         user_id = uuid4()
-        timer_id = uuid4()
+        preset_owner_id = uuid4()
+        new_sound_id = uuid4()
         token = "valid_token"
-        
-        mock_user = TestDataFactory.create_mock_user(user_id=user_id)
-        mock_validate.return_value = mock_user
-        
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        
-        # Timer is preset type
-        existing_timer = TestDataFactory.create_mock_timer(
-            timer_id=timer_id,
-            user_id=user_id,
+        mock_get_sound.return_value = MagicMock(id=new_sound_id)
+        mock_get_copy.return_value = None
+
+        preset = TestDataFactory.create_mock_timer(
+            user_id=preset_owner_id,
+            name="Morning sit",
+            duration=900000,
+            ambient_sound_id=uuid4(),
             timer_type=TimerType.PRESET
         )
-        mock_get.return_value = existing_timer
-        
-        request = TestDataFactory.create_update_request(name="Updated")
-        
-        with pytest.raises(HTTPException) as exc_info:
-            update_timer_service(token=token, timer_id=timer_id, request=request)
-        
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        original_sound_id = preset.ambient_sound_id
+        mock_get.return_value = preset
+
+        personal_copy = TestDataFactory.create_mock_timer(
+            user_id=user_id,
+            name=preset.name,
+            duration=preset.duration,
+            ambient_sound_id=preset.ambient_sound_id,
+            timer_type=TimerType.USER,
+            parent_preset_id=preset.id
+        )
+        mock_copy_from_preset.return_value = personal_copy
+        mock_save.return_value = personal_copy
+
+        request = TestDataFactory.create_update_request(ambient_sound_id=new_sound_id)
+        result = update_timer_service(token=token, timer_id=preset.id, request=request)
+
+        assert result.type == TimerType.USER
+        assert result.user_id == user_id
+        assert result.parent_preset_id == preset.id
+        assert result.ambient_sound_id == new_sound_id
+        assert preset.ambient_sound_id == original_sound_id
+        mock_get_copy.assert_called_once_with(mock_db, user_id, preset.id)
+        mock_copy_from_preset.assert_called_once_with(user_id, preset)
+        mock_save.assert_called_once_with(mock_db, personal_copy)
+        assert personal_copy.ambient_sound_id == new_sound_id
+
+    @patch('pecha_api.timers.timer_service.SessionLocal')
+    @patch('pecha_api.timers.timer_service.save_timer')
+    @patch('pecha_api.timers.timer_service.update_timer')
+    @patch('pecha_api.timers.timer_service.get_user_timer_by_parent_preset')
+    @patch('pecha_api.timers.timer_service.get_ambient_sound_by_id')
+    @patch('pecha_api.timers.timer_service.get_timer_by_id')
+    @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
+    def test_update_timer_service_preset_updates_existing_personal_copy(
+        self, mock_validate, mock_get, mock_get_sound, mock_get_copy, mock_update, mock_save, mock_session
+    ):
+        """A second pick on the same preset rewrites the caller's copy, not a new row."""
+        user_id = uuid4()
+        new_sound_id = uuid4()
+        token = "valid_token"
+
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_get_sound.return_value = MagicMock(id=new_sound_id)
+
+        preset = TestDataFactory.create_mock_timer(
+            user_id=uuid4(),
+            ambient_sound_id=uuid4(),
+            timer_type=TimerType.PRESET
+        )
+        original_preset_sound_id = preset.ambient_sound_id
+        mock_get.return_value = preset
+
+        personal_copy = TestDataFactory.create_mock_timer(
+            user_id=user_id,
+            ambient_sound_id=uuid4(),
+            timer_type=TimerType.USER,
+            parent_preset_id=preset.id
+        )
+        mock_get_copy.return_value = personal_copy
+        mock_update.return_value = personal_copy
+
+        request = TestDataFactory.create_update_request(ambient_sound_id=new_sound_id)
+        result = update_timer_service(token=token, timer_id=preset.id, request=request)
+
+        assert personal_copy.ambient_sound_id == new_sound_id
+        assert result.ambient_sound_id == new_sound_id
+        assert preset.ambient_sound_id == original_preset_sound_id
+        mock_save.assert_not_called()
+        mock_update.assert_called_once_with(mock_db, personal_copy)
     
     @patch('pecha_api.timers.timer_service.validate_and_extract_user_details')
     def test_update_timer_service_invalid_token(self, mock_validate):
