@@ -6,7 +6,6 @@ from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy.sql.elements import ColumnElement
 from starlette import status
 
 from .event_model import Event
@@ -198,12 +197,6 @@ def list_undispatched_event_notifications(
     )
 
 
-def _event_format_filter(event_format: str) -> ColumnElement[bool]:
-    if event_format == "hybrid":
-        return Event.event_format == event_format
-    return Event.event_format.in_([event_format, "hybrid"])
-
-
 def _apply_event_filters(
     query,
     group_id: Optional[UUID] = None,
@@ -238,7 +231,7 @@ def _apply_event_filters(
             Event.group_recitation_collection_id == group_recitation_collection_id
         )
     if event_format:
-        query = query.filter(_event_format_filter(event_format))
+        query = query.filter(Event.event_format.in_({event_format, "hybrid"}))
     if from_date is not None:
         query = query.filter(Event.end_date >= from_date)
     if not_ended_before is not None:
