@@ -261,4 +261,4 @@ def test_get_events_service_forwards_collection_filter_to_repository() -> None:
         )
 
     _, _, kwargs = mock_get_events.mock_calls[0]
-    assert kwargs["group_recitation_collection_id"] == collection_id
+    assert kwargs["content_filter"].group_recitation_collection_id == collection_id

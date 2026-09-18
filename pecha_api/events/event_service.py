@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, List, Optional, Sequence
 from uuid import UUID
@@ -41,6 +40,7 @@ from pecha_api.users.users_service import validate_and_extract_user_details
 
 from .event_model import Event
 from .event_enums import EventLinkType
+from .event_filters import EventContentFilter
 from .event_response_models import (
     CreateEventRequest,
     UpdateEventRequest,
@@ -549,18 +549,6 @@ def _validate_location(db, location_id: Optional[UUID], group_id: UUID) -> None:
         )
 
 
-@dataclass(frozen=True)
-class EventContentFilter:
-    """Which content association(s) events must be linked to, for querying."""
-    group_id: Optional[UUID] = None
-    plan_id: Optional[UUID] = None
-    accumulator_id: Optional[UUID] = None
-    mantra_id: Optional[UUID] = None
-    timer_id: Optional[UUID] = None
-    group_recitation_collection_id: Optional[UUID] = None
-    event_format: Optional[EventFormat] = None
-
-
 def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
     """Treat offset-less datetimes as UTC so they can be compared with now()."""
     if value is None:
@@ -691,13 +679,7 @@ def get_events_service(
         # Note: We need all events to properly merge and paginate with recurring occurrences
         one_shot_events, _ = get_events(
             db,
-            group_id=content_filter.group_id,
-            plan_id=content_filter.plan_id,
-            accumulator_id=content_filter.accumulator_id,
-            mantra_id=content_filter.mantra_id,
-            timer_id=content_filter.timer_id,
-            group_recitation_collection_id=content_filter.group_recitation_collection_id,
-            event_format=content_filter.event_format,
+            content_filter=content_filter,
             from_date=from_date,
             to_date=to_date,
             restrict_group_ids=restrict_group_ids,
@@ -709,13 +691,7 @@ def get_events_service(
         # Get recurring event templates
         recurring_templates = get_recurring_events(
             db,
-            group_id=content_filter.group_id,
-            plan_id=content_filter.plan_id,
-            accumulator_id=content_filter.accumulator_id,
-            mantra_id=content_filter.mantra_id,
-            timer_id=content_filter.timer_id,
-            group_recitation_collection_id=content_filter.group_recitation_collection_id,
-            event_format=content_filter.event_format,
+            content_filter=content_filter,
             restrict_group_ids=restrict_group_ids,
         )
         
