@@ -4,7 +4,8 @@ from typing import Dict, Optional
 from uuid import UUID
 
 from redis.asyncio import Redis
-from redis.asyncio.client import PubSub
+
+from pecha_api.realtime.channel_fanout import ChannelFanout, Subscriber
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ class RecitationBroadcaster:
     def __init__(self, redis_url: str) -> None:
         self.redis_url = redis_url
         self.redis: Optional[Redis] = None
+        # One Redis subscription per event, shared by every socket watching
+        # it on this instance.
+        self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {event_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
 
@@ -72,6 +76,9 @@ class RecitationBroadcaster:
             self.redis = await Redis.from_url(
                 self.redis_url, decode_responses=True, socket_keepalive=True
             )
+            # A position is last-write-wins, so a socket that falls behind
+            # wants the newest frame, not a backlog of stale ones.
+            self.fanout = ChannelFanout(self.redis, queue_maxsize=64, drop_oldest=True)
             logger.info("✅ Redis connection established for recitation broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -98,28 +105,41 @@ class RecitationBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self.fanout:
+            await self.fanout.aclose()
         if self.redis:
             await self.redis.close()
             logger.info("Redis connection closed for recitation broadcaster")
 
-    async def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
-        """Track a local WebSocket connection."""
+    def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
+        """Track a local WebSocket connection.
+
+        Plain dict bookkeeping: unlike chat, a recitation keeps no presence
+        in Redis, so there is nothing here to await.
+        """
         if event_id not in self.connections:
             self.connections[event_id] = {}
         self.connections[event_id][user_id] = ws
 
-    async def remove_connection(self, event_id: UUID, user_id: UUID) -> None:
+    def remove_connection(self, event_id: UUID, user_id: UUID) -> None:
         """Drop a local WebSocket connection."""
         if event_id in self.connections:
             self.connections[event_id].pop(user_id, None)
             if not self.connections[event_id]:
                 del self.connections[event_id]
 
-    async def subscribe_to_event(self, event_id: UUID) -> PubSub:
-        """Subscribe to the position stream for an event."""
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(position_channel(event_id))
-        return pubsub
+    async def subscribe_to_event(self, event_id: UUID) -> Subscriber:
+        """Attach to the position stream for an event.
+
+        Shares the instance's single subscription for this event, so a
+        thousand phones in the room cost one Redis connection, not a
+        thousand. Release it with `unsubscribe_from_event`.
+        """
+        return await self.fanout.subscribe(position_channel(event_id))
+
+    async def unsubscribe_from_event(self, event_id: UUID, subscriber: Subscriber) -> None:
+        """Detach a socket; the last one out closes the Redis subscription."""
+        await self.fanout.unsubscribe(position_channel(event_id), subscriber)
 
     async def save_position(
         self,
@@ -157,7 +177,7 @@ class RecitationBroadcaster:
             )
             return int(revision)
         except Exception as e:
-            logger.error(f"Failed to save recitation position to Redis: {e}")
+            logger.exception("Failed to save recitation position to Redis: %s", e)
             return None
 
     async def get_position(self, event_id: UUID) -> Optional[dict]:
@@ -166,7 +186,7 @@ class RecitationBroadcaster:
         try:
             state = await self.redis.hgetall(position_state_key(event_id))
         except Exception as e:
-            logger.error(f"Failed to read recitation position from Redis: {e}")
+            logger.exception("Failed to read recitation position from Redis: %s", e)
             return None
 
         if not state or not state.get("segment_id"):
@@ -207,7 +227,7 @@ class RecitationBroadcaster:
             await self.redis.delete(position_state_key(event_id))
             return True
         except Exception as e:
-            logger.error(f"Failed to clear recitation position in Redis: {e}")
+            logger.exception("Failed to clear recitation position in Redis: %s", e)
             return False
 
     async def broadcast_position(
@@ -248,7 +268,7 @@ class RecitationBroadcaster:
         try:
             await self.redis.publish(position_channel(event_id), json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast recitation position to Redis: {e}")
+            logger.exception("Failed to broadcast recitation position to Redis: %s", e)
             raise
 
         return revision
@@ -266,7 +286,7 @@ class RecitationBroadcaster:
             await self.redis.publish(position_channel(event_id), json.dumps(payload))
             return True
         except Exception as e:
-            logger.error(f"Failed to broadcast recitation session end to Redis: {e}")
+            logger.exception("Failed to broadcast recitation session end to Redis: %s", e)
             return False
 
     async def allow_set(self, event_id: UUID) -> bool:
@@ -283,10 +303,10 @@ class RecitationBroadcaster:
                 await self.redis.expire(key, 1)
             return count <= MAX_SETS_PER_SECOND
         except Exception as e:
-            logger.error(f"Failed to check recitation rate limit in Redis: {e}")
+            logger.exception("Failed to check recitation rate limit in Redis: %s", e)
             return True
 
-    async def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
+    def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
         """Sockets this server holds for an event (local only - position is the
         shared state here, not presence)."""
         return self.connections.get(event_id, {})

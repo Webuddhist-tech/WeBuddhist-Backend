@@ -88,11 +88,11 @@ class TestRecitationBroadcasterLifecycle:
         event_id, user_id = uuid4(), uuid4()
         websocket = AsyncMock()
 
-        await broadcaster.add_connection(event_id, user_id, websocket)
+        broadcaster.add_connection(event_id, user_id, websocket)
         assert broadcaster.connections[event_id][user_id] is websocket
-        assert await broadcaster.get_connected_users(event_id) == {user_id: websocket}
+        assert broadcaster.get_connected_users(event_id) == {user_id: websocket}
 
-        await broadcaster.remove_connection(event_id, user_id)
+        broadcaster.remove_connection(event_id, user_id)
         assert event_id not in broadcaster.connections
 
 
