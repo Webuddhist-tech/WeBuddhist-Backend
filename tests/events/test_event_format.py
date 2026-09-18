@@ -1,10 +1,17 @@
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from pecha_api.events.event_model import Event
+from pecha_api.events.event_repository import _apply_event_filters
 from pecha_api.events.event_response_models import (
     CreateEventRequest,
     UpdateEventRequest,
@@ -284,14 +291,7 @@ def test_update_event_service_updates_event_format() -> None:
         assert result.event_format == "offline"
 
 
-def _event_format_session():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
-
-    from pecha_api.events.event_model import Event
-    from pecha_api.events.event_repository import _apply_event_filters
-
+def _event_format_session() -> tuple[Session, type[Event], Callable[..., Any]]:
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
