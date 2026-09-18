@@ -284,42 +284,57 @@ def test_update_event_service_updates_event_format() -> None:
         assert result.event_format == "offline"
 
 
-def _rendered_format_filter(event_format: str | None) -> str | None:
+def _event_format_session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from pecha_api.events.event_model import Event
     from pecha_api.events.event_repository import _apply_event_filters
 
-    query = MagicMock()
-    query.filter.return_value = query
-    _apply_event_filters(query, event_format=event_format)
-    if not query.filter.called:
-        return None
-    clause = query.filter.call_args.args[0]
-    return str(clause.compile(compile_kwargs={"literal_binds": True}))
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Event.metadata.create_all(bind=engine, tables=[Event.__table__])
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for event_format in ("online", "offline", "hybrid"):
+        db.add(
+            Event(
+                id=uuid4(),
+                group_id=uuid4(),
+                start_date=now,
+                end_date=now,
+                created_by="test@example.com",
+                event_format=event_format,
+                featured=False,
+                is_recurring=False,
+            )
+        )
+    db.commit()
+    return db, Event, _apply_event_filters
+
+
+def _formats_for(event_format: str | None) -> set[str]:
+    db, Event, apply_filters = _event_format_session()
+    query = apply_filters(db.query(Event), event_format=event_format)
+    return {event.event_format for event in query.all()}
 
 
 def test_apply_event_filters_online_includes_hybrid() -> None:
-    rendered = _rendered_format_filter("online")
-    assert rendered is not None
-    assert "online" in rendered
-    assert "hybrid" in rendered
-    assert "offline" not in rendered
+    assert _formats_for("online") == {"online", "hybrid"}
 
 
 def test_apply_event_filters_offline_includes_hybrid() -> None:
-    rendered = _rendered_format_filter("offline")
-    assert rendered is not None
-    assert "offline" in rendered
-    assert "hybrid" in rendered
-    assert "online" not in rendered
+    assert _formats_for("offline") == {"offline", "hybrid"}
 
 
 def test_apply_event_filters_hybrid_is_exact() -> None:
-    rendered = _rendered_format_filter("hybrid")
-    assert rendered is not None
-    assert "hybrid" in rendered
-    assert " IN " not in rendered
-    assert "online" not in rendered
-    assert "offline" not in rendered
+    assert _formats_for("hybrid") == {"hybrid"}
 
 
 def test_apply_event_filters_omits_format_clause_when_unset() -> None:
-    assert _rendered_format_filter(None) is None
+    assert _formats_for(None) == {"online", "offline", "hybrid"}
+

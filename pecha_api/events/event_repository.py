@@ -231,12 +231,10 @@ def _apply_event_filters(
             Event.group_recitation_collection_id == group_recitation_collection_id
         )
     if event_format:
-        if event_format == "hybrid":
-            query = query.filter(Event.event_format == event_format)
-        else:
-            query = query.filter(
-                Event.event_format.in_([event_format, "hybrid"])
-            )
+        event_format_filter = Event.event_format == event_format
+        if event_format != "hybrid":
+            event_format_filter = Event.event_format.in_([event_format, "hybrid"])
+        query = query.filter(event_format_filter)
     if from_date is not None:
         query = query.filter(Event.end_date >= from_date)
     if not_ended_before is not None:
