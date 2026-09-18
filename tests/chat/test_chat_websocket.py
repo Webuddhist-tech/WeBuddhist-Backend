@@ -246,9 +246,11 @@ class TestChatBroadcasterFailures:
         broadcaster = ChatBroadcaster("redis://localhost:6379/0")
         broadcaster.redis = AsyncMock()
         broadcaster.redis.publish.side_effect = RuntimeError("publish failed")
+        room_id = uuid4()
+        message = _message_dto(room_id)
 
         with pytest.raises(RuntimeError, match="publish failed"):
-            await broadcaster.broadcast_message(uuid4(), _message_dto(uuid4()))
+            await broadcaster.broadcast_message(room_id, message)
 
     @pytest.mark.asyncio
     async def test_broadcast_typing_survives_redis_failure(self):

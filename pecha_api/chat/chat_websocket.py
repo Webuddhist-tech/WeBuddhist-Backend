@@ -75,7 +75,7 @@ class ChatBroadcaster:
         try:
             await self.redis.hset(f"chat:room:{room_id}:presence", str(user_id), email)
         except Exception as e:
-            logger.error(f"Failed to add presence to Redis: {e}")
+            logger.exception("Failed to add presence to Redis: %s", e)
 
     async def remove_connection(self, room_id: UUID, user_id: UUID) -> None:
         """Remove local WebSocket connection and cleanup presence in Redis."""
@@ -87,7 +87,7 @@ class ChatBroadcaster:
         try:
             await self.redis.hdel(f"chat:room:{room_id}:presence", str(user_id))
         except Exception as e:
-            logger.error(f"Failed to remove presence from Redis: {e}")
+            logger.exception("Failed to remove presence from Redis: %s", e)
 
     async def broadcast_message(
         self,
@@ -104,7 +104,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast message to Redis: {e}")
+            logger.exception("Failed to broadcast message to Redis: %s", e)
             raise
 
     async def broadcast_reactions(
@@ -130,7 +130,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast reactions to Redis: {e}")
+            logger.exception("Failed to broadcast reactions to Redis: %s", e)
             raise
 
     async def broadcast_prayers(
@@ -153,7 +153,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast prayers to Redis: {e}")
+            logger.exception("Failed to broadcast prayers to Redis: %s", e)
             raise
 
     async def broadcast_message_deleted(
@@ -177,7 +177,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast message deletion to Redis: {e}")
+            logger.exception("Failed to broadcast message deletion to Redis: %s", e)
             raise
 
     async def broadcast_typing(
@@ -199,7 +199,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast typing indicator to Redis: {e}")
+            logger.exception("Failed to broadcast typing indicator to Redis: %s", e)
 
     async def broadcast_room_closed(self, room_id: UUID, reason: str) -> None:
         """Tell every server holding a socket for this room to drop it.
@@ -214,7 +214,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast room close to Redis: {e}")
+            logger.exception("Failed to broadcast room close to Redis: %s", e)
 
     async def broadcast_presence(self, room_id: UUID) -> None:
         """Publish the current online roster for a room (not persisted)."""
@@ -229,7 +229,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast presence to Redis: {e}")
+            logger.exception("Failed to broadcast presence to Redis: %s", e)
 
     async def subscribe_to_room(self, room_id: UUID) -> Subscriber:
         """Subscribe to the message stream for a room."""
@@ -244,7 +244,7 @@ class ChatBroadcaster:
         try:
             return await self.redis.hgetall(f"chat:room:{room_id}:presence")
         except Exception as e:
-            logger.error(f"Failed to get connected users from Redis: {e}")
+            logger.exception("Failed to get connected users from Redis: %s", e)
             return {}
 
 

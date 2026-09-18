@@ -75,8 +75,8 @@ def _comment_dto(post_id, parent_comment_id=None) -> GroupPostCommentDTO:
     )
 
 
-def _ws_url(group_id, post_id, token="test-token"):
-    return f"/author/groups/{group_id}/posts/{post_id}/comments/live?token={token}"
+def _ws_url(post_id, token="test-token"):
+    return f"/groups/author/posts/{post_id}/comments/live?token={token}"
 
 
 @contextmanager
@@ -145,7 +145,7 @@ class TestWebSocketPostCommentsConnection:
             side_effect=RuntimeError("Redis down"),
         ):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4(), uuid4())):
+                with client.websocket_connect(_ws_url(uuid4())):
                     pass
 
     def test_rejects_invalid_token(self):
@@ -153,12 +153,14 @@ class TestWebSocketPostCommentsConnection:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
         )
         with _websocket_env(auth_error=auth_error) as (broadcaster, _):
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4(), uuid4(), token="bad")) as websocket:
-                    message = websocket.receive_json()
-                    assert message["type"] == "error"
-                    assert message["code"] == "UNAUTHORIZED"
-                    assert message["message"] == "Invalid token"
+            with client.websocket_connect(_ws_url(uuid4(), token="bad")) as websocket:
+                message = websocket.receive_json()
+                assert message["type"] == "error"
+                assert message["code"] == "UNAUTHORIZED"
+                assert message["message"] == "Invalid token"
+                # Rejected: the server closes right after the error frame.
+                with pytest.raises(WebSocketDisconnect):
+                    websocket.receive_json()
         
         broadcaster.add_connection.assert_not_awaited()
 
@@ -167,14 +169,15 @@ class TestWebSocketPostCommentsConnection:
         not_found = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
         with _websocket_env(author=author, validation_error=not_found) as (broadcaster, _):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4(), uuid4())):
+                with client.websocket_connect(_ws_url(uuid4())):
                     pass
 
-        # Validation fails before accept(), so connection is never added
+        # Validation fails before accept(), so the connection is never added.
         broadcaster.add_connection.assert_not_awaited()
-        broadcaster.remove_connection.assert_not_awaited()
+        # Cleanup still runs for a known user, and removing a connection that
+        # was never added is a no-op by design.
+        broadcaster.remove_connection.assert_awaited_once()
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_registers_and_unregisters_connection(self):
         group_id = uuid4()
         post_id = uuid4()
@@ -182,34 +185,29 @@ class TestWebSocketPostCommentsConnection:
         subscriber = FakeSubscriber(keep_alive=True)
 
         with _websocket_env(author=author, subscriber=subscriber) as (broadcaster, _):
-            # Connection will be accepted, then immediately closed when context exits
-            # The websocket waits for messages in an infinite loop, so it will disconnect when we exit
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(group_id, post_id)) as ws:
-                    # Close the connection to trigger cleanup
-                    pass
+            # Accepted, then closed from the client end, which runs the
+            # endpoint's cleanup.
+            with client.websocket_connect(_ws_url(post_id)):
+                pass
 
         broadcaster.add_connection.assert_awaited_once()
         assert broadcaster.add_connection.await_args.args[:2] == (post_id, author.id)
         broadcaster.remove_connection.assert_awaited_once_with(post_id, author.id)
         broadcaster.unsubscribe_from_post.assert_awaited_once_with(post_id, subscriber)
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_unsubscribe_failure_is_swallowed(self):
         broadcaster = AsyncMock()
         broadcaster.unsubscribe_from_post.side_effect = RuntimeError("redis gone")
 
         with _websocket_env(broadcaster=broadcaster):
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4(), uuid4())) as ws:
-                    pass
+            with client.websocket_connect(_ws_url(uuid4())):
+                pass
 
         broadcaster.unsubscribe_from_post.assert_awaited_once()
 
 
 class TestWebSocketPostCommentsRedisStream:
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_forwards_published_comments_to_client(self):
         post_id = uuid4()
         payload = json.dumps({"type": "comment_created", "comment": {"text": "from redis"}})
@@ -222,30 +220,28 @@ class TestWebSocketPostCommentsRedisStream:
         )
 
         with _websocket_env(subscriber=subscriber):
-            with client.websocket_connect(_ws_url(uuid4(), post_id)) as websocket:
+            with client.websocket_connect(_ws_url(post_id)) as websocket:
                 received = websocket.receive_text()
                 assert received == payload
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_redis_listen_failure_does_not_break_connection(self):
         # When listen fails, the background task stops but the main loop should continue
         subscriber = FakeSubscriber(listen_error=RuntimeError("pubsub exploded"), keep_alive=True)
 
         with _websocket_env(subscriber=subscriber) as (_, mock_create):
-            with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+                # The socket still answers after the relay task died.
                 websocket.send_json({"type": "ping"})
-                message = websocket.receive_json()
-                assert message["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
         mock_create.assert_not_called()
 
 
 class TestWebSocketPostCommentsMessages:
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_rejects_unsupported_message_type(self):
         with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (_, mock_create):
-            with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.send_json({"type": "reaction", "text": "hi"})
                 message = websocket.receive_json()
                 assert message["type"] == "error"
@@ -253,7 +249,6 @@ class TestWebSocketPostCommentsMessages:
         
         mock_create.assert_not_called()
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_creates_and_broadcasts_comment(self):
         group_id = uuid4()
         post_id = uuid4()
@@ -262,7 +257,7 @@ class TestWebSocketPostCommentsMessages:
 
         with _websocket_env(author=author, subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = dto
-            with client.websocket_connect(_ws_url(group_id, post_id)) as websocket:
+            with client.websocket_connect(_ws_url(post_id)) as websocket:
                 websocket.send_json({"type": "comment", "text": "Great post!"})
                 # Give it a moment to process
                 import time
@@ -276,7 +271,6 @@ class TestWebSocketPostCommentsMessages:
         )
         broadcaster.broadcast_comment.assert_awaited_once_with(post_id, dto)
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_creates_and_broadcasts_reply(self):
         group_id = uuid4()
         post_id = uuid4()
@@ -286,7 +280,7 @@ class TestWebSocketPostCommentsMessages:
 
         with _websocket_env(author=author, subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = dto
-            with client.websocket_connect(_ws_url(group_id, post_id)) as websocket:
+            with client.websocket_connect(_ws_url(post_id)) as websocket:
                 websocket.send_json({
                     "type": "comment",
                     "text": "Nested reply",
@@ -304,13 +298,12 @@ class TestWebSocketPostCommentsMessages:
         )
         broadcaster.broadcast_comment.assert_awaited_once_with(post_id, dto)
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_reports_comment_creation_failure(self):
         with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.side_effect = HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="POST_NOT_FOUND"
             )
-            with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.send_json({"type": "comment", "text": "Great post!"})
                 message = websocket.receive_json()
                 assert message["type"] == "error"
@@ -318,27 +311,25 @@ class TestWebSocketPostCommentsMessages:
         
         broadcaster.broadcast_comment.assert_not_awaited()
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_reports_non_string_creation_failure_detail(self):
         with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (_, mock_create):
             mock_create.side_effect = HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"field": "text"},
             )
-            with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
+            with client.websocket_connect(_ws_url(uuid4())) as websocket:
                 websocket.send_json({"type": "comment", "text": "Great post!"})
                 message = websocket.receive_json()
                 assert message["code"] == "ERROR"
                 assert "text" in message["message"]
 
-    @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_reports_broadcast_failure(self):
         post_id = uuid4()
 
         with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = _comment_dto(post_id)
             broadcaster.broadcast_comment.side_effect = RuntimeError("redis publish failed")
-            with client.websocket_connect(_ws_url(uuid4(), post_id)) as websocket:
+            with client.websocket_connect(_ws_url(post_id)) as websocket:
                 websocket.send_json({"type": "comment", "text": "Great post!"})
                 message = websocket.receive_json()
                 assert message["type"] == "error"

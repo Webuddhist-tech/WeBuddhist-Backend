@@ -64,6 +64,14 @@ class Subscriber:
         return item
 
     def _deliver(self, payload: str) -> None:
+        if self._lagged:
+            # Already missed a frame. Taking later ones would hand the client
+            # a stream with an invisible hole in it, and on a busy channel the
+            # queue would keep being refilled as fast as it drains, so the gap
+            # might never be reported at all. Drop everything from here and let
+            # the queue empty out, which is what surfaces the lag.
+            return
+
         try:
             self._queue.put_nowait(payload)
             return
@@ -101,6 +109,9 @@ class _Channel:
         self.pubsub = pubsub
         self.subscribers: Set[Subscriber] = set()
         self.reader: Optional[asyncio.Task] = None
+        # Guards the pubsub close, which both a teardown and a dead reader
+        # can reach.
+        self.closed = False
 
 
 class ChannelFanout:
@@ -172,25 +183,60 @@ class ChannelFanout:
                 for subscriber in tuple(entry.subscribers):
                     subscriber._deliver(payload)
         except asyncio.CancelledError:
+            # A teardown is closing this channel and will do the rest; release
+            # the consumers without awaiting anything on the way out.
+            for subscriber in tuple(entry.subscribers):
+                subscriber._end()
             raise
         except Exception as e:
             logger.exception("Redis channel reader failed for %s: %s", channel, e)
-        finally:
-            # Whether the stream ended or broke, consumers must not keep
-            # waiting on a channel that nobody is reading any more.
-            for subscriber in tuple(entry.subscribers):
-                subscriber._end()
+
+        # The stream ended or broke on its own. Retire the channel rather than
+        # leave a finished reader in place: subscribers attaching to it would
+        # get a subscription nobody is reading, and the room would stay silent
+        # until every socket had disconnected.
+        await self._retire(channel, entry)
+
+    async def _retire(self, channel: str, entry: _Channel) -> None:
+        """Drop a channel whose reader has stopped, so the next subscriber
+        opens a fresh subscription."""
+        async with self._lock:
+            if self._channels.get(channel) is entry:
+                del self._channels[channel]
+            subscribers = tuple(entry.subscribers)
+            entry.subscribers.clear()
+
+        # Consumers must not keep waiting on a channel nobody is reading.
+        for subscriber in subscribers:
+            subscriber._end()
+
+        await self._close_pubsub(channel, entry)
 
     async def _teardown(self, channel: str, entry: _Channel) -> None:
         reader = entry.reader
         if reader is not None and not reader.done():
             reader.cancel()
-            try:
-                await reader
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.exception("Channel reader for %s failed on cancel: %s", channel, e)
+            # gather() hands back the reader's own CancelledError as a result
+            # instead of raising it here. Catching it directly would also
+            # swallow a cancellation aimed at *this* task - a socket closing
+            # runs this from a `finally` during its own cancellation - and
+            # leave us running work that was meant to stop.
+            for result in await asyncio.gather(reader, return_exceptions=True):
+                # CancelledError derives from BaseException, so the reader's
+                # own cancellation is not caught by this.
+                if isinstance(result, Exception):
+                    logger.exception(
+                        "Channel reader for %s failed on cancel: %s", channel, result
+                    )
+
+        await self._close_pubsub(channel, entry)
+
+    async def _close_pubsub(self, channel: str, entry: _Channel) -> None:
+        """Release the Redis connection, once, whichever path gets here first."""
+        async with self._lock:
+            if entry.closed:
+                return
+            entry.closed = True
 
         try:
             await entry.pubsub.unsubscribe(channel)

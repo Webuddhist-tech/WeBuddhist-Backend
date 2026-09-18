@@ -78,7 +78,7 @@ class PostCommentBroadcaster:
         try:
             await self.redis.sadd(f"post:{post_id}:users", str(user_id))
         except Exception as e:
-            logger.error(f"Failed to add connection to Redis: {e}")
+            logger.exception("Failed to add connection to Redis: %s", e)
 
     async def remove_connection(self, post_id: UUID, user_id: UUID) -> None:
         """Remove local WebSocket connection and cleanup Redis tracking."""
@@ -91,7 +91,7 @@ class PostCommentBroadcaster:
         try:
             await self.redis.srem(f"post:{post_id}:users", str(user_id))
         except Exception as e:
-            logger.error(f"Failed to remove connection from Redis: {e}")
+            logger.exception("Failed to remove connection from Redis: %s", e)
 
     async def broadcast_comment(
         self,
@@ -109,7 +109,7 @@ class PostCommentBroadcaster:
             # Publish to Redis: all servers subscribe to this channel
             await self.redis.publish(channel, json.dumps(message))
         except Exception as e:
-            logger.error(f"Failed to broadcast comment to Redis: {e}")
+            logger.exception("Failed to broadcast comment to Redis: %s", e)
             raise
 
     async def subscribe_to_post(self, post_id: UUID) -> Subscriber:
@@ -129,7 +129,7 @@ class PostCommentBroadcaster:
         try:
             return await self.redis.smembers(f"post:{post_id}:users")
         except Exception as e:
-            logger.error(f"Failed to get connected users from Redis: {e}")
+            logger.exception("Failed to get connected users from Redis: %s", e)
             return set()
 
 

@@ -1,6 +1,6 @@
 import json
 from contextlib import ExitStack, contextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -66,6 +66,9 @@ def _ws_env(
 ):
     if broadcaster is None:
         broadcaster = AsyncMock()
+    # Local dict bookkeeping, not I/O, so these are plain sync methods.
+    broadcaster.add_connection = MagicMock()
+    broadcaster.remove_connection = MagicMock()
     broadcaster.subscribe_to_event.return_value = (
         subscriber if subscriber is not None else FakeSubscriber()
     )
@@ -116,7 +119,7 @@ class TestRecitationConnection:
 
         assert message["type"] == "error"
         assert message["code"] == "UNAUTHORIZED"
-        broadcaster.add_connection.assert_not_awaited()
+        broadcaster.add_connection.assert_not_called()
 
     def test_rejects_ineligible_subscriber(self):
         access_error = HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
@@ -125,7 +128,7 @@ class TestRecitationConnection:
                 message = websocket.receive_json()
 
         assert message["code"] == "Forbidden"
-        broadcaster.add_connection.assert_not_awaited()
+        broadcaster.add_connection.assert_not_called()
 
     def test_closes_for_unknown_event(self):
         access_error = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -158,8 +161,8 @@ class TestRecitationConnection:
             "event_id": str(event_id),
             "is_operator": False,
         }
-        broadcaster.add_connection.assert_awaited_once()
-        broadcaster.remove_connection.assert_awaited_once_with(event_id, user.id)
+        broadcaster.add_connection.assert_called_once()
+        broadcaster.remove_connection.assert_called_once_with(event_id, user.id)
 
     def test_late_joiner_receives_current_position(self):
         event_id = uuid4()

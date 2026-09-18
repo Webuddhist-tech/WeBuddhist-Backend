@@ -254,3 +254,94 @@ async def test_teardown_survives_a_failing_unsubscribe(make_fanout):
 
     pubsub.aclose.assert_awaited_once()
     assert fanout.channel_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_lagged_subscriber_is_told_even_under_sustained_traffic(make_fanout):
+    """A busy room keeps refilling the freed slot, so the queue need never look
+    empty. If the gap were only reported on an empty queue, the client would
+    keep receiving post-gap frames as though nothing were missing."""
+    pubsub = FakePubSub()
+    fanout = make_fanout(_redis_with(pubsub), queue_maxsize=2)
+    subscriber = await fanout.subscribe("room:1")
+
+    for frame in ("first", "second", "dropped"):
+        pubsub.publish(frame)
+    await _settle()
+
+    # Drain one slot, then keep publishing into it, as a busy room would.
+    assert await subscriber.get() == "first"
+    pubsub.publish("after-the-gap")
+    await _settle()
+
+    assert await subscriber.get() == "second"
+    with pytest.raises(SubscriberLagged):
+        await subscriber.get()
+
+
+@pytest.mark.asyncio
+async def test_channel_recovers_after_the_reader_dies(make_fanout):
+    """A transient Redis failure must not leave a dead entry behind: the next
+    socket to join has to open a fresh subscription, or the room stays silent
+    until the process restarts."""
+    dead = FakePubSub()
+    dead.listen = MagicMock(side_effect=RuntimeError("redis went away"))
+    healthy = FakePubSub()
+    redis = MagicMock()
+    redis.pubsub.side_effect = [dead, healthy]
+    fanout = make_fanout(redis)
+
+    first = await fanout.subscribe("room:1")
+    assert await asyncio.wait_for(first.get(), timeout=1) is None
+    await _settle()
+
+    # The dead channel must not be reused.
+    assert fanout.channel_count() == 0
+    dead.aclose.assert_awaited_once()
+
+    second = await fanout.subscribe("room:1")
+    assert redis.pubsub.call_count == 2
+
+    healthy.publish("back online")
+    await _settle()
+    assert await asyncio.wait_for(second.get(), timeout=1) == "back online"
+
+
+@pytest.mark.asyncio
+async def test_teardown_does_not_swallow_a_cancellation_aimed_at_the_caller(make_fanout):
+    """A socket runs the teardown from a `finally` while it is itself being
+    cancelled. Catching CancelledError there would eat that cancellation and
+    let the handler carry on doing work that was meant to stop."""
+    pubsub = FakePubSub()
+    fanout = make_fanout(_redis_with(pubsub))
+    subscriber = await fanout.subscribe("room:1")
+
+    started = asyncio.Event()
+    finished = False
+
+    async def closer():
+        nonlocal finished
+        started.set()
+        await fanout.unsubscribe("room:1", subscriber)
+        finished = True
+
+    task = asyncio.create_task(closer())
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not finished
+
+
+@pytest.mark.asyncio
+async def test_teardown_absorbs_the_readers_own_cancellation(make_fanout):
+    """The reader is cancelled on purpose; that must not surface as an error."""
+    pubsub = FakePubSub()
+    fanout = make_fanout(_redis_with(pubsub))
+    subscriber = await fanout.subscribe("room:1")
+
+    await fanout.unsubscribe("room:1", subscriber)
+
+    pubsub.aclose.assert_awaited_once()
+    assert fanout.channel_count() == 0

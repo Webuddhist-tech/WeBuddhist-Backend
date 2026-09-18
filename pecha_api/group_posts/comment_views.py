@@ -43,7 +43,6 @@ public_group_post_comment_actions_router = APIRouter(
 @public_group_post_comments_router.get(
     "",
     status_code=status.HTTP_200_OK,
-    response_model=GroupPostCommentsResponse,
 )
 def list_post_comments(
     post_id: UUID,
@@ -72,7 +71,6 @@ def list_post_comments(
 @public_group_post_comments_router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    response_model=GroupPostCommentDTO,
 )
 def create_post_comment(
     post_id: UUID,

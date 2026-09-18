@@ -55,7 +55,6 @@ def _require_broadcaster() -> RecitationBroadcaster:
 @recitation_live_router.post(
     "/{event_id}/recitation/position",
     status_code=status.HTTP_202_ACCEPTED,
-    response_model=PositionAcceptedResponse,
     summary="Publish a recitation position over HTTP",
     dependencies=[Depends(verify_recitation_emit_token)],
 )
@@ -214,7 +213,7 @@ async def websocket_recitation_live(
         })
 
         subscriber = await broadcaster.subscribe_to_event(event_id)
-        await broadcaster.add_connection(event_id, user.id, websocket)
+        broadcaster.add_connection(event_id, user.id, websocket)
 
         # A late joiner is the normal case, not the exception: send whatever the
         # operator's last click was so the phone lands on the live line.
@@ -383,4 +382,4 @@ async def websocket_recitation_live(
 
     finally:
         if user is not None:
-            await broadcaster.remove_connection(event_id, user.id)
+            broadcaster.remove_connection(event_id, user.id)

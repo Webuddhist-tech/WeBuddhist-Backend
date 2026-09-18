@@ -111,13 +111,17 @@ class RecitationBroadcaster:
             await self.redis.close()
             logger.info("Redis connection closed for recitation broadcaster")
 
-    async def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
-        """Track a local WebSocket connection."""
+    def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
+        """Track a local WebSocket connection.
+
+        Plain dict bookkeeping: unlike chat, a recitation keeps no presence
+        in Redis, so there is nothing here to await.
+        """
         if event_id not in self.connections:
             self.connections[event_id] = {}
         self.connections[event_id][user_id] = ws
 
-    async def remove_connection(self, event_id: UUID, user_id: UUID) -> None:
+    def remove_connection(self, event_id: UUID, user_id: UUID) -> None:
         """Drop a local WebSocket connection."""
         if event_id in self.connections:
             self.connections[event_id].pop(user_id, None)
@@ -173,7 +177,7 @@ class RecitationBroadcaster:
             )
             return int(revision)
         except Exception as e:
-            logger.error(f"Failed to save recitation position to Redis: {e}")
+            logger.exception("Failed to save recitation position to Redis: %s", e)
             return None
 
     async def get_position(self, event_id: UUID) -> Optional[dict]:
@@ -182,7 +186,7 @@ class RecitationBroadcaster:
         try:
             state = await self.redis.hgetall(position_state_key(event_id))
         except Exception as e:
-            logger.error(f"Failed to read recitation position from Redis: {e}")
+            logger.exception("Failed to read recitation position from Redis: %s", e)
             return None
 
         if not state or not state.get("segment_id"):
@@ -223,7 +227,7 @@ class RecitationBroadcaster:
             await self.redis.delete(position_state_key(event_id))
             return True
         except Exception as e:
-            logger.error(f"Failed to clear recitation position in Redis: {e}")
+            logger.exception("Failed to clear recitation position in Redis: %s", e)
             return False
 
     async def broadcast_position(
@@ -264,7 +268,7 @@ class RecitationBroadcaster:
         try:
             await self.redis.publish(position_channel(event_id), json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast recitation position to Redis: {e}")
+            logger.exception("Failed to broadcast recitation position to Redis: %s", e)
             raise
 
         return revision
@@ -282,7 +286,7 @@ class RecitationBroadcaster:
             await self.redis.publish(position_channel(event_id), json.dumps(payload))
             return True
         except Exception as e:
-            logger.error(f"Failed to broadcast recitation session end to Redis: {e}")
+            logger.exception("Failed to broadcast recitation session end to Redis: %s", e)
             return False
 
     async def allow_set(self, event_id: UUID) -> bool:
@@ -299,10 +303,10 @@ class RecitationBroadcaster:
                 await self.redis.expire(key, 1)
             return count <= MAX_SETS_PER_SECOND
         except Exception as e:
-            logger.error(f"Failed to check recitation rate limit in Redis: {e}")
+            logger.exception("Failed to check recitation rate limit in Redis: %s", e)
             return True
 
-    async def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
+    def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
         """Sockets this server holds for an event (local only - position is the
         shared state here, not presence)."""
         return self.connections.get(event_id, {})

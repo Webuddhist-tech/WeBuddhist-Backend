@@ -413,12 +413,12 @@ class TestHiddenGroupEndsLiveSession:
                     status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
                 ),
             ):
-                with pytest.raises(WebSocketDisconnect):
-                    with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                        websocket.receive_json()
-                        websocket.send_json({"type": "typing", "is_typing": True})
-                        assert websocket.receive_json()["type"] == "error"
-                        # Session ended: nothing further is served.
+                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({"type": "typing", "is_typing": True})
+                    assert websocket.receive_json()["type"] == "error"
+                    # Session ended: nothing further is served.
+                    with pytest.raises(WebSocketDisconnect):
                         websocket.receive_json()
 
             broadcaster.broadcast_typing.assert_not_awaited()
@@ -428,11 +428,12 @@ class TestHiddenGroupEndsLiveSession:
             mock_send_group.side_effect = HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             )
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                    websocket.receive_json()
-                    websocket.send_json({"type": "message", "body": "hi"})
-                    assert websocket.receive_json()["type"] == "error"
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "message", "body": "hi"})
+                assert websocket.receive_json()["type"] == "error"
+                # Session ended: nothing further is served.
+                with pytest.raises(WebSocketDisconnect):
                     websocket.receive_json()
 
     def test_per_message_rejection_keeps_socket_open(self):
@@ -462,10 +463,10 @@ class TestRemoteEviction:
             {"type": "message", "data": json.dumps({"type": "room_closed", "reason": "GROUP_UNPUBLISHED"})},
         ])
         with _websocket_env(subscriber=subscriber):
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                    websocket.receive_json()   # room_info
-                    websocket.receive_json()   # room_closed, forwarded to the client
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()   # room_info
+                websocket.receive_json()   # room_closed, forwarded to the client
+                with pytest.raises(WebSocketDisconnect):
                     websocket.receive_json()   # session over
 
     def test_ordinary_events_do_not_end_the_session(self):
