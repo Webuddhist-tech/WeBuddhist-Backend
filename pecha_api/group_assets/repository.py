@@ -17,10 +17,16 @@ from pecha_api.group_recitation_collection.models import (
 
 
 def create_asset(db: Session, asset: GroupAsset) -> GroupAsset:
-    """Create a new asset in a group's library."""
+    """Create a new asset in a group's library.
+
+    Flushes before committing so the row is fully populated without a
+    post-commit refresh: once the commit returns, nothing else here can fail
+    and wrongly make the caller think the row never landed.
+    """
     db.add(asset)
-    db.commit()
+    db.flush()
     db.refresh(asset)
+    db.commit()
     return asset
 
 

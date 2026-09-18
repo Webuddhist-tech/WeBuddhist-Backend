@@ -459,7 +459,7 @@ class TestDeleteFailureHandling:
     @patch(f"{SERVICE}.validate_and_extract_author_details")
     @patch(f"{SERVICE}.SessionLocal")
     @pytest.mark.asyncio
-    async def test_s3_failure_rolls_back_and_raises(
+    async def test_s3_failure_reports_502_after_db_is_committed(
         self,
         mock_session,
         mock_author,
@@ -470,6 +470,9 @@ class TestDeleteFailureHandling:
         mock_soft_delete,
         mock_delete_file,
     ):
+        """The database is the source of truth and commits first. A failed
+        object delete still surfaces as an error, but the row is already
+        authoritative and the key is retryable."""
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_author.return_value = MockAuthor()
@@ -484,8 +487,9 @@ class TestDeleteFailureHandling:
             )
 
         assert exc.value.status_code == status.HTTP_502_BAD_GATEWAY
-        mock_db.rollback.assert_called_once()
-        mock_db.commit.assert_not_called()
+        # Committed before the object delete, so no rollback loses the links.
+        mock_db.commit.assert_called_once()
+        mock_db.rollback.assert_not_called()
 
     @patch(f"{SERVICE}.delete_file")
     @patch(f"{SERVICE}.soft_delete_asset")
@@ -521,6 +525,44 @@ class TestDeleteFailureHandling:
         mock_delete_file.assert_called_once()
         mock_db.commit.assert_called_once()
         mock_db.rollback.assert_not_called()
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.soft_delete_asset")
+    @patch(f"{SERVICE}.get_asset_usages")
+    @patch(f"{SERVICE}.get_asset_by_id")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @pytest.mark.asyncio
+    async def test_database_is_committed_before_the_object_is_dropped(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_get,
+        mock_usages,
+        mock_soft_delete,
+        mock_delete_file,
+    ):
+        """Ordering matters: a rollback after the object is gone would leave a
+        live asset pointing at a missing file, which no retry can undo."""
+        order = []
+        mock_db = MagicMock()
+        mock_db.commit.side_effect = lambda: order.append("commit")
+        mock_delete_file.side_effect = lambda key: order.append("s3")
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_get.return_value = MockGroupAsset()
+        mock_usages.return_value = []
+
+        await delete_group_asset_service(
+            token="token", group_id=uuid4(), asset_id=uuid4()
+        )
+
+        assert order == ["commit", "s3"]
 
     @patch(f"{SERVICE}.get_asset_by_id")
     @patch(f"{SERVICE}.require_can_create_content")
@@ -617,5 +659,44 @@ class TestUploadCompensation:
             file=MockUploadFile(),
             asset_type=GroupAssetType.AUDIO,
         )
+
+        mock_delete_file.assert_not_called()
+
+    @patch(f"{SERVICE}.build_asset_dto")
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.GroupAsset")
+    @patch(f"{SERVICE}.create_asset")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    def test_post_commit_failure_keeps_the_object(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_upload,
+        mock_create,
+        mock_model,
+        mock_delete_file,
+        mock_dto,
+    ):
+        """Once the row is committed the asset is live, so a later failure must
+        not delete its object and leave reads handing out a dead URL."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_create.return_value = MockGroupAsset()
+        mock_dto.side_effect = Exception("serialisation blew up after commit")
+
+        with pytest.raises(Exception, match="serialisation blew up"):
+            upload_group_asset_service(
+                token="token",
+                group_id=uuid4(),
+                file=MockUploadFile(),
+                asset_type=GroupAssetType.AUDIO,
+            )
 
         mock_delete_file.assert_not_called()

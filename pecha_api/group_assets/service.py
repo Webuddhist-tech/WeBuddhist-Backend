@@ -167,6 +167,7 @@ def upload_group_asset_service(
             file=file,
         )
 
+        committed = False
         try:
             asset = create_asset(
                 db=db,
@@ -182,13 +183,15 @@ def upload_group_asset_service(
                     created_by=author.email,
                 ),
             )
+            committed = True
+            return build_asset_dto(asset)
         except Exception:
-            # The row never committed, so nothing points at the object we just
-            # uploaded. The key is unique to this request, so discarding it
-            # cannot touch anything else.
-            _discard(s3_key)
+            # Only discard when the row is known not to have landed. Once the
+            # commit returns, the asset is live and its object must stay, or
+            # later reads would hand out a URL for a file that is gone.
+            if not committed:
+                _discard(s3_key)
             raise
-        return build_asset_dto(asset)
 
 
 def list_group_assets_service(
@@ -308,21 +311,26 @@ async def delete_group_asset_service(
         s3_key = asset.s3_key
         soft_delete_asset(db=db, asset=asset, deleted_by=author.email)
 
-        # The object goes before the commit. If S3 fails, the transaction
-        # rolls back and the caller gets an error rather than a 204 for an
-        # asset whose audio still serves through its presigned URL.
-        try:
-            delete_file(s3_key)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Failed to delete S3 object {s3_key}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=ASSET_DELETE_FAILED,
-            ) from e
-
-        # Link cleanup and the soft delete land together, or neither does.
+        # The database is the source of truth and goes first: link cleanup and
+        # the soft delete land together, or neither does.
+        #
+        # The object is dropped after. Deleting it before the commit would risk
+        # the opposite, worse failure -- a rolled-back transaction leaving a
+        # live asset whose audio file is already gone, which no retry can undo.
+        # This way the row is authoritative and a surviving object is only
+        # storage: the key stays on the soft-deleted row, and delete_file
+        # treats an already-missing key as success, so a retry or a sweep can
+        # always finish the job.
         db.commit()
+
+    try:
+        delete_file(s3_key)
+    except Exception as e:
+        logger.error(f"Failed to delete S3 object {s3_key}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=ASSET_DELETE_FAILED,
+        ) from e
 
 
 async def _resolve_text_titles(text_ids: List[str]) -> Dict[str, Optional[str]]:
