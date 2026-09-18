@@ -20,20 +20,26 @@ class MockUser:
         self.email = email
 
 
-class FakePubSub:
+class FakeSubscriber:
+    """Stands in for realtime.channel_fanout.Subscriber.
+
+    Takes pubsub-shaped messages so the cases below still read as published
+    frames; filtering non-message frames is the fanout's job in production.
+    Returns None once drained, which is how a subscriber reports that the
+    channel stopped.
+    """
+
     def __init__(self, messages=None):
-        self.messages = messages or []
-        self.unsubscribed = []
+        self.messages = list(messages or [])
+        self._index = 0
 
-    def listen(self):
-        return self._listen()
-
-    async def _listen(self):
-        for message in self.messages:
-            yield message
-
-    async def unsubscribe(self, channel):
-        self.unsubscribed.append(channel)
+    async def get(self):
+        while self._index < len(self.messages):
+            message = self.messages[self._index]
+            self._index += 1
+            if message.get("type") == "message":
+                return message["data"]
+        return None
 
 
 def _ws_url(event_id, token="test-token"):
@@ -54,13 +60,15 @@ def _ws_env(
     access_error=None,
     is_operator=True,
     broadcaster=None,
-    pubsub=None,
+    subscriber=None,
     position=None,
     allow_set=True,
 ):
     if broadcaster is None:
         broadcaster = AsyncMock()
-    broadcaster.subscribe_to_event.return_value = pubsub if pubsub is not None else FakePubSub()
+    broadcaster.subscribe_to_event.return_value = (
+        subscriber if subscriber is not None else FakeSubscriber()
+    )
     broadcaster.get_position.return_value = position
     broadcaster.allow_set.return_value = allow_set
 
@@ -186,8 +194,8 @@ class TestRecitationConnection:
             "round_number": None,
             "server_time": "2026-09-14T09:31:00Z",
         }
-        pubsub = FakePubSub([{"type": "message", "data": json.dumps(published)}])
-        with _ws_env(pubsub=pubsub, is_operator=False):
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(published)}])
+        with _ws_env(subscriber=subscriber, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == published
@@ -209,12 +217,12 @@ class TestRecitationConnection:
         }
         stale = {**snapshot, "segment_id": "seg-older", "index": 4, "revision": 55}
         fresh = {**snapshot, "segment_id": "seg-next", "index": 10, "revision": 58}
-        pubsub = FakePubSub([
+        subscriber = FakeSubscriber([
             {"type": "message", "data": json.dumps(stale)},
             {"type": "message", "data": json.dumps(fresh)},
         ])
 
-        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+        with _ws_env(subscriber=subscriber, position=snapshot, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()                      # session_info
                 assert websocket.receive_json() == snapshot   # connect-time position
@@ -237,9 +245,9 @@ class TestRecitationConnection:
         # Older clock, higher revision: a skewed instance published it later.
         skewed = {**snapshot, "segment_id": "seg-2", "index": 2,
                   "server_time": "2026-09-14T09:29:59Z", "revision": 58}
-        pubsub = FakePubSub([{"type": "message", "data": json.dumps(skewed)}])
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(skewed)}])
 
-        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+        with _ws_env(subscriber=subscriber, position=snapshot, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == snapshot
@@ -260,9 +268,9 @@ class TestRecitationConnection:
             "revision": 57,
         }
         unnumbered = {**snapshot, "segment_id": "seg-2", "revision": None}
-        pubsub = FakePubSub([{"type": "message", "data": json.dumps(unnumbered)}])
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(unnumbered)}])
 
-        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+        with _ws_env(subscriber=subscriber, position=snapshot, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == snapshot
@@ -283,12 +291,12 @@ class TestRecitationConnection:
             "revision": 57,
         }
         later = {**snapshot, "segment_id": "seg-2", "revision": 58}
-        pubsub = FakePubSub([
+        subscriber = FakeSubscriber([
             {"type": "message", "data": json.dumps(snapshot)},
             {"type": "message", "data": json.dumps(later)},
         ])
 
-        with _ws_env(pubsub=pubsub, position=snapshot, is_operator=False):
+        with _ws_env(subscriber=subscriber, position=snapshot, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == snapshot
@@ -306,9 +314,9 @@ class TestRecitationConnection:
             "server_time": "2026-09-14T09:30:01Z",
             "revision": 1,
         }
-        pubsub = FakePubSub([{"type": "message", "data": json.dumps(first)}])
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(first)}])
 
-        with _ws_env(pubsub=pubsub, position=None, is_operator=False):
+        with _ws_env(subscriber=subscriber, position=None, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == first
@@ -316,8 +324,8 @@ class TestRecitationConnection:
     def test_session_ended_frame_releases_the_socket(self):
         event_id = uuid4()
         ended = {"type": "session_ended", "event_id": str(event_id)}
-        pubsub = FakePubSub([{"type": "message", "data": json.dumps(ended)}])
-        with _ws_env(pubsub=pubsub, is_operator=False):
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(ended)}])
+        with _ws_env(subscriber=subscriber, is_operator=False):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == ended
@@ -496,12 +504,14 @@ class TestOperatorPublishing:
 
         broadcaster.broadcast_position.assert_not_awaited()
 
-    def test_unsubscribes_on_disconnect(self):
+    def test_releases_subscription_on_disconnect(self):
+        """The socket must hand its slot back: the event's Redis subscription
+        is shared, and it is only closed once the last watcher lets go."""
         event_id = uuid4()
-        pubsub = FakePubSub()
-        with _ws_env(pubsub=pubsub, is_operator=True):
+        subscriber = FakeSubscriber()
+        with _ws_env(subscriber=subscriber, is_operator=True) as (broadcaster, _):
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 _sync(websocket)
 
-        assert pubsub.unsubscribed == [f"recitation:event:{event_id}:position"]
+        broadcaster.unsubscribe_from_event.assert_awaited_once_with(event_id, subscriber)

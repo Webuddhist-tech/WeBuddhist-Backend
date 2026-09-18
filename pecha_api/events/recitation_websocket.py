@@ -4,7 +4,8 @@ from typing import Dict, Optional
 from uuid import UUID
 
 from redis.asyncio import Redis
-from redis.asyncio.client import PubSub
+
+from pecha_api.realtime.channel_fanout import ChannelFanout, Subscriber
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ class RecitationBroadcaster:
     def __init__(self, redis_url: str) -> None:
         self.redis_url = redis_url
         self.redis: Optional[Redis] = None
+        # One Redis subscription per event, shared by every socket watching
+        # it on this instance.
+        self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {event_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
 
@@ -72,6 +76,9 @@ class RecitationBroadcaster:
             self.redis = await Redis.from_url(
                 self.redis_url, decode_responses=True, socket_keepalive=True
             )
+            # A position is last-write-wins, so a socket that falls behind
+            # wants the newest frame, not a backlog of stale ones.
+            self.fanout = ChannelFanout(self.redis, queue_maxsize=64, drop_oldest=True)
             logger.info("✅ Redis connection established for recitation broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -98,6 +105,8 @@ class RecitationBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self.fanout:
+            await self.fanout.aclose()
         if self.redis:
             await self.redis.close()
             logger.info("Redis connection closed for recitation broadcaster")
@@ -115,11 +124,18 @@ class RecitationBroadcaster:
             if not self.connections[event_id]:
                 del self.connections[event_id]
 
-    async def subscribe_to_event(self, event_id: UUID) -> PubSub:
-        """Subscribe to the position stream for an event."""
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(position_channel(event_id))
-        return pubsub
+    async def subscribe_to_event(self, event_id: UUID) -> Subscriber:
+        """Attach to the position stream for an event.
+
+        Shares the instance's single subscription for this event, so a
+        thousand phones in the room cost one Redis connection, not a
+        thousand. Release it with `unsubscribe_from_event`.
+        """
+        return await self.fanout.subscribe(position_channel(event_id))
+
+    async def unsubscribe_from_event(self, event_id: UUID, subscriber: Subscriber) -> None:
+        """Detach a socket; the last one out closes the Redis subscription."""
+        await self.fanout.unsubscribe(position_channel(event_id), subscriber)
 
     async def save_position(
         self,

@@ -21,6 +21,7 @@ from pecha_api.group_posts.comment_service import (
     list_post_comments_service,
 )
 from pecha_api.group_posts.comment_websocket import get_broadcaster
+from pecha_api.realtime.channel_fanout import SubscriberLagged
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
@@ -155,17 +156,33 @@ async def websocket_post_comments(
         # 3. Accept, track connection, and subscribe to Redis channel
         await websocket.accept()
         await broadcaster.add_connection(post_id, user.id, websocket)
-        pubsub = await broadcaster.subscribe_to_post(post_id)
+        subscriber = await broadcaster.subscribe_to_post(post_id)
 
         # 4a. Background task: listen for Redis pub/sub messages
         async def listen_redis():
             try:
-                async for message in pubsub.listen():
-                    if message["type"] == "message":
+                while True:
+                    try:
+                        payload = await subscriber.get()
+                    except SubscriberLagged:
+                        # Comments are an ordered stream: rather than leave a
+                        # gap the client cannot see, close and let it refetch.
+                        logger.warning(
+                            "Comment socket for post %s fell behind; closing to force a resync",
+                            post_id,
+                        )
                         try:
-                            await websocket.send_text(message["data"])
-                        except (ConnectionClosedOK, ConnectionClosedError):
-                            break
+                            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                        except Exception:
+                            pass
+                        break
+                    if payload is None:
+                        # Channel stopped (shutdown, or Redis went away).
+                        break
+                    try:
+                        await websocket.send_text(payload)
+                    except (ConnectionClosedOK, ConnectionClosedError):
+                        break
             except Exception as e:
                 logger.exception("Error listening to Redis: %s", e)
 
@@ -176,11 +193,15 @@ async def websocket_post_comments(
             while True:
                 data = await websocket.receive_json()
 
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
                 if data.get("type") != "comment":
                     await websocket.send_json({
                         "type": "error",
                         "code": "INVALID_MESSAGE",
-                        "message": "Only 'comment' type messages are supported"
+                        "message": "Only 'comment' and 'ping' type messages are supported"
                     })
                     continue
 
@@ -225,7 +246,7 @@ async def websocket_post_comments(
         finally:
             redis_task.cancel()
             try:
-                await pubsub.unsubscribe(f"post:{post_id}:comments")
+                await broadcaster.unsubscribe_from_post(post_id, subscriber)
             except Exception as e:
                 logger.exception("Error unsubscribing from Redis: %s", e)
 

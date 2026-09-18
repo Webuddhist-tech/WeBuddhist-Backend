@@ -17,7 +17,6 @@ from pecha_api.events.recitation_live_service import assert_live_event, resolve_
 from pecha_api.events.recitation_websocket import (
     RecitationBroadcaster,
     get_broadcaster,
-    position_channel,
 )
 from pecha_api.users.users_service import validate_and_extract_user_details
 
@@ -214,16 +213,17 @@ async def websocket_recitation_live(
             "is_operator": is_operator,
         })
 
-        pubsub = await broadcaster.subscribe_to_event(event_id)
+        subscriber = await broadcaster.subscribe_to_event(event_id)
         await broadcaster.add_connection(event_id, user.id, websocket)
 
         # A late joiner is the normal case, not the exception: send whatever the
         # operator's last click was so the phone lands on the live line.
         current_position = await broadcaster.get_position(event_id)
         # Frames published between subscribing and reading the snapshot are
-        # already queued on the pubsub, and the snapshot may be newer than some
-        # of them. Relaying those as-is would scroll the room backwards before
-        # it caught up, so anything not newer than what we just sent is dropped.
+        # already queued for this subscriber, and the snapshot may be newer
+        # than some of them. Relaying those as-is would scroll the room
+        # backwards before it caught up, so anything not newer than what we
+        # just sent is dropped.
         # Newer means a higher Redis revision, never a wall clock: the clocks
         # belong to whichever instance served the operator and need not agree.
         last_revision = None
@@ -240,12 +240,14 @@ async def websocket_recitation_live(
         async def listen_redis() -> None:
             nonlocal last_revision
             try:
-                async for message in pubsub.listen():
-                    if message["type"] != "message":
-                        continue
+                while True:
+                    payload = await subscriber.get()
+                    if payload is None:
+                        # Channel stopped (shutdown, or Redis went away).
+                        break
 
                     try:
-                        frame = json.loads(message["data"])
+                        frame = json.loads(payload)
                     except (ValueError, TypeError):
                         frame = None
 
@@ -262,7 +264,7 @@ async def websocket_recitation_live(
                             last_revision = revision
 
                     try:
-                        await websocket.send_text(message["data"])
+                        await websocket.send_text(payload)
                     except (ConnectionClosedOK, ConnectionClosedError):
                         break
 
@@ -359,7 +361,7 @@ async def websocket_recitation_live(
         finally:
             redis_task.cancel()
             try:
-                await pubsub.unsubscribe(position_channel(event_id))
+                await broadcaster.unsubscribe_from_event(event_id, subscriber)
             except Exception as e:
                 logger.exception("Error unsubscribing from Redis: %s", e)
             if session_over:

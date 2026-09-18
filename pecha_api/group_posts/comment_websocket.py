@@ -8,8 +8,13 @@ from redis.asyncio import Redis
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.group_posts.comment_response_models import GroupPostCommentDTO
+from pecha_api.realtime.channel_fanout import ChannelFanout, Subscriber
 
 logger = logging.getLogger(__name__)
+
+
+def post_channel(post_id: UUID) -> str:
+    return f"post:{post_id}:comments"
 
 
 class PostCommentBroadcaster:
@@ -18,6 +23,9 @@ class PostCommentBroadcaster:
     def __init__(self, redis_url: str):
         self.redis_url = redis_url
         self.redis: Optional[Redis] = None
+        # One Redis subscription per post, shared by every socket watching
+        # it on this instance.
+        self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {post_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
 
@@ -27,6 +35,7 @@ class PostCommentBroadcaster:
             self.redis = await Redis.from_url(
                 self.redis_url, decode_responses=True, socket_keepalive=True
             )
+            self.fanout = ChannelFanout(self.redis)
             logger.info("✅ Redis connection established for comment broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -53,6 +62,8 @@ class PostCommentBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self.fanout:
+            await self.fanout.aclose()
         if self.redis:
             await self.redis.close()
             logger.info("Redis connection closed for comment broadcaster")
@@ -88,7 +99,7 @@ class PostCommentBroadcaster:
         comment: GroupPostCommentDTO,
     ) -> None:
         """Publish comment to all servers via Redis pub/sub."""
-        channel = f"post:{post_id}:comments"
+        channel = post_channel(post_id)
         message = {
             "type": "comment_created",
             "comment": comment.model_dump(mode="json"),
@@ -101,11 +112,17 @@ class PostCommentBroadcaster:
             logger.error(f"Failed to broadcast comment to Redis: {e}")
             raise
 
-    async def subscribe_to_post(self, post_id: UUID):
-        """Subscribe to comment stream for a post."""
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(f"post:{post_id}:comments")
-        return pubsub
+    async def subscribe_to_post(self, post_id: UUID) -> Subscriber:
+        """Attach to the comment stream for a post.
+
+        Shares this instance's single subscription for the post. Release it
+        with `unsubscribe_from_post`.
+        """
+        return await self.fanout.subscribe(post_channel(post_id))
+
+    async def unsubscribe_from_post(self, post_id: UUID, subscriber: Subscriber) -> None:
+        """Detach a socket; the last one out closes the Redis subscription."""
+        await self.fanout.unsubscribe(post_channel(post_id), subscriber)
 
     async def get_connected_users(self, post_id: UUID) -> set:
         """Get all users connected to a post (across all servers)."""

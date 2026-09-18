@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
 from pecha_api.chat.response_models import ChatMessageDTO
+from pecha_api.realtime.channel_fanout import SubscriberLagged
 
 client = TestClient(api)
 
@@ -22,26 +23,32 @@ class MockUser:
         self.email = email
 
 
-class FakePubSub:
-    def __init__(self, messages=None, listen_error=None, unsubscribe_error=None):
-        self.messages = messages or []
+class FakeSubscriber:
+    """Stands in for realtime.channel_fanout.Subscriber.
+
+    Takes pubsub-shaped messages so the cases below still read as published
+    frames; filtering non-message frames is the fanout's job in production.
+    Returns None once drained, which is how a subscriber reports that the
+    channel stopped.
+    """
+
+    def __init__(self, messages=None, listen_error=None, lagged=False):
+        self.messages = list(messages or [])
         self.listen_error = listen_error
-        self.unsubscribe_error = unsubscribe_error
-        self.unsubscribed = []
+        self.lagged = lagged
+        self._index = 0
 
-    def listen(self):
-        return self._listen()
-
-    async def _listen(self):
+    async def get(self):
         if self.listen_error is not None:
             raise self.listen_error
-        for message in self.messages:
-            yield message
-
-    async def unsubscribe(self, channel):
-        self.unsubscribed.append(channel)
-        if self.unsubscribe_error is not None:
-            raise self.unsubscribe_error
+        while self._index < len(self.messages):
+            message = self.messages[self._index]
+            self._index += 1
+            if message.get("type") == "message":
+                return message["data"]
+        if self.lagged:
+            raise SubscriberLagged("chat")
+        return None
 
 
 def _message_dto(room_id=None) -> ChatMessageDTO:
@@ -83,13 +90,15 @@ def _websocket_env(
     user=None,
     auth_error=None,
     broadcaster=None,
-    pubsub=None,
+    subscriber=None,
     room=None,
     resolve_error=None,
 ):
     if broadcaster is None:
         broadcaster = AsyncMock()
-    broadcaster.subscribe_to_room.return_value = pubsub if pubsub is not None else FakePubSub()
+    broadcaster.subscribe_to_room.return_value = (
+        subscriber if subscriber is not None else FakeSubscriber()
+    )
 
     resolved_room = room or MagicMock(id=uuid4())
 
@@ -188,9 +197,9 @@ class TestWebSocketChatConnection:
     def test_registers_and_unregisters_group_connection(self):
         user = MockUser()
         room = MagicMock(id=uuid4())
-        pubsub = FakePubSub()
+        subscriber = FakeSubscriber()
 
-        with _websocket_env(user=user, room=room, pubsub=pubsub) as (broadcaster, *_):
+        with _websocket_env(user=user, room=room, subscriber=subscriber) as (broadcaster, *_):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 info = websocket.receive_json()
 
@@ -199,7 +208,7 @@ class TestWebSocketChatConnection:
         assert broadcaster.add_connection.await_args.args[:3] == (room.id, user.id, user.email)
         broadcaster.broadcast_presence.assert_awaited()
         broadcaster.remove_connection.assert_awaited_once_with(room.id, user.id)
-        assert pubsub.unsubscribed == [f"chat:room:{room.id}:messages"]
+        broadcaster.unsubscribe_from_room.assert_awaited_once_with(room.id, subscriber)
 
     def test_registers_dm_connection(self):
         room = MagicMock(id=uuid4())
@@ -211,39 +220,41 @@ class TestWebSocketChatConnection:
         broadcaster.subscribe_to_room.assert_awaited_once_with(room.id)
 
     def test_unsubscribe_failure_is_swallowed(self):
-        pubsub = FakePubSub(unsubscribe_error=RuntimeError("redis gone"))
+        broadcaster = AsyncMock()
+        broadcaster.unsubscribe_from_room.side_effect = RuntimeError("redis gone")
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(broadcaster=broadcaster):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
 
-        assert len(pubsub.unsubscribed) == 1
+        broadcaster.unsubscribe_from_room.assert_awaited_once()
 
 
 class TestWebSocketChatRedisStream:
 
     def test_forwards_published_messages_to_client(self):
         payload = json.dumps({"type": "message_created", "message": {"body": "from redis"}})
-        pubsub = FakePubSub(
+        subscriber = FakeSubscriber(
             messages=[
                 {"type": "subscribe", "data": 1},
                 {"type": "message", "data": payload},
             ]
         )
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 assert websocket.receive_json()["type"] == "room_info"
                 assert websocket.receive_text() == payload
 
     def test_redis_listen_failure_does_not_break_connection(self):
-        pubsub = FakePubSub(listen_error=RuntimeError("pubsub exploded"))
+        subscriber = FakeSubscriber(listen_error=RuntimeError("pubsub exploded"))
 
-        with _websocket_env(pubsub=pubsub) as (_, mock_send_group, *_):
+        with _websocket_env(subscriber=subscriber) as (_, mock_send_group, *_):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
+                # The socket still answers after the relay task died.
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
         mock_send_group.assert_not_called()
 
@@ -386,7 +397,7 @@ class TestWebSocketChatMessages:
                 websocket.receive_json()
                 websocket.send_json({"type": "typing", "is_typing": False})
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
 
 class TestHiddenGroupEndsLiveSession:
@@ -438,7 +449,7 @@ class TestHiddenGroupEndsLiveSession:
                 assert websocket.receive_json()["code"] == "INAPPROPRIATE_LANGUAGE"
 
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
 
 class TestRemoteEviction:
@@ -447,10 +458,10 @@ class TestRemoteEviction:
     than one server is running."""
 
     def test_room_closed_event_ends_the_session(self):
-        pubsub = FakePubSub(messages=[
+        subscriber = FakeSubscriber(messages=[
             {"type": "message", "data": json.dumps({"type": "room_closed", "reason": "GROUP_UNPUBLISHED"})},
         ])
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                     websocket.receive_json()   # room_info
@@ -459,16 +470,16 @@ class TestRemoteEviction:
 
     def test_ordinary_events_do_not_end_the_session(self):
         """Regression guard: only room_closed evicts."""
-        pubsub = FakePubSub(messages=[
+        subscriber = FakeSubscriber(messages=[
             {"type": "message", "data": json.dumps({"type": "typing", "user_id": str(uuid4())})},
         ])
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json()["type"] == "typing"
 
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
 
 class TestWebSocketEventRoomsAndPrayers:

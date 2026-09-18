@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone as tz
@@ -12,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
 from pecha_api.group_posts.comment_response_models import GroupPostCommentDTO
+from pecha_api.realtime.channel_fanout import SubscriberLagged
 
 client = TestClient(api)
 
@@ -22,37 +24,36 @@ class MockAuthor:
         self.email = email
 
 
-class FakePubSub:
-    """Stands in for a redis.asyncio pubsub object.
+class FakeSubscriber:
+    """Stands in for realtime.channel_fanout.Subscriber.
 
-    ``listen()`` must be a plain call returning an async iterator, which an
-    AsyncMock cannot express.
+    Takes pubsub-shaped messages so the cases below still read as published
+    frames; filtering non-message frames is the fanout's job in production.
+    With keep_alive it never ends, as a live subscription does; otherwise it
+    returns None once drained, which is how a subscriber reports that the
+    channel stopped.
     """
 
-    def __init__(self, messages=None, listen_error=None, unsubscribe_error=None, keep_alive=False):
-        self.messages = messages or []
+    def __init__(self, messages=None, listen_error=None, keep_alive=False, lagged=False):
+        self.messages = list(messages or [])
         self.listen_error = listen_error
-        self.unsubscribe_error = unsubscribe_error
-        self.unsubscribed = []
         self.keep_alive = keep_alive
+        self.lagged = lagged
+        self._index = 0
 
-    def listen(self):
-        return self._listen()
-
-    async def _listen(self):
+    async def get(self):
         if self.listen_error is not None:
             raise self.listen_error
-        for message in self.messages:
-            yield message
-        # If keep_alive is True, wait indefinitely to keep the connection open
+        while self._index < len(self.messages):
+            message = self.messages[self._index]
+            self._index += 1
+            if message.get("type") == "message":
+                return message["data"]
+        if self.lagged:
+            raise SubscriberLagged("post")
         if self.keep_alive:
-            import asyncio
             await asyncio.Event().wait()
-
-    async def unsubscribe(self, channel):
-        self.unsubscribed.append(channel)
-        if self.unsubscribe_error is not None:
-            raise self.unsubscribe_error
+        return None
 
 
 def _comment_dto(post_id, parent_comment_id=None) -> GroupPostCommentDTO:
@@ -83,7 +84,7 @@ def _websocket_env(
     author=None,
     auth_error=None,
     broadcaster=None,
-    pubsub=None,
+    subscriber=None,
     validation_error=None,
 ):
     """Patch every collaborator the websocket endpoint reaches for."""
@@ -92,7 +93,7 @@ def _websocket_env(
     
     # subscribe_to_post is awaited, so it needs to return an awaitable
     async def mock_subscribe(post_id):
-        return pubsub if pubsub is not None else FakePubSub(keep_alive=True)
+        return subscriber if subscriber is not None else FakeSubscriber(keep_alive=True)
     broadcaster.subscribe_to_post = mock_subscribe
 
     with ExitStack() as stack:
@@ -178,9 +179,9 @@ class TestWebSocketPostCommentsConnection:
         group_id = uuid4()
         post_id = uuid4()
         author = MockAuthor()
-        pubsub = FakePubSub(keep_alive=True)
+        subscriber = FakeSubscriber(keep_alive=True)
 
-        with _websocket_env(author=author, pubsub=pubsub) as (broadcaster, _):
+        with _websocket_env(author=author, subscriber=subscriber) as (broadcaster, _):
             # Connection will be accepted, then immediately closed when context exits
             # The websocket waits for messages in an infinite loop, so it will disconnect when we exit
             with pytest.raises(WebSocketDisconnect):
@@ -191,18 +192,19 @@ class TestWebSocketPostCommentsConnection:
         broadcaster.add_connection.assert_awaited_once()
         assert broadcaster.add_connection.await_args.args[:2] == (post_id, author.id)
         broadcaster.remove_connection.assert_awaited_once_with(post_id, author.id)
-        assert pubsub.unsubscribed == [f"post:{post_id}:comments"]
+        broadcaster.unsubscribe_from_post.assert_awaited_once_with(post_id, subscriber)
 
     @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_unsubscribe_failure_is_swallowed(self):
-        pubsub = FakePubSub(unsubscribe_error=RuntimeError("redis gone"), keep_alive=True)
+        broadcaster = AsyncMock()
+        broadcaster.unsubscribe_from_post.side_effect = RuntimeError("redis gone")
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(broadcaster=broadcaster):
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect(_ws_url(uuid4(), uuid4())) as ws:
                     pass
 
-        assert len(pubsub.unsubscribed) == 1
+        broadcaster.unsubscribe_from_post.assert_awaited_once()
 
 
 class TestWebSocketPostCommentsRedisStream:
@@ -211,7 +213,7 @@ class TestWebSocketPostCommentsRedisStream:
     def test_forwards_published_comments_to_client(self):
         post_id = uuid4()
         payload = json.dumps({"type": "comment_created", "comment": {"text": "from redis"}})
-        pubsub = FakePubSub(
+        subscriber = FakeSubscriber(
             messages=[
                 {"type": "subscribe", "data": 1},
                 {"type": "message", "data": payload},
@@ -219,7 +221,7 @@ class TestWebSocketPostCommentsRedisStream:
             keep_alive=True
         )
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with client.websocket_connect(_ws_url(uuid4(), post_id)) as websocket:
                 received = websocket.receive_text()
                 assert received == payload
@@ -227,9 +229,9 @@ class TestWebSocketPostCommentsRedisStream:
     @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_redis_listen_failure_does_not_break_connection(self):
         # When listen fails, the background task stops but the main loop should continue
-        pubsub = FakePubSub(listen_error=RuntimeError("pubsub exploded"), keep_alive=True)
+        subscriber = FakeSubscriber(listen_error=RuntimeError("pubsub exploded"), keep_alive=True)
 
-        with _websocket_env(pubsub=pubsub) as (_, mock_create):
+        with _websocket_env(subscriber=subscriber) as (_, mock_create):
             with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
                 websocket.send_json({"type": "ping"})
                 message = websocket.receive_json()
@@ -242,7 +244,7 @@ class TestWebSocketPostCommentsMessages:
 
     @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_rejects_unsupported_message_type(self):
-        with _websocket_env(pubsub=FakePubSub(keep_alive=True)) as (_, mock_create):
+        with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (_, mock_create):
             with client.websocket_connect(_ws_url(uuid4(), uuid4())) as websocket:
                 websocket.send_json({"type": "reaction", "text": "hi"})
                 message = websocket.receive_json()
@@ -258,7 +260,7 @@ class TestWebSocketPostCommentsMessages:
         author = MockAuthor()
         dto = _comment_dto(post_id)
 
-        with _websocket_env(author=author, pubsub=FakePubSub(keep_alive=True)) as (broadcaster, mock_create):
+        with _websocket_env(author=author, subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = dto
             with client.websocket_connect(_ws_url(group_id, post_id)) as websocket:
                 websocket.send_json({"type": "comment", "text": "Great post!"})
@@ -282,7 +284,7 @@ class TestWebSocketPostCommentsMessages:
         author = MockAuthor()
         dto = _comment_dto(post_id, parent_comment_id=parent_comment_id)
 
-        with _websocket_env(author=author, pubsub=FakePubSub(keep_alive=True)) as (broadcaster, mock_create):
+        with _websocket_env(author=author, subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = dto
             with client.websocket_connect(_ws_url(group_id, post_id)) as websocket:
                 websocket.send_json({
@@ -304,7 +306,7 @@ class TestWebSocketPostCommentsMessages:
 
     @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_reports_comment_creation_failure(self):
-        with _websocket_env(pubsub=FakePubSub(keep_alive=True)) as (broadcaster, mock_create):
+        with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.side_effect = HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="POST_NOT_FOUND"
             )
@@ -318,7 +320,7 @@ class TestWebSocketPostCommentsMessages:
 
     @pytest.mark.skip(reason="Websocket uses local imports that are difficult to mock")
     def test_reports_non_string_creation_failure_detail(self):
-        with _websocket_env(pubsub=FakePubSub(keep_alive=True)) as (_, mock_create):
+        with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (_, mock_create):
             mock_create.side_effect = HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"field": "text"},
@@ -333,7 +335,7 @@ class TestWebSocketPostCommentsMessages:
     def test_reports_broadcast_failure(self):
         post_id = uuid4()
 
-        with _websocket_env(pubsub=FakePubSub(keep_alive=True)) as (broadcaster, mock_create):
+        with _websocket_env(subscriber=FakeSubscriber(keep_alive=True)) as (broadcaster, mock_create):
             mock_create.return_value = _comment_dto(post_id)
             broadcaster.broadcast_comment.side_effect = RuntimeError("redis publish failed")
             with client.websocket_connect(_ws_url(uuid4(), post_id)) as websocket:
