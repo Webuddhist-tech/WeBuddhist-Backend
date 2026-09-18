@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from pecha_api.events.event_filters import EventContentFilter
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import _apply_event_filters
 from pecha_api.events.event_response_models import (
@@ -318,8 +319,11 @@ def _event_format_session() -> tuple[Session, type[Event], Callable[..., Any]]:
 
 
 def _formats_for(event_format: str | None) -> set[str]:
-    db, Event, apply_filters = _event_format_session()
-    query = apply_filters(db.query(Event), event_format=event_format)
+    db, event_cls, apply_filters = _event_format_session()
+    query = apply_filters(
+        db.query(event_cls),
+        content_filter=EventContentFilter(event_format=event_format),
+    )
     return {event.event_format for event in query.all()}
 
 

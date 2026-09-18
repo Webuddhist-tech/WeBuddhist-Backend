@@ -5,13 +5,14 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Query, Session, selectinload
 from starlette import status
 
 from .event_model import Event
 from .event_metadata_model import EventMetadata
 from .event_link_model import EventLink
 from .event_enums import EventLinkType
+from .event_filters import EventContentFilter
 from ..accumulator.accumulator_models import Accumulator
 from ..mantra.mantra_model import Mantra
 from ..plans.plans_models import Plan
@@ -198,40 +199,38 @@ def list_undispatched_event_notifications(
 
 
 def _apply_event_filters(
-    query,
-    group_id: Optional[UUID] = None,
-    plan_id: Optional[UUID] = None,
-    accumulator_id: Optional[UUID] = None,
-    mantra_id: Optional[UUID] = None,
-    timer_id: Optional[UUID] = None,
-    group_recitation_collection_id: Optional[UUID] = None,
-    event_format: Optional[str] = None,
-    from_date: Optional = None,
-    to_date: Optional = None,
+    query: Query,
+    content_filter: Optional[EventContentFilter] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
     restrict_group_ids: Optional[List[UUID]] = None,
     not_ended_before: Optional[datetime] = None,
     exclude_plan_or_series_linked: bool = False,
-):
+) -> Query:
+    content_filter = content_filter or EventContentFilter()
     if restrict_group_ids is not None:
         query = query.filter(Event.group_id.in_(restrict_group_ids))
-    if group_id:
-        query = query.filter(Event.group_id == group_id)
-    if plan_id:
-        query = query.filter(Event.plan_id == plan_id)
+    if content_filter.group_id:
+        query = query.filter(Event.group_id == content_filter.group_id)
+    if content_filter.plan_id:
+        query = query.filter(Event.plan_id == content_filter.plan_id)
     if exclude_plan_or_series_linked:
         query = query.filter(Event.plan_id.is_(None), Event.series_id.is_(None))
-    if accumulator_id:
-        query = query.filter(Event.accumulator_id == accumulator_id)
-    if mantra_id:
-        query = query.filter(Event.mantra_id == mantra_id)
-    if timer_id:
-        query = query.filter(Event.timer_id == timer_id)
-    if group_recitation_collection_id:
+    if content_filter.accumulator_id:
+        query = query.filter(Event.accumulator_id == content_filter.accumulator_id)
+    if content_filter.mantra_id:
+        query = query.filter(Event.mantra_id == content_filter.mantra_id)
+    if content_filter.timer_id:
+        query = query.filter(Event.timer_id == content_filter.timer_id)
+    if content_filter.group_recitation_collection_id:
         query = query.filter(
-            Event.group_recitation_collection_id == group_recitation_collection_id
+            Event.group_recitation_collection_id
+            == content_filter.group_recitation_collection_id
         )
-    if event_format:
-        query = query.filter(Event.event_format.in_({event_format, "hybrid"}))
+    if content_filter.event_format:
+        query = query.filter(
+            Event.event_format.in_({content_filter.event_format, "hybrid"})
+        )
     if from_date is not None:
         query = query.filter(Event.end_date >= from_date)
     if not_ended_before is not None:
@@ -243,15 +242,9 @@ def _apply_event_filters(
 
 def get_events(
     db: Session,
-    group_id: Optional[UUID] = None,
-    plan_id: Optional[UUID] = None,
-    accumulator_id: Optional[UUID] = None,
-    mantra_id: Optional[UUID] = None,
-    timer_id: Optional[UUID] = None,
-    group_recitation_collection_id: Optional[UUID] = None,
-    event_format: Optional[str] = None,
-    from_date: Optional = None,
-    to_date: Optional = None,
+    content_filter: Optional[EventContentFilter] = None,
+    from_date: Optional[datetime] = None,
+    to_date: Optional[datetime] = None,
     restrict_group_ids: Optional[List[UUID]] = None,
     not_ended_before: Optional[datetime] = None,
     skip: int = 0,
@@ -264,13 +257,7 @@ def get_events(
 
     count_query = _apply_event_filters(
         db.query(func.count(Event.id)).filter(Event.is_recurring == False),
-        group_id=group_id,
-        plan_id=plan_id,
-        accumulator_id=accumulator_id,
-        mantra_id=mantra_id,
-        timer_id=timer_id,
-        group_recitation_collection_id=group_recitation_collection_id,
-        event_format=event_format,
+        content_filter=content_filter,
         from_date=from_date,
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
@@ -286,13 +273,7 @@ def get_events(
             selectinload(Event.location),
             *_linked_resource_options(),
         ).filter(Event.is_recurring == False),
-        group_id=group_id,
-        plan_id=plan_id,
-        accumulator_id=accumulator_id,
-        mantra_id=mantra_id,
-        timer_id=timer_id,
-        group_recitation_collection_id=group_recitation_collection_id,
-        event_format=event_format,
+        content_filter=content_filter,
         from_date=from_date,
         to_date=to_date,
         restrict_group_ids=restrict_group_ids,
@@ -356,13 +337,7 @@ def get_featured_recurring_events(
 
 def get_recurring_events(
     db: Session,
-    group_id: Optional[UUID] = None,
-    plan_id: Optional[UUID] = None,
-    accumulator_id: Optional[UUID] = None,
-    mantra_id: Optional[UUID] = None,
-    timer_id: Optional[UUID] = None,
-    group_recitation_collection_id: Optional[UUID] = None,
-    event_format: Optional[str] = None,
+    content_filter: Optional[EventContentFilter] = None,
     restrict_group_ids: Optional[List[UUID]] = None,
     exclude_plan_or_series_linked: bool = False,
 ) -> List[Event]:
@@ -376,13 +351,7 @@ def get_recurring_events(
 
     return _apply_event_filters(
         query,
-        group_id=group_id,
-        plan_id=plan_id,
-        accumulator_id=accumulator_id,
-        mantra_id=mantra_id,
-        timer_id=timer_id,
-        group_recitation_collection_id=group_recitation_collection_id,
-        event_format=event_format,
+        content_filter=content_filter,
         restrict_group_ids=restrict_group_ids,
         exclude_plan_or_series_linked=exclude_plan_or_series_linked,
     ).all()
