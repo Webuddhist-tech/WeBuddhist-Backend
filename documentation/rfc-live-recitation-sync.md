@@ -2,216 +2,93 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Implemented (backend); app + overlay pending |
 | **Date** | 2026-09-14 |
 | **Scope** | WeBuddhist-Backend, mobile client, OBS overlay repo |
-| **Related** | `segments.md`, `rfc-realtime-comments.md`, `rfc-event-rooms-and-prayers.md`, `pecha_api/chat/chat_websocket.py` |
+| **Related** | `live-recitation-sync-api.md` (client guide), `segments.md`, `rfc-event-rooms-and-prayers.md` |
 
 ---
 
 ## 1. Summary
 
-One operator advances a puja on a controller. The current position is broadcast to every subscriber of that
-event: the **OBS language overlays** (bo / en / zh) burn it into the livestream, and the **WeBuddhist app**
-scrolls the liturgy on each in-person attendee's phone, lyrics-style, so people in the room read along
-without watching video.
+One operator advances a puja on a controller. The position is broadcast to every subscriber of that event: the OBS overlays (bo / en / zh) burn it into the livestream, and the app scrolls the liturgy on each attendee's phone, lyrics-style. The payload is **one segment id plus a round counter** — the service never sends text.
 
-The broadcast payload is **one segment id plus a round counter**. Nothing else. The service never sends text.
+## 2. Core decision: `segment_id` is the wire key
 
----
+The prototype broadcasts a bare array `index` into a flattened `content.json`. That breaks the moment the liturgy is edited, and it gives the app no way to know which line to highlight in the reader's own language.
 
-## 2. The core decision: `segment_id` is the wire key
+Per `segments.md`, every segment already has a stable UUID and a `mappings` list linking it to its translations. So we broadcast `segment_id`; the app resolves it to the segment in the user's language and scrolls there. Three languages, one message, no new id scheme.
 
-The prototype broadcasts a bare array `index` into a flattened `content.json`. That breaks the moment the
-liturgy is edited — every client after the edit point scrolls to the wrong line — and it gives the app no way
-to know *which* line to highlight in the reader's own language.
+`index` stays in the payload as an **advisory** ordinal so existing OBS overlays keep working during migration. New clients key off `segment_id`.
 
-We already have the right identifier. Per `segments.md`, every segment is its own document with a stable UUID
-`id`, a `text_id`, and a `mappings` list linking it to its translations. So:
+**`text_id` rides along.** An event links a recitation collection, and a collection holds several texts in order, so a session is normally two or three liturgies one after another. Naming the text in every frame is what lets a client load the next one when the operator moves on, instead of quietly failing to find the segment. It is data, not an address: the channel stays keyed by event, so nobody is stranded on a silent per-text channel when the operator advances.
 
-- **`segment_id` is what we broadcast.** Stable across content edits, and already the app's unit of rendering.
-- **Language is a client concern.** The app resolves `segment_id` to the segment in the user's chosen
-  translation through the existing `mappings`, and scrolls to that. Three languages, one message.
-- **No new id scheme and no shared vocabulary to keep in sync**, which was the open question in the prototype
-  design. The contract is the segment collection, which both sides already read.
-
-`index` stays in the payload as an **advisory** ordinal so the existing OBS overlays keep working unchanged
-during migration. It is not authoritative. New clients must key off `segment_id`.
-
-### 2.1 Naming: not `pass`
-
-The prototype calls the 21-Taras loop counter `pass`. That is a Python keyword, so `pass: int` is a syntax
-error and it cannot be a Pydantic field name without an alias. Use **`round_number`** on the wire and in
-Python (`round` is a builtin; avoid shadowing it). Rename once, here, before clients bake it in.
-
----
+**Naming:** the prototype's loop counter `pass` is a Python keyword and cannot be a field name. Use `round_number` (not `round` — a builtin), renamed here before clients bake it in.
 
 ## 3. Architecture
 
-Mirrors the existing chat stack — nothing new is introduced.
-
-```mermaid
-flowchart LR
-  C[Controller - operator] -- set --> API[FastAPI WS endpoint - instance A]
-  API -- publish --> R[(Redis pub/sub + position snapshot)]
-  R -- fanout --> I2[instance B]
-  API --> O[OBS overlays bo/en/zh]
-  I2 --> A1[App phone 1]
-  I2 --> An[App phone N]
-```
-
-Redis pub/sub is what makes this safe on Render: the load balancer assigns each socket to a **random**
-instance with no sticky sessions, so in-process state alone would desync half the room the moment we run more
-than one instance. `ChatBroadcaster` already solves this; we copy it.
-
----
+Mirrors the chat stack exactly: operator → FastAPI WS endpoint → Redis pub/sub → every instance → its local sockets. Render assigns sockets to random instances with no sticky sessions, so in-process state alone would desync half the room past one instance. `ChatBroadcaster` already solves this; we copy it.
 
 ## 4. Endpoint and protocol
-
-Follows the convention in `websocket-client-integration.md`:
 
 ```
 wss://{host}/api/v1/events/{event_id}/recitation/live?token={auth_token}
 ```
 
-### 4.1 Operator to server
+Operator → server:
 
 ```json
-{ "type": "set", "segment_id": "e47b3b6a-6c4a-4c9f-80d9-8aa632c42b44", "index": 12, "round_number": 3 }
+{ "type": "set", "text_id": "abc…", "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3 }
 ```
 
-Rejected with `FORBIDDEN` unless the caller is the event's operator (section 8). Subscribers that send `set`
-are ignored, not disconnected.
-
-### 4.2 Server to all subscribers
+Server → all subscribers, on every change **and once on connect** so late joiners land on the live line:
 
 ```json
-{
-  "type": "position",
-  "event_id": "550e8400-e29b-41d4-a716-446655440000",
-  "segment_id": "e47b3b6a-6c4a-4c9f-80d9-8aa632c42b44",
-  "index": 12,
-  "round_number": 3,
-  "server_time": "2026-09-14T09:30:00Z"
-}
+{ "type": "position", "event_id": "550e8400-…", "text_id": "abc…",
+  "segment_id": "e47b3b6a-…", "index": 12, "round_number": 3,
+  "server_time": "2026-09-14T09:30:00Z", "revision": 57 }
 ```
 
-Sent on every change, **and once immediately on connect**, so a late joiner or a reconnecting phone lands on
-the live line. There is no catch-up-by-replaying-history: position is a single current value.
+Also: `ping`/`pong` (30s heartbeat — phones sleep), `error` (`VALIDATION_ERROR`, `FORBIDDEN`, `SERVER_ERROR`, as in the comments WS), and `session_ended` when the operator closes the puja. Malformed JSON and unknown types are ignored; a `set` from a non-operator gets a `FORBIDDEN` error frame but keeps its socket.
 
-### 4.3 Other frames
+### 4.4 HTTP emit
 
-| Type | Direction | Notes |
-|------|-----------|-------|
-| `ping` / `pong` | both | 30s heartbeat. Phones sleep; this is how we notice |
-| `error` | server to client | `{type, code, message}`, codes as in the comments WS: `VALIDATION_ERROR`, `INVALID_MESSAGE`, `FORBIDDEN`, `SERVER_ERROR` |
-| `session_ended` | server to all | Operator closed the puja; clients stop auto-scrolling and release the socket |
-
-Malformed JSON and unknown `type` values are ignored, matching the prototype and the existing endpoints.
-
----
+`POST /events/{event_id}/recitation/position` publishes one position without a socket, for controllers that cannot hold one open (a script, a pedal, an OBS action). It reuses the socket's frame model, throttle and fan-out, so there is one contract and one code path; only the failure reporting differs, since HTTP can answer (`429` for a throttled call, which the socket drops silently). Auth does differ by necessity: these callers have no user session, so they carry the `X-Recitation-Token` shared secret instead of a bearer token, and the operator/Author check has nothing to run against - the secret is the authorization, and all that is left to verify is that the event exists and its group is published. `POST …/recitation/end` is the `end` frame's twin.
 
 ## 5. `RecitationBroadcaster`
 
-New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster`:
+New `pecha_api/events/recitation_websocket.py`, structured like `ChatBroadcaster`: local map `{event_id: {user_id: ws}}`, channel `recitation:event:{event_id}:position`, `broadcast_position(...)` publishes and each instance relays locally.
 
-- Local map `{event_id: {user_id: websocket}}`
-- Channel `recitation:event:{event_id}:position`
-- `broadcast_position(event_id, segment_id, index, round_number)` publishes, and every instance relays to its
-  own local sockets
+**Ordering is the shared counter, not the clock.** Frames queued between a subscribe and the snapshot read have to be compared against what was just sent, and `server_time` cannot do it: it comes from whichever instance served the operator's socket. `revision` is the one value every instance agrees on. A frame without one (a rolling deploy mid-flight) is relayed rather than dropped.
 
-### 5.1 The one addition over chat: a position snapshot
-
-Chat is a stream of events; this is a **current value**. A phone connecting 40 minutes into a puja must get
-the live line, and an instance restarted by a deploy must not lose the operator's place.
-
-So every `set` also writes a Redis hash:
-
-```
-KEY  recitation:event:{event_id}:state
-     segment_id, index, round_number, updated_at
-TTL  12h, refreshed on write
-```
-
-On connect, the endpoint reads this key and sends the `position` frame from it. That is one extra `HSET` per
-operator click — a handful per minute. This is what makes reconnection and redeploy survivable.
-
----
+**The one addition over chat: a position snapshot.** Chat is a stream; this is a current value. Every `set` runs one small Lua script that takes a revision from `recitation:event:{event_id}:rev` and writes the hash `recitation:event:{event_id}:state` (`text_id`, `segment_id`, `index`, `round_number`, `updated_at`, `revision`; 12h TTL, refreshed on write) in the same atomic step - as two round trips they interleave, and with two operators publishing at once the lower revision's write can land last, leaving the snapshot behind the room, and the connect handler sends its `position` frame from that key. One extra `HSET` per operator click is what makes reconnects and redeploys survivable.
 
 ## 6. App behavior on `position`
 
-- Scroll the line for `segment_id` to the focus position, smooth-animated; highlight it, dim the rest.
-- Show `round_number` during the 21-Taras loop. The same segments repeat and only the counter advances, so
-  `segment_id` alone is ambiguous there and the counter is what tells the reader which round they are in.
-- **Operator jumps** (clicking any line) arrive as an ordinary `position`; treat them as a scroll, not a
-  special case. Make no client-side assumption that position advances monotonically.
-- **Follow toggle.** If the user scrolls away to read ahead, drop out of follow mode and show a resync button
-  that snaps back to the live segment. Auto-scrolling someone who is deliberately reading ahead is the single
-  most annoying failure mode here.
-- If `segment_id` is not present in the loaded text (stale content), do not throw. Hold the last good position
-  and surface a quiet "out of sync" affordance.
-- Reconnect with exponential backoff; the `position` frame on connect resyncs. Never assume order was kept.
+- Scroll `segment_id` into focus, smooth-animated; highlight it, dim the rest.
+- When `text_id` changes, load that text and keep following - that is how the session's second and third recitations arrive, on the same socket.
+- Show `round_number` during the 21-Taras loop — the segments repeat there, so the id alone is ambiguous.
+- Operator jumps arrive as an ordinary `position`; never assume position advances monotonically.
+- **Follow toggle:** if the user scrolls away to read ahead, leave follow mode and show a resync button. Auto-scrolling someone deliberately reading ahead is the worst failure mode here.
+- Unknown `segment_id` (stale content) holds the last good position and shows a quiet "out of sync" hint — never throws.
+- Reconnect with exponential backoff; the connect-time `position` frame resyncs.
 
----
+## 7. Permissions and hosting
 
-## 7. Hosting note
+Subscribe: caller is joined to or following the event's group (the same rule the event's chat room uses), **or** passes the operator check. Publish `set`: whoever may edit the event in the CMS — group owner, admin or author, plus super admins — so there is no second permission model to keep in step. Operator rights stand alone deliberately: they live on the Author while joining is an app action, and requiring both would lock a group's own admins out of their event. Publishes throttled ~10/s per event, excess dropped. An unknown or unpublished `event_id` closes the socket.
 
-Render imposes no connection limit; the ceiling is instance CPU and RAM. For a room of hundreds of phones with
-a ~200-byte payload sent a few times a minute this sits far below any meaningful limit — Standard (`1c-2g`) is
-adequate, and the shared-Redis design means scaling out later is safe.
+Render imposes no connection limit; a few hundred phones at ~200 bytes a few times a minute sits far below Standard (`1c-2g`). Two operational facts matter more: **a deploy drops every socket**, so freeze deploys during a live puja and treat client reconnect as mandatory; and set `perMessageDeflate: false` on any Node overlay bridge, since per-connection zlib buffers dwarf our payload.
 
-Two operational facts matter more than capacity:
+## 8. Non-goals (v1)
 
-- **A deploy drops every socket.** Freeze deploys during a live puja. Client reconnect is mandatory rather than
-  nice to have, and section 5.1 is what makes it correct.
-- Set `perMessageDeflate: false` on any Node overlay bridge — per-connection zlib buffers dwarf our payload.
+Audio/word-level karaoke timing; two recitations running at the same moment in one event (one position per event - sequential texts are the supported shape); multiple or handed-off operators; persisting or replaying a past puja; per-user position; serving liturgy text over the socket (the app loads it through the existing segment APIs).
 
----
+## 9. Acceptance criteria
 
-## 8. Permissions
+- **Backend** — the endpoint accepts subscribers and sends `position` on connect; non-operator `set` is ignored while operator `set` fans out across instances; position survives an instance restart and expires after 12h; `ping`/`pong` holds sockets through a multi-hour puja.
+- **App** — auto-scrolls and highlights by `segment_id` in the user's language; shows `round_number` during the Taras loop; follow toggle, resync button, and reconnect-without-reload all work.
+- **Overlay** — existing OBS overlays keep rendering from `index`, unchanged.
 
-| Action | Rule |
-|--------|------|
-| Subscribe | Caller may view the event — reuses the event-room eligibility gate, so no new permission concept |
-| Publish (`set`) | Caller is the event's designated operator. v1: event owner or group admin |
-| Rate limit | Publishes throttled per event (e.g. 10/s); excess dropped silently |
+## 10. Open questions
 
-`event_id` is validated server-side on connect; an unknown or unpublished event closes the socket.
-
----
-
-## 9. Non-goals (v1)
-
-- Audio playback or word-level karaoke timing. This is line-level and operator-driven.
-- Multiple simultaneous operators, or handoff between operators mid-puja.
-- Persisting a recitation history, or replaying a past puja.
-- Per-user position (bookmarks). This is a shared live position only.
-- Serving liturgy text over the socket. The app loads text through the existing segment APIs.
-
----
-
-## 10. Acceptance criteria
-
-**Backend**
-- `wss://.../events/{event_id}/recitation/live` accepts subscribers and sends a `position` frame on connect.
-- Non-operator `set` is ignored; operator `set` fans out to every instance via Redis.
-- Position survives an instance restart (snapshot key) and expires after 12h.
-- Malformed frames are ignored; `ping`/`pong` keeps sockets alive through a multi-hour puja.
-
-**App**
-- Auto-scrolls and highlights by `segment_id` in the user's selected language.
-- `round_number` is displayed during the Taras loop.
-- Follow toggle and resync button work; reconnect resyncs without a manual reload.
-
-**Overlay**
-- Existing OBS overlays keep rendering from `index` against the hosted endpoint with no rewrite.
-
----
-
-## 11. Open questions
-
-- Who is the operator in practice — the event owner, or an explicit role on the event record?
-- Does the controller stay a standalone page, or move into Studio?
-- One puja at a time per group, or several concurrently? The design supports concurrent events by `event_id`;
-  the question is whether the UI needs it.
-- In-room wifi: assume flaky and tolerate it (the design does), or is venue networking guaranteed?
+(The operator question is settled: CMS edit rights on the event.) Does the controller stay a standalone page or move into Studio? One puja at a time per group, or concurrent (the design supports concurrent by `event_id`; the question is the UI)? Is venue wifi assumed flaky — the design tolerates it — or guaranteed?

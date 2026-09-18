@@ -73,6 +73,7 @@ def test_super_admin_sees_all_no_group_restriction(
     assert result is expected
     # super admin => restrict_group_ids stays None (no scoping)
     assert mock_get_events.call_args.kwargs["restrict_group_ids"] is None
+    assert mock_get_events.call_args.kwargs["should_include_past"] is True
 
 
 @patch(f"{MODULE}.validate_cms_author_details")
@@ -90,6 +91,7 @@ def test_reviewer_sees_all_no_group_restriction(
 
     assert result is expected
     assert mock_get_events.call_args.kwargs["restrict_group_ids"] is None
+    assert mock_get_events.call_args.kwargs["should_include_past"] is True
 
 
 @patch(f"{MODULE}.SessionLocal")
@@ -119,6 +121,7 @@ def test_member_scoped_to_own_groups(
     # normal member => scoped to exactly their group ids
     assert mock_get_events.call_args.kwargs["restrict_group_ids"] == group_ids
     assert mock_get_events.call_args.kwargs["language"] == "en"
+    assert mock_get_events.call_args.kwargs["should_include_past"] is True
 
 
 @patch(f"{MODULE}.SessionLocal")

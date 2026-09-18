@@ -167,27 +167,31 @@ def _get_author_group_feed(
     post_dtos = build_post_dtos(
         db, posts, user_id=current_user.id if current_user else None
     )
+    now = datetime.now(timezone.utc)
+    today = now.date()
 
-    # Get one-shot events
+    # Get one-shot events that have not already ended
+    # Get one-shot events. Events merged with a plan or series are left out of the feed.
     one_shot_events, one_shot_total = get_events(
         db=db,
         restrict_group_ids=group_ids,
         skip=0,
         limit=fetch_limit,
         should_sort_newest_first=True,
+        not_ended_before=now,
+        exclude_plan_or_series_linked=True,
     )
-    
+
     # Get recurring events and find next occurrence for each template
     recurring_templates = get_recurring_events(
         db=db,
         restrict_group_ids=group_ids,
+        exclude_plan_or_series_linked=True,
     )
     
     # For feed context, show the current (active) or next upcoming occurrence per template.
     # Use resolve_current_or_next_occurrence (5-year horizon) to handle sparse yearly
     # recurrences like Feb 29 and include active multi-day occurrences.
-    now = datetime.now(timezone.utc)
-    today = now.date()
     
     expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
     

@@ -20,9 +20,12 @@ from pecha_api.plans.groups.groups_response_models import (
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupBanDTO,
+    GroupBanListResponse,
     GroupInviteCreatedResponse,
     GroupInviteDTO,
     GroupInviteListResponse,
+    GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
     GroupMemberAccumulationsResponse,
@@ -31,6 +34,7 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupPracticesResponse,
     PublicAuthorGroupDetailDTO,
     PublicAuthorGroupListResponse,
+    RemoveGroupUserRequest,
     ReplaceGroupSocialLinksRequest,
     ReplaceGroupTagsRequest,
     UpdateAuthorGroupRequest,
@@ -63,8 +67,11 @@ from pecha_api.plans.groups.groups_service import (
     get_joined_group,
     join_group,
     leave_group,
+    lift_group_ban_by_id,
+    list_cms_group_joined_users,
     list_cms_groups,
     list_followed_groups,
+    list_group_bans,
     list_joined_groups,
     list_group_members,
     list_group_invites,
@@ -73,6 +80,7 @@ from pecha_api.plans.groups.groups_service import (
     list_public_groups,
     reject_group_invite_by_id,
     reject_group_join_request,
+    remove_and_ban_group_user,
     submit_group_join_request,
     replace_group_social_links_by_id,
     replace_group_tags,
@@ -390,6 +398,92 @@ def post_cms_reject_group_join_request(
         token=authentication_credential.credentials,
         group_id=group_id,
         request_id=request_id,
+    )
+
+
+@cms_groups_router.get(
+    "/{group_id}/joined-users",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupJoinedUsersListResponse,
+)
+def get_cms_group_joined_users(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GroupJoinedUsersListResponse:
+    """Community users who joined this group, newest first.
+
+    Distinct from `/members`, which lists the group's staff authors and roles.
+    """
+    return list_cms_group_joined_users(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+    )
+
+
+# POST rather than DELETE: the call carries a body (ban length and reason).
+@cms_groups_router.post(
+    "/{group_id}/joined-users/{user_id}/remove",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanDTO,
+)
+def post_cms_remove_group_joined_user(
+    group_id: UUID,
+    user_id: UUID,
+    request: RemoveGroupUserRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> GroupBanDTO:
+    """Remove a joined user and block them from rejoining for `ban_duration_days`."""
+    return remove_and_ban_group_user(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        user_id=user_id,
+        request=request,
+    )
+
+
+@cms_groups_router.get(
+    "/{group_id}/bans",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanListResponse,
+)
+def get_cms_group_bans(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    active_only: Annotated[
+        bool,
+        Query(description="When false, also returns expired and lifted bans as a history."),
+    ] = True,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GroupBanListResponse:
+    return list_group_bans(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        active_only=active_only,
+    )
+
+
+@cms_groups_router.post(
+    "/{group_id}/bans/{ban_id}/lift",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanDTO,
+)
+def post_cms_lift_group_ban(
+    group_id: UUID,
+    ban_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> GroupBanDTO:
+    """End a ban early. The user may rejoin, but is not re-added automatically."""
+    return lift_group_ban_by_id(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        ban_id=ban_id,
     )
 
 

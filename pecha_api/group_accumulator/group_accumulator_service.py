@@ -29,6 +29,7 @@ from pecha_api.plans.groups.groups_repository import (
     is_user_joined_group,
     upsert_group_join,
 )
+from pecha_api.plans.groups.group_ban_guard import assert_user_not_banned_from_group
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.users.users_models import Users
 from pecha_api.region_restrictions.region_restriction_enums import RestrictedItemType
@@ -586,6 +587,9 @@ def join_group_accumulator_service(
             )
 
         _assert_group_allows_join(group)
+        # Joining an accumulator also joins the parent group, so a user banned
+        # from that group must not be able to slip back in through here.
+        assert_user_not_banned_from_group(db=db, group_id=group.id, user_id=current_user.id)
         # Joining an accumulator also joins the parent group, so a private
         # parent has to go through the join-request flow first.
         if not group.is_public and not is_user_joined_group(

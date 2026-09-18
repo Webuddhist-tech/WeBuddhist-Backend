@@ -1390,6 +1390,8 @@ def test_join_group_success():
     group = _make_group(is_public=True, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4949,6 +4951,8 @@ def test_join_group_private_group_directs_to_request_flow():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4975,6 +4979,8 @@ def test_submit_group_join_request_creates_pending_request():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5015,6 +5021,8 @@ def test_submit_group_join_request_rejects_public_group():
     group = _make_group(is_public=True, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5036,6 +5044,8 @@ def test_submit_group_join_request_rejects_existing_member():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5064,6 +5074,8 @@ def test_submit_group_join_request_rejects_duplicate_pending():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5124,6 +5136,11 @@ def test_approve_group_join_request_adds_joiner():
     ), patch(
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
+    ), patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
@@ -5282,6 +5299,11 @@ def test_flipping_group_public_approves_pending_join_requests():
         "pecha_api.plans.groups.groups_service.list_pending_join_requests_by_group",
         return_value=pending,
     ) as mock_list, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join:
         _approve_pending_join_requests_on_publish(mock_db, group_id=group_id)
@@ -5311,6 +5333,8 @@ def test_submit_group_join_request_notifies_moderators():
     owner_id, admin_id = uuid4(), uuid4()
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5356,6 +5380,8 @@ def test_submit_group_join_request_survives_notification_failure():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5392,6 +5418,8 @@ def test_submit_group_join_request_without_moderators_sends_nothing():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5433,6 +5461,11 @@ def test_approve_join_request_keeps_row_lock_until_commit():
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
     ) as mock_get, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
         "pecha_api.plans.groups.groups_service.save_join_request",
@@ -5456,6 +5489,8 @@ def test_submit_join_request_locks_group_against_concurrent_publish():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5486,6 +5521,8 @@ def test_submit_join_request_rejects_group_published_under_us():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
