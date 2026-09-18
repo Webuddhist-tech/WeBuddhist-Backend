@@ -282,3 +282,44 @@ def test_update_event_service_updates_event_format() -> None:
         
         # Verify the returned DTO includes updated event_format
         assert result.event_format == "offline"
+
+
+def _rendered_format_filter(event_format: str | None) -> str | None:
+    from pecha_api.events.event_repository import _apply_event_filters
+
+    query = MagicMock()
+    query.filter.return_value = query
+    _apply_event_filters(query, event_format=event_format)
+    if not query.filter.called:
+        return None
+    clause = query.filter.call_args.args[0]
+    return str(clause.compile(compile_kwargs={"literal_binds": True}))
+
+
+def test_apply_event_filters_online_includes_hybrid() -> None:
+    rendered = _rendered_format_filter("online")
+    assert rendered is not None
+    assert "online" in rendered
+    assert "hybrid" in rendered
+    assert "offline" not in rendered
+
+
+def test_apply_event_filters_offline_includes_hybrid() -> None:
+    rendered = _rendered_format_filter("offline")
+    assert rendered is not None
+    assert "offline" in rendered
+    assert "hybrid" in rendered
+    assert "online" not in rendered
+
+
+def test_apply_event_filters_hybrid_is_exact() -> None:
+    rendered = _rendered_format_filter("hybrid")
+    assert rendered is not None
+    assert "hybrid" in rendered
+    assert " IN " not in rendered
+    assert "online" not in rendered
+    assert "offline" not in rendered
+
+
+def test_apply_event_filters_omits_format_clause_when_unset() -> None:
+    assert _rendered_format_filter(None) is None
