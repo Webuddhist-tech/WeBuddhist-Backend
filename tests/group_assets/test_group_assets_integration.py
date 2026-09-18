@@ -422,3 +422,83 @@ class TestLibraryListing:
             db=db, group_id=group_id, search="Sutra slow", limit=100
         )
         assert asset.id in {a.id for a in found}
+
+
+class TestDeleteAtomicity:
+    """Link cleanup and the soft delete must land in one transaction, so a
+    failure cannot leave links gone while the row is still live."""
+
+    def test_cleanup_helpers_do_not_commit(self, db, factory):
+        """Rolling back after cleanup must restore the links."""
+        from pecha_api.group_assets.repository import (
+            count_links_for_asset,
+            delete_links_for_item,
+            replace_item_assets,
+        )
+
+        collection = factory.collection()
+        item = factory.item(collection)
+        slow = factory.asset("slow")
+        replace_item_assets(
+            db=db, item_id=item.id, links=factory.links(item, [slow])
+        )
+
+        delete_links_for_item(db=db, item_id=item.id)
+        # Flushed but not committed, so the rows are gone in-transaction...
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 0
+
+        db.rollback()
+        # ...and come back on rollback. That is what makes the delete atomic.
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 1
+
+    def test_collection_cleanup_does_not_commit(self, db, factory):
+        from pecha_api.group_assets.repository import (
+            count_links_for_asset,
+            delete_links_for_collection,
+            replace_item_assets,
+        )
+
+        collection = factory.collection()
+        item = factory.item(collection)
+        slow = factory.asset("slow")
+        replace_item_assets(
+            db=db, item_id=item.id, links=factory.links(item, [slow])
+        )
+
+        delete_links_for_collection(db=db, collection_id=collection.id)
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 0
+
+        db.rollback()
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 1
+
+    def test_asset_cleanup_does_not_commit(self, db, factory):
+        from pecha_api.group_assets.repository import (
+            count_links_for_asset,
+            delete_links_for_asset,
+            replace_item_assets,
+        )
+
+        collection = factory.collection()
+        item = factory.item(collection)
+        slow = factory.asset("slow")
+        replace_item_assets(
+            db=db, item_id=item.id, links=factory.links(item, [slow])
+        )
+
+        delete_links_for_asset(db=db, asset_id=slow.id)
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 0
+
+        db.rollback()
+        assert count_links_for_asset(db=db, asset_id=slow.id) == 1
+
+    def test_soft_delete_asset_does_not_commit(self, db, factory):
+        from pecha_api.group_assets.repository import soft_delete_asset
+
+        asset = factory.asset("slow")
+
+        soft_delete_asset(db=db, asset=asset, deleted_by="author@example.com")
+        assert asset.deleted_at is not None
+
+        db.rollback()
+        db.refresh(asset)
+        assert asset.deleted_at is None

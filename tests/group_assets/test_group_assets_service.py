@@ -445,3 +445,177 @@ class TestSoftDeleteClearsLinks:
         mock_drop_links.assert_called_once()
         assert mock_drop_links.call_args.kwargs["collection_id"] == collection_id
         mock_soft_delete.assert_called_once()
+
+
+class TestDeleteFailureHandling:
+    """A failed S3 delete must not leave the DB claiming the asset is gone."""
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.soft_delete_asset")
+    @patch(f"{SERVICE}.get_asset_usages")
+    @patch(f"{SERVICE}.get_asset_by_id")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @pytest.mark.asyncio
+    async def test_s3_failure_rolls_back_and_raises(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_get,
+        mock_usages,
+        mock_soft_delete,
+        mock_delete_file,
+    ):
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_get.return_value = MockGroupAsset()
+        mock_usages.return_value = []
+        mock_delete_file.side_effect = Exception("S3 is down")
+
+        with pytest.raises(HTTPException) as exc:
+            await delete_group_asset_service(
+                token="token", group_id=uuid4(), asset_id=uuid4()
+            )
+
+        assert exc.value.status_code == status.HTTP_502_BAD_GATEWAY
+        mock_db.rollback.assert_called_once()
+        mock_db.commit.assert_not_called()
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.soft_delete_asset")
+    @patch(f"{SERVICE}.get_asset_usages")
+    @patch(f"{SERVICE}.get_asset_by_id")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @pytest.mark.asyncio
+    async def test_success_commits_once_after_s3_delete(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_get,
+        mock_usages,
+        mock_soft_delete,
+        mock_delete_file,
+    ):
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_get.return_value = MockGroupAsset()
+        mock_usages.return_value = []
+
+        await delete_group_asset_service(
+            token="token", group_id=uuid4(), asset_id=uuid4()
+        )
+
+        mock_delete_file.assert_called_once()
+        mock_db.commit.assert_called_once()
+        mock_db.rollback.assert_not_called()
+
+    @patch(f"{SERVICE}.get_asset_by_id")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @pytest.mark.asyncio
+    async def test_delete_locks_the_asset_row(
+        self, mock_session, mock_author, mock_group, mock_perm, mock_get
+    ):
+        """The lock is what serialises deletion against a concurrent link."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_get.return_value = None
+
+        with pytest.raises(HTTPException):
+            await delete_group_asset_service(
+                token="token", group_id=uuid4(), asset_id=uuid4()
+            )
+
+        assert mock_get.call_args.kwargs["for_update"] is True
+
+
+class TestUploadCompensation:
+    """A failed DB write must not leave the uploaded object behind."""
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.GroupAsset")
+    @patch(f"{SERVICE}.create_asset")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    def test_db_failure_discards_uploaded_object(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_upload,
+        mock_create,
+        mock_model,
+        mock_delete_file,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_create.side_effect = Exception("db down")
+
+        with pytest.raises(Exception, match="db down"):
+            upload_group_asset_service(
+                token="token",
+                group_id=uuid4(),
+                file=MockUploadFile(),
+                asset_type=GroupAssetType.AUDIO,
+            )
+
+        # The orphan is cleaned up with the same key that was uploaded.
+        mock_delete_file.assert_called_once()
+        assert mock_delete_file.call_args[0][0] == mock_upload.call_args.kwargs["s3_key"]
+
+    @patch(f"{SERVICE}.delete_file")
+    @patch(f"{SERVICE}.GroupAsset")
+    @patch(f"{SERVICE}.create_asset")
+    @patch(f"{SERVICE}.upload_file")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.generate_asset_presigned_url")
+    def test_successful_upload_discards_nothing(
+        self,
+        mock_presign,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_upload,
+        mock_create,
+        mock_model,
+        mock_delete_file,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_author.return_value = MockAuthor()
+        mock_group.return_value = MagicMock()
+        mock_create.return_value = MockGroupAsset()
+        mock_presign.return_value = "https://presigned"
+
+        upload_group_asset_service(
+            token="token",
+            group_id=uuid4(),
+            file=MockUploadFile(),
+            asset_type=GroupAssetType.AUDIO,
+        )
+
+        mock_delete_file.assert_not_called()

@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 ASSET_NOT_FOUND = "Asset not found"
 ASSET_IN_USE = "Asset is used by {count} recitation item(s)"
 ASSET_TYPE_NOT_SUPPORTED = "Only AUDIO assets are supported"
+ASSET_DELETE_FAILED = "Failed to delete the asset file; nothing was changed"
 
 
 def validate_audio_file(file: UploadFile) -> None:
@@ -67,6 +68,18 @@ def validate_audio_file(file: UploadFile) -> None:
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=AUDIO_FILE_TOO_LARGE,
         )
+
+
+def _discard(s3_key: Optional[str]) -> None:
+    """Drop an object uploaded moments ago that never made it onto a committed
+    row. The key is unique per upload, so nothing else points at it. Best
+    effort: an orphan in the bucket is not worth masking the original error."""
+    if not s3_key:
+        return
+    try:
+        delete_file(s3_key)
+    except Exception:
+        logger.exception("Failed to delete orphaned group asset: %s", s3_key)
 
 
 def generate_asset_presigned_url(s3_key: Optional[str]) -> Optional[str]:
@@ -154,20 +167,27 @@ def upload_group_asset_service(
             file=file,
         )
 
-        asset = create_asset(
-            db=db,
-            asset=GroupAsset(
-                group_id=group_id,
-                asset_type=asset_type,
-                title=(title or original_name)[:255],
-                s3_key=s3_key,
-                file_name=original_name[:255],
-                mime_type=content_type[:64] if content_type else None,
-                file_size_bytes=file.size if hasattr(file, "size") else None,
-                duration_ms=duration_ms,
-                created_by=author.email,
-            ),
-        )
+        try:
+            asset = create_asset(
+                db=db,
+                asset=GroupAsset(
+                    group_id=group_id,
+                    asset_type=asset_type,
+                    title=(title or original_name)[:255],
+                    s3_key=s3_key,
+                    file_name=original_name[:255],
+                    mime_type=content_type[:64] if content_type else None,
+                    file_size_bytes=file.size if hasattr(file, "size") else None,
+                    duration_ms=duration_ms,
+                    created_by=author.email,
+                ),
+            )
+        except Exception:
+            # The row never committed, so nothing points at the object we just
+            # uploaded. The key is unique to this request, so discarding it
+            # cannot touch anything else.
+            _discard(s3_key)
+            raise
         return build_asset_dto(asset)
 
 
@@ -252,7 +272,11 @@ async def delete_group_asset_service(
         _validate_group_exists(db=db, group_id=group_id)
         require_can_create_content(db=db, group_id=group_id, author=author)
 
-        asset = get_asset_by_id(db=db, group_id=group_id, asset_id=asset_id)
+        # Locked: a concurrent PUT .../audio blocks here until this
+        # transaction ends, so it cannot link an asset that is being deleted.
+        asset = get_asset_by_id(
+            db=db, group_id=group_id, asset_id=asset_id, for_update=True
+        )
         if not asset:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -284,12 +308,21 @@ async def delete_group_asset_service(
         s3_key = asset.s3_key
         soft_delete_asset(db=db, asset=asset, deleted_by=author.email)
 
-    try:
-        delete_file(s3_key)
-    except Exception as e:
-        # The row is already soft-deleted; a stranded object is recoverable,
-        # a failed request the author retries is not worth the confusion.
-        logger.error(f"Failed to delete S3 object {s3_key}: {e}")
+        # The object goes before the commit. If S3 fails, the transaction
+        # rolls back and the caller gets an error rather than a 204 for an
+        # asset whose audio still serves through its presigned URL.
+        try:
+            delete_file(s3_key)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to delete S3 object {s3_key}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=ASSET_DELETE_FAILED,
+            ) from e
+
+        # Link cleanup and the soft delete land together, or neither does.
+        db.commit()
 
 
 async def _resolve_text_titles(text_ids: List[str]) -> Dict[str, Optional[str]]:

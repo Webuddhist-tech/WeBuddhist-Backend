@@ -180,7 +180,7 @@ async def cms_set_collection_item_audio(
     item_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     request: SetItemAudioRequest,
-):
+) -> GroupRecitationCollectionDetailDTO:
     """Set an item's ordered audio.
 
     The array is the state: this links, unlinks and reorders in one call.

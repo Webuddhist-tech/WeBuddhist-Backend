@@ -28,40 +28,47 @@ def get_asset_by_id(
     db: Session,
     group_id: UUID,
     asset_id: UUID,
+    for_update: bool = False,
 ) -> Optional[GroupAsset]:
     """Fetch a live asset scoped to its owning group.
 
     Group scoping lives in the query, so an asset from another group is simply
     not found rather than found-and-forbidden.
+
+    ``for_update`` takes a row lock, which is what serialises deletion against
+    a concurrent link write.
     """
-    return (
-        db.query(GroupAsset)
-        .filter(
-            GroupAsset.id == asset_id,
-            GroupAsset.group_id == group_id,
-            GroupAsset.deleted_at.is_(None),
-        )
-        .first()
+    query = db.query(GroupAsset).filter(
+        GroupAsset.id == asset_id,
+        GroupAsset.group_id == group_id,
+        GroupAsset.deleted_at.is_(None),
     )
+    if for_update:
+        query = query.with_for_update()
+    return query.first()
 
 
 def get_assets_by_ids(
     db: Session,
     group_id: UUID,
     asset_ids: Sequence[UUID],
+    for_update: bool = False,
 ) -> List[GroupAsset]:
-    """Fetch live assets of a group by id, in one query."""
+    """Fetch live assets of a group by id, in one query.
+
+    ``for_update`` takes a row lock so a concurrent delete cannot soft-delete
+    an asset between this check and the link insert that follows it.
+    """
     if not asset_ids:
         return []
-    return (
-        db.query(GroupAsset)
-        .filter(
-            GroupAsset.id.in_(list(asset_ids)),
-            GroupAsset.group_id == group_id,
-            GroupAsset.deleted_at.is_(None),
-        )
-        .all()
+    query = db.query(GroupAsset).filter(
+        GroupAsset.id.in_(list(asset_ids)),
+        GroupAsset.group_id == group_id,
+        GroupAsset.deleted_at.is_(None),
     )
+    if for_update:
+        query = query.with_for_update()
+    return query.all()
 
 
 def get_group_assets(
@@ -106,11 +113,15 @@ def update_asset(db: Session, asset: GroupAsset) -> GroupAsset:
 
 
 def soft_delete_asset(db: Session, asset: GroupAsset, deleted_by: str) -> None:
-    """Soft delete an asset. Links must already be gone."""
+    """Soft delete an asset. Links must already be gone.
+
+    Does not commit: the caller owns the transaction so link cleanup and the
+    soft delete land together or not at all.
+    """
     asset.deleted_at = datetime.now(timezone.utc)
     asset.updated_by = deleted_by
     asset.updated_at = datetime.now(timezone.utc)
-    db.commit()
+    db.flush()
 
 
 def get_item_asset_links(
@@ -182,13 +193,15 @@ def delete_links_for_item(db: Session, item_id: UUID) -> int:
 
     Items are soft-deleted, so the FK's ON DELETE CASCADE never fires; without
     this the links would outlive the item and keep their assets looking in use.
+
+    Does not commit: the caller commits the whole delete as one transaction.
     """
     deleted = (
         db.query(GroupRecitationCollectionItemAsset)
         .filter(GroupRecitationCollectionItemAsset.item_id == item_id)
         .delete(synchronize_session=False)
     )
-    db.commit()
+    db.flush()
     return deleted
 
 
@@ -196,6 +209,8 @@ def delete_links_for_collection(db: Session, collection_id: UUID) -> int:
     """Drop every link belonging to a collection's items.
 
     Same reason as delete_links_for_item: collections are soft-deleted too.
+
+    Does not commit: the caller commits the whole delete as one transaction.
     """
     item_ids = [
         row[0]
@@ -214,18 +229,21 @@ def delete_links_for_collection(db: Session, collection_id: UUID) -> int:
         .filter(GroupRecitationCollectionItemAsset.item_id.in_(item_ids))
         .delete(synchronize_session=False)
     )
-    db.commit()
+    db.flush()
     return deleted
 
 
 def delete_links_for_asset(db: Session, asset_id: UUID) -> int:
-    """Drop every link pointing at an asset. Used by force delete."""
+    """Drop every link pointing at an asset. Used by force delete.
+
+    Does not commit: the caller commits the whole delete as one transaction.
+    """
     deleted = (
         db.query(GroupRecitationCollectionItemAsset)
         .filter(GroupRecitationCollectionItemAsset.asset_id == asset_id)
         .delete(synchronize_session=False)
     )
-    db.commit()
+    db.flush()
     return deleted
 
 

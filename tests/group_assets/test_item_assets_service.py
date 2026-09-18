@@ -266,3 +266,40 @@ class TestSetItemAudioService:
             )
 
         assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestLinkingLocksAssets:
+    @patch(f"{SERVICE}.get_assets_by_ids")
+    @patch(f"{SERVICE}.get_collection_item_by_id")
+    @patch(f"{SERVICE}.get_collection_by_id")
+    @patch(f"{SERVICE}.require_can_create_content")
+    @patch(f"{SERVICE}.get_group_by_id")
+    @patch(f"{SERVICE}.validate_and_extract_author_details")
+    @patch(f"{SERVICE}.SessionLocal")
+    @pytest.mark.asyncio
+    async def test_assets_are_locked_before_linking(
+        self,
+        mock_session,
+        mock_author,
+        mock_group,
+        mock_perm,
+        mock_collection,
+        mock_item,
+        mock_get_assets,
+    ):
+        """Without the lock, a concurrent delete could soft-delete an asset
+        between this fetch and the link insert."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        _patch_happy_path(mock_author, mock_group, mock_collection, mock_item)
+        mock_get_assets.return_value = []
+
+        with pytest.raises(HTTPException):
+            await set_item_audio_service(
+                token="token",
+                group_id=uuid4(),
+                collection_id=uuid4(),
+                item_id=uuid4(),
+                asset_ids=[uuid4()],
+            )
+
+        assert mock_get_assets.call_args.kwargs["for_update"] is True

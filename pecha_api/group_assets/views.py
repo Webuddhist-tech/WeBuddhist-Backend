@@ -38,7 +38,7 @@ def cms_upload_group_asset(
     asset_type: Annotated[GroupAssetType, Form()],
     title: Annotated[Optional[str], Form()] = None,
     duration_ms: Annotated[Optional[int], Form()] = None,
-):
+) -> GroupAssetDTO:
     """Upload a file into this group's asset library.
 
     One file per call, and uploading links it to nothing.
@@ -65,7 +65,7 @@ def cms_list_group_assets(
     search: Optional[str] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-):
+) -> GroupAssetsResponse:
     """List and search this group's assets. Newest first."""
     return list_group_assets_service(
         token=authentication_credential.credentials,
@@ -87,7 +87,7 @@ def cms_update_group_asset(
     asset_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     request: UpdateGroupAssetRequest,
-):
+) -> GroupAssetDTO:
     """Rename an asset."""
     return update_group_asset_service(
         token=authentication_credential.credentials,
@@ -106,7 +106,7 @@ async def cms_delete_group_asset(
     asset_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     force: bool = False,
-):
+) -> Response:
     """Remove an asset from the library.
 
     Returns 409 with its usages when it is still linked; pass force=true to

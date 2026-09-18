@@ -89,7 +89,11 @@ async def set_item_audio_service(
         if asset_ids:
             # Scoped to this group, so an asset from another group resolves to
             # nothing and is reported as not found rather than forbidden.
-            assets = get_assets_by_ids(db=db, group_id=group_id, asset_ids=asset_ids)
+            # Locked, so a concurrent delete cannot soft-delete these assets
+            # between this check and the link insert below.
+            assets = get_assets_by_ids(
+                db=db, group_id=group_id, asset_ids=asset_ids, for_update=True
+            )
             assets_by_id = {asset.id: asset for asset in assets}
 
             missing = [str(aid) for aid in asset_ids if aid not in assets_by_id]
