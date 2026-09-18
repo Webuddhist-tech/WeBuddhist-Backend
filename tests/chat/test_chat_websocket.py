@@ -1,6 +1,7 @@
 import asyncio
 import json
 import pytest
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 from datetime import datetime, timezone as tz
@@ -159,7 +160,7 @@ class TestChatBroadcasterUnit:
             chat_websocket_module.broadcaster = original
 
 
-async def _never_ending():
+async def _never_ending() -> AsyncIterator[None]:
     """A subscription that stays open, as a real one does."""
     await asyncio.Event().wait()
     yield  # pragma: no cover

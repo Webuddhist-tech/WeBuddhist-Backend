@@ -1,6 +1,7 @@
 import json
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone as tz
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -32,13 +33,18 @@ class FakeSubscriber:
     channel stopped.
     """
 
-    def __init__(self, messages=None, listen_error=None, lagged=False):
+    def __init__(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        listen_error: Optional[BaseException] = None,
+        lagged: bool = False,
+    ) -> None:
         self.messages = list(messages or [])
         self.listen_error = listen_error
         self.lagged = lagged
         self._index = 0
 
-    async def get(self):
+    async def get(self) -> Optional[str]:
         if self.listen_error is not None:
             raise self.listen_error
         while self._index < len(self.messages):
