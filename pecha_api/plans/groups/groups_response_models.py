@@ -132,6 +132,10 @@ class PublicAuthorGroupSummaryDTO(AuthorGroupSummaryDTO):
 class PublicAuthorGroupDetailDTO(AuthorGroupDetailDTO):
     tags: List[str] = []
     my_join_request_status: Optional[AuthorGroupJoinRequestStatus] = None
+    # The group chat room this caller can open, so the app can go straight to
+    # it from the group page. None when the caller is anonymous, is neither a
+    # joiner nor a follower, or nobody has started the chat yet.
+    chat_room_id: Optional[UUID] = None
 
 
 class AuthorGroupListResponse(BaseModel):

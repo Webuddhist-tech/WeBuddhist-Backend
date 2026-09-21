@@ -167,6 +167,41 @@ def leave_member(db: Session, member: ChatRoomMember, *, commit: bool = True) ->
         db.commit()
 
 
+def rejoin_group_room_member(
+    db: Session, group_id: UUID, user_id: UUID, *, commit: bool = True
+) -> bool:
+    """Undo a leave_member for the group's chat room: someone whose group
+    membership has begun again is active in the room again, keeping their role
+    and last_read_at so unread counts pick up where they left off.
+
+    The mirror of leave_group_chat_room, which the leave flows call. It lives
+    here rather than beside it in the service layer because its callers are the
+    upsert_group_join/upsert_group_follow writes themselves - the one chokepoint
+    every way of joining a group passes through, so no new join flow can forget
+    it and leave the room missing from list_my_active_rooms until the user
+    posts a message.
+
+    Only re-activates a row that already exists: someone who was never in the
+    room is added by resolve_or_create_group_room when they first open it, and
+    that decision (which carries the CREATOR role for a room that does not
+    exist yet) does not belong to a join. Returns whether anything changed.
+    No-op if the group has no room, or the user is already active in it.
+
+    Pass commit=False when the caller is inside a transaction that must include
+    this, so regaining group membership and regaining chat access cannot land
+    separately."""
+    room = get_room_by_group_id(db=db, group_id=group_id)
+    if room is None:
+        return False
+    member = get_member(db=db, room_id=room.id, user_id=user_id)
+    if member is None or member.left_at is None:
+        return False
+    member.left_at = None
+    if commit:
+        db.commit()
+    return True
+
+
 def mark_read(db: Session, member: ChatRoomMember) -> None:
     member.last_read_at = datetime.now(timezone.utc)
     db.commit()

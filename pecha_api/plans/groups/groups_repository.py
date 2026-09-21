@@ -941,6 +941,17 @@ def upsert_group_follow(
             created_at=datetime.now(timezone.utc),
         )
     )
+    # Imported here, not at module scope: chat.repository reaches
+    # pecha_api.events, whose package __init__ pulls in views that land back
+    # here, so the module-level edge would be a cycle.
+    from pecha_api.chat.repository import rejoin_group_room_member
+
+    # Following is one of the two ways to be eligible for a group's chat, so a
+    # returning follower goes back into its room in the same transaction -
+    # otherwise unfollow's leave_group_chat_room stands and the room stays out
+    # of their inbox. Only on the insert path: an existing follower who is out
+    # of the room was taken out by the room itself, not by unfollowing.
+    rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
     db.commit()
 
 
@@ -1004,7 +1015,8 @@ def upsert_group_join(
     *,
     commit: bool = True,
 ) -> None:
-    """Add a joiner. Pass commit=False to keep an enclosing transaction open."""
+    """Add a joiner, putting them back into the group's chat room if they had
+    left it. Pass commit=False to keep an enclosing transaction open."""
     exists_row = db.execute(
         select(author_group_joins.c.group_id).where(
             author_group_joins.c.group_id == group_id,
@@ -1020,6 +1032,15 @@ def upsert_group_join(
             created_at=datetime.now(timezone.utc),
         )
     )
+    # Imported here, not at module scope: chat.repository reaches
+    # pecha_api.events, whose package __init__ pulls in views that land back
+    # here, so the module-level edge would be a cycle.
+    from pecha_api.chat.repository import rejoin_group_room_member
+
+    # Same as upsert_group_follow: rejoining undoes the leave that
+    # leave_group_chat_room recorded, so the group's room comes back to the
+    # user's inbox instead of waiting for their next message.
+    rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
     if commit:
         db.commit()
 

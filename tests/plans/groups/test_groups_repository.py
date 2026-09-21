@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.orm import Session
@@ -32,6 +32,8 @@ from pecha_api.plans.groups.groups_repository import (
     get_user_series_enrollment_partner_map,
     leave_group_membership,
     update_group,
+    upsert_group_follow,
+    upsert_group_join,
 )
 from pecha_api.plans.users.plan_users_models import UserSeriesEnrollment
 
@@ -599,3 +601,76 @@ def test_is_group_id_published_does_not_lock_by_default():
     is_group_id_published(db=db, group_id=uuid.uuid4())
 
     query.with_for_update.assert_not_called()
+
+
+# The chat helper is imported inside the upsert functions (see the comment
+# there), so it is patched where it lives rather than in this module.
+_REJOIN = "pecha_api.chat.repository.rejoin_group_room_member"
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_puts_a_returning_member_back_in_the_chat_room(mock_rejoin):
+    """Leaving a group marks the chat membership as left; nothing used to clear
+    it, so the room stayed out of the rejoiner's inbox until they posted."""
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(db=db, group_id=group_id, user_id=user_id)
+
+    mock_rejoin.assert_called_once_with(
+        db=db, group_id=group_id, user_id=user_id, commit=False
+    )
+    # One commit for the join row and the chat membership together.
+    db.commit.assert_called_once()
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_defers_the_commit_with_its_caller(mock_rejoin):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(
+        db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4(), commit=False
+    )
+
+    mock_rejoin.assert_called_once()
+    db.commit.assert_not_called()
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_skips_the_chat_room_for_an_existing_joiner(mock_rejoin):
+    """Already a joiner, so nothing about their group membership changed: a
+    chat membership that is closed was closed by the room, not by a leave."""
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_join(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_rejoin.assert_not_called()
+
+
+@patch(_REJOIN)
+def test_upsert_group_follow_puts_a_returning_follower_back_in_the_chat_room(mock_rejoin):
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_follow(db=db, group_id=group_id, user_id=user_id)
+
+    mock_rejoin.assert_called_once_with(
+        db=db, group_id=group_id, user_id=user_id, commit=False
+    )
+    db.commit.assert_called_once()
+
+
+@patch(_REJOIN)
+def test_upsert_group_follow_skips_the_chat_room_for_an_existing_follower(mock_rejoin):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_follow(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_rejoin.assert_not_called()

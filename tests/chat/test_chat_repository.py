@@ -1,5 +1,5 @@
 from datetime import datetime, timezone as tz
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pecha_api.app  # noqa: F401
@@ -27,6 +27,7 @@ from pecha_api.chat.repository import (
     list_active_members,
     list_my_active_rooms,
     mark_read,
+    rejoin_group_room_member,
     soft_delete_message,
     soft_delete_messages,
     touch_room,
@@ -158,6 +159,69 @@ class TestMemberQueries:
 
         assert member.left_at is not None
         db.commit.assert_called_once()
+
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_clears_left_at_for_a_returning_member(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        member = MagicMock(left_at=datetime.now(tz.utc))
+        mock_get_member.return_value = member
+
+        changed = rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4())
+
+        assert changed is True
+        assert member.left_at is None
+        db.commit.assert_called_once()
+
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_leaves_an_enclosing_transaction_open(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        mock_get_member.return_value = MagicMock(left_at=datetime.now(tz.utc))
+
+        rejoin_group_room_member(
+            db=db, group_id=uuid4(), user_id=uuid4(), commit=False
+        )
+
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_is_a_noop_for_an_already_active_member(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        mock_get_member.return_value = MagicMock(left_at=None)
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_member', return_value=None)
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_does_not_add_someone_who_was_never_in_the_room(
+        self, mock_get_room, _mock_get_member
+    ):
+        """Joining the group does not put a newcomer in the room - that is
+        resolve_or_create_group_room's call, and it decides the role."""
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_room_by_group_id', return_value=None)
+    def test_rejoin_is_a_noop_when_the_group_has_no_room(self, _mock_get_room):
+        db = MagicMock()
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
 
     def test_mark_read_sets_last_read_at(self):
         db = MagicMock()

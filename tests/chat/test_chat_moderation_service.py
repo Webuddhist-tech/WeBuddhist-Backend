@@ -296,18 +296,18 @@ class TestProfanityWebSocket:
         mock_require_member.return_value = MockMember(room_id=room.id, user_id=user.id)
         mock_get_auto_report.return_value = None
 
-        class FakePubSub:
-            async def listen(self):
-                if False:
-                    yield  # makes this an async generator
-                while True:
-                    await asyncio.sleep(3600)
+        class FakeSubscriber:
+            """A live channel with nothing published on it: get() waits.
 
-            async def unsubscribe(self, channel):
-                return None
+            Returning instead would mean the channel stopped, which closes the
+            socket, and this case needs it open long enough to be answered."""
+
+            async def get(self):
+                await asyncio.Event().wait()
 
         broadcaster = MagicMock()
-        broadcaster.subscribe_to_room = AsyncMock(return_value=FakePubSub())
+        broadcaster.subscribe_to_room = AsyncMock(return_value=FakeSubscriber())
+        broadcaster.unsubscribe_from_room = AsyncMock()
         broadcaster.add_connection = AsyncMock()
         broadcaster.remove_connection = AsyncMock()
         broadcaster.broadcast_presence = AsyncMock()
