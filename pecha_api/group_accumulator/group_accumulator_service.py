@@ -1,12 +1,14 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 from starlette import status
 
+from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
 from pecha_api.accumulator.group_accumulator_link_model import GroupAccumulatorLink
 from pecha_api.accumulator.link_utils import classify_link, is_valid_http_url
 from pecha_api.accumulator.response_message import INVALID_URL
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.shared.metadata_utils import (
     DEFAULT_FALLBACK_LANGUAGE,
     filter_by_language_with_fallback,
@@ -125,16 +127,16 @@ def _build_detail_user_dto(
     )
 
 
-def _language_code(language) -> str:
+def _language_code(language: Union[LanguageCode, str]) -> str:
     return language.value if hasattr(language, "value") else str(language)
 
 
-def _metadata_language(entry) -> str:
+def _metadata_language(entry: GroupAccumulatorMetadata) -> str:
     return _language_code(entry.language)
 
 
 def _resolve_metadata_value(
-    group_accumulator,
+    group_accumulator: GroupAccumulator,
     language: Optional[str],
     attribute: str,
 ) -> Optional[str]:
@@ -166,11 +168,15 @@ def _resolve_metadata_value(
     return getattr(entries[0], attribute)
 
 
-def _resolve_description(group_accumulator, language: Optional[str]) -> Optional[str]:
+def _resolve_description(
+    group_accumulator: GroupAccumulator, language: Optional[str]
+) -> Optional[str]:
     return _resolve_metadata_value(group_accumulator, language, "description")
 
 
-def _resolve_title(group_accumulator, language: Optional[str]) -> Optional[str]:
+def _resolve_title(
+    group_accumulator: GroupAccumulator, language: Optional[str]
+) -> Optional[str]:
     """Per-language title, falling back to the default stored on the parent row
     for accumulators created before titles were translated."""
     resolved = _resolve_metadata_value(group_accumulator, language, "title")
@@ -192,7 +198,9 @@ def _default_metadata_title(
     return titled[0].title
 
 
-def _convert_metadata_entries(group_accumulator) -> List[GroupAccumulatorMetadataDTO]:
+def _convert_metadata_entries(
+    group_accumulator: GroupAccumulator,
+) -> List[GroupAccumulatorMetadataDTO]:
     return [
         GroupAccumulatorMetadataDTO(
             language=entry.language,
