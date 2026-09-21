@@ -340,7 +340,7 @@ class TestProfanityWebSocket:
 # These assert the allowlist is applied and that profanity still gets caught.
 
 @pytest.mark.parametrize("term", list(ALLOWED_TERMS))
-def test_allowlisted_term_is_not_profanity(term):
+def test_allowlisted_term_is_not_profanity(term: str) -> None:
     assert contains_inappropriate_language(term) is False
 
 
@@ -357,7 +357,7 @@ def test_allowlisted_term_is_not_profanity(term):
     "I am gay and new to this sangha",
     "please put the pot on the shrine",
 ])
-def test_community_vocabulary_is_allowed(message):
+def test_community_vocabulary_is_allowed(message: str) -> None:
     assert contains_inappropriate_language(message) is False
 
 
@@ -366,12 +366,17 @@ def test_community_vocabulary_is_allowed(message):
     "fuck this",
     "you are an asshole",
     "what a bitch",
+    # Compounds built on an allowlisted root: allowlisting "god", "gay" must
+    # not carry the compounds out of the wordset with them.
+    "goddamn",
+    "gaylord",
+    "gaysex",
 ])
-def test_genuine_profanity_is_still_blocked(message):
+def test_genuine_profanity_is_still_blocked(message: str) -> None:
     assert contains_inappropriate_language(message) is True
 
 
-def test_allowlist_is_actually_applied_to_the_wordset():
+def test_allowlist_is_actually_applied_to_the_wordset() -> None:
     """Guard against a library upgrade silently dropping `whitelist_words`.
 
     If the kwarg is renamed or ignored, the terms fall back into the active
