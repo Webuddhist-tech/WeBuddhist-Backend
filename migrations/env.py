@@ -43,6 +43,7 @@ from pecha_api.events.event_link_model import EventLink
 from pecha_api.events.event_reminder_model import EventReminder
 from pecha_api.events.location_model import Location
 from pecha_api.group_posts.models import GroupPost, GroupPostMedia, GroupPostLink
+from pecha_api.group_assets.models import GroupAsset, GroupRecitationCollectionItemAsset
 from pecha_api.group_posts.comment_models import GroupPostComment
 from pecha_api.group_posts.like_models import GroupPostLike
 from pecha_api.mantra.mantra_metadata_model import MantraMetadata

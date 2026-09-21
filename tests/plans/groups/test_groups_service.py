@@ -4867,6 +4867,8 @@ def test_get_author_group_detail_private_group_full_for_joiner():
     ), patch(
         "pecha_api.plans.groups.groups_service.is_user_joined_group", return_value=True,
     ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
@@ -4880,6 +4882,91 @@ def test_get_author_group_detail_private_group_full_for_joiner():
 
     assert result.id == private_group.id
     mock_series.assert_called_once()
+
+
+def _detail_with_chat_room(
+    *,
+    joined=False,
+    following=False,
+    room=None,
+    token=None,
+):
+    """Run the public group detail with the chat lookups pinned, so a case only
+    has to say who the caller is and whether the room exists."""
+    group = _make_group(is_public=True)
+    user = MagicMock()
+    user.id = uuid4()
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id", return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group", return_value=joined,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_following_group", return_value=following,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=room,
+    ) as mock_get_room, patch(
+        "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_join_request_status_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_series_by_group_id", return_value=[],
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_plans_by_group_id", return_value=[],
+    ):
+        _session_local_context(mock_session)
+        return get_author_group_detail(group_id=group.id, token=token), mock_get_room
+
+
+def test_group_detail_carries_the_chat_room_id_for_a_joiner():
+    """The group page can open the chat without a second round trip."""
+    room = MagicMock(id=uuid4())
+
+    result, _ = _detail_with_chat_room(joined=True, room=room, token="t")
+
+    assert result.chat_room_id == room.id
+
+
+def test_group_detail_carries_the_chat_room_id_for_a_follower():
+    """Followers may chat too, so withholding the id would hide a room they
+    can actually open."""
+    room = MagicMock(id=uuid4())
+
+    result, _ = _detail_with_chat_room(following=True, room=room, token="t")
+
+    assert result.chat_room_id == room.id
+
+
+def test_group_detail_has_no_chat_room_id_before_the_room_exists():
+    """A room is created by the chat routes on first use - reading a group
+    page must not create one, nor make the viewer its creator."""
+    result, _ = _detail_with_chat_room(joined=True, room=None, token="t")
+
+    assert result.chat_room_id is None
+
+
+def test_group_detail_has_no_chat_room_id_for_an_outsider():
+    result, mock_get_room = _detail_with_chat_room(
+        joined=False, following=False, room=MagicMock(id=uuid4()), token="t"
+    )
+
+    assert result.chat_room_id is None
+    # Not eligible, so the room is never even looked up.
+    mock_get_room.assert_not_called()
+
+
+def test_group_detail_has_no_chat_room_id_for_an_anonymous_caller():
+    result, mock_get_room = _detail_with_chat_room(
+        joined=True, room=MagicMock(id=uuid4()), token=None
+    )
+
+    assert result.chat_room_id is None
+    mock_get_room.assert_not_called()
 
 
 def test_get_author_group_detail_public_group_unaffected():
@@ -5560,6 +5647,8 @@ def test_group_detail_exposes_my_pending_join_request():
         "pecha_api.plans.groups.groups_service.get_join_request_status_map",
         return_value={group.id: "PENDING"},
     ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
@@ -6061,6 +6150,8 @@ def test_published_private_group_still_uses_teaser_flow():
         "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service.get_join_request_status_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
     ):
         _session_local_context(mock_session)
         result = get_author_group_detail(group_id=group.id, token="t")

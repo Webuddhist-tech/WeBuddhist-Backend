@@ -15,6 +15,8 @@ from pecha_api.group_recitation_collection.cms_service import (
     cms_reorder_items_service,
     cms_update_collection_service,
 )
+from pecha_api.group_assets.item_assets_service import set_item_audio_service
+from pecha_api.group_assets.response_models import SetItemAudioRequest
 from pecha_api.group_recitation_collection.response_models import (
     AddGroupRecitationCollectionItemsRequest,
     AddGroupRecitationCollectionItemsResponse,
@@ -165,6 +167,31 @@ def cms_delete_collection_item(
         item_id=item_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@cms_group_recitation_collection_router.put(
+    "/{collection_id}/items/{item_id}/audio",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupRecitationCollectionDetailDTO,
+)
+async def cms_set_collection_item_audio(
+    group_id: UUID,
+    collection_id: UUID,
+    item_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    request: SetItemAudioRequest,
+) -> GroupRecitationCollectionDetailDTO:
+    """Set an item's ordered audio.
+
+    The array is the state: this links, unlinks and reorders in one call.
+    """
+    return await set_item_audio_service(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        collection_id=collection_id,
+        item_id=item_id,
+        asset_ids=request.asset_ids,
+    )
 
 
 @cms_group_recitation_collection_router.put(

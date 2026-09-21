@@ -1,7 +1,8 @@
 import asyncio
 import json
 import logging
-from typing import Annotated, Optional
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Dict, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
@@ -60,6 +61,7 @@ from pecha_api.chat.service import (
     update_room_profile_service,
 )
 from pecha_api.realtime.channel_fanout import SubscriberLagged
+from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
@@ -552,6 +554,422 @@ def remove_room_member(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# --- Live chat socket -------------------------------------------------------
+#
+# websocket_chat_live below is the route; everything here is one step of the
+# session it runs, kept out of it so each piece stays readable on its own.
+
+
+@dataclass(frozen=True)
+class _RoomTarget:
+    """Which room a live socket is for. Exactly one of the three is set, and
+    that is also what decides where the socket's messages are sent."""
+
+    group_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
+    receiver_id: Optional[UUID] = None
+
+    def is_single(self) -> bool:
+        return (
+            sum(
+                param is not None
+                for param in (self.group_id, self.event_id, self.receiver_id)
+            )
+            == 1
+        )
+
+
+@dataclass
+class _LiveSession:
+    """The state the Redis pump and the receive loop share: why the session is
+    ending, and a flag the loop can wait on so an idle socket notices too."""
+
+    room_unreachable: bool = False
+    lagged: bool = False
+    closed_remotely: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _error_event(detail: Any) -> Dict[str, Any]:
+    """The error frame for an HTTPException detail.
+
+    A structured detail (e.g. INAPPROPRIATE_LANGUAGE) already carries its own
+    code and message; anything else is reported under its string form."""
+    if isinstance(detail, dict) and "code" in detail:
+        return {"type": "error", **detail}
+    return {
+        "type": "error",
+        "code": detail if isinstance(detail, str) else "ERROR",
+        "message": detail if isinstance(detail, str) else str(detail),
+    }
+
+
+async def _reject_socket(
+    websocket: WebSocket, event: Dict[str, Any], reason: Optional[str] = None
+) -> None:
+    """Accept a socket only to tell the client why it cannot be used, then
+    close it. Accepting first is what lets the error frame arrive at all."""
+    await websocket.accept()
+    await websocket.send_json(event)
+    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=reason)
+
+
+async def _authenticate_socket(websocket: WebSocket, token: str) -> Optional[Users]:
+    """The user behind the token, or None once the socket has been rejected."""
+    try:
+        return await run_in_threadpool(validate_and_extract_user_details, token=token)
+    except HTTPException as auth_error:
+        logger.warning("WebSocket auth failed: %s", auth_error.detail)
+        await _reject_socket(
+            websocket,
+            {
+                "type": "error",
+                "code": "UNAUTHORIZED",
+                "message": str(auth_error.detail),
+            },
+            reason="Unauthorized",
+        )
+        return None
+
+
+def _resolve_room_id(target: _RoomTarget, user: Users) -> UUID:
+    """The socket's room, auto-created on first use like the HTTP routes.
+
+    Synchronous SQLAlchemy: callers offload it so a slow room lookup cannot
+    stall every other socket sharing this event loop."""
+    from pecha_api.db.database import SessionLocal
+    from pecha_api.chat.service import (
+        resolve_or_create_event_room,
+        resolve_or_create_group_room,
+        resolve_or_create_private_room,
+    )
+
+    with SessionLocal() as db:
+        if target.group_id is not None:
+            room = resolve_or_create_group_room(
+                db=db, group_id=target.group_id, user=user
+            )
+        elif target.event_id is not None:
+            room = resolve_or_create_event_room(
+                db=db, event_id=target.event_id, user=user
+            )
+        else:
+            room = resolve_or_create_private_room(
+                db=db, user=user, receiver_id=target.receiver_id
+            )
+        return room.id
+
+
+async def _open_room(
+    websocket: WebSocket, target: _RoomTarget, user: Users
+) -> Optional[UUID]:
+    """The room this socket serves, or None once it has been rejected."""
+    try:
+        return await run_in_threadpool(_resolve_room_id, target, user)
+    except HTTPException as resolve_error:
+        await _reject_socket(websocket, _error_event(resolve_error.detail))
+        return None
+
+
+def _assert_room_reachable(room_id: UUID, user_id: UUID) -> None:
+    """Re-check the room mid-session, for traffic that never reaches the
+    message services and so carries no gate of its own. Synchronous, so
+    callers offload it."""
+    from pecha_api.db.database import SessionLocal
+    from pecha_api.chat.service import _get_room_or_404, _require_active_member
+
+    with SessionLocal() as db:
+        # Carries the group-publication gate.
+        _get_room_or_404(db=db, room_id=room_id)
+        _require_active_member(db=db, room_id=room_id, user_id=user_id)
+
+
+def _persist_message(
+    target: _RoomTarget,
+    user: Users,
+    body: str,
+    parent_id: Optional[UUID],
+    kind: str,
+) -> ChatMessageDTO:
+    """Write the message through the same service the HTTP route uses.
+
+    A synchronous DB write plus a profanity scan, so callers run it off the
+    loop: one send must not pause every socket."""
+    if target.group_id is not None:
+        return send_group_message_service(
+            group_id=target.group_id,
+            user=user,
+            body=body,
+            parent_message_id=parent_id,
+            message_type=kind,
+        )
+    if target.event_id is not None:
+        return send_event_message_service(
+            event_id=target.event_id,
+            user=user,
+            body=body,
+            parent_message_id=parent_id,
+            message_type=kind,
+        )
+    return send_direct_message_service(
+        receiver_id=target.receiver_id,
+        user=user,
+        body=body,
+        parent_message_id=parent_id,
+        message_type=kind,
+    )
+
+
+def _is_room_closed_event(payload: str) -> bool:
+    """Published when the group is hidden, so every server drops its own
+    sockets for this room."""
+    try:
+        return json.loads(payload).get("type") == "room_closed"
+    except (ValueError, TypeError):
+        return False
+
+
+async def _pump_room_events(
+    websocket: WebSocket, subscriber, room_id: UUID, session: _LiveSession
+) -> None:
+    """Forward what is published to the room until the channel stops, the
+    socket goes away, or the room is closed under us."""
+    try:
+        while True:
+            try:
+                payload = await subscriber.get()
+            except SubscriberLagged:
+                # Messages are an ordered stream, so a gap the client cannot
+                # see is worse than a reconnect that refetches history.
+                logger.warning(
+                    "Chat socket for room %s fell behind; closing to force a resync",
+                    room_id,
+                )
+                session.lagged = True
+                session.closed_remotely.set()
+                return
+            if payload is None:
+                # Channel stopped (shutdown, or Redis went away).
+                return
+            try:
+                await websocket.send_text(payload)
+            except (ConnectionClosedOK, ConnectionClosedError):
+                return
+            if _is_room_closed_event(payload):
+                session.room_unreachable = True
+                session.closed_remotely.set()
+                return
+    except Exception as e:
+        logger.exception("Error listening to Redis: %s", e)
+
+
+async def _next_client_frame(
+    websocket: WebSocket, session: _LiveSession
+) -> Optional[Dict[str, Any]]:
+    """The client's next frame, or None if the room closed under us first.
+
+    Racing the two is what lets a hidden group drop idle sockets as well."""
+    receive_task = asyncio.create_task(websocket.receive_json())
+    closed_task = asyncio.create_task(session.closed_remotely.wait())
+    done, pending = await asyncio.wait(
+        {receive_task, closed_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    if closed_task in done:
+        receive_task.cancel()
+        return None
+    return receive_task.result()
+
+
+async def _handle_typing(
+    websocket: WebSocket,
+    broadcaster,
+    room_id: UUID,
+    user: Users,
+    session: _LiveSession,
+    data: Dict[str, Any],
+) -> bool:
+    """Fan a typing indicator out to the room. Ephemeral, never persisted."""
+    try:
+        await run_in_threadpool(_assert_room_reachable, room_id, user.id)
+        await broadcaster.broadcast_typing(
+            room_id,
+            user.id,
+            user.email,
+            is_typing=bool(data.get("is_typing", True)),
+        )
+    except HTTPException as e:
+        await websocket.send_json(_error_event(e.detail))
+        # Room no longer reachable: end the session.
+        session.room_unreachable = True
+        return False
+    except Exception as e:
+        logger.exception("Failed to broadcast typing indicator: %s", e)
+    return True
+
+
+async def _broadcast_new_message(
+    websocket: WebSocket, broadcaster, room_id: UUID, message_dto: ChatMessageDTO
+) -> None:
+    """Publish a stored message to the room. It is already persisted, so a
+    publish failure is reported to the sender and nothing more."""
+    try:
+        await broadcaster.broadcast_message(room_id, message_dto)
+    except Exception as e:
+        logger.exception(
+            "Failed to broadcast message %s to Redis: %s", message_dto.id, e
+        )
+        await websocket.send_json({
+            "type": "error",
+            "code": "BROADCAST_ERROR",
+            "message": f"Failed to broadcast message: {str(e)}",
+        })
+
+
+async def _handle_message(
+    websocket: WebSocket,
+    broadcaster,
+    target: _RoomTarget,
+    room_id: UUID,
+    user: Users,
+    session: _LiveSession,
+    data: Dict[str, Any],
+) -> bool:
+    """Store the client's message and publish it to the room."""
+    raw_parent_id = data.get("parent_message_id")
+    try:
+        parent_message_id = UUID(str(raw_parent_id)) if raw_parent_id else None
+    except (ValueError, TypeError):
+        await websocket.send_json({
+            "type": "error",
+            "code": "INVALID_PARENT_MESSAGE_ID",
+            "message": "parent_message_id must be a valid UUID",
+        })
+        return True
+
+    message_type = str(data.get("message_type") or ChatMessageType.TEXT.value).upper()
+    try:
+        message_dto = await run_in_threadpool(
+            _persist_message,
+            target,
+            user,
+            data.get("body", ""),
+            parent_message_id,
+            message_type,
+        )
+    except HTTPException as e:
+        logger.warning("Message send failed: %s", e.detail)
+        await websocket.send_json(_error_event(e.detail))
+        # 404 means the room is gone; other rejections (profanity, bad parent
+        # id) are per-message and keep the socket usable.
+        if e.status_code == status.HTTP_404_NOT_FOUND:
+            session.room_unreachable = True
+            return False
+        return True
+
+    await _broadcast_new_message(websocket, broadcaster, room_id, message_dto)
+    return True
+
+
+async def _handle_client_frame(
+    websocket: WebSocket,
+    broadcaster,
+    target: _RoomTarget,
+    room_id: UUID,
+    user: Users,
+    session: _LiveSession,
+    data: Dict[str, Any],
+) -> bool:
+    """Handle one frame from the client. Returning False ends the session."""
+    frame_type = data.get("type")
+    if frame_type == "typing":
+        return await _handle_typing(
+            websocket, broadcaster, room_id, user, session, data
+        )
+    if frame_type == "ping":
+        await websocket.send_json({"type": "pong"})
+        return True
+    if frame_type == "message":
+        return await _handle_message(
+            websocket, broadcaster, target, room_id, user, session, data
+        )
+    await websocket.send_json({
+        "type": "error",
+        "code": "INVALID_MESSAGE",
+        "message": "Only 'message', 'typing' and 'ping' type messages are supported",
+    })
+    return True
+
+
+async def _serve_client_frames(
+    websocket: WebSocket,
+    broadcaster,
+    target: _RoomTarget,
+    room_id: UUID,
+    user: Users,
+    session: _LiveSession,
+) -> None:
+    """Serve the client one frame at a time until either side ends it."""
+    while True:
+        data = await _next_client_frame(websocket, session)
+        if data is None:
+            return
+        if not await _handle_client_frame(
+            websocket, broadcaster, target, room_id, user, session, data
+        ):
+            return
+
+
+async def _close_ended_session(websocket: WebSocket, session: _LiveSession) -> None:
+    """Close a socket this server ended. One the client ended is already gone,
+    and closing that again is the failure this swallows."""
+    if session.room_unreachable:
+        # Ended by eviction, not by the client, so close it here.
+        close_code = status.WS_1008_POLICY_VIOLATION
+    elif session.lagged:
+        # Ended by us, not by the client: close so it reconnects and refetches
+        # the history it missed.
+        close_code = status.WS_1011_INTERNAL_ERROR
+    else:
+        return
+    try:
+        await websocket.close(code=close_code)
+    except Exception:
+        pass
+
+
+async def _run_live_session(
+    websocket: WebSocket,
+    broadcaster,
+    target: _RoomTarget,
+    room_id: UUID,
+    user: Users,
+) -> None:
+    """Join the room's live stream and serve the socket until it ends."""
+    await websocket.accept()
+    await websocket.send_json({"type": "room_info", "room_id": str(room_id)})
+    subscriber = await broadcaster.subscribe_to_room(room_id)
+    await broadcaster.add_connection(room_id, user.id, user.email, websocket)
+    await broadcaster.broadcast_presence(room_id)
+
+    session = _LiveSession()
+    redis_task = asyncio.create_task(
+        _pump_room_events(websocket, subscriber, room_id, session)
+    )
+    try:
+        await _serve_client_frames(
+            websocket, broadcaster, target, room_id, user, session
+        )
+    finally:
+        redis_task.cancel()
+        try:
+            await broadcaster.unsubscribe_from_room(room_id, subscriber)
+        except Exception as e:
+            logger.exception("Error unsubscribing from Redis: %s", e)
+        await _close_ended_session(websocket, session)
+
+
 @chat_router.websocket("/chat/live")
 async def websocket_chat_live(
     websocket: WebSocket,
@@ -559,7 +977,7 @@ async def websocket_chat_live(
     group_id: Optional[UUID] = Query(None),
     event_id: Optional[UUID] = Query(None),
     receiver_id: Optional[UUID] = Query(None),
-):
+) -> None:
     """Live chat stream for a room (WebSocket). Pass exactly one of group_id
     (group chat), event_id (an event's room) or receiver_id (DM) - the room is
     resolved/auto-created on connect.
@@ -581,17 +999,15 @@ async def websocket_chat_live(
       {"type": "presence", "count": N, "online": [{"user_id": "...", "email": "..."}]}
       {"type": "error", "code": "...", "message": "..."}
     """
-    user = None
-    room_id: Optional[UUID] = None
-
-    if sum(param is not None for param in (group_id, event_id, receiver_id)) != 1:
-        await websocket.accept()
-        await websocket.send_json({
+    target = _RoomTarget(
+        group_id=group_id, event_id=event_id, receiver_id=receiver_id
+    )
+    if not target.is_single():
+        await _reject_socket(websocket, {
             "type": "error",
             "code": "INVALID_PARAMS",
             "message": "Pass exactly one of group_id, event_id or receiver_id",
         })
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     try:
@@ -601,260 +1017,16 @@ async def websocket_chat_live(
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
+    user: Optional[Users] = None
+    room_id: Optional[UUID] = None
     try:
-        try:
-            user = await run_in_threadpool(validate_and_extract_user_details, token=token)
-        except HTTPException as auth_error:
-            logger.warning("WebSocket auth failed: %s", auth_error.detail)
-            await websocket.accept()
-            await websocket.send_json({
-                "type": "error",
-                "code": "UNAUTHORIZED",
-                "message": str(auth_error.detail),
-            })
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
+        user = await _authenticate_socket(websocket, token)
+        if user is None:
             return
-
-        from pecha_api.db.database import SessionLocal
-        from pecha_api.chat.service import (
-            _get_room_or_404,
-            _require_active_member,
-            resolve_or_create_event_room,
-            resolve_or_create_group_room,
-            resolve_or_create_private_room,
-        )
-
-        # Synchronous SQLAlchemy: offloaded so a slow room lookup cannot stall
-        # every other socket sharing this event loop.
-        def _resolve_room_id() -> UUID:
-            with SessionLocal() as db:
-                if group_id is not None:
-                    room = resolve_or_create_group_room(db=db, group_id=group_id, user=user)
-                elif event_id is not None:
-                    room = resolve_or_create_event_room(db=db, event_id=event_id, user=user)
-                else:
-                    room = resolve_or_create_private_room(db=db, user=user, receiver_id=receiver_id)
-                return room.id
-
-        try:
-            room_id = await run_in_threadpool(_resolve_room_id)
-        except HTTPException as resolve_error:
-            await websocket.accept()
-            await websocket.send_json({
-                "type": "error",
-                "code": resolve_error.detail if isinstance(resolve_error.detail, str) else "ERROR",
-                "message": str(resolve_error.detail),
-            })
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        room_id = await _open_room(websocket, target, user)
+        if room_id is None:
             return
-
-        await websocket.accept()
-        await websocket.send_json({"type": "room_info", "room_id": str(room_id)})
-        subscriber = await broadcaster.subscribe_to_room(room_id)
-        await broadcaster.add_connection(room_id, user.id, user.email, websocket)
-        await broadcaster.broadcast_presence(room_id)
-
-        # Tells the cleanup below to close the socket rather than leave it open.
-        room_unreachable = False
-        # Set when this socket fell so far behind that frames were dropped.
-        # Messages are an ordered stream, so a gap the client cannot see is
-        # worse than a reconnect that refetches history.
-        lagged = False
-        closed_remotely = asyncio.Event()
-
-        async def listen_redis():
-            nonlocal room_unreachable, lagged
-            try:
-                while True:
-                    try:
-                        payload = await subscriber.get()
-                    except SubscriberLagged:
-                        logger.warning(
-                            "Chat socket for room %s fell behind; closing to force a resync",
-                            room_id,
-                        )
-                        lagged = True
-                        closed_remotely.set()
-                        break
-                    if payload is None:
-                        # Channel stopped (shutdown, or Redis went away).
-                        break
-                    try:
-                        await websocket.send_text(payload)
-                    except (ConnectionClosedOK, ConnectionClosedError):
-                        break
-                    # Published when the group is hidden, so every server
-                    # drops its own sockets for this room.
-                    try:
-                        if json.loads(payload).get("type") == "room_closed":
-                            room_unreachable = True
-                            closed_remotely.set()
-                            break
-                    except (ValueError, TypeError):
-                        pass
-            except Exception as e:
-                logger.exception("Error listening to Redis: %s", e)
-
-        redis_task = asyncio.create_task(listen_redis())
-
-        try:
-            while True:
-                # Race the next frame against eviction, so a hidden group
-                # drops idle sockets too.
-                receive_task = asyncio.create_task(websocket.receive_json())
-                closed_task = asyncio.create_task(closed_remotely.wait())
-                done, pending = await asyncio.wait(
-                    {receive_task, closed_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                if closed_task in done:
-                    receive_task.cancel()
-                    break
-                data = receive_task.result()
-
-                if data.get("type") == "typing":
-                    def _assert_room_reachable() -> None:
-                        with SessionLocal() as db:
-                            # Carries the group-publication gate.
-                            _get_room_or_404(db=db, room_id=room_id)
-                            _require_active_member(db=db, room_id=room_id, user_id=user.id)
-
-                    try:
-                        await run_in_threadpool(_assert_room_reachable)
-                        await broadcaster.broadcast_typing(
-                            room_id,
-                            user.id,
-                            user.email,
-                            is_typing=bool(data.get("is_typing", True)),
-                        )
-                    except HTTPException as e:
-                        await websocket.send_json({
-                            "type": "error",
-                            "code": e.detail if isinstance(e.detail, str) else "ERROR",
-                            "message": e.detail if isinstance(e.detail, str) else str(e.detail),
-                        })
-                        # Room no longer reachable: end the session.
-                        room_unreachable = True
-                        break
-                    except Exception as e:
-                        logger.exception("Failed to broadcast typing indicator: %s", e)
-                    continue
-
-                if data.get("type") == "ping":
-                    await websocket.send_json({"type": "pong"})
-                    continue
-
-                if data.get("type") != "message":
-                    await websocket.send_json({
-                        "type": "error",
-                        "code": "INVALID_MESSAGE",
-                        "message": "Only 'message', 'typing' and 'ping' type messages are supported",
-                    })
-                    continue
-
-                raw_parent_id = data.get("parent_message_id")
-                try:
-                    parent_message_id = UUID(str(raw_parent_id)) if raw_parent_id else None
-                except (ValueError, TypeError):
-                    await websocket.send_json({
-                        "type": "error",
-                        "code": "INVALID_PARENT_MESSAGE_ID",
-                        "message": "parent_message_id must be a valid UUID",
-                    })
-                    continue
-
-                message_type = str(
-                    data.get("message_type") or ChatMessageType.TEXT.value
-                ).upper()
-
-                # Persisting a message is a synchronous DB write plus a profanity
-                # scan; run it off the loop so one send cannot pause every socket.
-                def _persist_message(
-                    body: str,
-                    parent_id: Optional[UUID],
-                    kind: str,
-                ) -> ChatMessageDTO:
-                    if group_id is not None:
-                        return send_group_message_service(
-                            group_id=group_id,
-                            user=user,
-                            body=body,
-                            parent_message_id=parent_id,
-                            message_type=kind,
-                        )
-                    if event_id is not None:
-                        return send_event_message_service(
-                            event_id=event_id,
-                            user=user,
-                            body=body,
-                            parent_message_id=parent_id,
-                            message_type=kind,
-                        )
-                    return send_direct_message_service(
-                        receiver_id=receiver_id,
-                        user=user,
-                        body=body,
-                        parent_message_id=parent_id,
-                        message_type=kind,
-                    )
-
-                try:
-                    message_dto = await run_in_threadpool(
-                        _persist_message,
-                        data.get("body", ""),
-                        parent_message_id,
-                        message_type,
-                    )
-                except HTTPException as e:
-                    logger.warning("Message send failed: %s", e.detail)
-                    if isinstance(e.detail, dict) and "code" in e.detail:
-                        # Structured rejection (e.g. INAPPROPRIATE_LANGUAGE) with
-                        # its own code/message fields
-                        await websocket.send_json({"type": "error", **e.detail})
-                    else:
-                        await websocket.send_json({
-                            "type": "error",
-                            "code": e.detail if isinstance(e.detail, str) else "ERROR",
-                            "message": e.detail if isinstance(e.detail, str) else str(e.detail),
-                        })
-                    # 404 means the room is gone; other rejections (profanity,
-                    # bad parent id) are per-message and keep the socket usable.
-                    if e.status_code == status.HTTP_404_NOT_FOUND:
-                        room_unreachable = True
-                        break
-                    continue
-
-                try:
-                    await broadcaster.broadcast_message(room_id, message_dto)
-                except Exception as e:
-                    logger.exception("Failed to broadcast message %s to Redis: %s", message_dto.id, e)
-                    await websocket.send_json({
-                        "type": "error",
-                        "code": "BROADCAST_ERROR",
-                        "message": f"Failed to broadcast message: {str(e)}",
-                    })
-
-        finally:
-            redis_task.cancel()
-            try:
-                await broadcaster.unsubscribe_from_room(room_id, subscriber)
-            except Exception as e:
-                logger.exception("Error unsubscribing from Redis: %s", e)
-            if room_unreachable:
-                # Ended by eviction, not by the client, so close it here.
-                try:
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-                except Exception:
-                    pass
-            elif lagged:
-                # Ended by us, not by the client: close so it reconnects and
-                # refetches the history it missed.
-                try:
-                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                except Exception:
-                    pass
+        await _run_live_session(websocket, broadcaster, target, room_id, user)
 
     except Exception as e:
         logger.exception("WebSocket error: %s", e)
