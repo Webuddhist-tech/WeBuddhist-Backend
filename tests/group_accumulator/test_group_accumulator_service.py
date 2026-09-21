@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+from typing import Any, Callable, List, Optional
 from uuid import uuid4
 from datetime import datetime
 from fastapi import HTTPException
@@ -28,6 +29,7 @@ from pecha_api.group_accumulator.group_accumulator_response_models import (
     SubmitGroupCountRequest,
     GroupAccumulatorLinkRequest,
     GroupAccumulatorMetadataDTO,
+    GroupAccumulatorDetailDTO,
 )
 from pecha_api.accumulator.accumulator_enums import GroupAccumulatorLinkType
 from pecha_api.plans.plans_enums import LanguageCode
@@ -1276,9 +1278,11 @@ class TestGroupAccumulatorMetadataAndLinks:
     """Tests for the per-language About text and the ordered link set."""
 
     @pytest.fixture
-    def detail_for(self):
+    def detail_for(self) -> Callable[..., GroupAccumulatorDetailDTO]:
         """Fetch the public detail DTO for an accumulator carrying `entries`."""
-        def _fetch(entries, language):
+        def _fetch(
+            entries: List[Any], language: Optional[str]
+        ) -> GroupAccumulatorDetailDTO:
             accumulator_id = uuid4()
             accumulator = MockGroupAccumulator(id=accumulator_id)
             accumulator.metadata_entries = entries
@@ -1579,8 +1583,12 @@ class TestGroupAccumulatorTitleTranslations:
     then EN, then whatever language is stored."""
 
     @pytest.fixture
-    def detail_for(self):
-        def _fetch(entries, language, column_title=None):
+    def detail_for(self) -> Callable[..., GroupAccumulatorDetailDTO]:
+        def _fetch(
+            entries: List[Any],
+            language: Optional[str],
+            column_title: Optional[str] = None,
+        ) -> GroupAccumulatorDetailDTO:
             accumulator_id = uuid4()
             accumulator = MockGroupAccumulator(id=accumulator_id, title=column_title)
             accumulator.metadata_entries = entries
@@ -1597,7 +1605,11 @@ class TestGroupAccumulatorTitleTranslations:
         return _fetch
 
     @staticmethod
-    def _entry(language, title=None, description=None):
+    def _entry(
+        language: LanguageCode,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> MagicMock:
         return MagicMock(language=language, title=title, description=description)
 
     def test_detail_resolves_title_for_language(self, detail_for):

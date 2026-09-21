@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from pecha_api.accumulator.accumulator_models import Accumulator
@@ -30,7 +30,7 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
 )
 
 
-def test_is_user_joined_group_accumulator_checks_join_table():
+def test_is_user_joined_group_accumulator_checks_join_table() -> None:
     db = MagicMock()
     group_accumulator_id = uuid4()
     user_id = uuid4()
@@ -43,7 +43,7 @@ def test_is_user_joined_group_accumulator_checks_join_table():
     )
 
 
-def test_is_user_joined_group_accumulator_false_when_no_join_row():
+def test_is_user_joined_group_accumulator_false_when_no_join_row() -> None:
     db = MagicMock()
     db.execute.return_value.first.return_value = None
 
@@ -54,7 +54,7 @@ def test_is_user_joined_group_accumulator_false_when_no_join_row():
     )
 
 
-def test_get_joined_group_accumulator_ids_by_user_reads_join_table():
+def test_get_joined_group_accumulator_ids_by_user_reads_join_table() -> None:
     db = MagicMock()
     joined_id = uuid4()
     query = MagicMock()
@@ -72,7 +72,7 @@ def test_get_joined_group_accumulator_ids_by_user_reads_join_table():
     db.query.assert_called_once()
 
 
-def test_remove_group_accumulator_joins_for_group_deletes_join_rows_only():
+def test_remove_group_accumulator_joins_for_group_deletes_join_rows_only() -> None:
     db = MagicMock()
     user_id = uuid4()
     group_id = uuid4()
@@ -87,7 +87,7 @@ def test_remove_group_accumulator_joins_for_group_deletes_join_rows_only():
     db.commit.assert_not_called()
 
 
-def test_get_group_accumulators_for_group_ids_empty_group_ids_returns_early():
+def test_get_group_accumulators_for_group_ids_empty_group_ids_returns_early() -> None:
     db = MagicMock()
 
     result = get_group_accumulators_for_group_ids(db=db, group_ids=[], limit=20)
@@ -96,7 +96,7 @@ def test_get_group_accumulators_for_group_ids_empty_group_ids_returns_early():
     db.query.assert_not_called()
 
 
-def test_get_group_accumulators_for_group_ids_without_exclude_ids():
+def test_get_group_accumulators_for_group_ids_without_exclude_ids() -> None:
     db = MagicMock()
     group_id = uuid4()
     accumulator = MagicMock()
@@ -118,7 +118,7 @@ def test_get_group_accumulators_for_group_ids_without_exclude_ids():
     query.filter.assert_called_once()
 
 
-def test_get_group_accumulators_for_group_ids_with_exclude_ids_applies_extra_filter():
+def test_get_group_accumulators_for_group_ids_with_exclude_ids_applies_extra_filter() -> None:
     db = MagicMock()
     group_id = uuid4()
     excluded_id = uuid4()
@@ -145,7 +145,7 @@ def test_get_group_accumulators_for_group_ids_with_exclude_ids_applies_extra_fil
 # rows, duplicates them in the count, or breaks pagination. These run the SQL.
 
 
-def _search_sessionmaker():
+def _search_sessionmaker() -> sessionmaker:
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -164,7 +164,7 @@ def _search_sessionmaker():
 
 
 def _add_accumulator(
-    db,
+    db: Session,
     group_id: UUID,
     title: Optional[str],
     metadata: Optional[List[Tuple[LanguageCode, Optional[str], Optional[str]]]] = None,
@@ -193,13 +193,13 @@ def _add_accumulator(
 
 
 @pytest.fixture
-def search_db():
+def search_db() -> Iterator[Session]:
     db = _search_sessionmaker()()
     yield db
     db.close()
 
 
-def test_search_matches_a_translated_title_only(search_db):
+def test_search_matches_a_translated_title_only(search_db: Session) -> None:
     """The term appears in no default title, only in a BO metadata row."""
     group_id = uuid4()
     translated = _add_accumulator(
@@ -226,7 +226,7 @@ def test_search_matches_a_translated_title_only(search_db):
     assert total == 1
 
 
-def test_search_still_matches_the_default_title(search_db):
+def test_search_still_matches_the_default_title(search_db: Session) -> None:
     """The OR's first branch: a row whose translations do not match at all."""
     group_id = uuid4()
     accumulator = _add_accumulator(
@@ -244,7 +244,7 @@ def test_search_still_matches_the_default_title(search_db):
     assert total == 1
 
 
-def test_search_does_not_match_metadata_descriptions(search_db):
+def test_search_does_not_match_metadata_descriptions(search_db: Session) -> None:
     """Only titles are searched; About text must not pull a row in."""
     group_id = uuid4()
     _add_accumulator(
@@ -262,7 +262,7 @@ def test_search_does_not_match_metadata_descriptions(search_db):
     assert total == 0
 
 
-def test_search_with_no_match_returns_nothing(search_db):
+def test_search_with_no_match_returns_nothing(search_db: Session) -> None:
     group_id = uuid4()
     _add_accumulator(
         search_db,
@@ -279,7 +279,7 @@ def test_search_with_no_match_returns_nothing(search_db):
     assert total == 0
 
 
-def test_search_counts_a_row_once_when_several_translations_match(search_db):
+def test_search_counts_a_row_once_when_several_translations_match(search_db: Session) -> None:
     """EXISTS, not a join: three matching metadata rows are still one result.
 
     A join would return the accumulator once per matching metadata row and
@@ -304,7 +304,7 @@ def test_search_counts_a_row_once_when_several_translations_match(search_db):
     assert total == 1
 
 
-def test_search_excludes_other_groups_and_deleted_rows(search_db):
+def test_search_excludes_other_groups_and_deleted_rows(search_db: Session) -> None:
     """The search filter is ANDed with the group and soft-delete filters."""
     group_id = uuid4()
     other_group_id = uuid4()
@@ -336,7 +336,7 @@ def test_search_excludes_other_groups_and_deleted_rows(search_db):
     assert total == 1
 
 
-def test_search_paginates_while_total_reports_every_match(search_db):
+def test_search_paginates_while_total_reports_every_match(search_db: Session) -> None:
     """`total` is the full match count, not the size of the returned page."""
     group_id = uuid4()
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
