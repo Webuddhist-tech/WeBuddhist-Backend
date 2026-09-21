@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional, Tuple, Type
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
@@ -42,6 +43,10 @@ from pecha_api.chat.response_models import (
     ChatRoomDTO,
     ChatRoomMembersResponse,
     ChatRoomsResponse,
+    ChatSocketFrame,
+    ChatSocketMessageFrame,
+    ChatSocketPingFrame,
+    ChatSocketTypingFrame,
     DeleteChatMessagesRequest,
     PrayerBatchResponse,
     PrayForMessagesRequest,
@@ -787,7 +792,7 @@ async def _handle_typing(
     room_id: UUID,
     user: Users,
     session: _LiveSession,
-    data: Dict[str, Any],
+    frame: ChatSocketTypingFrame,
 ) -> bool:
     """Fan a typing indicator out to the room. Ephemeral, never persisted."""
     try:
@@ -796,7 +801,7 @@ async def _handle_typing(
             room_id,
             user.id,
             user.email,
-            is_typing=bool(data.get("is_typing", True)),
+            is_typing=frame.is_typing,
         )
     except HTTPException as e:
         await websocket.send_json(_error_event(e.detail))
@@ -833,29 +838,17 @@ async def _handle_message(
     room_id: UUID,
     user: Users,
     session: _LiveSession,
-    data: Dict[str, Any],
+    frame: ChatSocketMessageFrame,
 ) -> bool:
     """Store the client's message and publish it to the room."""
-    raw_parent_id = data.get("parent_message_id")
-    try:
-        parent_message_id = UUID(str(raw_parent_id)) if raw_parent_id else None
-    except (ValueError, TypeError):
-        await websocket.send_json({
-            "type": "error",
-            "code": "INVALID_PARENT_MESSAGE_ID",
-            "message": "parent_message_id must be a valid UUID",
-        })
-        return True
-
-    message_type = str(data.get("message_type") or ChatMessageType.TEXT.value).upper()
     try:
         message_dto = await run_in_threadpool(
             _persist_message,
             target,
             user,
-            data.get("body", ""),
-            parent_message_id,
-            message_type,
+            frame.body,
+            frame.parent_message_id,
+            frame.message_type,
         )
     except HTTPException as e:
         logger.warning("Message send failed: %s", e.detail)
@@ -871,6 +864,51 @@ async def _handle_message(
     return True
 
 
+class _InvalidFrame(Exception):
+    """A frame the client has to be told about, carrying the error to send.
+
+    Only the socket knows which code a rejection maps to, so validation is
+    turned into one of the documented error frames here rather than letting a
+    raw ValidationError reach the client."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.event = {"type": "error", "code": code, "message": message}
+
+
+_CLIENT_FRAMES: Dict[str, Type[ChatSocketFrame]] = {
+    "ping": ChatSocketPingFrame,
+    "typing": ChatSocketTypingFrame,
+    "message": ChatSocketMessageFrame,
+}
+
+
+def _parse_client_frame(data: Any) -> ChatSocketFrame:
+    """Validate one received frame into its model, or raise _InvalidFrame.
+
+    Dispatch is on "type" before validation so an unknown frame keeps its own
+    error code rather than becoming a field error about a Literal."""
+    frame_type = data.get("type") if isinstance(data, dict) else None
+    model = _CLIENT_FRAMES.get(frame_type)
+    if model is None:
+        raise _InvalidFrame(
+            "INVALID_MESSAGE",
+            "Only 'message', 'typing' and 'ping' type messages are supported",
+        )
+    try:
+        return model.model_validate(data)
+    except ValidationError as validation_error:
+        raise _InvalidFrame(*_frame_rejection(frame_type, validation_error)) from validation_error
+
+
+def _frame_rejection(frame_type: str, error: ValidationError) -> Tuple[str, str]:
+    """The code and message for a frame that failed validation. A bad parent
+    id is the one a client hits in practice, so it keeps its own code."""
+    if any("parent_message_id" in err["loc"] for err in error.errors()):
+        return "INVALID_PARENT_MESSAGE_ID", "parent_message_id must be a valid UUID"
+    return "INVALID_MESSAGE", f"Invalid {frame_type} frame"
+
+
 async def _handle_client_frame(
     websocket: WebSocket,
     broadcaster,
@@ -878,27 +916,25 @@ async def _handle_client_frame(
     room_id: UUID,
     user: Users,
     session: _LiveSession,
-    data: Dict[str, Any],
+    data: Any,
 ) -> bool:
     """Handle one frame from the client. Returning False ends the session."""
-    frame_type = data.get("type")
-    if frame_type == "typing":
+    try:
+        frame = _parse_client_frame(data)
+    except _InvalidFrame as invalid:
+        await websocket.send_json(invalid.event)
+        return True
+
+    if isinstance(frame, ChatSocketTypingFrame):
         return await _handle_typing(
-            websocket, broadcaster, room_id, user, session, data
+            websocket, broadcaster, room_id, user, session, frame
         )
-    if frame_type == "ping":
+    if isinstance(frame, ChatSocketPingFrame):
         await websocket.send_json({"type": "pong"})
         return True
-    if frame_type == "message":
-        return await _handle_message(
-            websocket, broadcaster, target, room_id, user, session, data
-        )
-    await websocket.send_json({
-        "type": "error",
-        "code": "INVALID_MESSAGE",
-        "message": "Only 'message', 'typing' and 'ping' type messages are supported",
-    })
-    return True
+    return await _handle_message(
+        websocket, broadcaster, target, room_id, user, session, frame
+    )
 
 
 async def _serve_client_frames(

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator, model_serializer
@@ -362,3 +362,56 @@ class AddChatRoomMembersRequest(BaseModel):
         if not value:
             raise ValueError("user_ids must not be empty")
         return value
+
+
+class ChatSocketFrame(BaseModel):
+    """Base for the frames a client may send over /chat/live.
+
+    Unknown fields are ignored (Pydantic's default), so a newer client cannot
+    break an older server by sending a field it does not know about yet."""
+
+    type: str
+
+
+class ChatSocketPingFrame(ChatSocketFrame):
+    """{"type": "ping"} - heartbeat, answered with a pong."""
+
+    type: Literal["ping"]
+
+
+class ChatSocketTypingFrame(ChatSocketFrame):
+    """{"type": "typing", "is_typing": true|false} - ephemeral, not persisted."""
+
+    type: Literal["typing"]
+    is_typing: bool = True
+
+
+class ChatSocketMessageFrame(ChatSocketFrame):
+    """{"type": "message", "body": "...", ...} - a message to store and publish.
+
+    message_type stays a plain normalised string rather than the enum, because
+    an unknown value has to reach the message service so it answers with its
+    own error and the socket stays usable."""
+
+    type: Literal["message"]
+    body: str = ""
+    message_type: str = ChatMessageType.TEXT.value
+    parent_message_id: Optional[UUID] = None
+
+    @field_validator("body", mode="before")
+    @classmethod
+    def default_body(cls, value: Any) -> Any:
+        """An absent body and an explicit null mean the same thing here: the
+        message service decides what an empty body is worth."""
+        return "" if value is None else value
+
+    @field_validator("message_type", mode="before")
+    @classmethod
+    def normalise_message_type(cls, value: Any) -> str:
+        return str(value or ChatMessageType.TEXT.value).upper()
+
+    @field_validator("parent_message_id", mode="before")
+    @classmethod
+    def blank_parent_is_absent(cls, value: Any) -> Any:
+        """A reply carries a parent id; "" and null both mean "not a reply"."""
+        return value or None

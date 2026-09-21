@@ -12,7 +12,10 @@ from starlette import status
 from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
-from pecha_api.chat.response_models import ChatMessageDTO
+from pecha_api.chat.response_models import (
+    ChatMessageDTO,
+    ChatSocketMessageFrame,
+)
 from pecha_api.realtime.channel_fanout import SubscriberLagged
 
 client = TestClient(api)
@@ -603,3 +606,114 @@ class TestWebSocketEventRoomsAndPrayers:
 
         assert error["type"] == "error"
         assert error["code"] == "PRAYER_NOT_ALLOWED_IN_DM"
+
+
+class TestClientFrameValidation:
+    """The frames are Pydantic models now, so these pin the error each kind of
+    bad frame still produces and that only a room-level failure ends it."""
+
+    def test_bad_parent_message_id_keeps_its_own_code(self):
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "parent_message_id": "not-a-uuid"}
+                )
+                error = websocket.receive_json()
+                # Per-message rejection: the socket is still served.
+                websocket.send_json({"type": "ping"})
+                assert websocket.receive_json() == {"type": "pong"}
+
+        assert error["code"] == "INVALID_PARENT_MESSAGE_ID"
+        mock_send_group.assert_not_called()
+
+    def test_blank_parent_message_id_is_not_a_reply(self):
+        group_id = uuid4()
+        user = MockUser()
+
+        with _websocket_env(user=user) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = _message_dto()
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "parent_message_id": ""}
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["parent_message_id"] is None
+
+    def test_unknown_fields_are_ignored(self):
+        """A newer client must not break an older server."""
+        with _websocket_env() as (_, mock_send_group, _, _):
+            mock_send_group.return_value = _message_dto()
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "invented_later": {"a": 1}}
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["body"] == "hi"
+
+    def test_frame_without_a_type_is_rejected(self):
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"body": "hi"})
+                error = websocket.receive_json()
+
+        assert error["code"] == "INVALID_MESSAGE"
+        mock_send_group.assert_not_called()
+
+    def test_non_object_frame_is_rejected_without_ending_the_session(self):
+        """Previously this crashed the handler and closed the socket; it is an
+        ordinary bad frame."""
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(["not", "an", "object"])
+                error = websocket.receive_json()
+                websocket.send_json({"type": "ping"})
+                assert websocket.receive_json() == {"type": "pong"}
+
+        assert error["code"] == "INVALID_MESSAGE"
+        mock_send_group.assert_not_called()
+
+    def test_typing_defaults_to_true_when_the_flag_is_absent(self):
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(user=user, room=room) as (broadcaster, *_):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "typing"})
+                _sync(websocket)
+
+        assert broadcaster.broadcast_typing.await_args.kwargs["is_typing"] is True
+
+
+class TestChatSocketMessageFrame:
+    """The normalisation the socket used to do by hand, now on the model."""
+
+    def test_message_type_defaults_to_text_and_upper_cases(self):
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message"}
+        ).message_type == "TEXT"
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message", "message_type": "prayer"}
+        ).message_type == "PRAYER"
+
+    def test_unknown_message_type_is_left_for_the_service_to_reject(self):
+        """Not an enum on purpose: the message service answers with its own
+        error so the socket stays usable."""
+        frame = ChatSocketMessageFrame.model_validate(
+            {"type": "message", "message_type": "shout"}
+        )
+
+        assert frame.message_type == "SHOUT"
+
+    def test_null_body_reads_as_empty(self):
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message", "body": None}
+        ).body == ""
+
