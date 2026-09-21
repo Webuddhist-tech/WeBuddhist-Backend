@@ -231,8 +231,11 @@ class TestListGroupPeopleService:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_group.return_value = None
 
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            list_group_people_service(group_id=uuid4(), user=MockUser(), skip=0, limit=50)
+            list_group_people_service(group_id=group_id, user=user, skip=0, limit=50)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -307,8 +310,12 @@ class TestResolveOrCreateGroupRoom:
         group is hidden, so members cannot keep messaging through it."""
         mock_get_room.return_value = MagicMock()
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -325,8 +332,12 @@ class TestResolveOrCreateGroupRoom:
         mock_joined.return_value = False
         mock_following.return_value = False
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
@@ -336,8 +347,12 @@ class TestResolveOrCreateGroupRoom:
         mock_get_room.return_value = None
         mock_get_group.return_value = None
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -423,8 +438,10 @@ class TestResolveOrCreatePrivateRoom:
     def test_cannot_dm_self(self):
         user = MockUser()
 
+        db = MagicMock()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_private_room(db=MagicMock(), user=user, receiver_id=user.id)
+            resolve_or_create_private_room(db=db, user=user, receiver_id=user.id)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
 
@@ -432,8 +449,11 @@ class TestResolveOrCreatePrivateRoom:
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
+        user = MockUser()
+        receiver_id = uuid4()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_private_room(db=mock_db, user=MockUser(), receiver_id=uuid4())
+            resolve_or_create_private_room(db=mock_db, user=user, receiver_id=receiver_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -475,8 +495,10 @@ class TestHelpers:
     @patch('pecha_api.chat.service.get_room_by_id')
     def test_get_room_or_404_raises(self, mock_get):
         mock_get.return_value = None
+        db = MagicMock()
+        room_id = uuid4()
         with pytest.raises(HTTPException) as exc_info:
-            _get_room_or_404(db=MagicMock(), room_id=uuid4())
+            _get_room_or_404(db=db, room_id=room_id)
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
     @patch('pecha_api.chat.service.get_room_by_id')
@@ -488,8 +510,11 @@ class TestHelpers:
     @patch('pecha_api.chat.service.get_active_member')
     def test_require_active_member_raises(self, mock_get):
         mock_get.return_value = None
+        db = MagicMock()
+        room_id = uuid4()
+        user_id = uuid4()
         with pytest.raises(HTTPException) as exc_info:
-            _require_active_member(db=MagicMock(), room_id=uuid4(), user_id=uuid4())
+            _require_active_member(db=db, room_id=room_id, user_id=user_id)
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
     @patch('pecha_api.chat.service.get_active_member')
@@ -598,9 +623,11 @@ class TestRoomServices:
         mock_get_room.return_value = room
         mock_require.return_value = MagicMock(role="MEMBER")
 
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
             update_room_profile_service(
-                room_id=room.id, user=MockUser(), name="Nope", img_url=None
+                room_id=room.id, user=user, name="Nope", img_url=None
             )
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
@@ -653,8 +680,11 @@ class TestRoomIdRoutesRespectGroupStatus:
         history, reactions, reports and member ops close together."""
         mock_get_room.return_value = MagicMock(group_id=uuid4())
 
+        db = MagicMock()
+        room_id = uuid4()
+
         with pytest.raises(HTTPException) as exc_info:
-            _get_room_or_404(db=MagicMock(), room_id=uuid4())
+            _get_room_or_404(db=db, room_id=room_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 

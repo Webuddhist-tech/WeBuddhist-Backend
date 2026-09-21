@@ -323,7 +323,6 @@ def report_message(
 @chat_router.get(
     "/chat/groups/{group_id}/room",
     status_code=status.HTTP_200_OK,
-    response_model=ChatRoomDTO,
 )
 def get_group_chat_room(
     group_id: UUID,
