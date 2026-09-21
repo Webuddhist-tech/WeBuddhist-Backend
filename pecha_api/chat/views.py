@@ -326,7 +326,7 @@ def report_message(
 def get_group_chat_room(
     group_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> ChatRoomDTO:
     """Get a group's chat room by group id, creating it and joining the caller
     on first use. Open to anyone who joins or follows the group.
 
