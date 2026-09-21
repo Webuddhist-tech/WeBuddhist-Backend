@@ -58,6 +58,7 @@ from pecha_api.chat.service import (
     mark_room_read_service,
     update_room_profile_service,
 )
+from pecha_api.realtime.channel_fanout import SubscriberLagged
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
@@ -547,9 +548,11 @@ async def websocket_chat_live(
       {"type": "message", "body": "...", "message_type": "TEXT"|"PRAYER", "parent_message_id": "..."}
           (message_type defaults to TEXT; parent_message_id optional, makes it a reply)
       {"type": "typing", "is_typing": true|false}   (ephemeral, not persisted)
+      {"type": "ping"}                              (heartbeat; answered with pong)
 
     Server -> client events:
       {"type": "room_info", "room_id": "..."}   (sent once, right after connect)
+      {"type": "pong"}
       {"type": "message_created", "message": {...}}
       {"type": "message_deleted", "message_id": "...", "deleted_by": {...}, "deleted_at": "..."}
       {"type": "reactions_updated", "message_id": "...", "reactions": [{"emoji": "...", "count": N, "user_ids": [...]}]}
@@ -627,32 +630,48 @@ async def websocket_chat_live(
 
         await websocket.accept()
         await websocket.send_json({"type": "room_info", "room_id": str(room_id)})
-        pubsub = await broadcaster.subscribe_to_room(room_id)
+        subscriber = await broadcaster.subscribe_to_room(room_id)
         await broadcaster.add_connection(room_id, user.id, user.email, websocket)
         await broadcaster.broadcast_presence(room_id)
 
         # Tells the cleanup below to close the socket rather than leave it open.
         room_unreachable = False
+        # Set when this socket fell so far behind that frames were dropped.
+        # Messages are an ordered stream, so a gap the client cannot see is
+        # worse than a reconnect that refetches history.
+        lagged = False
         closed_remotely = asyncio.Event()
 
         async def listen_redis():
-            nonlocal room_unreachable
+            nonlocal room_unreachable, lagged
             try:
-                async for message in pubsub.listen():
-                    if message["type"] == "message":
-                        try:
-                            await websocket.send_text(message["data"])
-                        except (ConnectionClosedOK, ConnectionClosedError):
+                while True:
+                    try:
+                        payload = await subscriber.get()
+                    except SubscriberLagged:
+                        logger.warning(
+                            "Chat socket for room %s fell behind; closing to force a resync",
+                            room_id,
+                        )
+                        lagged = True
+                        closed_remotely.set()
+                        break
+                    if payload is None:
+                        # Channel stopped (shutdown, or Redis went away).
+                        break
+                    try:
+                        await websocket.send_text(payload)
+                    except (ConnectionClosedOK, ConnectionClosedError):
+                        break
+                    # Published when the group is hidden, so every server
+                    # drops its own sockets for this room.
+                    try:
+                        if json.loads(payload).get("type") == "room_closed":
+                            room_unreachable = True
+                            closed_remotely.set()
                             break
-                        # Published when the group is hidden, so every server
-                        # drops its own sockets for this room.
-                        try:
-                            if json.loads(message["data"]).get("type") == "room_closed":
-                                room_unreachable = True
-                                closed_remotely.set()
-                                break
-                        except (ValueError, TypeError):
-                            pass
+                    except (ValueError, TypeError):
+                        pass
             except Exception as e:
                 logger.exception("Error listening to Redis: %s", e)
 
@@ -703,11 +722,15 @@ async def websocket_chat_live(
                         logger.exception("Failed to broadcast typing indicator: %s", e)
                     continue
 
+                if data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
                 if data.get("type") != "message":
                     await websocket.send_json({
                         "type": "error",
                         "code": "INVALID_MESSAGE",
-                        "message": "Only 'message' and 'typing' type messages are supported",
+                        "message": "Only 'message', 'typing' and 'ping' type messages are supported",
                     })
                     continue
 
@@ -796,13 +819,20 @@ async def websocket_chat_live(
         finally:
             redis_task.cancel()
             try:
-                await pubsub.unsubscribe(f"chat:room:{room_id}:messages")
+                await broadcaster.unsubscribe_from_room(room_id, subscriber)
             except Exception as e:
                 logger.exception("Error unsubscribing from Redis: %s", e)
             if room_unreachable:
                 # Ended by eviction, not by the client, so close it here.
                 try:
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                except Exception:
+                    pass
+            elif lagged:
+                # Ended by us, not by the client: close so it reconnects and
+                # refetches the history it missed.
+                try:
+                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
                 except Exception:
                     pass
 

@@ -31,4 +31,6 @@ EXPOSE 8000
 
 # Command to run the application
 # SYNC_ALEMBIC_STAMP defaults to false; only enable for legacy local databases.
-CMD ["sh", "-c", "poetry run python scripts/sync_alembic_stamp.py && poetry run alembic upgrade heads && poetry run uvicorn pecha_api.app:api --host 0.0.0.0 --port 8000 --log-level debug"]
+# ws-ping-*: uvicorn defaults (20s/20s) drop a socket after 20s without a
+# pong, which a phone on a weak connection hits during an hours-long puja.
+CMD ["sh", "-c", "poetry run python scripts/sync_alembic_stamp.py && poetry run alembic upgrade heads && poetry run uvicorn pecha_api.app:api --host 0.0.0.0 --port 8000 --log-level debug --ws-ping-interval 30 --ws-ping-timeout 60"]
