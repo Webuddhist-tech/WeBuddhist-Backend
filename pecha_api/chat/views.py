@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from starlette import status
 from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.chat.chat_websocket import get_broadcaster
@@ -590,6 +591,10 @@ class _LiveSession:
 
     room_unreachable: bool = False
     lagged: bool = False
+    # The room's event stream stopped under us (shutdown, or the shared reader
+    # died and retired the channel). Nothing resubscribes, so the socket is
+    # closed rather than left connected and silent.
+    channel_lost: bool = False
     closed_remotely: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -732,11 +737,28 @@ def _is_room_closed_event(payload: str) -> bool:
         return False
 
 
+# What a send or receive raises once the client has gone away. Starlette
+# translates the websockets errors into WebSocketDisconnect, and guards a socket
+# it has already seen close with a plain RuntimeError, so every one of these
+# means the same thing here: the session is over, and that is not an error.
+_CLIENT_GONE = (
+    ConnectionClosedOK,
+    ConnectionClosedError,
+    WebSocketDisconnect,
+    RuntimeError,
+)
+
+
 async def _pump_room_events(
     websocket: WebSocket, subscriber, room_id: UUID, session: _LiveSession
 ) -> None:
     """Forward what is published to the room until the channel stops, the
-    socket goes away, or the room is closed under us."""
+    socket goes away, or the room is closed under us.
+
+    However this ends, it ends the session with it. A pump that has stopped is
+    a socket nothing will ever reach again, and a client holding one that still
+    looks connected has no way to tell: it would sit there silent, missing
+    every message, until someone reloaded the page."""
     try:
         while True:
             try:
@@ -749,21 +771,32 @@ async def _pump_room_events(
                     room_id,
                 )
                 session.lagged = True
-                session.closed_remotely.set()
                 return
             if payload is None:
-                # Channel stopped (shutdown, or Redis went away).
+                # Channel stopped: shutdown, or the shared reader broke and
+                # retired the room. Nothing resubscribes on our behalf, so the
+                # client has to come back for a fresh subscription.
+                logger.warning(
+                    "Room %s event stream stopped; closing its socket to resubscribe",
+                    room_id,
+                )
+                session.channel_lost = True
                 return
             try:
                 await websocket.send_text(payload)
-            except (ConnectionClosedOK, ConnectionClosedError):
+            except _CLIENT_GONE:
                 return
             if _is_room_closed_event(payload):
                 session.room_unreachable = True
-                session.closed_remotely.set()
                 return
     except Exception as e:
-        logger.exception("Error listening to Redis: %s", e)
+        logger.exception("Error forwarding events for room %s: %s", room_id, e)
+        session.channel_lost = True
+    finally:
+        # Whichever way this ended, the receive loop must stop waiting on a
+        # socket that has gone deaf. CancelledError lands here too, where the
+        # session is already on its way out and setting this changes nothing.
+        session.closed_remotely.set()
 
 
 async def _next_client_frame(
@@ -783,7 +816,12 @@ async def _next_client_frame(
     if closed_task in done:
         receive_task.cancel()
         return None
-    return receive_task.result()
+    try:
+        return receive_task.result()
+    except _CLIENT_GONE:
+        # The client hung up - a closed tab, a navigation, or an idle proxy
+        # dropping the connection. Ends the session; nothing to report.
+        return None
 
 
 async def _handle_typing(
@@ -962,7 +1000,7 @@ async def _close_ended_session(websocket: WebSocket, session: _LiveSession) -> N
     if session.room_unreachable:
         # Ended by eviction, not by the client, so close it here.
         close_code = status.WS_1008_POLICY_VIOLATION
-    elif session.lagged:
+    elif session.lagged or session.channel_lost:
         # Ended by us, not by the client: close so it reconnects and refetches
         # the history it missed.
         close_code = status.WS_1011_INTERNAL_ERROR

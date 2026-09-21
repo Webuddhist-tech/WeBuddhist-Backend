@@ -486,6 +486,10 @@ _CHAT_VIEWER_HTML = """
         let typingTimeout = null;
         let lastTypingSent = false;
         let myGroups = [];
+        let pingTimer = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let liveQuery = null;
 
         const tokenSection = document.getElementById("tokenSection");
         const tokenInput = document.getElementById("tokenInput");
@@ -738,11 +742,7 @@ _CHAT_VIEWER_HTML = """
         }
 
         function connect(queryParam, title) {
-            if (ws) {
-                ws.onclose = null;
-                ws.close();
-                ws = null;
-            }
+            closeSocket();
             roomId = null;
             lastTypingSent = false;
             cancelReply();
@@ -756,14 +756,25 @@ _CHAT_VIEWER_HTML = """
             addBackButton();
             updateStatus(false, "Connecting...");
 
+            liveQuery = queryParam;
+            reconnectDelay = 1000;
+            openSocket();
+        }
+
+        /* A socket can end without the client doing anything: an idle proxy, a
+           server restart, or the room's event stream being retired. Nothing
+           arrives after that, so reopen it - room_info refetches the history
+           that was missed while it was down. */
+        function openSocket() {
             const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
             const encodedToken = encodeURIComponent(token);
-            const wsUrl = `${protocol}//${window.location.host}/api/v1/chat/live?token=${encodedToken}&${queryParam}`;
+            const wsUrl = `${protocol}//${window.location.host}/api/v1/chat/live?token=${encodedToken}&${liveQuery}`;
 
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 updateStatus(true, "Connected");
+                startHeartbeat();
             };
 
             ws.onmessage = (event) => {
@@ -775,6 +786,10 @@ _CHAT_VIEWER_HTML = """
                 }
 
                 if (message.type === "room_info") {
+                    // Only a joined room resets the backoff. A rejection is
+                    // accepted before it is closed, so onopen fires for those
+                    // too and resetting there would retry every second.
+                    reconnectDelay = 1000;
                     roomId = message.room_id;
                     messagesSection.innerHTML = "";
                     loadHistory();
@@ -798,9 +813,61 @@ _CHAT_VIEWER_HTML = """
                 updateStatus(false, "Connection error");
             };
 
-            ws.onclose = () => {
-                updateStatus(false, "Disconnected");
+            ws.onclose = (event) => {
+                stopHeartbeat();
+                ws = null;
+                if (event.code === 1008) {
+                    // Rejected: unauthorized, or no longer in this room.
+                    // Retrying cannot change that, and the error frame that
+                    // came just before it says why.
+                    liveQuery = null;
+                    updateStatus(false, "Disconnected");
+                    return;
+                }
+                scheduleReconnect();
             };
+        }
+
+        function scheduleReconnect() {
+            if (!liveQuery) return;
+            const delay = reconnectDelay;
+            reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+            updateStatus(false, `Disconnected - retrying in ${Math.round(delay / 1000)}s`);
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(() => {
+                updateStatus(false, "Reconnecting...");
+                openSocket();
+            }, delay);
+        }
+
+        /* Both this server and the proxies in front of it drop a socket that
+           has been silent, so say something while idle. */
+        function startHeartbeat() {
+            stopHeartbeat();
+            pingTimer = setInterval(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "ping" }));
+                }
+            }, 30000);
+        }
+
+        function stopHeartbeat() {
+            clearInterval(pingTimer);
+            pingTimer = null;
+        }
+
+        /* Leaving a room on purpose: stop the reconnect loop, not just the
+           socket, or it would reopen the chat the tester just left. */
+        function closeSocket() {
+            liveQuery = null;
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            stopHeartbeat();
+            if (ws) {
+                ws.onclose = null;
+                ws.close();
+                ws = null;
+            }
         }
 
         function addBackButton() {
@@ -816,11 +883,7 @@ _CHAT_VIEWER_HTML = """
         }
 
         function goBackToLobby() {
-            if (ws) {
-                ws.onclose = null;
-                ws.close();
-                ws = null;
-            }
+            closeSocket();
             roomId = null;
             cancelReply();
             closeEmojiPicker();
