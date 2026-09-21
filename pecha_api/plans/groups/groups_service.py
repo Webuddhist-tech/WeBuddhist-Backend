@@ -60,6 +60,7 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
     get_joined_group_accumulator_ids_by_user,
     remove_group_accumulator_joins_for_group,
 )
+from pecha_api.chat.repository import get_room_by_group_id
 from pecha_api.chat.service import leave_group_chat_room
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
 from pecha_api.plans.groups.group_ban_guard import (
@@ -727,6 +728,7 @@ def _group_to_detail(
     user_id: Optional[UUID] = None,
     teaser: bool = False,
     my_join_request_status: Optional[str] = None,
+    chat_room_id: Optional[UUID] = None,
 ) -> AuthorGroupDetailDTO:
     if teaser:
         db = None
@@ -771,6 +773,9 @@ def _group_to_detail(
             if public and my_join_request_status
             else {}
         ),
+        # Only the public DTO carries it: the CMS view is an author's, not a
+        # chat participant's.
+        **({"chat_room_id": chat_room_id} if public else {}),
     )
 
 
@@ -934,6 +939,28 @@ def delete_author_group(token: str, group_id: UUID) -> None:
         update_group(db=db, group=group)
 
 
+def _chat_room_id_for_viewer(
+    db: Session, group_id: UUID, user_id: Optional[UUID]
+) -> Optional[UUID]:
+    """The group's chat room id, for a caller who can actually open it.
+
+    Joiners and followers both get one, because both may chat (the same gate
+    the chat routes apply). Read-only on purpose: the room is created on first
+    use by the chat routes, so opening a group page never creates one, nor
+    makes the viewer its creator. None means there is nothing for this caller
+    to open yet - they are anonymous, outside the group, or nobody has started
+    the chat."""
+    if user_id is None:
+        return None
+    eligible = is_user_joined_group(
+        db=db, group_id=group_id, user_id=user_id
+    ) or is_user_following_group(db=db, group_id=group_id, user_id=user_id)
+    if not eligible:
+        return None
+    room = get_room_by_group_id(db=db, group_id=group_id)
+    return room.id if room is not None else None
+
+
 def get_author_group_detail(
     group_id: UUID,
     language: Optional[str] = None,
@@ -972,6 +999,9 @@ def get_author_group_detail(
             user_id=user_id,
             teaser=teaser,
             my_join_request_status=join_request_status,
+            chat_room_id=_chat_room_id_for_viewer(
+                db=db, group_id=group_id, user_id=user_id
+            ),
         )
 
 
