@@ -125,30 +125,78 @@ def _build_detail_user_dto(
     )
 
 
-def _metadata_language(entry) -> str:
-    language = entry.language
+def _language_code(language) -> str:
     return language.value if hasattr(language, "value") else str(language)
 
 
-def _resolve_description(group_accumulator, language: Optional[str]) -> Optional[str]:
-    """Falls back to EN when the requested language has no entry."""
-    entries = list(getattr(group_accumulator, "metadata_entries", None) or [])
+def _metadata_language(entry) -> str:
+    return _language_code(entry.language)
+
+
+def _resolve_metadata_value(
+    group_accumulator,
+    language: Optional[str],
+    attribute: str,
+) -> Optional[str]:
+    """The requested language, else EN, else whatever language is stored.
+
+    Entries with nothing in ``attribute`` are skipped first, so a title-only
+    translation never hides the English description (or the other way round)."""
+    entries = [
+        entry
+        for entry in (getattr(group_accumulator, "metadata_entries", None) or [])
+        if getattr(entry, attribute, None)
+    ]
     if not entries:
         return None
-    matched = filter_by_language_with_fallback(
-        entries=entries,
-        language=language or DEFAULT_FALLBACK_LANGUAGE,
-        language_of=_metadata_language,
-    )
-    if not matched:
+
+    if language:
+        matched = filter_by_language_with_fallback(
+            entries=entries,
+            language=language,
+            language_of=_metadata_language,
+        )
+        if matched:
+            return getattr(matched[0], attribute)
+
+    fallback = DEFAULT_FALLBACK_LANGUAGE.upper()
+    for entry in entries:
+        if _metadata_language(entry).upper() == fallback:
+            return getattr(entry, attribute)
+    return getattr(entries[0], attribute)
+
+
+def _resolve_description(group_accumulator, language: Optional[str]) -> Optional[str]:
+    return _resolve_metadata_value(group_accumulator, language, "description")
+
+
+def _resolve_title(group_accumulator, language: Optional[str]) -> Optional[str]:
+    """Per-language title, falling back to the default stored on the parent row
+    for accumulators created before titles were translated."""
+    resolved = _resolve_metadata_value(group_accumulator, language, "title")
+    return resolved if resolved else group_accumulator.title
+
+
+def _default_metadata_title(
+    metadata: Optional[List[GroupAccumulatorMetadataDTO]],
+) -> Optional[str]:
+    """The title to keep on ``group_accumulators.title``: EN when it is being
+    written, else the first entry carrying a title. Search, list views and the
+    modules reading that column all stay on this single value."""
+    titled = [entry for entry in (metadata or []) if (entry.title or "").strip()]
+    if not titled:
         return None
-    return matched[0].description
+    for entry in titled:
+        if _language_code(entry.language).upper() == DEFAULT_FALLBACK_LANGUAGE.upper():
+            return entry.title
+    return titled[0].title
 
 
 def _convert_metadata_entries(group_accumulator) -> List[GroupAccumulatorMetadataDTO]:
     return [
         GroupAccumulatorMetadataDTO(
             language=entry.language,
+            title=entry.title,
             description=entry.description,
         )
         for entry in (getattr(group_accumulator, "metadata_entries", None) or [])
@@ -177,6 +225,7 @@ def _build_metadata_entries(
     return [
         GroupAccumulatorMetadata(
             id=uuid4(),
+            title=entry.title,
             description=entry.description,
             language=entry.language,
         )
@@ -234,6 +283,13 @@ def _apply_update_request(
         if value is not None:
             setattr(group_accumulator, field, value)
 
+    # An explicit `title` wins; otherwise the default title follows the
+    # translations being written.
+    if request.title is None:
+        default_title = _default_metadata_title(request.metadata)
+        if default_title is not None:
+            group_accumulator.title = default_title
+
     _apply_metadata_and_links(
         db,
         group_accumulator,
@@ -270,7 +326,7 @@ def _create_with_children(
         db=db,
         group_id=group_id,
         accumulator_id=request.accumulator_id,
-        title=request.title,
+        title=request.title or _default_metadata_title(request.metadata),
         image_key=request.image_key,
         target_count=request.target_count,
         start_date=request.start_date,
@@ -334,7 +390,7 @@ def _convert_to_dto(
         text_id=preset_accumulator.text_id if preset_accumulator else None,
         mantra_id=preset_accumulator.mantra_id if preset_accumulator else None,
         group_id=group_accumulator.group_id,
-        title=group_accumulator.title,
+        title=_resolve_title(group_accumulator, language),
         image=get_image_url(group_accumulator.image_key),
         image_key=group_accumulator.image_key,
         target_count=group_accumulator.target_count,
@@ -374,7 +430,7 @@ def _convert_to_detail_dto(
         text_id=preset_accumulator.text_id if preset_accumulator else None,
         mantra_id=preset_accumulator.mantra_id if preset_accumulator else None,
         group_id=group_accumulator.group_id,
-        title=group_accumulator.title,
+        title=_resolve_title(group_accumulator, language),
         image=get_image_url(group_accumulator.image_key),
         image_key=group_accumulator.image_key,
         target_count=group_accumulator.target_count,

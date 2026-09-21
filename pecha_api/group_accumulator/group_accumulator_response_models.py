@@ -16,6 +16,7 @@ class GroupAccumulatorMemberSortBy(str, Enum):
 
 class GroupAccumulatorMetadataDTO(BaseModel):
     language: LanguageCode
+    title: Optional[str] = None
     description: Optional[str] = None
 
 
@@ -54,7 +55,11 @@ class CreateGroupAccumulatorRequest(BaseModel):
     end_date: Optional[datetime] = None
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="Per-language About text. Replaces the full set; [] clears it.",
+        description=(
+            "Per-language title and About text. Replaces the full set; [] clears it. "
+            "The EN entry's title (or the first translated one) is stored as the "
+            "default title when `title` is omitted."
+        ),
     )
     links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
         None,
@@ -76,7 +81,11 @@ class UpdateGroupAccumulatorRequest(BaseModel):
     end_date: Optional[datetime] = None
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="Per-language About text. Replaces the full set; [] clears it. Omit to leave unchanged.",
+        description=(
+            "Per-language title and About text. Replaces the full set; [] clears it. "
+            "Omit to leave unchanged. The EN entry's title (or the first translated "
+            "one) is stored as the default title when `title` is omitted."
+        ),
     )
     links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
         None,
@@ -104,7 +113,10 @@ class GroupAccumulatorDTO(BaseModel):
         description="Mantra ID from the linked preset accumulator, if any",
     )
     group_id: UUID
-    title: Optional[str] = None
+    title: Optional[str] = Field(
+        None,
+        description="Title resolved for the requested language, falling back to EN then any stored language",
+    )
     image: Optional[ImageUrlModel] = None
     image_key: Optional[str] = None
     target_count: Optional[int] = None
@@ -112,11 +124,11 @@ class GroupAccumulatorDTO(BaseModel):
     end_date: Optional[datetime] = None
     description: Optional[str] = Field(
         None,
-        description="About text resolved for the requested language, falling back to EN",
+        description="About text resolved for the requested language, falling back to EN then any stored language",
     )
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads and writes only.",
+        description="All per-language title/About entries. Returned on CMS reads and writes only.",
     )
     links: List[GroupAccumulatorLinkDTO] = Field(
         default_factory=list,
@@ -175,7 +187,10 @@ class GroupAccumulatorDetailDTO(BaseModel):
         description="Mantra ID from the linked preset accumulator, if any",
     )
     group_id: UUID
-    title: Optional[str] = None
+    title: Optional[str] = Field(
+        None,
+        description="Title resolved for the requested language, falling back to EN then any stored language",
+    )
     image: Optional[ImageUrlModel] = None
     image_key: Optional[str] = None
     target_count: Optional[int] = None
@@ -183,11 +198,11 @@ class GroupAccumulatorDetailDTO(BaseModel):
     end_date: Optional[datetime] = None
     description: Optional[str] = Field(
         None,
-        description="About text resolved for the requested language, falling back to EN",
+        description="About text resolved for the requested language, falling back to EN then any stored language",
     )
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads only.",
+        description="All per-language title/About entries. Returned on CMS reads only.",
     )
     links: List[GroupAccumulatorLinkDTO] = Field(
         default_factory=list,
