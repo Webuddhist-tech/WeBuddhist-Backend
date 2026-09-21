@@ -123,6 +123,43 @@ class TestSendGroupMessage:
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
+class TestGetGroupChatRoom:
+
+    @patch('pecha_api.chat.views.get_group_room_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_returns_the_room_for_a_group_id(self, mock_validate, mock_service):
+        client = get_client()
+        room = _room_dto()
+        mock_validate.return_value = MagicMock()
+        mock_service.return_value = room
+
+        response = client.get(f"/chat/groups/{room.group_id}/room", headers=AUTH_HEADERS)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["id"] == str(room.id)
+        assert mock_service.call_args.kwargs["group_id"] == room.group_id
+
+    @patch('pecha_api.chat.views.get_group_room_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_propagates_forbidden_from_service(self, mock_validate, mock_service):
+        client = get_client()
+        mock_validate.return_value = MagicMock()
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="not eligible"
+        )
+
+        response = client.get(f"/chat/groups/{uuid4()}/room", headers=AUTH_HEADERS)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_requires_auth(self):
+        client = get_client()
+
+        response = client.get(f"/chat/groups/{uuid4()}/room")
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
 class TestListGroupPeople:
 
     @patch('pecha_api.chat.views.list_group_people_service')

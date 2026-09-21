@@ -52,6 +52,7 @@ from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.service import (
     _sender_name,
     get_event_room_service,
+    get_group_room_service,
     get_room_detail_service,
     list_group_people_service,
     list_my_rooms_service,
@@ -315,6 +316,25 @@ def report_message(
         description=request.description,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@chat_router.get(
+    "/chat/groups/{group_id}/room",
+    status_code=status.HTTP_200_OK,
+    response_model=ChatRoomDTO,
+)
+def get_group_chat_room(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Get a group's chat room by group id, creating it and joining the caller
+    on first use. Open to anyone who joins or follows the group.
+
+    Use this to get a room_id for the message routes without going through the
+    inbox: someone who rejoined the group is still marked as having left the
+    room, so it does not appear in /chat/rooms until this re-activates them."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    return get_group_room_service(group_id=group_id, user=user)
 
 
 @chat_router.post(

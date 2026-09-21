@@ -569,6 +569,19 @@ def get_room_detail_service(room_id: UUID, user: Users) -> ChatRoomDTO:
         return build_room_dto(db=db, room=room, viewer_id=user.id)
 
 
+def get_group_room_service(group_id: UUID, user: Users) -> ChatRoomDTO:
+    """The group's chat room, created on first use, with the caller joined.
+
+    Lets a client open a group's room straight from the group id, without
+    first finding it in the inbox. That matters for someone who rejoined the
+    group: their old membership row is still marked left, so the room is
+    missing from list_my_rooms until something re-activates it - resolving
+    through here both hands back the room id and puts them back in it."""
+    with SessionLocal() as db:
+        room = resolve_or_create_group_room(db=db, group_id=group_id, user=user)
+        return build_room_dto(db=db, room=room, viewer_id=user.id)
+
+
 def get_event_room_service(event_id: UUID, user: Users) -> ChatRoomDTO:
     """The event's chat room, created on first use, with the caller joined.
 

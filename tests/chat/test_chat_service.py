@@ -18,6 +18,7 @@ from pecha_api.chat.service import (
     _require_active_member,
     build_message_dto,
     build_room_dto,
+    get_group_room_service,
     get_room_detail_service,
     leave_group_chat_room,
     list_group_people_service,
@@ -277,6 +278,28 @@ class TestResolveOrCreateGroupRoom:
 
         assert result is existing_room
 
+    @patch('pecha_api.chat.service.is_user_following_group', return_value=False)
+    @patch('pecha_api.chat.service.is_user_joined_group', return_value=True)
+    @patch('pecha_api.chat.service.get_member')
+    @patch('pecha_api.chat.service.is_group_id_published', return_value=True)
+    @patch('pecha_api.chat.service.get_room_by_group_id')
+    def test_rejoined_member_is_reactivated(
+        self, mock_get_room, _mock_published, mock_get_member, _mock_joined, _mock_following
+    ):
+        """Rejoining the group does not clear the chat membership's left_at, so
+        the room stays out of the inbox until something resolves it again."""
+        existing_room = MagicMock(id=uuid4())
+        mock_get_room.return_value = existing_room
+        member = MagicMock(left_at=datetime.now(tz.utc))
+        mock_get_member.return_value = member
+
+        result = resolve_or_create_group_room(
+            db=MagicMock(), group_id=uuid4(), user=MockUser()
+        )
+
+        assert result is existing_room
+        assert member.left_at is None
+
     @patch('pecha_api.chat.service.is_group_id_published', return_value=False)
     @patch('pecha_api.chat.service.get_room_by_group_id')
     def test_existing_room_rejected_when_group_hidden(self, mock_get_room, _mock_published):
@@ -478,6 +501,26 @@ class TestHelpers:
 
 
 class TestRoomServices:
+
+    @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_or_create_group_room')
+    @patch('pecha_api.chat.service.SessionLocal')
+    def test_get_group_room_service_resolves_by_group_id(
+        self, mock_session, mock_resolve, mock_build
+    ):
+        """A client with only a group id can get the room id - and, for someone
+        who rejoined, get put back into the room on the way."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+        mock_resolve.return_value = MockRoom(group_id=group_id)
+        mock_build.return_value = MagicMock()
+
+        result = get_group_room_service(group_id=group_id, user=user)
+
+        assert result is mock_build.return_value
+        assert mock_resolve.call_args.kwargs["group_id"] == group_id
+        assert mock_resolve.call_args.kwargs["user"] is user
 
     @patch('pecha_api.chat.service.build_room_dto')
     @patch('pecha_api.chat.service._require_active_member')
