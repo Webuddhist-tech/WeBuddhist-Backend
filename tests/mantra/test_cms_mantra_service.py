@@ -181,7 +181,7 @@ class TestUploadMantraImage:
     @patch("pecha_api.mantra.mantra_service.validate_file")
     @patch("pecha_api.mantra.mantra_service.SessionLocal")
     @patch("pecha_api.mantra.mantra_service.get_mantra_by_id")
-    @patch("pecha_api.mantra.mantra_service.validate_and_extract_author_details")
+    @patch("pecha_api.mantra.mantra_service.validate_cms_author_details")
     def test_upload_mantra_image_success(
         self, mock_validate_auth, mock_get_mantra, mock_session, mock_validate_file, mock_prepare_upload
     ):
@@ -206,7 +206,7 @@ class TestUploadMantraImage:
     @patch("pecha_api.mantra.mantra_service.validate_file")
     @patch("pecha_api.mantra.mantra_service.SessionLocal")
     @patch("pecha_api.mantra.mantra_service.get_mantra_by_id")
-    @patch("pecha_api.mantra.mantra_service.validate_and_extract_author_details")
+    @patch("pecha_api.mantra.mantra_service.validate_cms_author_details")
     def test_upload_mantra_image_mantra_not_found(
         self, mock_validate_auth, mock_get_mantra, mock_session, mock_validate_file
     ):
@@ -218,3 +218,17 @@ class TestUploadMantraImage:
             upload_mantra_image(token="token", mantra_id=uuid4(), file=MagicMock())
 
         assert exc_info.value.status_code == 404
+
+    @patch("pecha_api.mantra.mantra_service.validate_cms_author_details")
+    def test_upload_mantra_image_rejects_inactive_author(self, mock_validate_auth):
+        """Upload must use the same active-author check as create/update, not
+        just token validation - an inactive author should be rejected here too."""
+        mock_validate_auth.side_effect = HTTPException(
+            status_code=403,
+            detail="Author is not active",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            upload_mantra_image(token="token", mantra_id=uuid4(), file=MagicMock())
+
+        assert exc_info.value.status_code == 403

@@ -8,7 +8,7 @@ from ..accumulator.accumulator_repository import get_mala_image_by_id
 from ..accumulator.accumulator_service import generate_mala_image_presigned_url
 from ..accumulator.response_message import NOT_FOUND, MANTRA_NOT_FOUND
 from ..db.database import SessionLocal
-from ..plans.authors.plan_authors_service import safe_get_image_url, validate_and_extract_author_details, validate_cms_author_details
+from ..plans.authors.plan_authors_service import safe_get_image_url, validate_cms_author_details
 from ..plans.media.media_response_models import ImageUrlModel, PlanUploadResponse
 from ..plans.media.media_services import prepare_image_upload, validate_file
 from ..plans.response_message import IMAGE_UPLOAD_SUCCESS
@@ -32,7 +32,7 @@ def resolve_deity_image(mantra: Optional[Mantra]) -> Optional[ImageUrlModel]:
     return safe_get_image_url(mantra.deity_image, resource_id=mantra.id, resource_type="mantra")
 
 
-def _build_mantra_dto(mantra, language: Optional[str]) -> MantraDTO:
+def _build_mantra_dto(mantra: Mantra, language: Optional[str]) -> MantraDTO:
     entries = mantra.metadata_entries
     if language:
         language_upper = language.upper()
@@ -70,7 +70,7 @@ def get_mantras_service(
         )
 
 
-def _build_cms_mantra_dto(mantra) -> CMSMantraDTO:
+def _build_cms_mantra_dto(mantra: Mantra) -> CMSMantraDTO:
     base = _build_mantra_dto(mantra, language=None)
     return CMSMantraDTO(**base.__dict__, deity_image_key=mantra.deity_image)
 
@@ -115,7 +115,7 @@ def update_mantra_service(token: str, mantra_id: uuid.UUID, request: UpdateMantr
 
 
 def upload_mantra_image(token: str, mantra_id: uuid.UUID, file: UploadFile) -> PlanUploadResponse:
-    validate_and_extract_author_details(token=token)
+    validate_cms_author_details(token=token)
     validate_file(file)
 
     with SessionLocal() as db:

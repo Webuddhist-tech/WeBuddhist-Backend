@@ -75,7 +75,7 @@ def update_mantra_endpoint(
     status_code=status.HTTP_201_CREATED,
     response_model=PlanUploadResponse,
 )
-async def upload_mantra_image_endpoint(
+def upload_mantra_image_endpoint(
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     mantra_id: UUID = Query(...),
     file: UploadFile = File(...),
