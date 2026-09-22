@@ -858,3 +858,35 @@ def test_retrieve_client_info():
         assert props.client_id == "test-client-id"
         assert props.domain == "test-domain"
         assert props.audience == "test-audience"
+
+
+def test_create_user_request_treats_blank_identifiers_as_absent() -> None:
+    """`email` and `phone_number` are UNIQUE columns: '' would claim the one
+    ''-slot in the table and make every later blank collide as a duplicate."""
+    from pecha_api.auth.auth_models import CreateUserRequest
+
+    request = CreateUserRequest(
+        firstname="Webuddhist",
+        lastname="_user_123456",
+        email="someone@example.com",
+        password="",
+        phone_number="",
+    )
+
+    assert request.phone_number is None
+    assert request.password is None
+    assert request.email == "someone@example.com"
+
+
+def test_create_user_request_keeps_real_identifiers() -> None:
+    from pecha_api.auth.auth_models import CreateUserRequest
+
+    request = CreateUserRequest(
+        firstname="Webuddhist",
+        lastname="_user_123456",
+        email="",
+        phone_number="+15551234567",
+    )
+
+    assert request.email is None
+    assert request.phone_number == "+15551234567"

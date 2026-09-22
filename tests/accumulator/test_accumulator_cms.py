@@ -491,6 +491,7 @@ class TestCmsPresetService:
             accumulator,
             mantras_by_id=mantras,
             language="bo",
+            include_key=True,
         )
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
@@ -510,6 +511,7 @@ class TestCmsPresetService:
             accumulator,
             mantras_by_id={},
             language=None,
+            include_key=True,
         )
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mala_image_by_id")
