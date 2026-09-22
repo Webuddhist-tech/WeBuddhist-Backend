@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, File, Header, Query, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Annotated, Optional
+from uuid import UUID
 from starlette import status
 
 from pecha_api.plans.language_constants import language_query_description
-from .mantra_response_models import CreateMantraRequest, MantraDTO, MantraResponse
-from .mantra_service import create_mantra_service, get_mantras_service
+from pecha_api.plans.media.media_response_models import PlanUploadResponse
+from .mantra_response_models import CMSMantraDTO, CreateMantraRequest, MantraResponse, UpdateMantraRequest
+from .mantra_service import create_mantra_service, get_mantras_service, update_mantra_service, upload_mantra_image
 
 oauth2_scheme = HTTPBearer()
 
@@ -39,13 +41,47 @@ def get_mantras_endpoint(
 @cms_mantra_router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    response_model=MantraDTO,
+    response_model=CMSMantraDTO,
 )
 def create_mantra_endpoint(
     create_mantra_request: CreateMantraRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-) -> MantraDTO:
+) -> CMSMantraDTO:
     return create_mantra_service(
         token=authentication_credential.credentials,
         request=create_mantra_request,
+    )
+
+
+@cms_mantra_router.patch(
+    "/{mantra_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=CMSMantraDTO,
+)
+def update_mantra_endpoint(
+    mantra_id: UUID,
+    update_mantra_request: UpdateMantraRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> CMSMantraDTO:
+    return update_mantra_service(
+        token=authentication_credential.credentials,
+        mantra_id=mantra_id,
+        request=update_mantra_request,
+    )
+
+
+@cms_mantra_router.post(
+    "/image",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PlanUploadResponse,
+)
+async def upload_mantra_image_endpoint(
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    mantra_id: UUID = Query(...),
+    file: UploadFile = File(...),
+) -> PlanUploadResponse:
+    return upload_mantra_image(
+        token=authentication_credential.credentials,
+        mantra_id=mantra_id,
+        file=file,
     )

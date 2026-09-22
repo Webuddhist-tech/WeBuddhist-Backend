@@ -19,6 +19,10 @@ class Mantra(Base):
         ForeignKey("mala_images.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # S3 key ("original" size) of the mantra's deity image, e.g. Chenrezig
+    # for Om Mani Padme Hung. Independent of mala_image; never copied onto
+    # accumulators, always resolved live from the mantra.
+    deity_image = Column(String(1000), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), onupdate=lambda: datetime.now(_datetime.timezone.utc))
