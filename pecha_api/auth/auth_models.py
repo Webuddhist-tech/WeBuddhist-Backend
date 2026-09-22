@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator
@@ -15,7 +15,7 @@ class CreateUserRequest(BaseModel):
 
     @field_validator("email", "password", "phone_number", mode="before")
     @classmethod
-    def _blank_to_none(cls, value):
+    def _blank_to_none(cls, value: Any) -> Any:
         """Treat a blank identifier as absent.
 
         `email` and `phone_number` are UNIQUE columns, and Postgres exempts
