@@ -275,9 +275,15 @@ def test_pick_metadata_falls_back_to_the_first_entry():
 
 
 def _db_returning(rows):
-    """A session whose `query(...).filter(...).all()` yields `rows`."""
+    """A session whose `query(...)[.options(...)].filter(...).all()` yields `rows`.
+
+    `.options(...)` chains back to the same query so loaders that eager-load a
+    relationship and loaders that don't can share this stub.
+    """
     db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = rows
+    query = db.query.return_value
+    query.options.return_value = query
+    query.filter.return_value.all.return_value = rows
     return db
 
 
@@ -329,6 +335,15 @@ def test_load_group_accumulations_maps_title_and_image():
     assert resolved[accumulator_id].image_url == "https://signed/img"
     assert resolved[accumulator_id].group_id == group_id
     assert resolved[accumulator_id].subtitle is None
+
+
+def test_load_group_accumulations_eager_loads_its_metadata():
+    """Guards an N+1: without this, About text costs a query per accumulation."""
+    db = _db_returning([])
+
+    _load_group_accumulations(db, [uuid.uuid4()], None)
+
+    assert db.query.return_value.options.called
 
 
 def test_load_group_accumulations_describes_it_in_the_plan_language():

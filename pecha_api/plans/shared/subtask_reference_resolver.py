@@ -7,12 +7,12 @@ ids into a display payload at read time and enforces, at write time, that
 the target exists and belongs to the plan's own group.
 """
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, TypeVar
 from uuid import UUID
 
 from fastapi import HTTPException
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from starlette import status
 
 from pecha_api.config import get
@@ -26,6 +26,8 @@ from pecha_api.plans.shared.metadata_utils import (
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 REFERENCE_ID_REQUIRED = "A reference_id is required for this content type"
 REFERENCE_NOT_FOUND = "The referenced content was not found in this plan's group"
@@ -77,7 +79,9 @@ def _pick_metadata(entries, language):
     return next(iter(entries), None)
 
 
-def _pick_metadata_with_en_fallback(entries, language):
+def _pick_metadata_with_en_fallback(
+    entries: Optional[Iterable[T]], language: Optional[str]
+) -> Optional[T]:
     """Like `_pick_metadata`, but falls back to EN rather than to whichever
     entry happens to come first.
 
@@ -109,6 +113,8 @@ def _load_group_accumulations(db: Session, ids: List[UUID], language: Optional[s
 
     rows = (
         db.query(GroupAccumulator)
+        # Without this the About text below costs one query per accumulation.
+        .options(selectinload(GroupAccumulator.metadata_entries))
         .filter(GroupAccumulator.id.in_(ids), GroupAccumulator.deleted_at.is_(None))
         .all()
     )
