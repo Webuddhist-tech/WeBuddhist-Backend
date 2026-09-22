@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import patch, MagicMock, AsyncMock
 from uuid import uuid4
 
@@ -29,7 +30,7 @@ from pecha_api.plans.plans_enums import LanguageCode
 client = TestClient(api)
 
 
-def _sample_public_dto(**overrides) -> PublicAccumulatorDTO:
+def _sample_public_dto(**overrides: Any) -> PublicAccumulatorDTO:
     data = {
         "id": uuid4(),
         "group_id": None,

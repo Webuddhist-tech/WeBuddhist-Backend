@@ -1,6 +1,6 @@
 import uuid
 from types import SimpleNamespace
-from typing import Iterable
+from typing import Any, Iterable, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,11 +33,15 @@ from pecha_api.plans.shared.subtask_reference_resolver import (
 MODULE = "pecha_api.plans.shared.subtask_reference_resolver"
 
 
-def _subtask(content_type, reference_id=None):
+def _subtask(
+    content_type: ContentType, reference_id: Optional[uuid.UUID] = None
+) -> SimpleNamespace:
     return SimpleNamespace(content_type=content_type, reference_id=reference_id)
 
 
-def _reference(reference_id, content_type, group_id):
+def _reference(
+    reference_id: uuid.UUID, content_type: ContentType, group_id: uuid.UUID
+) -> SubTaskReferenceDTO:
     return SubTaskReferenceDTO(
         id=reference_id,
         content_type=content_type,
@@ -275,7 +279,7 @@ def test_pick_metadata_falls_back_to_the_first_entry():
 # the real loaders against a stubbed session.
 
 
-def _db_returning(rows):
+def _db_returning(rows: List[Any]) -> MagicMock:
     """A session whose `query(...)[.options(...)].filter(...).all()` yields `rows`.
 
     `.options(...)` chains back to the same query so loaders that eager-load a
@@ -288,7 +292,7 @@ def _db_returning(rows):
     return db
 
 
-def _presigned(fake_url="https://signed/img"):
+def _presigned(fake_url: str = "https://signed/img") -> Any:
     return patch(f"{MODULE}.generate_presigned_access_url", return_value=fake_url)
 
 

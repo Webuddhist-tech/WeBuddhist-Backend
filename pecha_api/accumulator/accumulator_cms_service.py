@@ -75,7 +75,7 @@ async def _validate_optional_text_id(text_id: Optional[UUID]) -> None:
         await TextUtils.validate_text_exists(text_id=str(text_id))
 
 
-def _validate_optional_mala_image(db, mala_image_id: Optional[UUID]) -> None:
+def _validate_optional_mala_image(db: Session, mala_image_id: Optional[UUID]) -> None:
     if mala_image_id is None:
         return
     mala = get_mala_image_by_id(db, mala_image_id)
