@@ -200,7 +200,7 @@ class TestGetAllTimers:
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
     async def test_get_all_timers_without_group_id(self, mock_service):
-        """Test get_all_timers without group_id filter (returns all timers)."""
+        """Test get_all_timers without group_id filter (returns catalogue presets)."""
         timer1 = TestDataFactory.create_timer_dto(name="Timer 1")
         timer2 = TestDataFactory.create_timer_dto(name="Timer 2")
         
