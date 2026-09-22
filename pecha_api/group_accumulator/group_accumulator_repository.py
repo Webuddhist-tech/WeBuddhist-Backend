@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Dict
 from uuid import UUID
 from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 import _datetime
 from _datetime import datetime, timezone
 
@@ -11,6 +11,7 @@ from pecha_api.accumulator import (
     UserGroupAccumulator,
     group_accumulator_joins,
 )
+from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
 from pecha_api.users.users_models import Users
 
 
@@ -71,7 +72,16 @@ def get_group_accumulators(
         )
     )
     if search:
-        query = query.filter(GroupAccumulator.title.ilike(f"%{search}%"))
+        # Match the default title or any of its translations.
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                GroupAccumulator.title.ilike(pattern),
+                GroupAccumulator.metadata_entries.any(
+                    GroupAccumulatorMetadata.title.ilike(pattern)
+                ),
+            )
+        )
     total = query.count()
     accumulators = query.order_by(GroupAccumulator.created_at.desc()).offset(skip).limit(limit).all()
     return accumulators, total

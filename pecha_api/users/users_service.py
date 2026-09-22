@@ -22,6 +22,7 @@ from .user_response_models import (
     UpdateOnboardingStatusRequest,
 )
 from .users_enums import SocialProfile
+from .reserved_usernames import is_reserved_username
 from .users_models import Users, SocialMediaAccount
 from ..auth.auth_repository import validate_token
 from .users_repository import (
@@ -275,6 +276,9 @@ def _generate_username_suggestions(base: str, count: int = 3) -> List[str]:
         while len(suggestions) < count and attempts < 20:
             suffix = ''.join(random.choices(string.digits, k=4))
             candidate = f"{base}{suffix}"
+            if is_reserved_username(candidate):
+                attempts += 1
+                continue
             if not find_user_by_username(db=db_session, username=candidate):
                 suggestions.append(candidate)
             attempts += 1

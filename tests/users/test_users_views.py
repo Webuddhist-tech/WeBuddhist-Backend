@@ -304,3 +304,15 @@ def test_update_user_onboarding_status_unauthenticated():
     )
     assert response.status_code == 403
 
+
+
+def test_patch_username_validation_reserved_name():
+    with patch("pecha_api.users.users_views.update_username") as mock_fn:
+        response = client.patch(
+            "/users/username",
+            json={"username": "dalailama"},
+            headers={"Authorization": "Bearer testtoken"}
+        )
+    assert response.status_code == 422
+    assert "reserved" in response.text
+    mock_fn.assert_not_called()
