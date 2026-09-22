@@ -221,7 +221,7 @@ class TestGetAllTimersService:
     def test_get_all_timers_service_hides_customized_presets_for_user(
         self, mock_get_timers, mock_session
     ):
-        """An authenticated catalogue list is asked to drop presets the caller already copied."""
+        """An authenticated catalogue list includes the caller so their timers can be merged in."""
         user_id = uuid4()
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
