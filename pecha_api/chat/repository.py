@@ -825,10 +825,20 @@ def list_reports(
     source: Optional[str] = None,
     reason: Optional[str] = None,
     resolved: Optional[bool] = None,
+    group_id: Optional[UUID] = None,
 ) -> Tuple[List[ChatMessageReport], int]:
     """Paginated moderation reports, newest first, with the people and
-    message context eagerly loaded for display."""
+    message context eagerly loaded for display.
+
+    `group_id` narrows to one group's rooms. Reports whose room_id is unset -
+    older manual ones that only resolve a room through the message - are not
+    attributable to a group and are excluded by the join.
+    """
     query = db.query(ChatMessageReport)
+    if group_id is not None:
+        query = query.join(
+            ChatRoom, ChatMessageReport.room_id == ChatRoom.id
+        ).filter(ChatRoom.group_id == group_id)
     if source:
         query = query.filter(ChatMessageReport.source == source)
     if reason:
