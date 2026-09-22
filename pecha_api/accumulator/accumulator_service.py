@@ -39,8 +39,10 @@ from .accumulator_response_models import (
     AccumulatorDTO,
     AccumulatorMetadataDTO,
     PresetMantraDTO,
+    CMSPresetMantraDTO,
     PublicAccumulatorDTO,
     PublicAccumulatorsResponse,
+    CMSPublicAccumulatorDTO,
     CreateAccumulatorRequest,
     UpdateAccumulatorRequest,
     UpdateMalaImageRequest,
@@ -136,13 +138,23 @@ def resolve_accumulator_bookmark_mala_image_url(
     return mala_image_url
 
 
-def convert_accumulator_to_dto(accumulator: Accumulator) -> AccumulatorDTO:
+def _single_mantra_by_id(db: Session, mantra_id: Optional[UUID]) -> Dict[UUID, Mantra]:
+    return get_mantras_by_ids(db, [mantra_id]) if mantra_id is not None else {}
+
+
+def convert_accumulator_to_dto(
+    accumulator: Accumulator,
+    mantras_by_id: Optional[Dict[UUID, Mantra]] = None,
+) -> AccumulatorDTO:
+    from ..mantra.mantra_service import resolve_deity_image
+
     accumulator_type = (
         AccumulatorType(accumulator.type.value)
         if hasattr(accumulator.type, 'value')
         else accumulator.type
     )
     mala_image_id, mala_image_url = resolve_mala_image_fields(accumulator)
+    mantra = mantras_by_id.get(accumulator.mantra_id) if mantras_by_id and accumulator.mantra_id else None
     return AccumulatorDTO(
         id=accumulator.id,
         user_id=accumulator.user_id,
@@ -155,14 +167,18 @@ def convert_accumulator_to_dto(accumulator: Accumulator) -> AccumulatorDTO:
         mantra_id=accumulator.mantra_id,
         mala_image_id=mala_image_id,
         mala_image_url=mala_image_url,
+        deity_image=resolve_deity_image(mantra),
         metadata=convert_metadata_entries_to_dtos(accumulator),
         created_at=accumulator.created_at,
         updated_at=accumulator.updated_at
     )
 
 
-def convert_accumulators_to_dtos(accumulators: List[Accumulator]) -> List[AccumulatorDTO]:
-    return [convert_accumulator_to_dto(accumulator) for accumulator in accumulators]
+def convert_accumulators_to_dtos(
+    accumulators: List[Accumulator],
+    mantras_by_id: Optional[Dict[UUID, Mantra]] = None,
+) -> List[AccumulatorDTO]:
+    return [convert_accumulator_to_dto(accumulator, mantras_by_id) for accumulator in accumulators]
 
 
 def _metadata_language(entry: MantraMetadata) -> str:
@@ -191,12 +207,20 @@ def _pick_mantra_metadata(
 def build_preset_mantra_dto(
     mantra: Mantra,
     language: Optional[str],
+    include_key: bool = False,
 ) -> Optional[PresetMantraDTO]:
+    # Deferred import: mantra_service imports generate_mala_image_presigned_url
+    # from this module, so importing it back at module load time would be
+    # circular. By call time both modules are fully loaded.
+    from ..mantra.mantra_service import resolve_deity_image
+
     metadata = _pick_mantra_metadata(mantra.metadata_entries, language)
     if metadata is None:
         return None
     mala = mantra.mala
-    return PresetMantraDTO(
+    dto_class = CMSPresetMantraDTO if include_key else PresetMantraDTO
+    extra_fields = {"deity_image_key": mantra.deity_image} if include_key else {}
+    return dto_class(
         id=mantra.id,
         mantra=metadata.mantra,
         title=metadata.title,
@@ -204,6 +228,8 @@ def build_preset_mantra_dto(
         audio_url=mantra.audio_url,
         mala_image_id=mala.id if mala is not None else None,
         mala_image_url=generate_mala_image_presigned_url(mala.url) if mala is not None else None,
+        deity_image=resolve_deity_image(mantra),
+        **extra_fields,
     )
 
 
@@ -211,6 +237,7 @@ def convert_accumulator_to_public_dto(
     accumulator: Accumulator,
     mantras_by_id: Optional[Dict[UUID, Mantra]] = None,
     language: Optional[str] = None,
+    include_key: bool = False,
 ) -> PublicAccumulatorDTO:
     accumulator_type = (
         AccumulatorType(accumulator.type.value)
@@ -222,8 +249,9 @@ def convert_accumulator_to_public_dto(
     if accumulator.mantra_id and mantras_by_id:
         mantra = mantras_by_id.get(accumulator.mantra_id)
         if mantra is not None:
-            mantra_dto = build_preset_mantra_dto(mantra, language)
-    return PublicAccumulatorDTO(
+            mantra_dto = build_preset_mantra_dto(mantra, language, include_key=include_key)
+    dto_class = CMSPublicAccumulatorDTO if include_key else PublicAccumulatorDTO
+    return dto_class(
         id=accumulator.id,
         group_id=accumulator.group_id,
         type=accumulator_type,
@@ -309,8 +337,12 @@ def _build_accumulator_history_dto(
     accumulator: Accumulator,
     total_counted: int,
     sessions: List[AccumulatorHistory],
+    mantras_by_id: Optional[Dict[UUID, Mantra]] = None,
 ) -> AccumulatorHistoryDTO:
+    from ..mantra.mantra_service import resolve_deity_image
+
     mala_image_id, mala_image_url = resolve_mala_image_fields(accumulator)
+    mantra = mantras_by_id.get(accumulator.mantra_id) if mantras_by_id and accumulator.mantra_id else None
     return AccumulatorHistoryDTO(
         accumulator_id=accumulator.id,
         parent_id=accumulator.parent_id,
@@ -319,6 +351,7 @@ def _build_accumulator_history_dto(
         total_counted=total_counted,
         mala_image_id=mala_image_id,
         mala_image_url=mala_image_url,
+        deity_image=resolve_deity_image(mantra),
         metadata=convert_metadata_entries_to_dtos(accumulator),
         sessions=[
             AccumulatorSessionDTO(
@@ -372,8 +405,10 @@ def get_user_accumulators_service(
 ) -> AccumulatorsResponse:
     with SessionLocal() as db:
         accumulators, total = get_user_accumulators(db, user_id, skip, limit)
+        mantra_ids = [a.mantra_id for a in accumulators if a.mantra_id is not None]
+        mantras_by_id = get_mantras_by_ids(db, mantra_ids)
         return AccumulatorsResponse(
-            accumulators=convert_accumulators_to_dtos(accumulators),
+            accumulators=convert_accumulators_to_dtos(accumulators, mantras_by_id),
             total=total,
             skip=skip,
             limit=limit
@@ -392,7 +427,8 @@ def create_accumulator_service(token: str, request: CreateAccumulatorRequest) ->
         saved_accumulator = _create_accumulator_from_preset(
             db, current_user.id, request.parent_id
         )
-        return convert_accumulator_to_dto(saved_accumulator)
+        mantras_by_id = _single_mantra_by_id(db, saved_accumulator.mantra_id)
+        return convert_accumulator_to_dto(saved_accumulator, mantras_by_id)
 
 
 async def update_accumulator_service(token: str, accumulator_id: UUID, request: UpdateAccumulatorRequest) -> AccumulatorDTO:
@@ -442,7 +478,8 @@ async def update_accumulator_service(token: str, accumulator_id: UUID, request: 
                 await invalidate_user_stats_cache(user_id=current_user.id)
 
         updated_accumulator = update_accumulator(db, accumulator)
-        return convert_accumulator_to_dto(updated_accumulator)
+        mantras_by_id = _single_mantra_by_id(db, updated_accumulator.mantra_id)
+        return convert_accumulator_to_dto(updated_accumulator, mantras_by_id)
 
 
 def delete_accumulator_service(token: str, accumulator_id: UUID) -> None:
@@ -488,10 +525,16 @@ def get_accumulator_detail_service(
             accumulator = _create_accumulator_from_preset(
                 db, current_user.id, parent_id
             )
-            return _build_accumulator_history_dto(accumulator, total_counted=0, sessions=[])
+            total_counted, sessions = 0, []
+        else:
+            accumulator, total_counted, sessions = result
 
-        accumulator, total_counted, sessions = result
-        return _build_accumulator_history_dto(accumulator, total_counted, sessions)
+        mantras_by_id = (
+            get_mantras_by_ids(db, [accumulator.mantra_id])
+            if accumulator.mantra_id is not None
+            else {}
+        )
+        return _build_accumulator_history_dto(accumulator, total_counted, sessions, mantras_by_id)
 
 
 def get_accumulator_history_service(
@@ -504,27 +547,17 @@ def get_accumulator_history_service(
     with SessionLocal() as db:
         history_data, total = get_user_accumulator_history(db, current_user.id, skip, limit)
 
-        accumulators = []
-        for accumulator, total_counted, sessions in history_data:
-            mala_image_id, mala_image_url = resolve_mala_image_fields(accumulator)
-            accumulator_history_dto = AccumulatorHistoryDTO(
-                accumulator_id=accumulator.id,
-                parent_id=accumulator.parent_id,
-                target_count=accumulator.target_count,
-                current_count=accumulator.current_count or 0,
-                total_counted=total_counted,
-                mala_image_id=mala_image_id,
-                mala_image_url=mala_image_url,
-                metadata=convert_metadata_entries_to_dtos(accumulator),
-                sessions=[
-                    AccumulatorSessionDTO(
-                        count=session.count,
-                        created_at=session.created_at
-                    )
-                    for session in sessions
-                ]
-            )
-            accumulators.append(accumulator_history_dto)
+        mantra_ids = [
+            accumulator.mantra_id
+            for accumulator, _, _ in history_data
+            if accumulator.mantra_id is not None
+        ]
+        mantras_by_id = get_mantras_by_ids(db, mantra_ids)
+
+        accumulators = [
+            _build_accumulator_history_dto(accumulator, total_counted, sessions, mantras_by_id)
+            for accumulator, total_counted, sessions in history_data
+        ]
 
         return AccumulatorHistoryResponse(
             accumulators=accumulators,
@@ -567,7 +600,8 @@ def update_mala_image_service(
 
         accumulator.mala_image = mala.id
         updated_accumulator = update_accumulator(db, accumulator)
-        return convert_accumulator_to_dto(updated_accumulator)
+        mantras_by_id = _single_mantra_by_id(db, updated_accumulator.mantra_id)
+        return convert_accumulator_to_dto(updated_accumulator, mantras_by_id)
 
 
 def get_accumulator_groups_service(

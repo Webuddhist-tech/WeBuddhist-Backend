@@ -23,8 +23,8 @@ from .accumulator_response_models import (
     AccumulatorMetadataDTO,
     CreatePresetAccumulatorRequest,
     UpdatePresetAccumulatorRequest,
-    PublicAccumulatorDTO,
-    PublicAccumulatorsResponse,
+    CMSPublicAccumulatorDTO,
+    CMSPublicAccumulatorsResponse,
 )
 from .accumulator_service import (
     convert_accumulator_to_public_dto,
@@ -54,7 +54,7 @@ def _build_metadata_entries(
     ]
 
 
-def _to_public_dto(db, accumulator: Accumulator, language: Optional[str] = None) -> PublicAccumulatorDTO:
+def _to_public_dto(db, accumulator: Accumulator, language: Optional[str] = None) -> CMSPublicAccumulatorDTO:
     mantras_by_id = {}
     if accumulator.mantra_id is not None:
         mantras_by_id = get_mantras_by_ids(db, [accumulator.mantra_id])
@@ -62,6 +62,7 @@ def _to_public_dto(db, accumulator: Accumulator, language: Optional[str] = None)
         accumulator,
         mantras_by_id=mantras_by_id,
         language=language,
+        include_key=True,
     )
 
 
@@ -87,7 +88,7 @@ def list_preset_accumulators_cms_service(
     limit: int = 20,
     search: Optional[str] = None,
     language: Optional[str] = None,
-) -> PublicAccumulatorsResponse:
+) -> CMSPublicAccumulatorsResponse:
     validate_cms_author_details(token=token)
 
     with SessionLocal() as db:
@@ -101,9 +102,9 @@ def list_preset_accumulators_cms_service(
         )
         mantra_ids = [a.mantra_id for a in accumulators if a.mantra_id is not None]
         mantras_by_id = get_mantras_by_ids(db, mantra_ids)
-        return PublicAccumulatorsResponse(
+        return CMSPublicAccumulatorsResponse(
             accumulators=[
-                convert_accumulator_to_public_dto(a, mantras_by_id=mantras_by_id, language=language)
+                convert_accumulator_to_public_dto(a, mantras_by_id=mantras_by_id, language=language, include_key=True)
                 for a in accumulators
             ],
             total=total,
@@ -116,7 +117,7 @@ def get_preset_accumulator_cms_service(
     token: str,
     preset_id: UUID,
     language: Optional[str] = None,
-) -> PublicAccumulatorDTO:
+) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
 
     with SessionLocal() as db:
@@ -132,7 +133,7 @@ def get_preset_accumulator_cms_service(
 async def create_preset_accumulator_cms_service(
     token: str,
     request: CreatePresetAccumulatorRequest,
-) -> PublicAccumulatorDTO:
+) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
     await _validate_optional_text_id(request.text_id)
 
@@ -162,7 +163,7 @@ async def update_preset_accumulator_cms_service(
     token: str,
     preset_id: UUID,
     request: UpdatePresetAccumulatorRequest,
-) -> PublicAccumulatorDTO:
+) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
     await _validate_optional_text_id(request.text_id)
 

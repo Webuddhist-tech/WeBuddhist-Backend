@@ -64,6 +64,13 @@ class PresetMantraDTO(BaseModel):
         None,
         description="Presigned S3 URL for the mantra's default mala image",
     )
+    deity_image: Optional[ImageUrlModel] = None
+
+
+class CMSPresetMantraDTO(PresetMantraDTO):
+    """CMS-facing variant of PresetMantraDTO that also round-trips the raw
+    deity image S3 key, so a CMS edit form can display/re-submit it."""
+    deity_image_key: Optional[str] = None
 
 
 class AccumulatorDTO(BaseModel):
@@ -78,6 +85,7 @@ class AccumulatorDTO(BaseModel):
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     mala_image_url: Optional[str] = Field(None, description="Presigned S3 URL for the chosen mala image (None when no image is set)")
+    deity_image: Optional[ImageUrlModel] = Field(None, description="The linked mantra's deity image, if any")
     metadata: List[AccumulatorMetadataDTO] = []
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -116,6 +124,19 @@ class PublicAccumulatorsResponse(BaseModel):
     limit: int
 
 
+class CMSPublicAccumulatorDTO(PublicAccumulatorDTO):
+    """CMS-facing variant of PublicAccumulatorDTO whose nested mantra also
+    carries the raw deity image key."""
+    mantra: Optional[CMSPresetMantraDTO] = None
+
+
+class CMSPublicAccumulatorsResponse(BaseModel):
+    accumulators: List[CMSPublicAccumulatorDTO]
+    total: int
+    skip: int
+    limit: int
+
+
 class CreateAccumulatorRequest(BaseModel):
     parent_id: UUID = Field(..., description="Id of the public preset the user tapped (the `id` from GET /accumulators/presets); its fields are copied into the new user accumulator and stored as the new row's parent_id")
 
@@ -144,6 +165,7 @@ class AccumulatorHistoryDTO(BaseModel):
     total_counted: int
     mala_image_id: Optional[UUID] = None
     mala_image_url: Optional[str] = Field(None, description="Presigned S3 URL for the chosen mala image (None when no image is set)")
+    deity_image: Optional[ImageUrlModel] = Field(None, description="The linked mantra's deity image, if any")
     metadata: List[AccumulatorMetadataDTO] = []
     sessions: List[AccumulatorSessionDTO]
 
