@@ -17,7 +17,9 @@ from pecha_api.group_posts.comment_repository import get_comment_by_id_only
 from pecha_api.group_posts.enums import (
     GroupPostReportReason,
     GroupPostReportTargetType,
+    GroupPostStatus,
 )
+from pecha_api.group_posts.models import GroupPost
 from pecha_api.group_posts.report_models import GroupPostReport
 from pecha_api.group_posts.report_repository import (
     create_report,
@@ -44,14 +46,32 @@ def _already_reported() -> HTTPException:
     )
 
 
-def _get_visible_post(db: Session, post_id: UUID, user_id: UUID):
-    post = get_post_by_id_only(db=db, post_id=post_id, status=None)
+def _get_visible_post(db: Session, post_id: UUID, user_id: UUID) -> GroupPost:
+    # Both halves of the same gate the post itself is read through: PUBLISHED
+    # only, then group access. A report must not reach further than a read
+    # can, or it becomes a way to probe for hidden posts and to file
+    # moderation records against content the reporter cannot open.
+    post = get_post_by_id_only(
+        db=db, post_id=post_id, status=GroupPostStatus.PUBLISHED
+    )
     if not post:
         raise _not_found()
-    # Same gate the post itself is read through, so a report cannot be used to
-    # probe for content in a private group the reporter has not joined.
     validate_group_content_access(db=db, group_id=post.group_id, user_id=user_id)
     return post
+
+
+def _target_is_gone(
+    db: Session, *, post_id: UUID, comment_id: Optional[UUID]
+) -> bool:
+    """Whether the reported post or comment vanished between the visibility
+    check and the insert - a hard delete trips the foreign key, a soft delete
+    is simply no longer readable, and either way the report is stale rather
+    than duplicate."""
+    if get_post_by_id_only(db=db, post_id=post_id, status=None) is None:
+        return True
+    return comment_id is not None and (
+        get_comment_by_id_only(db=db, comment_id=comment_id) is None
+    )
 
 
 def _file(
@@ -93,10 +113,27 @@ def _file(
             ),
         )
     except IntegrityError:
-        # A concurrent duplicate won the race past the lookup; the partial
-        # unique index already guarantees the one open report we wanted.
         db.rollback()
-        raise _already_reported()
+        # The insert enforces more than the one-report-per-target indexes: the
+        # target and user foreign keys and the target-shape check ride on it
+        # too. Calling every one of those "already reported" would answer 409
+        # to a target that was deleted mid-request and bury the real failure,
+        # so the duplicate is confirmed by re-reading rather than assumed.
+        if get_report_by_target_and_reporter(
+            db=db, reporter_id=reporter_id, post_id=post_id, comment_id=comment_id
+        ):
+            # A concurrent duplicate won the race past the lookup; the partial
+            # unique index already guarantees the one open report we wanted.
+            raise _already_reported()
+        if _target_is_gone(db=db, post_id=post_id, comment_id=comment_id):
+            raise _not_found()
+        logger.exception(
+            "Failed to file %s report against post %s comment %s",
+            target_type.value,
+            post_id,
+            comment_id,
+        )
+        raise
 
     logger.info(
         "Filed %s report against post %s comment %s",

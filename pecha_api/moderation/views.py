@@ -28,7 +28,7 @@ def get_group_reports(
     reason: Annotated[Optional[str], Query()] = None,
     resolved: Annotated[Optional[bool], Query()] = None,
     token: Annotated[str, Depends(get_cms_author_token)] = "",
-):
+) -> GroupReportsResponse:
     """A group's moderation queue, newest first: chat message reports and post
     and comment reports together. Group owner/admin, or platform staff.
 

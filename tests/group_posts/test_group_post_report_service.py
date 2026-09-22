@@ -13,6 +13,7 @@ import pecha_api.app  # noqa: F401
 from pecha_api.group_posts.enums import (
     GroupPostReportReason,
     GroupPostReportTargetType,
+    GroupPostStatus,
 )
 from pecha_api.group_posts.report_service import (
     ALREADY_REPORTED,
@@ -122,7 +123,47 @@ class TestReportPost:
         assert exc.value.detail == ALREADY_REPORTED
 
     def test_a_concurrent_duplicate_is_409_not_500(self):
-        """The partial unique index catches what the lookup raced past."""
+        """The partial unique index catches what the lookup raced past, and
+        the re-read confirms the row really is the reporter's own duplicate."""
+        post = _post()
+        ctx, _db = _session()
+        with patch(f"{MODULE}.SessionLocal", return_value=ctx), patch(
+            f"{MODULE}.get_post_by_id_only", return_value=post
+        ), patch(f"{MODULE}.validate_group_content_access"), patch(
+            f"{MODULE}.get_user_by_email_or_none", return_value=None
+        ), patch(
+            f"{MODULE}.get_report_by_target_and_reporter",
+            side_effect=[None, MagicMock()],
+        ), patch(
+            f"{MODULE}.create_report",
+            side_effect=IntegrityError("stmt", {}, Exception("dup")),
+        ), pytest.raises(HTTPException) as exc:
+            report_post_service(
+                post_id=post.id, user_id=uuid4(), reason=GroupPostReportReason.SPAM
+            )
+        assert exc.value.status_code == status.HTTP_409_CONFLICT
+
+    def test_a_target_deleted_mid_request_is_404_not_409(self):
+        """A foreign key failure is a stale target, not a duplicate report."""
+        post = _post()
+        ctx, _db = _session()
+        with patch(f"{MODULE}.SessionLocal", return_value=ctx), patch(
+            f"{MODULE}.get_post_by_id_only", side_effect=[post, None]
+        ), patch(f"{MODULE}.validate_group_content_access"), patch(
+            f"{MODULE}.get_user_by_email_or_none", return_value=None
+        ), patch(
+            f"{MODULE}.get_report_by_target_and_reporter", return_value=None
+        ), patch(
+            f"{MODULE}.create_report",
+            side_effect=IntegrityError("stmt", {}, Exception("fk")),
+        ), pytest.raises(HTTPException) as exc:
+            report_post_service(
+                post_id=post.id, user_id=uuid4(), reason=GroupPostReportReason.SPAM
+            )
+        assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_an_unexplained_integrity_error_is_not_dressed_up_as_409(self):
+        """Neither duplicate nor stale target: the real failure surfaces."""
         post = _post()
         ctx, _db = _session()
         with patch(f"{MODULE}.SessionLocal", return_value=ctx), patch(
@@ -133,12 +174,26 @@ class TestReportPost:
             f"{MODULE}.get_report_by_target_and_reporter", return_value=None
         ), patch(
             f"{MODULE}.create_report",
-            side_effect=IntegrityError("stmt", {}, Exception("dup")),
-        ), pytest.raises(HTTPException) as exc:
+            side_effect=IntegrityError("stmt", {}, Exception("check")),
+        ), pytest.raises(IntegrityError):
             report_post_service(
                 post_id=post.id, user_id=uuid4(), reason=GroupPostReportReason.SPAM
             )
-        assert exc.value.status_code == status.HTTP_409_CONFLICT
+
+    def test_a_hidden_post_is_not_reportable(self):
+        """Reporting must not reach further than reading: the status filter is
+        applied, so a HIDDEN post answers 404 just as its detail endpoint does."""
+        ctx, _db = _session()
+        with patch(f"{MODULE}.SessionLocal", return_value=ctx), patch(
+            f"{MODULE}.get_post_by_id_only", return_value=None
+        ) as mock_get, patch(
+            f"{MODULE}.validate_group_content_access"
+        ), pytest.raises(HTTPException) as exc:
+            report_post_service(
+                post_id=uuid4(), user_id=uuid4(), reason=GroupPostReportReason.SPAM
+            )
+        assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+        assert mock_get.call_args.kwargs["status"] == GroupPostStatus.PUBLISHED
 
     def test_a_group_the_reporter_cannot_see_is_not_reportable(self):
         """Reporting must not become a way to probe a private group."""

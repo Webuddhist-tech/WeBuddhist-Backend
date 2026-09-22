@@ -830,15 +830,26 @@ def list_reports(
     """Paginated moderation reports, newest first, with the people and
     message context eagerly loaded for display.
 
-    `group_id` narrows to one group's rooms. Reports whose room_id is unset -
-    older manual ones that only resolve a room through the message - are not
-    attributable to a group and are excluded by the join.
+    `group_id` narrows to one group's rooms. A report's own room_id is
+    authoritative, but manual reports filed before that column was added were
+    never backfilled and still resolve their room through the message - the
+    same fallback the queue DTO displays them with. Scoping on room_id alone
+    would drop those from both the page and the total, so the join takes
+    whichever of the two is set.
     """
     query = db.query(ChatMessageReport)
     if group_id is not None:
-        query = query.join(
-            ChatRoom, ChatMessageReport.room_id == ChatRoom.id
-        ).filter(ChatRoom.group_id == group_id)
+        query = (
+            query.outerjoin(
+                ChatMessage, ChatMessageReport.message_id == ChatMessage.id
+            )
+            .join(
+                ChatRoom,
+                ChatRoom.id
+                == func.coalesce(ChatMessageReport.room_id, ChatMessage.room_id),
+            )
+            .filter(ChatRoom.group_id == group_id)
+        )
     if source:
         query = query.filter(ChatMessageReport.source == source)
     if reason:

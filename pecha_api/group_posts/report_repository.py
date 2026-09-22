@@ -1,5 +1,5 @@
 """Persistence for group post and comment moderation reports."""
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy import func
@@ -38,7 +38,7 @@ def create_report(db: Session, report: GroupPostReport) -> GroupPostReport:
     return report
 
 
-def _display_options():
+def _display_options() -> Tuple[Any, ...]:
     """Everything the queue DTO reads, so a page costs a fixed number of
     queries rather than one per report."""
     return (

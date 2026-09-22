@@ -28,7 +28,7 @@ def report_post(
     post_id: UUID,
     request: ReportGroupPostRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> Response:
     """Report a post for moderation. One report per user per post; you cannot
     report your own post."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
@@ -49,7 +49,7 @@ def report_comment(
     comment_id: UUID,
     request: ReportGroupPostRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> Response:
     """Report a comment for moderation. One report per user per comment; you
     cannot report your own comment."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)

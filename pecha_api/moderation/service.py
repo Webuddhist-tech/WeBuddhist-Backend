@@ -4,6 +4,7 @@ Chat message reports and post/comment reports live in separate tables, so the
 two are queried independently and merged here. `kind` narrows to one of them,
 which skips the other query entirely.
 """
+from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
@@ -11,8 +12,10 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
 
+from pecha_api.chat.models import ChatMessageReport
 from pecha_api.chat.repository import list_reports as list_chat_reports
 from pecha_api.db.database import SessionLocal
+from pecha_api.group_posts.report_models import GroupPostReport
 from pecha_api.group_posts.report_repository import list_group_post_reports
 from pecha_api.moderation.enums import GroupReportKind
 from pecha_api.moderation.response_models import (
@@ -20,6 +23,7 @@ from pecha_api.moderation.response_models import (
     GroupReportsResponse,
     GroupReportUserDTO,
 )
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details
 from pecha_api.plans.groups.groups_enums import AuthorGroupMemberRole
 from pecha_api.plans.shared.permissions import (
@@ -34,7 +38,7 @@ from pecha_api.users.users_models import Users
 _MODERATOR_ROLES = {AuthorGroupMemberRole.OWNER, AuthorGroupMemberRole.ADMIN}
 
 
-def _require_group_moderator(db: Session, group_id: UUID, author) -> None:
+def _require_group_moderator(db: Session, group_id: UUID, author: Author) -> None:
     if is_super_admin(author) or is_reviewer(author):
         return
     require_group_member(
@@ -53,11 +57,11 @@ def _user_dto(user: Optional[Users]) -> Optional[GroupReportUserDTO]:
     )
 
 
-def _isoformat(value) -> Optional[str]:
+def _isoformat(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
 
 
-def _chat_dto(report) -> GroupReportDTO:
+def _chat_dto(report: ChatMessageReport) -> GroupReportDTO:
     message = report.message
     room = report.room or (message.room if message else None)
     return GroupReportDTO(
@@ -79,7 +83,7 @@ def _chat_dto(report) -> GroupReportDTO:
     )
 
 
-def _post_dto(report) -> GroupReportDTO:
+def _post_dto(report: GroupPostReport) -> GroupReportDTO:
     return GroupReportDTO(
         id=report.id,
         kind=GroupReportKind(report.target_type),
