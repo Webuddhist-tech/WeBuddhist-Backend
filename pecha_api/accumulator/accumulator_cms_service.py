@@ -1,4 +1,6 @@
 from typing import Optional, List
+
+from sqlalchemy.orm import Session
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -54,7 +56,9 @@ def _build_metadata_entries(
     ]
 
 
-def _to_public_dto(db, accumulator: Accumulator, language: Optional[str] = None) -> CMSPublicAccumulatorDTO:
+def _to_public_dto(
+    db: Session, accumulator: Accumulator, language: Optional[str] = None
+) -> CMSPublicAccumulatorDTO:
     mantras_by_id = {}
     if accumulator.mantra_id is not None:
         mantras_by_id = get_mantras_by_ids(db, [accumulator.mantra_id])
