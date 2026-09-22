@@ -28,7 +28,7 @@ def get_cms_chat_message_reports(
     resolved: Annotated[Optional[bool], Query()] = None,
     group_id: Annotated[Optional[UUID], Query()] = None,
     token: Annotated[str, Depends(get_cms_author_token)] = "",
-):
+) -> AdminChatMessageReportsResponse:
     """List chat moderation reports, newest first. Super admin / reviewer only.
     Covers both user-submitted (MANUAL) and system-generated (AUTOMATIC)
     reports; filter by source, reason, resolved state, or group.
