@@ -18,6 +18,7 @@ from pecha_api.plans.shared.subtask_reference_resolver import (
     _load_group_collections,
     _load_posts,
     _pick_metadata,
+    _pick_metadata_with_en_fallback,
     _presign,
     _truncate,
     REFERENCE_ID_NOT_ALLOWED,
@@ -305,12 +306,20 @@ def test_presign_swallows_a_signing_failure():
         assert _presign("bucket/key.png") is None
 
 
+def _group_accumulation_row(accumulator_id, group_id, metadata_entries=()):
+    return SimpleNamespace(
+        id=accumulator_id,
+        title="Mani",
+        image_key="key",
+        group_id=group_id,
+        metadata_entries=list(metadata_entries),
+    )
+
+
 def test_load_group_accumulations_maps_title_and_image():
     accumulator_id = uuid.uuid4()
     group_id = uuid.uuid4()
-    row = SimpleNamespace(
-        id=accumulator_id, title="Mani", image_key="key", group_id=group_id
-    )
+    row = _group_accumulation_row(accumulator_id, group_id)
 
     with _presigned():
         resolved = _load_group_accumulations(_db_returning([row]), [accumulator_id], None)
@@ -319,6 +328,59 @@ def test_load_group_accumulations_maps_title_and_image():
     assert resolved[accumulator_id].content_type == ContentType.GROUP_ACCUMULATION
     assert resolved[accumulator_id].image_url == "https://signed/img"
     assert resolved[accumulator_id].group_id == group_id
+    assert resolved[accumulator_id].subtitle is None
+
+
+def test_load_group_accumulations_describes_it_in_the_plan_language():
+    accumulator_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    row = _group_accumulation_row(
+        accumulator_id,
+        group_id,
+        [
+            SimpleNamespace(language=LanguageCode.EN, description="Recite together"),
+            SimpleNamespace(language=LanguageCode.BO, description="མཉམ་དུ་བཟླས།"),
+        ],
+    )
+
+    with _presigned():
+        resolved = _load_group_accumulations(
+            _db_returning([row]), [accumulator_id], LanguageCode.BO
+        )
+
+    assert resolved[accumulator_id].subtitle == "མཉམ་དུ་བཟླས།"
+
+
+def test_load_group_accumulations_falls_back_to_english_about_text():
+    """A Tibetan plan linking an accumulation with no BO About text still
+    shows the EN one rather than nothing."""
+    accumulator_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    row = _group_accumulation_row(
+        accumulator_id,
+        group_id,
+        [SimpleNamespace(language=LanguageCode.EN, description="Recite together")],
+    )
+
+    with _presigned():
+        resolved = _load_group_accumulations(
+            _db_returning([row]), [accumulator_id], LanguageCode.BO
+        )
+
+    assert resolved[accumulator_id].subtitle == "Recite together"
+
+
+def test_pick_metadata_with_en_fallback_prefers_english_over_the_first_entry():
+    """`_pick_metadata` takes whatever comes first; this one matches how the
+    group-accumulator API itself resolves About text."""
+    tibetan = SimpleNamespace(language=LanguageCode.BO, description="First")
+    english = SimpleNamespace(language=LanguageCode.EN, description="Second")
+
+    assert _pick_metadata_with_en_fallback([tibetan, english], LanguageCode.ZH) is english
+    assert _pick_metadata_with_en_fallback([tibetan, english], LanguageCode.BO) is tibetan
+    assert _pick_metadata_with_en_fallback([tibetan], LanguageCode.ZH) is None
+    assert _pick_metadata_with_en_fallback([], LanguageCode.EN) is None
+    assert _pick_metadata_with_en_fallback(None, None) is None
 
 
 def test_load_group_collections_maps_name_to_title():
