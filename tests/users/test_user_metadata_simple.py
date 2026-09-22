@@ -107,3 +107,15 @@ class TestVerseOfDayTimezoneSync:
             
             # Should still return verse (error is silently caught)
             assert response.status_code == 200
+
+
+def test_user_metadata_is_removed_with_its_user():
+    """Regression: the relationship carried no cascade, so deleting a user made
+    the ORM NULL out user_metadata.user_id - which the NOT NULL column rejects,
+    so the delete failed and the FK's ON DELETE CASCADE never ran."""
+    from sqlalchemy import inspect
+
+    relationship = inspect(Users).relationships["user_metadata"]
+
+    assert "delete-orphan" in relationship.cascade
+    assert relationship.passive_deletes is True

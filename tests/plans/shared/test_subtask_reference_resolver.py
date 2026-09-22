@@ -1,5 +1,6 @@
 import uuid
 from types import SimpleNamespace
+from typing import Iterable
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -312,7 +313,11 @@ def test_presign_swallows_a_signing_failure():
         assert _presign("bucket/key.png") is None
 
 
-def _group_accumulation_row(accumulator_id, group_id, metadata_entries=()):
+def _group_accumulation_row(
+    accumulator_id: uuid.UUID,
+    group_id: uuid.UUID,
+    metadata_entries: Iterable[SimpleNamespace] = (),
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=accumulator_id,
         title="Mani",
@@ -337,7 +342,7 @@ def test_load_group_accumulations_maps_title_and_image():
     assert resolved[accumulator_id].subtitle is None
 
 
-def test_load_group_accumulations_eager_loads_its_metadata():
+def test_load_group_accumulations_eager_loads_its_metadata() -> None:
     """Guards an N+1: without this, About text costs a query per accumulation."""
     db = _db_returning([])
 
@@ -346,7 +351,7 @@ def test_load_group_accumulations_eager_loads_its_metadata():
     assert db.query.return_value.options.called
 
 
-def test_load_group_accumulations_describes_it_in_the_plan_language():
+def test_load_group_accumulations_describes_it_in_the_plan_language() -> None:
     accumulator_id = uuid.uuid4()
     group_id = uuid.uuid4()
     row = _group_accumulation_row(
@@ -366,7 +371,7 @@ def test_load_group_accumulations_describes_it_in_the_plan_language():
     assert resolved[accumulator_id].subtitle == "མཉམ་དུ་བཟླས།"
 
 
-def test_load_group_accumulations_falls_back_to_english_about_text():
+def test_load_group_accumulations_falls_back_to_english_about_text() -> None:
     """A Tibetan plan linking an accumulation with no BO About text still
     shows the EN one rather than nothing."""
     accumulator_id = uuid.uuid4()
@@ -385,7 +390,7 @@ def test_load_group_accumulations_falls_back_to_english_about_text():
     assert resolved[accumulator_id].subtitle == "Recite together"
 
 
-def test_pick_metadata_with_en_fallback_prefers_english_over_the_first_entry():
+def test_pick_metadata_with_en_fallback_prefers_english_over_the_first_entry() -> None:
     """`_pick_metadata` takes whatever comes first; this one matches how the
     group-accumulator API itself resolves About text."""
     tibetan = SimpleNamespace(language=LanguageCode.BO, description="First")
