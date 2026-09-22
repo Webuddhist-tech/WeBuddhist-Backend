@@ -9,6 +9,29 @@ from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.accumulator.accumulator_enums import GroupAccumulatorLinkType
 
 
+# Field descriptions repeated across the request/response pairs below. Kept
+# in one place so the two DTOs cannot drift apart in the public schema.
+_METADATA_REQUEST_DESCRIPTION = (
+    "Per-language title and About text. Replaces the full set; [] clears it. "
+    "{omit}The EN entry's title (or the first translated one) is stored as the "
+    "default title when `title` is omitted."
+)
+_RESOLVED_TITLE_DESCRIPTION = (
+    "Title resolved for the requested language, falling back to EN then any stored language"
+)
+_RESOLVED_ABOUT_DESCRIPTION = (
+    "About text resolved for the requested language, falling back to EN then any stored language"
+)
+_LINKS_DESCRIPTION = "Links shared by the group, ordered by display_order"
+_IS_JOINED_DESCRIPTION = (
+    "Whether the authenticated user has joined (null when unauthenticated)"
+)
+_MEMBER_COUNT_DESCRIPTION = "Number of users who joined this group accumulator"
+_PRESET_ACCUMULATOR_ID_DESCRIPTION = "ID of the linked preset accumulator, if any"
+_TEXT_ID_DESCRIPTION = "Text ID from the linked preset accumulator, if any"
+_MANTRA_ID_DESCRIPTION = "Mantra ID from the linked preset accumulator, if any"
+
+
 class GroupAccumulatorMemberSortBy(str, Enum):
     TOTAL = "total"
     TODAY = "today"
@@ -16,6 +39,7 @@ class GroupAccumulatorMemberSortBy(str, Enum):
 
 class GroupAccumulatorMetadataDTO(BaseModel):
     language: LanguageCode
+    title: Optional[str] = None
     description: Optional[str] = None
 
 
@@ -54,7 +78,7 @@ class CreateGroupAccumulatorRequest(BaseModel):
     end_date: Optional[datetime] = None
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="Per-language About text. Replaces the full set; [] clears it.",
+        description=_METADATA_REQUEST_DESCRIPTION.format(omit=""),
     )
     links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
         None,
@@ -76,7 +100,9 @@ class UpdateGroupAccumulatorRequest(BaseModel):
     end_date: Optional[datetime] = None
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="Per-language About text. Replaces the full set; [] clears it. Omit to leave unchanged.",
+        description=_METADATA_REQUEST_DESCRIPTION.format(
+            omit="Omit to leave unchanged. "
+        ),
     )
     links: Optional[List[GroupAccumulatorLinkRequest]] = Field(
         None,
@@ -92,44 +118,27 @@ class UpdateGroupAccumulatorRequest(BaseModel):
 class GroupAccumulatorDTO(BaseModel):
     id: UUID
     preset_accumulator_id: Optional[UUID] = Field(
-        None,
-        description="ID of the linked preset accumulator, if any",
+        None, description=_PRESET_ACCUMULATOR_ID_DESCRIPTION
     )
-    text_id: Optional[str] = Field(
-        None,
-        description="Text ID from the linked preset accumulator, if any",
-    )
-    mantra_id: Optional[UUID] = Field(
-        None,
-        description="Mantra ID from the linked preset accumulator, if any",
-    )
+    text_id: Optional[str] = Field(None, description=_TEXT_ID_DESCRIPTION)
+    mantra_id: Optional[UUID] = Field(None, description=_MANTRA_ID_DESCRIPTION)
     group_id: UUID
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, description=_RESOLVED_TITLE_DESCRIPTION)
     image: Optional[ImageUrlModel] = None
     image_key: Optional[str] = None
     target_count: Optional[int] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
-    description: Optional[str] = Field(
-        None,
-        description="About text resolved for the requested language, falling back to EN",
-    )
+    description: Optional[str] = Field(None, description=_RESOLVED_ABOUT_DESCRIPTION)
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads and writes only.",
+        description="All per-language title/About entries. Returned on CMS reads and writes only.",
     )
     links: List[GroupAccumulatorLinkDTO] = Field(
-        default_factory=list,
-        description="Links shared by the group, ordered by display_order",
+        default_factory=list, description=_LINKS_DESCRIPTION
     )
-    is_joined: Optional[bool] = Field(
-        None,
-        description="Whether the authenticated user has joined (null when unauthenticated)",
-    )
-    member_count: int = Field(
-        0,
-        description="Number of users who joined this group accumulator",
-    )
+    is_joined: Optional[bool] = Field(None, description=_IS_JOINED_DESCRIPTION)
+    member_count: int = Field(0, description=_MEMBER_COUNT_DESCRIPTION)
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -163,35 +172,24 @@ class GroupAccumulatorDetailUserDTO(BaseModel):
 class GroupAccumulatorDetailDTO(BaseModel):
     id: UUID
     preset_accumulator_id: Optional[UUID] = Field(
-        None,
-        description="ID of the linked preset accumulator, if any",
+        None, description=_PRESET_ACCUMULATOR_ID_DESCRIPTION
     )
-    text_id: Optional[str] = Field(
-        None,
-        description="Text ID from the linked preset accumulator, if any",
-    )
-    mantra_id: Optional[UUID] = Field(
-        None,
-        description="Mantra ID from the linked preset accumulator, if any",
-    )
+    text_id: Optional[str] = Field(None, description=_TEXT_ID_DESCRIPTION)
+    mantra_id: Optional[UUID] = Field(None, description=_MANTRA_ID_DESCRIPTION)
     group_id: UUID
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, description=_RESOLVED_TITLE_DESCRIPTION)
     image: Optional[ImageUrlModel] = None
     image_key: Optional[str] = None
     target_count: Optional[int] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
-    description: Optional[str] = Field(
-        None,
-        description="About text resolved for the requested language, falling back to EN",
-    )
+    description: Optional[str] = Field(None, description=_RESOLVED_ABOUT_DESCRIPTION)
     metadata: Optional[List[GroupAccumulatorMetadataDTO]] = Field(
         None,
-        description="All per-language About entries. Returned on CMS reads only.",
+        description="All per-language title/About entries. Returned on CMS reads only.",
     )
     links: List[GroupAccumulatorLinkDTO] = Field(
-        default_factory=list,
-        description="Links shared by the group, ordered by display_order",
+        default_factory=list, description=_LINKS_DESCRIPTION
     )
     total_count: int = Field(..., description="Total lifetime count from all users")
     total_today_count: int = Field(0, description="Total count from all users for today in the request timezone")
@@ -199,11 +197,8 @@ class GroupAccumulatorDetailDTO(BaseModel):
         None,
         description="Authenticated user's profile and counts (null when unauthenticated)",
     )
-    is_joined: Optional[bool] = Field(
-        None,
-        description="Whether the authenticated user has joined (null when unauthenticated)",
-    )
-    member_count: int = Field(0, description="Number of users who joined this group accumulator")
+    is_joined: Optional[bool] = Field(None, description=_IS_JOINED_DESCRIPTION)
+    member_count: int = Field(0, description=_MEMBER_COUNT_DESCRIPTION)
     created_at: datetime
     updated_at: Optional[datetime] = None
 

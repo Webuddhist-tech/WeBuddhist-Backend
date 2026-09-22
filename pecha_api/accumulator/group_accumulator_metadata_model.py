@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import Column, Text, UUID, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Text, UUID, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from ..db.database import Base
@@ -8,8 +8,11 @@ from ..plans.plans_enums import LanguageCodeEnum
 
 
 class GroupAccumulatorMetadata(Base):
-    """Unlike AccumulatorMetadata there is no name — the group accumulator
-    carries its own title."""
+    """Per-language title/description for a group accumulator.
+
+    ``group_accumulators.title`` stays populated with the default (EN, else the
+    first translated) title so list views, search and the other modules that
+    read that column keep working."""
     __tablename__ = "group_accumulator_metadata"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -18,6 +21,7 @@ class GroupAccumulatorMetadata(Base):
         ForeignKey("group_accumulators.id", ondelete="CASCADE"),
         nullable=False,
     )
+    title = Column(String, nullable=True)
     description = Column(Text, nullable=True)
     language = Column(LanguageCodeEnum, nullable=False)
 
