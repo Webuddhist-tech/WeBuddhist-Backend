@@ -1,4 +1,6 @@
 from typing import Optional, List
+
+from sqlalchemy.orm import Session
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -54,7 +56,9 @@ def _build_metadata_entries(
     ]
 
 
-def _to_public_dto(db, accumulator: Accumulator, language: Optional[str] = None) -> CMSPublicAccumulatorDTO:
+def _to_public_dto(
+    db: Session, accumulator: Accumulator, language: Optional[str] = None
+) -> CMSPublicAccumulatorDTO:
     mantras_by_id = {}
     if accumulator.mantra_id is not None:
         mantras_by_id = get_mantras_by_ids(db, [accumulator.mantra_id])
@@ -71,7 +75,7 @@ async def _validate_optional_text_id(text_id: Optional[UUID]) -> None:
         await TextUtils.validate_text_exists(text_id=str(text_id))
 
 
-def _validate_optional_mala_image(db, mala_image_id: Optional[UUID]) -> None:
+def _validate_optional_mala_image(db: Session, mala_image_id: Optional[UUID]) -> None:
     if mala_image_id is None:
         return
     mala = get_mala_image_by_id(db, mala_image_id)

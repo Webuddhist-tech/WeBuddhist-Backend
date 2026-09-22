@@ -1,5 +1,6 @@
 """CMS admin services for chat moderation reports."""
 from typing import Optional
+from uuid import UUID
 
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageReportSource
 from pecha_api.chat.models import ChatMessageReport
@@ -59,6 +60,7 @@ def list_chat_message_reports_service(
     source: Optional[ChatMessageReportSource] = None,
     reason: Optional[ChatMessageReportReason] = None,
     resolved: Optional[bool] = None,
+    group_id: Optional[UUID] = None,
 ) -> AdminChatMessageReportsResponse:
     author = validate_and_extract_author_details(token=token)
     require_super_admin_or_reviewer(author)
@@ -70,6 +72,7 @@ def list_chat_message_reports_service(
             source=source.value if source else None,
             reason=reason.value if reason else None,
             resolved=resolved,
+            group_id=group_id,
         )
         reports = [_build_report_dto(report) for report in rows]
     return AdminChatMessageReportsResponse(

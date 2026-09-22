@@ -1,5 +1,6 @@
 import uuid
 from types import SimpleNamespace
+from typing import Any, Iterable, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from pecha_api.plans.shared.subtask_reference_resolver import (
     _load_group_collections,
     _load_posts,
     _pick_metadata,
+    _pick_metadata_with_en_fallback,
     _presign,
     _truncate,
     REFERENCE_ID_NOT_ALLOWED,
@@ -31,11 +33,15 @@ from pecha_api.plans.shared.subtask_reference_resolver import (
 MODULE = "pecha_api.plans.shared.subtask_reference_resolver"
 
 
-def _subtask(content_type, reference_id=None):
+def _subtask(
+    content_type: ContentType, reference_id: Optional[uuid.UUID] = None
+) -> SimpleNamespace:
     return SimpleNamespace(content_type=content_type, reference_id=reference_id)
 
 
-def _reference(reference_id, content_type, group_id):
+def _reference(
+    reference_id: uuid.UUID, content_type: ContentType, group_id: uuid.UUID
+) -> SubTaskReferenceDTO:
     return SubTaskReferenceDTO(
         id=reference_id,
         content_type=content_type,
@@ -273,14 +279,20 @@ def test_pick_metadata_falls_back_to_the_first_entry():
 # the real loaders against a stubbed session.
 
 
-def _db_returning(rows):
-    """A session whose `query(...).filter(...).all()` yields `rows`."""
+def _db_returning(rows: List[Any]) -> MagicMock:
+    """A session whose `query(...)[.options(...)].filter(...).all()` yields `rows`.
+
+    `.options(...)` chains back to the same query so loaders that eager-load a
+    relationship and loaders that don't can share this stub.
+    """
     db = MagicMock()
-    db.query.return_value.filter.return_value.all.return_value = rows
+    query = db.query.return_value
+    query.options.return_value = query
+    query.filter.return_value.all.return_value = rows
     return db
 
 
-def _presigned(fake_url="https://signed/img"):
+def _presigned(fake_url: str = "https://signed/img") -> Any:
     return patch(f"{MODULE}.generate_presigned_access_url", return_value=fake_url)
 
 
@@ -305,12 +317,24 @@ def test_presign_swallows_a_signing_failure():
         assert _presign("bucket/key.png") is None
 
 
+def _group_accumulation_row(
+    accumulator_id: uuid.UUID,
+    group_id: uuid.UUID,
+    metadata_entries: Iterable[SimpleNamespace] = (),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=accumulator_id,
+        title="Mani",
+        image_key="key",
+        group_id=group_id,
+        metadata_entries=list(metadata_entries),
+    )
+
+
 def test_load_group_accumulations_maps_title_and_image():
     accumulator_id = uuid.uuid4()
     group_id = uuid.uuid4()
-    row = SimpleNamespace(
-        id=accumulator_id, title="Mani", image_key="key", group_id=group_id
-    )
+    row = _group_accumulation_row(accumulator_id, group_id)
 
     with _presigned():
         resolved = _load_group_accumulations(_db_returning([row]), [accumulator_id], None)
@@ -319,6 +343,68 @@ def test_load_group_accumulations_maps_title_and_image():
     assert resolved[accumulator_id].content_type == ContentType.GROUP_ACCUMULATION
     assert resolved[accumulator_id].image_url == "https://signed/img"
     assert resolved[accumulator_id].group_id == group_id
+    assert resolved[accumulator_id].subtitle is None
+
+
+def test_load_group_accumulations_eager_loads_its_metadata() -> None:
+    """Guards an N+1: without this, About text costs a query per accumulation."""
+    db = _db_returning([])
+
+    _load_group_accumulations(db, [uuid.uuid4()], None)
+
+    assert db.query.return_value.options.called
+
+
+def test_load_group_accumulations_describes_it_in_the_plan_language() -> None:
+    accumulator_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    row = _group_accumulation_row(
+        accumulator_id,
+        group_id,
+        [
+            SimpleNamespace(language=LanguageCode.EN, description="Recite together"),
+            SimpleNamespace(language=LanguageCode.BO, description="མཉམ་དུ་བཟླས།"),
+        ],
+    )
+
+    with _presigned():
+        resolved = _load_group_accumulations(
+            _db_returning([row]), [accumulator_id], LanguageCode.BO
+        )
+
+    assert resolved[accumulator_id].subtitle == "མཉམ་དུ་བཟླས།"
+
+
+def test_load_group_accumulations_falls_back_to_english_about_text() -> None:
+    """A Tibetan plan linking an accumulation with no BO About text still
+    shows the EN one rather than nothing."""
+    accumulator_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    row = _group_accumulation_row(
+        accumulator_id,
+        group_id,
+        [SimpleNamespace(language=LanguageCode.EN, description="Recite together")],
+    )
+
+    with _presigned():
+        resolved = _load_group_accumulations(
+            _db_returning([row]), [accumulator_id], LanguageCode.BO
+        )
+
+    assert resolved[accumulator_id].subtitle == "Recite together"
+
+
+def test_pick_metadata_with_en_fallback_prefers_english_over_the_first_entry() -> None:
+    """`_pick_metadata` takes whatever comes first; this one matches how the
+    group-accumulator API itself resolves About text."""
+    tibetan = SimpleNamespace(language=LanguageCode.BO, description="First")
+    english = SimpleNamespace(language=LanguageCode.EN, description="Second")
+
+    assert _pick_metadata_with_en_fallback([tibetan, english], LanguageCode.ZH) is english
+    assert _pick_metadata_with_en_fallback([tibetan, english], LanguageCode.BO) is tibetan
+    assert _pick_metadata_with_en_fallback([tibetan], LanguageCode.ZH) is None
+    assert _pick_metadata_with_en_fallback([], LanguageCode.EN) is None
+    assert _pick_metadata_with_en_fallback(None, None) is None
 
 
 def test_load_group_collections_maps_name_to_title():

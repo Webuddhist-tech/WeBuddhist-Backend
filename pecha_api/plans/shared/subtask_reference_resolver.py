@@ -7,21 +7,27 @@ ids into a display payload at read time and enforces, at write time, that
 the target exists and belongs to the plan's own group.
 """
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, TypeVar
 from uuid import UUID
 
 from fastapi import HTTPException
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from starlette import status
 
 from pecha_api.config import get
 from pecha_api.plans.auth.plan_auth_models import ResponseError
 from pecha_api.plans.plans_enums import ContentType, REFERENCE_CONTENT_TYPES
 from pecha_api.plans.response_message import BAD_REQUEST
+from pecha_api.plans.shared.metadata_utils import (
+    DEFAULT_FALLBACK_LANGUAGE,
+    filter_by_language_with_fallback,
+)
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 REFERENCE_ID_REQUIRED = "A reference_id is required for this content type"
 REFERENCE_NOT_FOUND = "The referenced content was not found in this plan's group"
@@ -73,6 +79,23 @@ def _pick_metadata(entries, language):
     return next(iter(entries), None)
 
 
+def _pick_metadata_with_en_fallback(
+    entries: Optional[Iterable[T]], language: Optional[str]
+) -> Optional[T]:
+    """Like `_pick_metadata`, but falls back to EN rather than to whichever
+    entry happens to come first.
+
+    This is how the group-accumulator API resolves its own About text, so a
+    plan card and the accumulation screen it links to show the same thing.
+    """
+    matched = filter_by_language_with_fallback(
+        entries=list(entries or []),
+        language=_language_value(language) or DEFAULT_FALLBACK_LANGUAGE,
+        language_of=lambda entry: _language_value(entry.language) or "",
+    )
+    return next(iter(matched), None)
+
+
 def _truncate(value: Optional[str], limit: int = 120) -> Optional[str]:
     if not value:
         return None
@@ -90,19 +113,25 @@ def _load_group_accumulations(db: Session, ids: List[UUID], language: Optional[s
 
     rows = (
         db.query(GroupAccumulator)
+        # Without this the About text below costs one query per accumulation.
+        .options(selectinload(GroupAccumulator.metadata_entries))
         .filter(GroupAccumulator.id.in_(ids), GroupAccumulator.deleted_at.is_(None))
         .all()
     )
-    return {
-        row.id: SubTaskReferenceDTO(
+    resolved = {}
+    for row in rows:
+        # Only the About text is translated: the title is a single column on
+        # the accumulation itself, so it reads the same in every plan language.
+        metadata = _pick_metadata_with_en_fallback(row.metadata_entries, language)
+        resolved[row.id] = SubTaskReferenceDTO(
             id=row.id,
             content_type=ContentType.GROUP_ACCUMULATION,
             title=row.title,
+            subtitle=_truncate(metadata.description if metadata else None),
             image_url=_presign(row.image_key),
             group_id=row.group_id,
         )
-        for row in rows
-    }
+    return resolved
 
 
 def _load_group_collections(db: Session, ids: List[UUID], language: Optional[str]):

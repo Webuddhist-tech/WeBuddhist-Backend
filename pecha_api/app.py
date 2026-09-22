@@ -49,6 +49,8 @@ from pecha_api.group_assets import views as group_assets_views
 from pecha_api.group_posts import views as group_posts_views
 from pecha_api.group_posts import cms_views as cms_group_posts_views
 from pecha_api.group_posts import comment_views as group_post_comments_views
+from pecha_api.group_posts import report_views as group_post_report_views
+from pecha_api.moderation.views import group_reports_router
 from pecha_api.group_posts import viewer as group_posts_viewer
 from pecha_api.group_posts import notification_internal_views as group_post_notification_internal_views
 from pecha_api.author_group_feed import views as author_group_feed_views
@@ -178,6 +180,8 @@ api.include_router(group_post_comments_views.public_group_post_comments_router)
 api.include_router(group_post_comments_views.public_group_post_comment_actions_router)
 api.include_router(group_post_like_views.public_group_post_likes_router)
 api.include_router(group_post_comment_like_views.public_group_post_comment_likes_router)
+api.include_router(group_post_report_views.group_post_reports_router)
+api.include_router(group_reports_router)
 api.include_router(chat_views.chat_router)
 api.include_router(chat_viewer_views.chat_viewer_router)
 api.include_router(chat_notification_internal_views.internal_chat_notifications_router)
