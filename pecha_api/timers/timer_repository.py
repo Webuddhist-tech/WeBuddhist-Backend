@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func, and_
+from sqlalchemy import func
 from typing import List, Tuple, Optional, Dict
 from uuid import UUID
 from datetime import datetime
@@ -75,8 +75,12 @@ def get_timers_by_group(
     limit: int = 20,
     user_id: Optional[UUID] = None,
 ) -> Tuple[List[Timer], int]:
-
-    query = db.query(Timer).filter(Timer.deleted_at.is_(None))
+    # Catalogue only: personal (user_created) rows belong on GET /timers/user
+    # and must never leak across accounts.
+    query = db.query(Timer).filter(
+        Timer.deleted_at.is_(None),
+        Timer.type == TimerType.PRESET,
+    )
     if group_id:
         query = query.filter(Timer.group_id == group_id)
     if user_id is not None:
@@ -89,8 +93,8 @@ def get_timers_by_group(
 
 
 def _exclude_customized_presets(query, db: Session, user_id: UUID):
-    """Drop the shared preset (and this user's copy of it) so a customized
-    sit does not appear twice when GET /timers is merged with GET /timers/user."""
+    """Omit presets the caller already copied so GET /timers + GET /timers/user
+    do not list the same sit twice."""
     copied_preset_ids = (
         db.query(Timer.parent_preset_id)
         .filter(
@@ -99,16 +103,7 @@ def _exclude_customized_presets(query, db: Session, user_id: UUID):
             Timer.deleted_at.is_(None),
         )
     )
-    return query.filter(
-        ~and_(
-            Timer.type == TimerType.PRESET,
-            Timer.id.in_(copied_preset_ids),
-        ),
-        ~and_(
-            Timer.user_id == user_id,
-            Timer.parent_preset_id.isnot(None),
-        ),
-    )
+    return query.filter(~Timer.id.in_(copied_preset_ids))
 
 
 def get_user_timers_by_group(

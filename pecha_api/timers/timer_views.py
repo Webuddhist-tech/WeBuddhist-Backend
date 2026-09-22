@@ -33,13 +33,19 @@ optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
 @timer_router.get("", response_model=TimersResponse)
 async def get_all_timers(
-    group_id: Optional[UUID] = Query(None, description="Group ID to filter timers"),
+    group_id: Optional[UUID] = Query(None, description="Group ID to filter catalogue presets"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return"),
     credentials: Annotated[
         Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
     ] = None,
 ):
+    """Shared timer catalogue (presets only). Personal timers are GET /timers/user.
+
+    A bearer token hides presets the caller has already customized, so the two
+    lists concatenate without duplicates. Other users' personal timers are never
+    included.
+    """
     user_id = None
     if credentials is not None:
         current_user = await run_in_threadpool(
