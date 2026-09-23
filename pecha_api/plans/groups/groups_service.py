@@ -1737,7 +1737,7 @@ def _join_request_to_dto(join_request: AuthorGroupJoinRequest) -> GroupJoinReque
     )
 
 
-def _requester_email(user) -> Optional[str]:
+def _requester_email(user: Optional[Users]) -> Optional[str]:
     if user is None:
         return None
     email = getattr(user, "email", None)

@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_, func, or_
 from typing import List, Tuple, Optional, Dict
@@ -90,7 +90,7 @@ def get_timers_by_group(
     return timers, total
 
 
-def _catalogue_plus_caller_timers(query, db: Session, user_id: UUID):
+def _catalogue_plus_caller_timers(query: Query[Timer], db: Session, user_id: UUID) -> Query[Timer]:
     """Presets the caller has not copied, plus their user_created timers.
 
     Ownership is limited to USER rows so a preset whose user_id happens to
