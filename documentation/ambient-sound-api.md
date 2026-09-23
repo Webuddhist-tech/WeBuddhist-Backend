@@ -181,11 +181,11 @@ the same preset therefore get two rows; the catalogue row is untouched.
 You can still `POST /timers/user` with `parent_preset_id` yourself if you
 want to create the copy up front. Either way the sound lives on *your* row.
 
-**Lists do not show both.** Send the same token on `GET /timers` that you
-use for `GET /timers/user`. The catalogue then omits any preset you have
-already copied, and omits the copy itself (that row lives on
-`GET /timers/user`). Concatenating the two lists therefore yields one
-row per sit: the preset until you customize it, your copy afterwards.
+**`GET /timers` with a token includes your timers.** Anonymous `GET /timers`
+is presets only. Send a bearer token and the same list is presets you have
+not copied **plus** every timer you own. A copied preset is omitted so that
+sit appears once, as your copy. Other people's personal timers are never
+included. `GET /timers/user` is still the personal-only list.
 
 **`is_default` is not the user's default.** It marks the catalogue entry Studio
 wants preselected for everyone, and at most one entry carries it. It is a
