@@ -91,10 +91,11 @@ def get_timers_by_group(
 
 
 def _catalogue_plus_caller_timers(query, db: Session, user_id: UUID):
-    """Presets the caller has not copied, plus every timer they own.
+    """Presets the caller has not copied, plus their user_created timers.
 
-    Other accounts' user_created rows stay out. A copied preset is omitted
-    so the personal copy is the only row for that sit.
+    Ownership is limited to USER rows so a preset whose user_id happens to
+    be the caller is not re-included after the copied-preset exclusion.
+    Other accounts' user_created rows stay out.
     """
     copied_preset_ids = (
         db.query(Timer.parent_preset_id)
@@ -110,7 +111,10 @@ def _catalogue_plus_caller_timers(query, db: Session, user_id: UUID):
                 Timer.type == TimerType.PRESET,
                 ~Timer.id.in_(copied_preset_ids),
             ),
-            Timer.user_id == user_id,
+            and_(
+                Timer.type == TimerType.USER,
+                Timer.user_id == user_id,
+            ),
         )
     )
 
