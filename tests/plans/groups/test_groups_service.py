@@ -5356,6 +5356,7 @@ def test_list_group_join_requests_returns_requester_profile():
     requester = MagicMock()
     requester.firstname = "Tenzin"
     requester.lastname = "Tib"
+    requester.email = "tenzin@example.com"
     requester.avatar_url = None
     join_request.user = requester
 
@@ -5374,7 +5375,35 @@ def test_list_group_join_requests_returns_requester_profile():
 
     assert result.total == 1
     assert result.requests[0].user_name == "Tenzin Tib"
+    assert result.requests[0].email == "tenzin@example.com"
     assert result.requests[0].status == AuthorGroupJoinRequestStatus.PENDING
+
+
+def test_list_group_join_requests_omits_email_when_user_has_none():
+    author = _make_author(is_admin=True)
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    join_request = _make_join_request(group_id=group.id)
+    requester = MagicMock()
+    requester.firstname = "Dawa"
+    requester.lastname = ""
+    requester.email = None
+    requester.avatar_url = None
+    join_request.user = requester
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_author_details",
+        return_value=author,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_join_requests_by_group",
+        return_value=([join_request], 1),
+    ):
+        _session_local_context(mock_session)
+        result = list_group_join_requests(token="t", group_id=group.id, skip=0, limit=20)
+
+    assert result.requests[0].email is None
 
 
 def test_flipping_group_public_approves_pending_join_requests():

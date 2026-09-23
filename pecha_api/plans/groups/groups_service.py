@@ -1737,12 +1737,23 @@ def _join_request_to_dto(join_request: AuthorGroupJoinRequest) -> GroupJoinReque
     )
 
 
+def _requester_email(user) -> Optional[str]:
+    if user is None:
+        return None
+    email = getattr(user, "email", None)
+    if not email:
+        return None
+    stripped = email.strip()
+    return stripped or None
+
+
 def _join_request_to_user_dto(join_request: AuthorGroupJoinRequest) -> GroupJoinRequestUserDTO:
     user = join_request.user
     return GroupJoinRequestUserDTO(
         id=join_request.id,
         user_id=join_request.user_id,
         user_name=_user_fullname(user) if user else "",
+        email=_requester_email(user),
         user_avatar_url=_user_avatar_url(user) if user else None,
         message=join_request.message,
         status=_to_join_request_status(join_request.status),
