@@ -18,6 +18,8 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_reminder_service import reschedule_event_reminders
@@ -28,7 +30,7 @@ _PAGE_SIZE = 200
 
 
 def _candidates(
-    db, *, after_id: UUID | None, limit: int
+    db: Session, *, after_id: UUID | None, limit: int
 ) -> tuple[list[Event], UUID | None]:
     """One-time events still to come whose end falls on a later day than
     their start.

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.config import get
@@ -1192,7 +1193,7 @@ def _apply_relational_field_updates(db, event: Event, request: UpdateEventReques
         event.location_id = request.location_id
 
 
-def _sync_event_reminders(db, event: Event, should_rebuild: bool) -> None:
+def _sync_event_reminders(db: Session, event: Event, should_rebuild: bool) -> None:
     if should_rebuild:
         reschedule_event_reminders(db, event)
 
