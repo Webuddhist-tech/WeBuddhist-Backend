@@ -34,6 +34,7 @@ def _saved_event_stub(group_id=None, collection_id=None) -> SimpleNamespace:
         location=None,
         start_date=now,
         end_date=now,
+        timezone=None,
         image_url=None,
         featured=False,
         event_format="hybrid",

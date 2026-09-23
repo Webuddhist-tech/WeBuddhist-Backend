@@ -19,6 +19,10 @@ from pecha_api.events.event_reminder_dispatch_service import (
     dispatch_due_event_reminders,
     reconcile_undispatched_event_reminders,
 )
+from pecha_api.events.event_reminder_materialize_service import (
+    materialize_recurring_event_reminders,
+    purge_expired_event_reminders,
+)
 from pecha_api.group_posts.notification_dispatch_service import (
     reconcile_undispatched_group_post_notifications,
 )
@@ -151,6 +155,32 @@ def setup_scheduler() -> None:
         max_instances=1,
     )
 
+    event_reminder_materialize_interval = max(
+        get_int("EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        materialize_recurring_event_reminders,
+        IntervalTrigger(seconds=event_reminder_materialize_interval),
+        id="materialize_recurring_event_reminders",
+        name="Materialize recurring event reminders",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    event_reminder_purge_interval = max(
+        get_int("EVENT_REMINDER_PURGE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        purge_expired_event_reminders,
+        IntervalTrigger(seconds=event_reminder_purge_interval),
+        id="purge_expired_event_reminders",
+        name="Purge expired event reminders",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     if not scheduler.running:
         scheduler.start()
     logger.info(
@@ -159,13 +189,15 @@ def setup_scheduler() -> None:
         "re-enqueueing undispatched chat notifications every %s second(s); "
         "re-enqueueing undispatched group post notifications every %s second(s); "
         "re-enqueueing undispatched event notifications every %s second(s); "
-        "dispatching due event reminders every %s second(s)",
+        "dispatching due event reminders every %s second(s); "
+        "materializing recurring event reminders every %s second(s)",
         expiry_days,
         reconcile_interval,
         chat_reconcile_interval,
         group_post_reconcile_interval,
         event_reconcile_interval,
         event_reminder_dispatch_interval,
+        event_reminder_materialize_interval,
     )
 
 
