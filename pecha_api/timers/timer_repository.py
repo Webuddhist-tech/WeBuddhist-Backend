@@ -1,6 +1,6 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from typing import List, Tuple, Optional, Dict
 from uuid import UUID
 from datetime import datetime
@@ -75,16 +75,14 @@ def get_timers_by_group(
     limit: int = 20,
     user_id: Optional[UUID] = None,
 ) -> Tuple[List[Timer], int]:
-    # Catalogue only: personal (user_created) rows belong on GET /timers/user
-    # and must never leak across accounts.
-    query = db.query(Timer).filter(
-        Timer.deleted_at.is_(None),
-        Timer.type == TimerType.PRESET,
-    )
+    query = db.query(Timer).filter(Timer.deleted_at.is_(None))
     if group_id:
         query = query.filter(Timer.group_id == group_id)
-    if user_id is not None:
-        query = _exclude_customized_presets(query, db, user_id)
+    if user_id is None:
+        # Anonymous catalogue: shared presets only, never anyone's personal rows.
+        query = query.filter(Timer.type == TimerType.PRESET)
+    else:
+        query = _catalogue_plus_caller_timers(query, db, user_id)
 
     total = query.count()
     timers = query.order_by(Timer.created_at.desc()).offset(skip).limit(limit).all()
@@ -92,9 +90,13 @@ def get_timers_by_group(
     return timers, total
 
 
-def _exclude_customized_presets(query, db: Session, user_id: UUID):
-    """Omit presets the caller already copied so GET /timers + GET /timers/user
-    do not list the same sit twice."""
+def _catalogue_plus_caller_timers(query: Query[Timer], db: Session, user_id: UUID) -> Query[Timer]:
+    """Presets the caller has not copied, plus their user_created timers.
+
+    Ownership is limited to USER rows so a preset whose user_id happens to
+    be the caller is not re-included after the copied-preset exclusion.
+    Other accounts' user_created rows stay out.
+    """
     copied_preset_ids = (
         db.query(Timer.parent_preset_id)
         .filter(
@@ -103,7 +105,18 @@ def _exclude_customized_presets(query, db: Session, user_id: UUID):
             Timer.deleted_at.is_(None),
         )
     )
-    return query.filter(~Timer.id.in_(copied_preset_ids))
+    return query.filter(
+        or_(
+            and_(
+                Timer.type == TimerType.PRESET,
+                ~Timer.id.in_(copied_preset_ids),
+            ),
+            and_(
+                Timer.type == TimerType.USER,
+                Timer.user_id == user_id,
+            ),
+        )
+    )
 
 
 def get_user_timers_by_group(

@@ -228,7 +228,7 @@ class TestGetAllTimers:
     async def test_get_all_timers_with_token_passes_user_id(
         self, mock_service, mock_validate
     ):
-        """A bearer token lets the catalogue drop presets this caller already customized."""
+        """A bearer token merges the caller's timers into the catalogue list."""
         user_id = uuid4()
         mock_user = MagicMock()
         mock_user.id = user_id

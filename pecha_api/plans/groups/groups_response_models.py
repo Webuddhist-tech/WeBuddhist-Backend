@@ -276,6 +276,7 @@ class GroupJoinRequestUserDTO(BaseModel):
     id: UUID
     user_id: UUID
     user_name: str
+    email: Optional[str] = None
     user_avatar_url: Optional[str] = None
     message: Optional[str] = None
     status: AuthorGroupJoinRequestStatus
