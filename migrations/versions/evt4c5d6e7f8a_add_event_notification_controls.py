@@ -11,6 +11,9 @@ from alembic import op
 import sqlalchemy as sa
 
 from migrations.idempotency import column_exists, enum_value_exists, table_exists
+from migrations.notification_preference_schema import (
+    ensure_notification_preference_tables,
+)
 
 # revision identifiers, used by Alembic.
 revision: str = "evt4c5d6e7f8a"
@@ -20,6 +23,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Databases stamped past np1a2b3c4d5e without its DDL ever running have no
+    # notification_scope type to alter, and no preference table for the scoped
+    # rows to land in. Build whatever is missing before touching the enum.
+    ensure_notification_preference_tables()
+
     # A per-event mute is a scoped preference row, so the scope enum needs the
     # new member. ALTER TYPE ... ADD VALUE cannot run inside a transaction on
     # older PostgreSQL, and the value cannot be *used* in the transaction that
