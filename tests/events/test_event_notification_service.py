@@ -189,6 +189,9 @@ class TestGetEventNotificationTargets:
             skip=0,
             limit=100,
             notification_type=NotificationType.EVENT,
+            # The audience is the whole group, but someone who muted this one
+            # event should not hear about it anyway.
+            event_id=event.id,
         )
 
     @patch("pecha_api.events.notification_service.get_event_by_id", return_value=None)
@@ -233,6 +236,7 @@ class TestCreateEventEnqueuesNotification:
             start_date=now,
             end_date=now,
             timezone=None,
+            notifications_enabled=True,
             image_url=None,
             featured=False,
             event_format="hybrid",

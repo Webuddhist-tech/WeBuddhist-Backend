@@ -88,6 +88,9 @@ def get_event_notification_targets(
             skip=skip,
             limit=limit,
             notification_type=NotificationType.EVENT,
+            # Group-wide audience, but someone who muted this one event is
+            # still entitled not to hear about it.
+            event_id=event.id,
         )
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)

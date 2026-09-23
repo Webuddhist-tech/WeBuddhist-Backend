@@ -38,6 +38,7 @@ def _event_stub(group_id=None, is_recurring=False, start_date=None) -> SimpleNam
         start_date=now,
         end_date=now,
         timezone=None,
+        notifications_enabled=True,
         image_url=None,
         event_format="hybrid",
         featured=False,

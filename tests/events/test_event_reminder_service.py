@@ -47,6 +47,7 @@ def _event(
         start_date=start_date,
         end_date=end_date,
         timezone=timezone_name,
+        notifications_enabled=True,
         is_recurring=is_recurring,
         duration_days=duration_days,
     )

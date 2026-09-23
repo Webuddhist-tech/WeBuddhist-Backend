@@ -47,6 +47,7 @@ def _event(metadata_entries, links=None):
         start_date=now,
         end_date=now,
         timezone=None,
+        notifications_enabled=True,
         image_url=None,
         featured=False,
         event_format="hybrid",

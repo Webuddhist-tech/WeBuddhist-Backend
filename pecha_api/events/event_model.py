@@ -37,6 +37,11 @@ class Event(Base):
     event_format = Column(String(10), nullable=False, server_default="hybrid")
     # Per-event kill switch for the event's chat room (CMS-controlled).
     chat_enabled = Column(Boolean, default=True, nullable=False, server_default=text("true"))
+    # The organizer's switch for everything this event can send: reminders,
+    # the event-created push, and manual sends from the CMS. Distinct from
+    # a participant muting the event for themselves, which is a scoped row
+    # in user_notification_preferences.
+    notifications_enabled = Column(Boolean, default=True, nullable=False, server_default=text("true"))
     
     is_recurring = Column(Boolean, default=False, nullable=False)
     recurrence_frequency = Column(String(20), nullable=True)

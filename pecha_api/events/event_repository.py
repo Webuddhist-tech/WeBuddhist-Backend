@@ -191,6 +191,9 @@ def list_undispatched_event_notifications(
         .filter(
             Event.notification_sqs_message_id.is_(None),
             Event.created_at <= older_than,
+            # Never re-enqueue for an event whose organizer has since
+            # switched notifications off.
+            Event.notifications_enabled.is_(True),
         )
         .order_by(Event.created_at.asc())
         .limit(limit)

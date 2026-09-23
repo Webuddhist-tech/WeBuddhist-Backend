@@ -196,6 +196,12 @@ def _reminder_rows(
     Rows already in the past are skipped rather than written: they would fire
     immediately on the next dispatch poll, which for an event created or
     edited mid-run means notifying people about days that already happened."""
+    # The organizer's switch, checked before anything is computed: turning it
+    # off and rebuilding is what actually withdraws a scheduled reminder,
+    # since the rebuild clears the old rows and writes none back.
+    if not getattr(event, "notifications_enabled", True):
+        return
+
     if event.is_recurring:
         if not recurring_reminders_enabled():
             return

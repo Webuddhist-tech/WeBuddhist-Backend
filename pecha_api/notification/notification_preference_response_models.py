@@ -77,3 +77,9 @@ class GroupNotificationPreferencesResponse(BaseModel):
     group_id: UUID
     channel: NotificationChannel
     preferences: List[EffectivePreferenceDTO]
+
+
+class EventNotificationPreferencesResponse(BaseModel):
+    event_id: UUID
+    channel: NotificationChannel
+    preferences: List[EffectivePreferenceDTO]

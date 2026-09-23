@@ -10,11 +10,14 @@ from starlette import status
 from pecha_api.db.database import SessionLocal
 from pecha_api.group_posts.notification_repository import get_group_notification_title
 from pecha_api.notification.notification_preference_enums import (
+    EVENT_SCOPED_TYPES,
     GROUP_SCOPED_TYPES,
     NON_TOGGLEABLE_TYPES,
     NotificationChannel,
+    NotificationScope,
     NotificationType,
     PreferenceSource,
+    V1_EVENT_TOGGLEABLE_TYPES,
     V1_GROUP_TOGGLEABLE_TYPES,
     V1_TOGGLEABLE_TYPES,
 )
@@ -22,23 +25,26 @@ from pecha_api.notification.notification_preference_models import (
     UserNotificationPreference,
 )
 from pecha_api.notification.notification_preference_repository import (
-    delete_group_preferences,
+    delete_scoped_preferences,
     index_by_key,
     list_preferences_for_user,
     upsert_preference,
 )
 from pecha_api.notification.notification_preference_response_models import (
     EffectivePreferenceDTO,
+    EventNotificationPreferencesResponse,
     GroupNotificationPreferencesResponse,
     GroupOverrideSummaryDTO,
     NotificationPreferenceUpdateDTO,
     NotificationPreferencesResponse,
     UpdateNotificationPreferencesRequest,
 )
+from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.plans.groups.groups_repository import is_user_joined_group
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 NOT_A_MEMBER = "You are not a member of this group"
+EVENT_NOT_FOUND = "Event not found"
 
 
 def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -54,14 +60,29 @@ def _reject(detail: str) -> None:
     )
 
 
-def _validate_type(notification_type: NotificationType, *, group_scoped: bool) -> None:
+# Per scope: which types accept an override, which types `ALL` expands to,
+# and how the rejection reads.
+_SCOPE_RULES = {
+    NotificationScope.GROUP: (GROUP_SCOPED_TYPES, V1_GROUP_TOGGLEABLE_TYPES, "per-group"),
+    NotificationScope.EVENT: (EVENT_SCOPED_TYPES, V1_EVENT_TOGGLEABLE_TYPES, "per-event"),
+}
+
+
+def _validate_type(
+    notification_type: NotificationType,
+    *,
+    scope_type=None,
+) -> None:
     if notification_type in NON_TOGGLEABLE_TYPES:
         _reject(
             f"{notification_type.value} is transactional and cannot be toggled"
         )
-    if group_scoped and notification_type not in GROUP_SCOPED_TYPES:
+    if scope_type is None:
+        return
+    allowed, _, label = _SCOPE_RULES[scope_type]
+    if notification_type not in allowed:
         _reject(
-            f"{notification_type.value} has no per-group setting; "
+            f"{notification_type.value} has no {label} setting; "
             f"set it globally instead"
         )
 
@@ -69,18 +90,20 @@ def _validate_type(notification_type: NotificationType, *, group_scoped: bool) -
 def _expand(
     entry: NotificationPreferenceUpdateDTO,
     *,
-    group_scoped: bool,
+    scope_type=None,
 ) -> Sequence[NotificationType]:
     """Resolve one PATCH entry to the types it writes.
 
-    `ALL` is sugar so a "Mute this group" button need not enumerate types; it
-    never reaches the database.
+    `ALL` is sugar so a "Mute this group" or "Mute this event" button need not
+    enumerate types; it never reaches the database.
     """
     if entry.is_all_types:
-        return V1_GROUP_TOGGLEABLE_TYPES if group_scoped else V1_TOGGLEABLE_TYPES
+        if scope_type is None:
+            return V1_TOGGLEABLE_TYPES
+        return _SCOPE_RULES[scope_type][1]
 
     notification_type = NotificationType[entry.notification_type]
-    _validate_type(notification_type, group_scoped=group_scoped)
+    _validate_type(notification_type, scope_type=scope_type)
     return (notification_type,)
 
 
@@ -90,11 +113,12 @@ def _resolve(
     group_row: Optional[UserNotificationPreference],
     global_row: Optional[UserNotificationPreference],
     now: datetime,
+    scoped_source: PreferenceSource = PreferenceSource.GROUP,
 ) -> EffectivePreferenceDTO:
     """RFC §5: `enabled` is most-specific-wins, `muted_until` is any-row-suppresses."""
     if group_row is not None:
         enabled = bool(group_row.enabled)
-        source = PreferenceSource.GROUP
+        source = scoped_source
     elif global_row is not None:
         enabled = bool(global_row.enabled)
         source = PreferenceSource.GLOBAL
@@ -125,6 +149,7 @@ def _effective_preferences(
     *,
     group_id: Optional[UUID],
     now: datetime,
+    scoped_source: PreferenceSource = PreferenceSource.GROUP,
 ) -> List[EffectivePreferenceDTO]:
     return [
         _resolve(
@@ -136,6 +161,7 @@ def _effective_preferences(
             ),
             global_row=rows_by_key.get((notification_type, None)),
             now=now,
+            scoped_source=scoped_source,
         )
         for notification_type in types
     ]
@@ -206,7 +232,7 @@ class _PendingChange:
 def _collect_changes(
     request: UpdateNotificationPreferencesRequest,
     *,
-    group_scoped: bool,
+    scope_type,
     now: datetime,
 ) -> Dict[NotificationType, _PendingChange]:
     """Fold the body into at most one write per type.
@@ -230,7 +256,7 @@ def _collect_changes(
                 f"send enabled, muted_until, or both"
             )
 
-        for notification_type in _expand(entry, group_scoped=group_scoped):
+        for notification_type in _expand(entry, scope_type=scope_type):
             changes.setdefault(notification_type, _PendingChange()).merge(entry)
 
     return changes
@@ -244,10 +270,14 @@ def _apply_updates(
     scope_id: Optional[UUID],
     request: UpdateNotificationPreferencesRequest,
     now: datetime,
+    scope_type=None,
 ) -> None:
+    resolved_scope = (
+        None if scope_id is None else (scope_type or NotificationScope.GROUP)
+    )
     changes = _collect_changes(
         request,
-        group_scoped=scope_id is not None,
+        scope_type=resolved_scope,
         now=now,
     )
 
@@ -258,6 +288,7 @@ def _apply_updates(
             notification_type=notification_type,
             channel=channel,
             scope_id=scope_id,
+            scope_type=resolved_scope,
             enabled=change.enabled,
             muted_until=change.muted_until,
             set_enabled=change.set_enabled,
@@ -407,14 +438,139 @@ def delete_group_notification_preferences_service(
         _assert_group_member(db, group_id=group_id, user_id=current_user.id)
 
         if notification_type is not None:
-            _validate_type(notification_type, group_scoped=True)
+            _validate_type(notification_type, scope_type=NotificationScope.GROUP)
 
         # Deleting rows that do not exist is not an error: the caller's intent
         # is "fall back to global", which is already true.
-        delete_group_preferences(
+        delete_scoped_preferences(
             db=db,
             user_id=current_user.id,
-            group_id=group_id,
+            scope_id=group_id,
+            channel=channel,
+            notification_type=notification_type,
+        )
+
+
+def _event_for_preferences(db: Session, *, event_id: UUID, user_id: UUID):
+    """The event a preference row is being written against.
+
+    Membership of the event's group is the gate, not attendance: the EVENT
+    notification reaches the whole group, so someone who has not joined the
+    event still receives things about it and still needs a way to stop them.
+    """
+    event = get_event_by_id(db, event_id)
+    if event is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=EVENT_NOT_FOUND,
+        )
+    _assert_group_member(db, group_id=event.group_id, user_id=user_id)
+    return event
+
+
+def _event_preferences_response(
+    db: Session,
+    *,
+    event_id: UUID,
+    user_id: UUID,
+    channel: NotificationChannel,
+    now: datetime,
+) -> EventNotificationPreferencesResponse:
+    rows = list_preferences_for_user(
+        db=db,
+        user_id=user_id,
+        channel=channel,
+        scope_id=event_id,
+    )
+    return EventNotificationPreferencesResponse(
+        event_id=event_id,
+        channel=channel,
+        preferences=_effective_preferences(
+            V1_EVENT_TOGGLEABLE_TYPES,
+            index_by_key(rows),
+            group_id=event_id,
+            now=now,
+            scoped_source=PreferenceSource.EVENT,
+        ),
+    )
+
+
+def get_event_notification_preferences_service(
+    token: str,
+    event_id: UUID,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+) -> EventNotificationPreferencesResponse:
+    current_user = validate_and_extract_user_details(token=token)
+    now = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        _event_for_preferences(db, event_id=event_id, user_id=current_user.id)
+        return _event_preferences_response(
+            db,
+            event_id=event_id,
+            user_id=current_user.id,
+            channel=channel,
+            now=now,
+        )
+
+
+def update_event_notification_preferences_service(
+    token: str,
+    event_id: UUID,
+    request: UpdateNotificationPreferencesRequest,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+) -> EventNotificationPreferencesResponse:
+    """Mute (or un-mute) one event for the calling user.
+
+    The proportionate opt-out: before this, someone tired of a single
+    recurring event's weekly reminder could only silence reminders for every
+    event they attend, or leave the event outright.
+    """
+    current_user = validate_and_extract_user_details(token=token)
+    now = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        _event_for_preferences(db, event_id=event_id, user_id=current_user.id)
+
+        _apply_updates(
+            db=db,
+            user_id=current_user.id,
+            channel=channel,
+            scope_id=event_id,
+            scope_type=NotificationScope.EVENT,
+            request=request,
+            now=now,
+        )
+
+        return _event_preferences_response(
+            db,
+            event_id=event_id,
+            user_id=current_user.id,
+            channel=channel,
+            now=now,
+        )
+
+
+def delete_event_notification_preferences_service(
+    token: str,
+    event_id: UUID,
+    notification_type: Optional[NotificationType] = None,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+) -> None:
+    current_user = validate_and_extract_user_details(token=token)
+
+    with SessionLocal() as db:
+        _event_for_preferences(db, event_id=event_id, user_id=current_user.id)
+
+        if notification_type is not None:
+            _validate_type(notification_type, scope_type=NotificationScope.EVENT)
+
+        # Deleting rows that do not exist is not an error: the caller's intent
+        # is "fall back to global", which is already true.
+        delete_scoped_preferences(
+            db=db,
+            user_id=current_user.id,
+            scope_id=event_id,
             channel=channel,
             notification_type=notification_type,
         )

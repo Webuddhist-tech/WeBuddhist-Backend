@@ -476,6 +476,7 @@ def _event_to_dto(
         occurrence_date=occurrence_date,
         event_format=event.event_format,
         chat_enabled=bool(getattr(event, "chat_enabled", True)),
+        notifications_enabled=bool(getattr(event, "notifications_enabled", True)),
         chat_room_id=chat_room_id,
         metadata=_metadata_response(
             event.metadata_entries, language=language, fallback=fallback
@@ -961,6 +962,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         image_url=request.image_url,
         event_format=request.event_format,
         chat_enabled=request.chat_enabled,
+        notifications_enabled=request.notifications_enabled,
         is_recurring=is_recurring,
         recurrence_frequency=recurrence_frequency,
         recurrence_date_system=recurrence_date_system,
@@ -1002,7 +1004,8 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             youtube_entries=request.youtube,
             after_flush=_schedule_reminders_after_flush,
         )
-        enqueue_event_notification(saved.id)
+        if bool(getattr(saved, "notifications_enabled", True)):
+            enqueue_event_notification(saved.id)
         return _event_to_dto(saved)
 
 
@@ -1147,6 +1150,8 @@ def _apply_simple_field_updates(event: Event, request: UpdateEventRequest) -> No
     fields_set = request.model_fields_set
     if request.timezone is not None:
         event.timezone = request.timezone
+    if "notifications_enabled" in fields_set and request.notifications_enabled is not None:
+        event.notifications_enabled = request.notifications_enabled
     if request.group_id is not None:
         event.group_id = request.group_id
     # plan_id/series_id/accumulator_id/group_accumulator_id/mantra_id/timer_id use
@@ -1209,13 +1214,19 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
 
         should_rebuild_reminders = _apply_recurrence_or_dates(event, request)
         timezone_before = event.timezone
+        notifications_enabled_before = bool(getattr(event, "notifications_enabled", True))
         _apply_simple_field_updates(event, request)
         # The zone decides what local time each day of a multi-day event is
         # owed its reminder at, and _apply_simple_field_updates is where it
         # lands - so the rebuild signal has to be picked up here rather than
         # from the date/recurrence pass above, which never sees it.
         should_rebuild_reminders = (
-            should_rebuild_reminders or event.timezone != timezone_before
+            should_rebuild_reminders
+            or event.timezone != timezone_before
+            # Switching notifications off has to reach reminders already
+            # written: the rebuild clears them and writes nothing back.
+            # Switching it back on re-materializes what is still to come.
+            or bool(getattr(event, "notifications_enabled", True)) != notifications_enabled_before
         )
         _apply_relational_field_updates(db, event, request)
 

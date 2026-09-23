@@ -23,6 +23,11 @@ from .event_service import (
     update_event_featured_service,
 )
 from .event_participant_service import get_cms_event_participants_service
+from .event_announcement_service import send_event_announcement
+from .notification_response_models import (
+    SendEventAnnouncementRequest,
+    SendEventAnnouncementResponse,
+)
 
 oauth2_scheme = HTTPBearer()
 
@@ -133,3 +138,27 @@ async def update_event_featured_endpoint(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> None:
     update_event_featured_service(token=credentials.credentials, event_id=event_id)
+
+
+@cms_events_router.post(
+    "/{event_id}/notifications",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SendEventAnnouncementResponse,
+)
+async def send_event_notification_endpoint(
+    event_id: UUID,
+    request: SendEventAnnouncementRequest,
+    authentication_credential: Annotated[
+        HTTPAuthorizationCredentials, Depends(oauth2_scheme)
+    ],
+) -> SendEventAnnouncementResponse:
+    """Send a one-off notification about this event.
+
+    202 rather than 200: the queue has accepted it, delivery happens in the
+    worker. A 409 means the event's notifications switch is off.
+    """
+    return send_event_announcement(
+        token=authentication_credential.credentials,
+        event_id=event_id,
+        request=request,
+    )

@@ -220,6 +220,8 @@ class EventDTO(BaseModel):
     )
     event_format: EventFormat = "hybrid"
     chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
     chat_room_id: Optional[UUID] = Field(
         None,
         description="The event's chat room, when one has been created (null until first use)",
@@ -306,6 +308,8 @@ class CreateEventRequest(BaseModel):
     recurrence: Optional[RecurrenceInput] = None
     event_format: EventFormat = "hybrid"
     chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
 
     @field_validator("metadata")
     @classmethod
@@ -353,6 +357,7 @@ class UpdateEventRequest(BaseModel):
     recurrence: Optional[RecurrenceInput] = None
     event_format: Optional[EventFormat] = None
     chat_enabled: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
     @field_validator("event_format")
     @classmethod

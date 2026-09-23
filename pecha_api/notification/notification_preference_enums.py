@@ -26,11 +26,13 @@ class NotificationChannel(enum.Enum):
 class NotificationScope(enum.Enum):
     GLOBAL = "GLOBAL"
     GROUP = "GROUP"
+    EVENT = "EVENT"
 
 
 class PreferenceSource(enum.Enum):
     """Where a resolved `enabled` value came from. Not persisted."""
 
+    EVENT = "EVENT"
     GROUP = "GROUP"
     GLOBAL = "GLOBAL"
     DEFAULT = "DEFAULT"
@@ -42,6 +44,16 @@ NotificationScopeEnum = Enum(NotificationScope, name="notification_scope")
 
 # Sugar accepted on PATCH bodies; expanded by the service, never stored.
 ALL_TYPES = "ALL"
+
+# Types that accept an EVENT-scoped override: everything an event can send.
+# This is the proportionate opt-out - without it the only way to escape one
+# talkative event is to silence that notification type for every event.
+EVENT_SCOPED_TYPES = frozenset(
+    {
+        NotificationType.EVENT,
+        NotificationType.EVENT_REMINDER,
+    }
+)
 
 # Types that accept a GROUP-scoped override.
 GROUP_SCOPED_TYPES = frozenset(
@@ -72,6 +84,14 @@ V1_TOGGLEABLE_TYPES = (
     NotificationType.ACCUMULATION,
     NotificationType.SERIES,
     NotificationType.PRAYER_RECEIVED,
+)
+
+# Event-scoped subset of the above, in render order. Muting one event
+# silences both what it announces and what it reminds about.
+V1_EVENT_TOGGLEABLE_TYPES = tuple(
+    notification_type
+    for notification_type in V1_TOGGLEABLE_TYPES
+    if notification_type in EVENT_SCOPED_TYPES
 )
 
 # Group-scoped subset of the above, in render order.
