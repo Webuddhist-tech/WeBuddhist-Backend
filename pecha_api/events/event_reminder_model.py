@@ -42,13 +42,11 @@ class EventReminder(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False)
 
     __table_args__ = (
-        # uq_event_reminders_event_type - one row per (event, type) - is
-        # deliberately absent here while still present in deployed databases:
-        # a later migration drops it, and until then the per-day flag keeps
-        # writes to a single day per event so both hold. It is left out of
-        # the model because anything built from this metadata (tests, a fresh
-        # environment) would otherwise get a schema that cannot store the
-        # second day of a multi-day event at all.
+        # The per-day key below replaces uq_event_reminders_event_type - one
+        # row per (event, type) - which evt3b4c5d6e7f drops in the same
+        # migration that adds occurrence_date. A schema built from this
+        # metadata therefore matches a migrated database, and neither can
+        # hold a reminder's identity without its occurrence date.
         Index(
             "uq_event_reminders_event_type_day",
             "event_id",

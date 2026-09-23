@@ -10,7 +10,7 @@ reconcile afterwards. The cost is that there is no history of what was sent -
 worth revisiting if organizers start needing an outbox.
 """
 import logging
-from typing import Optional
+from typing import List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -28,6 +28,7 @@ from pecha_api.plans.authors.plan_authors_service import validate_cms_author_det
 from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.users.users_repository import get_user_by_email
 
+from .event_model import Event
 from .event_participant_repository import get_event_participants_paginated
 from .event_repository import get_event_by_id
 from .notification_response_models import (
@@ -126,11 +127,11 @@ def send_event_announcement(
 def _recipient_ids(
     db: Session,
     *,
-    event,
+    event: Event,
     audience: EventAnnouncementAudience,
     skip: int,
     limit: int,
-):
+) -> Tuple[List[UUID], int]:
     """Who the announcement reaches, already filtered by preference.
 
     Both branches resolve a mute on this specific event, so the per-event

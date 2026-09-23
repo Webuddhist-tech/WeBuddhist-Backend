@@ -10,7 +10,12 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-from migrations.idempotency import column_exists, index_exists, table_exists
+from migrations.idempotency import (
+    column_exists,
+    index_exists,
+    table_exists,
+    unique_constraint_exists,
+)
 
 # revision identifiers, used by Alembic.
 revision: str = "evt3b4c5d6e7f"
@@ -70,16 +75,31 @@ def upgrade() -> None:
             sa.Column("day_total", sa.SmallInteger(), nullable=True),
         )
 
-    # Deliberately created alongside uq_event_reminders_event_type rather
-    # than replacing it: while only one day per event is written, both hold,
-    # which is what lets the code roll out before the old constraint is
-    # dropped in a later migration.
+    # Created before the old constraint goes, so the table is never without
+    # uniqueness protection on a reminder's identity.
     if not index_exists("event_reminders", "uq_event_reminders_event_type_day"):
         op.create_index(
             "uq_event_reminders_event_type_day",
             "event_reminders",
             ["event_id", "reminder_type", "occurrence_date"],
             unique=True,
+        )
+
+    # uq_event_reminders_event_type - one row per (event, type) - is what the
+    # per-day key replaces, and it has to go in the same migration that adds
+    # the key. It cannot be deferred to a later release to protect a rolling
+    # deploy: adding occurrence_date NOT NULL above already makes the previous
+    # release's INSERT (which does not supply the column) fail, so keeping the
+    # old constraint buys no extra compatibility while leaving a table that
+    # physically cannot hold day 2 of a multi-day event. Dropping it here is
+    # what makes EVENT_REMINDER_DAILY_ENABLED and
+    # EVENT_REMINDER_RECURRING_ENABLED safe to turn on at all: both write
+    # several rows per (event, type), one per occurrence date.
+    if unique_constraint_exists("event_reminders", "uq_event_reminders_event_type"):
+        op.drop_constraint(
+            "uq_event_reminders_event_type",
+            "event_reminders",
+            type_="unique",
         )
 
     # idx_event_reminders_due is partial (undispatched, uncanceled) so it
@@ -94,6 +114,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Restored before the per-day rows are lost with occurrence_date. This
+    # fails if the daily or recurring flag ever ran: the extra days are real
+    # rows that (event_id, reminder_type) cannot hold, and there is no
+    # correct way to pick which day survives, so the duplicates have to be
+    # cleared deliberately before downgrading.
+    if table_exists("event_reminders") and not unique_constraint_exists(
+        "event_reminders", "uq_event_reminders_event_type"
+    ):
+        op.create_unique_constraint(
+            "uq_event_reminders_event_type",
+            "event_reminders",
+            ["event_id", "reminder_type"],
+        )
     if index_exists("event_reminders", "idx_event_reminders_fire_at"):
         op.drop_index("idx_event_reminders_fire_at", table_name="event_reminders")
     if index_exists("event_reminders", "uq_event_reminders_event_type_day"):

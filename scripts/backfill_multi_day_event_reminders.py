@@ -16,6 +16,7 @@ run again with the flag off to roll every event back to day one.
 import argparse
 import logging
 from datetime import datetime, timezone
+from uuid import UUID
 
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_model import Event
@@ -26,7 +27,9 @@ logger = logging.getLogger("backfill_multi_day_event_reminders")
 _PAGE_SIZE = 200
 
 
-def _candidates(db, *, after_id, limit):
+def _candidates(
+    db, *, after_id: UUID | None, limit: int
+) -> tuple[list[Event], UUID | None]:
     """One-time events still to come whose end falls on a later day than
     their start.
 
@@ -34,7 +37,15 @@ def _candidates(db, *, after_id, limit):
     each event's own zone - because this only decides which events are worth
     rebuilding. reschedule_event_reminders then applies the real per-event
     rule, so an event pulled in by the looser filter simply gets the same
-    single day it already had."""
+    single day it already had.
+
+    Returns the qualifying events *and* the id of the last row the database
+    actually handed back, qualifying or not. The caller has to page on that
+    second value: the limit applies to the raw page, before the single-day
+    events are dropped, so a page of 200 that happens to hold no multi-day
+    event yields an empty list while qualifying events still wait at higher
+    ids. Paging on the filtered list would stop the scan there and leave
+    every one of them with its original day-one reminders."""
     query = db.query(Event).filter(
         Event.is_recurring.is_(False),
         Event.end_date > datetime.now(timezone.utc),
@@ -42,7 +53,10 @@ def _candidates(db, *, after_id, limit):
     if after_id is not None:
         query = query.filter(Event.id > after_id)
     rows = query.order_by(Event.id.asc()).limit(limit).all()
-    return [row for row in rows if row.end_date.date() > row.start_date.date()]
+    if not rows:
+        return [], None
+    qualifying = [row for row in rows if row.end_date.date() > row.start_date.date()]
+    return qualifying, rows[-1].id
 
 
 def backfill(*, dry_run: bool, limit: int | None) -> int:
@@ -50,17 +64,23 @@ def backfill(*, dry_run: bool, limit: int | None) -> int:
     after_id = None
 
     while True:
+        if limit is not None and processed >= limit:
+            break
+
         with SessionLocal() as db:
-            page_size = _PAGE_SIZE if limit is None else min(_PAGE_SIZE, limit - processed)
-            if page_size <= 0:
+            events, last_scanned_id = _candidates(db, after_id=after_id, limit=_PAGE_SIZE)
+            # A None cursor is the only end of the scan - it means the page
+            # came back empty, so there is nothing past it. An empty `events`
+            # with a cursor is just a page of single-day events; advance and
+            # keep walking.
+            if last_scanned_id is None:
                 break
+            after_id = last_scanned_id
 
-            events = _candidates(db, after_id=after_id, limit=_PAGE_SIZE)
-            if not events:
-                break
-            after_id = events[-1].id
+            if limit is not None:
+                events = events[: limit - processed]
 
-            for event in events[:page_size]:
+            for event in events:
                 if dry_run:
                     logger.info(
                         "would rebuild reminders for event %s (%s -> %s)",
@@ -78,9 +98,6 @@ def backfill(*, dry_run: bool, limit: int | None) -> int:
                 except Exception:
                     db.rollback()
                     logger.exception("failed to rebuild reminders for event %s", event.id)
-
-            if limit is not None and processed >= limit:
-                break
 
     return processed
 

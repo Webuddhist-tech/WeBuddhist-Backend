@@ -145,7 +145,7 @@ async def update_event_featured_endpoint(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=SendEventAnnouncementResponse,
 )
-async def send_event_notification_endpoint(
+def send_event_notification_endpoint(
     event_id: UUID,
     request: SendEventAnnouncementRequest,
     authentication_credential: Annotated[
