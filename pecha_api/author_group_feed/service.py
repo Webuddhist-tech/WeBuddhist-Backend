@@ -248,11 +248,11 @@ def _get_author_group_feed(
                 event_ids=list(joined_event_ids),
             )
 
-    page_group_ids = list({
-        *[post.group_id for post in posts],
-        *[event.group_id for event in events],
-        *[item['event'].group_id for item in expanded_recurring],
-    })
+    page_group_id_set: Set[UUID] = set()
+    page_group_id_set.update(post.group_id for post in posts)
+    page_group_id_set.update(event.group_id for event in events)
+    page_group_id_set.update(item["event"].group_id for item in expanded_recurring)
+    page_group_ids = list(page_group_id_set)
     page_groups = (
         get_groups_by_ids(db=db, group_ids=page_group_ids) if page_group_ids else []
     )

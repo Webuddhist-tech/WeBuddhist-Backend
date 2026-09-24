@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone, date, timedelta
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -659,6 +659,37 @@ def _occurrence_item(
     }
 
 
+def _pick_chosen_occurrence_in_window(
+    template: Event,
+    occurrences: Sequence[Tuple[date, date]],
+    *,
+    not_ended_before: Optional[datetime],
+    prefer_current_or_last: bool,
+    reference: Optional[datetime],
+) -> Optional[Dict]:
+    chosen = None
+    last_in_window = None
+    for start_d, end_d in occurrences:
+        item = _occurrence_item(template, start_d, end_d)
+        if not_ended_before is not None:
+            if item["end_date"] < not_ended_before:
+                continue
+            return item
+        if prefer_current_or_last:
+            last_in_window = item
+            if (
+                reference is not None
+                and chosen is None
+                and item["end_date"] >= reference
+            ):
+                chosen = item
+            continue
+        return item
+    if chosen is None:
+        chosen = last_in_window
+    return chosen
+
+
 def _expand_earliest_occurrences(
     recurring_templates: Sequence[Event],
     from_date_obj: date,
@@ -681,32 +712,129 @@ def _expand_earliest_occurrences(
     expanded_occurrences = []
     for template in recurring_templates:
         occurrences = expand_occurrences(template, from_date_obj, to_date_obj)
-        chosen = None
-        last_in_window = None
-        for start_d, end_d in occurrences:
-            item = _occurrence_item(template, start_d, end_d)
-            if not_ended_before is not None:
-                if item["end_date"] < not_ended_before:
-                    continue
-                chosen = item
-                break
-            if prefer_current_or_last:
-                last_in_window = item
-                if (
-                    reference is not None
-                    and chosen is None
-                    and item["end_date"] >= reference
-                ):
-                    chosen = item
-                continue
-            chosen = item
-            break
-        if chosen is None:
-            chosen = last_in_window
+        chosen = _pick_chosen_occurrence_in_window(
+            template,
+            occurrences,
+            not_ended_before=not_ended_before,
+            prefer_current_or_last=prefer_current_or_last,
+            reference=reference,
+        )
         if chosen is None:
             continue
         expanded_occurrences.append(chosen)
     return expanded_occurrences
+
+
+class _EventListingWindow(NamedTuple):
+    from_date: Optional[datetime]
+    to_date: datetime
+    not_ended_before: Optional[datetime]
+    prefer_current_or_last: bool
+    from_date_obj: date
+    to_date_obj: date
+
+
+def _resolve_event_listing_window(
+    from_date: Optional[datetime],
+    to_date: Optional[datetime],
+    *,
+    should_include_past: bool,
+    now: datetime,
+) -> _EventListingWindow:
+    not_ended_before = None if should_include_past else now
+    resolved_from = from_date
+    if resolved_from is None and not should_include_past:
+        resolved_from = now
+    resolved_to = to_date
+    if resolved_to is None:
+        resolved_to = (resolved_from or now) + timedelta(days=365)
+
+    prefer_current_or_last = False
+    expansion_from = resolved_from or now
+    if should_include_past and from_date is None:
+        expansion_from = now - timedelta(days=_CMS_RECURRENCE_LOOKBACK_DAYS)
+        prefer_current_or_last = True
+    elif not_ended_before is not None and expansion_from < not_ended_before:
+        expansion_from = not_ended_before
+    from_date_obj = (
+        expansion_from.date()
+        if isinstance(expansion_from, datetime)
+        else expansion_from
+    )
+    to_date_obj = (
+        resolved_to.date() if isinstance(resolved_to, datetime) else resolved_to
+    )
+    return _EventListingWindow(
+        resolved_from,
+        resolved_to,
+        not_ended_before,
+        prefer_current_or_last,
+        from_date_obj,
+        to_date_obj,
+    )
+
+
+def _listing_join_state(
+    db: Session,
+    current_user,
+    event_ids: List[UUID],
+) -> Tuple[Set[UUID], Dict[UUID, str]]:
+    joined_ids: Set[UUID] = set()
+    participation_types: Dict[UUID, str] = {}
+    if not current_user:
+        return joined_ids, participation_types
+    joined_ids = set(
+        get_joined_event_ids_by_user(
+            db=db,
+            user_id=current_user.id,
+            event_ids=event_ids,
+        )
+    )
+    if joined_ids:
+        participation_types = get_participation_types_by_user(
+            db=db,
+            user_id=current_user.id,
+            event_ids=list(joined_ids),
+        )
+    return joined_ids, participation_types
+
+
+def _build_listing_event_dtos(
+    db: Session,
+    paginated_items: Sequence[Dict],
+    *,
+    language: Optional[str],
+    fallback: bool,
+    current_user,
+    joined_ids: Set[UUID],
+    participation_types: Dict[UUID, str],
+) -> List[EventDTO]:
+    event_ids = list({item["event"].id for item in paginated_items})
+    counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+    chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
+    group_ids = list({item["event"].group_id for item in paginated_items})
+    group_cards = _group_card_map(db, group_ids)
+
+    event_dtos: List[EventDTO] = []
+    for item in paginated_items:
+        event = item["event"]
+        event_dtos.append(
+            _event_to_dto(
+                event,
+                language=language,
+                fallback=fallback,
+                participant_count=counts_by_event.get(event.id, 0),
+                is_joined=(event.id in joined_ids) if current_user else None,
+                my_participation_type=participation_types.get(event.id),
+                group_name=group_cards.get(event.group_id, (None, None))[0],
+                group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
+                occurrence_date=item["occurrence_date"],
+                start_date=item["start_date"],
+                end_date=item["end_date"],
+                chat_room_id=chat_rooms_by_event.get(event.id),
+            )
+        )
+    return event_dtos
 
 
 def get_events_service(
@@ -737,27 +865,14 @@ def get_events_service(
                 )
 
         now = datetime.now(timezone.utc)
-        not_ended_before = None if should_include_past else now
-        # Public listings default to "from now" so finished events drop out of
-        # the window. CMS keeps from_date unset so past events remain listed.
-        if from_date is None and not should_include_past:
-            from_date = now
-        if to_date is None:
-            to_date = (from_date or now) + timedelta(days=365)
-
-        # Recurrence expansion still needs a start even when CMS has no from_date.
-        # Public listings clamp to now so a historical from_date cannot expand
-        # a finished occurrence as the earliest in the window.
-        # CMS with no from_date looks back so finished series still appear.
-        prefer_current_or_last = False
-        expansion_from = from_date or now
-        if should_include_past and from_date is None:
-            expansion_from = now - timedelta(days=_CMS_RECURRENCE_LOOKBACK_DAYS)
-            prefer_current_or_last = True
-        elif not_ended_before is not None and expansion_from < not_ended_before:
-            expansion_from = not_ended_before
-        from_date_obj = expansion_from.date() if isinstance(expansion_from, datetime) else expansion_from
-        to_date_obj = to_date.date() if isinstance(to_date, datetime) else to_date
+        listing_window = _resolve_event_listing_window(
+            from_date,
+            to_date,
+            should_include_past=should_include_past,
+            now=now,
+        )
+        from_date = listing_window.from_date
+        to_date = listing_window.to_date
 
         # Get all one-shot events for merged pagination with recurring occurrences
         # Note: We need all events to properly merge and paginate with recurring occurrences
@@ -767,7 +882,7 @@ def get_events_service(
             from_date=from_date,
             to_date=to_date,
             restrict_group_ids=restrict_group_ids,
-            not_ended_before=not_ended_before,
+            not_ended_before=listing_window.not_ended_before,
             skip=0,
             limit=None,
         )
@@ -785,11 +900,11 @@ def get_events_service(
         # a monthly recurrence over the default 12-month window).
         expanded_occurrences = _expand_earliest_occurrences(
             recurring_templates,
-            from_date_obj,
-            to_date_obj,
-            not_ended_before=not_ended_before,
-            prefer_current_or_last=prefer_current_or_last,
-            reference=now if prefer_current_or_last else None,
+            listing_window.from_date_obj,
+            listing_window.to_date_obj,
+            not_ended_before=listing_window.not_ended_before,
+            prefer_current_or_last=listing_window.prefer_current_or_last,
+            reference=now if listing_window.prefer_current_or_last else None,
         )
         
         # Merge one-shot events and expanded occurrences
@@ -804,51 +919,20 @@ def get_events_service(
         # Apply pagination
         total = len(all_event_items)
         paginated_items = all_event_items[skip:skip + limit]
-        
-        # Get participant counts for all unique event IDs
-        event_ids = list({item['event'].id for item in paginated_items})
-        counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
-        chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
-        group_ids = list({item['event'].group_id for item in paginated_items})
-        group_cards = _group_card_map(db, group_ids)
 
-        joined_ids: set[UUID] = set()
-        participation_types: dict[UUID, str] = {}
-        if current_user:
-            joined_ids = set(
-                get_joined_event_ids_by_user(
-                    db=db,
-                    user_id=current_user.id,
-                    event_ids=event_ids,
-                )
-            )
-            if joined_ids:
-                participation_types = get_participation_types_by_user(
-                    db=db,
-                    user_id=current_user.id,
-                    event_ids=list(joined_ids),
-                )
-
-        # Build DTOs with occurrence-specific dates
-        event_dtos = []
-        for item in paginated_items:
-            event = item['event']
-            event_dtos.append(
-                _event_to_dto(
-                    event,
-                    language=language,
-                    fallback=fallback,
-                    participant_count=counts_by_event.get(event.id, 0),
-                    is_joined=(event.id in joined_ids) if current_user else None,
-                    my_participation_type=participation_types.get(event.id),
-                    group_name=group_cards.get(event.group_id, (None, None))[0],
-                    group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
-                    occurrence_date=item['occurrence_date'],
-                    start_date=item['start_date'],
-                    end_date=item['end_date'],
-                    chat_room_id=chat_rooms_by_event.get(event.id),
-                )
-            )
+        event_ids = list({item["event"].id for item in paginated_items})
+        joined_ids, participation_types = _listing_join_state(
+            db, current_user, event_ids
+        )
+        event_dtos = _build_listing_event_dtos(
+            db,
+            paginated_items,
+            language=language,
+            fallback=fallback,
+            current_user=current_user,
+            joined_ids=joined_ids,
+            participation_types=participation_types,
+        )
 
         return EventsResponse(
             events=event_dtos,
