@@ -168,13 +168,13 @@ async def test_a_failed_invalidation_is_queued_and_retried(clean_pending):
                return_value=2) as mock_delete:
         await cached_response_module._drain_pending_invalidations()
     mock_delete.assert_awaited_once()
-    assert cached_response_module._pending_invalidations == set()
+    assert cached_response_module._pending_invalidations == {}
 
 
 @pytest.mark.asyncio
 async def test_a_namespace_owed_an_eviction_is_not_served_from_cache(clean_pending):
     """The entry sitting there may be the one the write already replaced."""
-    cached_response_module._pending_invalidations.add(CacheType.PLAN_LIST)
+    cached_response_module._mark_pending(CacheType.PLAN_LIST)
     with patch("pecha_api.cache.cached_response.cache_is_available", return_value=False),          patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
                return_value={"value": "stale", "count": 1}) as mock_get,          patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
         result = await cached_response(
@@ -187,7 +187,7 @@ async def test_a_namespace_owed_an_eviction_is_not_served_from_cache(clean_pendi
 
 @pytest.mark.asyncio
 async def test_the_debt_is_cleared_once_the_retry_succeeds(clean_pending):
-    cached_response_module._pending_invalidations.add(CacheType.PLAN_LIST)
+    cached_response_module._mark_pending(CacheType.PLAN_LIST)
     with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
                return_value=1),          patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
                return_value={"value": "cached", "count": 1}) as mock_get,          patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
@@ -211,4 +211,45 @@ async def test_one_failure_queues_the_rest_instead_of_retrying_each(clean_pendin
                side_effect=ConnectionError("redis down")) as mock_delete:
         assert await invalidate_namespaces(types) == 0
     assert mock_delete.await_count == 1
-    assert set(types) == cached_response_module._pending_invalidations
+    assert set(types) == set(cached_response_module._pending_invalidations)
+
+
+@pytest.mark.asyncio
+async def test_a_write_failing_mid_retry_keeps_the_namespace_pending(clean_pending):
+    """A sweep only settles the debt it started with. One that began before
+    the failing write cannot have evicted what that write superseded."""
+    cached_response_module._mark_pending(CacheType.PLAN_LIST)
+    sweeps = []
+
+    async def sweep(pattern):
+        sweeps.append(pattern)
+        if len(sweeps) == 1:
+            # A write lands while the retry is in flight, and its own
+            # invalidation fails against the still-shaky Redis.
+            await invalidate_namespace(CacheType.PLAN_LIST)
+            return 2
+        raise ConnectionError("redis down")
+
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", side_effect=sweep):
+        await cached_response_module._drain_pending_invalidations()
+
+    assert CacheType.PLAN_LIST in cached_response_module._pending_invalidations
+
+
+@pytest.mark.asyncio
+async def test_a_write_failing_mid_sweep_is_not_cleared_by_that_sweep(clean_pending):
+    """Same race on the write path: the successful sweep must not absolve the
+    invalidation that failed while it was running."""
+    sweeps = []
+
+    async def sweep(pattern):
+        sweeps.append(pattern)
+        if len(sweeps) == 1:
+            await invalidate_namespace(CacheType.PLAN_LIST)
+            return 5
+        raise ConnectionError("redis down")
+
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", side_effect=sweep):
+        assert await invalidate_namespace(CacheType.PLAN_LIST) == 5
+
+    assert CacheType.PLAN_LIST in cached_response_module._pending_invalidations

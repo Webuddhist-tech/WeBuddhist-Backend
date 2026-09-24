@@ -11,8 +11,9 @@ failed one.
 """
 
 import asyncio
+import itertools
 import logging
-from typing import Callable, Optional, Sequence, Set, Type, TypeVar
+from typing import Callable, Dict, Optional, Sequence, Tuple, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -38,11 +39,31 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # back when the cache does. Without this a CMS edit made during a Redis blip
 # would go on showing the old content for the whole 3.5h timeout.
 #
+# Each debt carries a mark. A sweep takes many round trips - SCAN, then
+# UNLINK, repeatedly - so another write can fail and re-mark the same
+# namespace while one is in flight, and that sweep, which began before the
+# second write, proves nothing about what the second write superseded.
+# Clearing a debt is therefore conditional on its mark still being the one the
+# sweep set out to settle.
+#
 # This is per-process. Another instance that never attempted the write knows
 # nothing about the debt and can still serve its own stale entry until the
 # timeout - the durable version of this needs a queue, which is more machinery
 # than the failure deserves.
-_pending_invalidations: Set[CacheType] = set()
+_pending_invalidations: Dict[CacheType, int] = {}
+_invalidation_marks = itertools.count()
+
+
+def _mark_pending(cache_type: CacheType) -> None:
+    """Record that this namespace is owed an eviction, under a fresh mark."""
+    _pending_invalidations[cache_type] = next(_invalidation_marks)
+
+
+def _settle_pending(cache_type: CacheType, mark: Optional[int]) -> None:
+    """Clear the debt, unless it was re-marked while the sweep was running."""
+    if _pending_invalidations.get(cache_type) != mark:
+        return
+    _pending_invalidations.pop(cache_type, None)
 
 
 async def _drain_pending_invalidations() -> None:
@@ -50,12 +71,13 @@ async def _drain_pending_invalidations() -> None:
     if not _pending_invalidations or not cache_is_available():
         return
     for cache_type in list(_pending_invalidations):
+        mark = _pending_invalidations.get(cache_type)
         try:
             deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))
         except Exception as cache_error:
             logger.error("Retry of invalidation for %s failed: %s", cache_type.value, cache_error)
             return
-        _pending_invalidations.discard(cache_type)
+        _settle_pending(cache_type, mark)
         logger.info(
             "Retried invalidation for %s: %d entries removed", cache_type.value, deleted
         )
@@ -110,6 +132,29 @@ async def cached_response(
     return response
 
 
+async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:
+    """Sweep one namespace. Returns the number removed and whether it worked."""
+    # The mark this sweep settles, read before the first await: anything
+    # marked after this point is a debt the sweep cannot have paid.
+    mark = _pending_invalidations.get(cache_type)
+    # Attempted even when the breaker is open. The breaker exists to stop
+    # reads paying a timeout each; an invalidation that is skipped is not
+    # deferred, it is lost, and these namespaces hold content for hours.
+    try:
+        deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))
+    except Exception as cache_error:
+        _mark_pending(cache_type)
+        logger.error(
+            "Could not invalidate cache namespace %s (queued for retry): %s",
+            cache_type.value,
+            cache_error,
+        )
+        return 0, False
+    _settle_pending(cache_type, mark)
+    logger.info("Invalidated %d cache entries in %s", deleted, cache_type.value)
+    return deleted, True
+
+
 async def invalidate_namespace(cache_type: CacheType) -> int:
     """Drop every cached entry of one type. Returns the number removed.
 
@@ -118,21 +163,7 @@ async def invalidate_namespace(cache_type: CacheType) -> int:
     the cache could not be reached afterwards. The cost of swallowing it is a
     stale entry until its timeout, which is exactly what the timeout is for.
     """
-    # Attempted even when the breaker is open. The breaker exists to stop
-    # reads paying a timeout each; an invalidation that is skipped is not
-    # deferred, it is lost, and these namespaces hold content for hours.
-    try:
-        deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))
-    except Exception as cache_error:
-        _pending_invalidations.add(cache_type)
-        logger.error(
-            "Could not invalidate cache namespace %s (queued for retry): %s",
-            cache_type.value,
-            cache_error,
-        )
-        return 0
-    _pending_invalidations.discard(cache_type)
-    logger.info("Invalidated %d cache entries in %s", deleted, cache_type.value)
+    deleted, _ = await _invalidate_namespace(cache_type)
     return deleted
 
 
@@ -149,9 +180,14 @@ async def invalidate_namespaces(cache_types: Sequence[CacheType]) -> int:
     remaining = list(cache_types)
     while remaining:
         cache_type = remaining.pop(0)
-        total += await invalidate_namespace(cache_type)
-        if cache_type in _pending_invalidations:
-            _pending_invalidations.update(remaining)
+        # The sweep reports its own outcome rather than it being read back off
+        # the pending set, where a concurrent write's failure would look like
+        # this one's.
+        deleted, succeeded = await _invalidate_namespace(cache_type)
+        total += deleted
+        if not succeeded:
+            for queued in remaining:
+                _mark_pending(queued)
             logger.error(
                 "Cache unreachable; queued %d further namespaces for retry", len(remaining)
             )

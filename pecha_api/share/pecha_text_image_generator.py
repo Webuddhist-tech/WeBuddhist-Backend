@@ -1,8 +1,7 @@
-import io
 import logging
 import textwrap
 from typing import BinaryIO, Optional, Union
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 from bs4 import BeautifulSoup
 from pecha_api.share.pecha_text_image_generator_config import CONFIG
 
@@ -200,51 +199,19 @@ def generate_segment_image(
 def generate_event_share_image(
     title: str,
     lang: str = None,
-    background: Optional[bytes] = None,
     logo_path: str = None,
     output_path: ImageDestination = None,
 ) -> None:
-    """Share card for an event: the event photo, the event name, and the logo."""
+    """Share card for an event: the WeBuddhist logo and the event name."""
     width = CONFIG["EVENT_CARD_WIDTH"]
     height = CONFIG["EVENT_CARD_HEIGHT"]
-    canvas = _event_background(background, width, height)
-    canvas = _add_bottom_scrim(canvas)
+    canvas = Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
     logo = _load_bottom_right_logo(logo_path, height) if logo_path else None
     _draw_event_title(canvas, title or "", lang, _logo_reserved_width(logo))
     if logo is not None:
         canvas = _paste_logo_bottom_right(canvas, logo)
     destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
     canvas.save(destination, format=IMAGE_FORMAT)
-
-def _event_background(background: Optional[bytes], width: int, height: int) -> Image.Image:
-    if background:
-        try:
-            source = ImageOps.exif_transpose(Image.open(io.BytesIO(background))).convert("RGBA")
-            return _cover_crop(source, width, height)
-        except (OSError, ValueError) as error:
-            logging.warning("Could not read event image for share card: %s", error)
-    return Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
-
-def _cover_crop(source: Image.Image, width: int, height: int) -> Image.Image:
-    scale = max(width / source.width, height / source.height)
-    resized = source.resize(
-        (max(width, int(source.width * scale)), max(height, int(source.height * scale))),
-        Image.Resampling.LANCZOS,
-    )
-    left = (resized.width - width) // 2
-    top = (resized.height - height) // 2
-    return resized.crop((left, top, left + width, top + height))
-
-def _add_bottom_scrim(canvas: Image.Image) -> Image.Image:
-    overlay = Image.new("RGBA", canvas.size, CONFIG["RGBA_TRANSPARENT"])
-    draw = ImageDraw.Draw(overlay)
-    start = int(canvas.height * CONFIG["EVENT_SCRIM_START_RATIO"])
-    span = max(canvas.height - start, 1)
-    for y in range(start, canvas.height):
-        progress = (y - start) / span
-        alpha = int(200 * progress * progress)
-        draw.line([(0, y), (canvas.width, y)], fill=(0, 0, 0, alpha))
-    return Image.alpha_composite(canvas, overlay)
 
 def _load_bottom_right_logo(logo_path: str, image_height: int) -> Optional[Image.Image]:
     try:

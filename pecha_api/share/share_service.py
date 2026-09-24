@@ -1,6 +1,5 @@
 from fastapi import HTTPException
 import io
-import logging
 import re
 from functools import partial
 from typing import Optional
@@ -14,7 +13,6 @@ from .pecha_text_image_generator import (
     generate_event_share_image,
     generate_segment_image,
 )
-from pecha_api.uploads.S3_utils import download_bytes
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
 from pecha_api.config import get
@@ -83,13 +81,30 @@ async def get_generated_image(share_request: Optional[ShareRequest] = None):
 
 async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
     _apply_inferred_ids(share_request)
+    og_title = DEFAULT_OG_TITLE
     og_description = DEFAULT_OG_DESCRIPTION
+    if _normalized_id(share_request.event_id) is not None:
+        title, description, _language = await to_thread.run_sync(
+            partial(
+                _load_event_share_metadata,
+                _normalized_id(share_request.event_id),
+                share_request.language,
+                get("SITE_NAME"),
+            )
+        )
+        og_title = title
+        if description:
+            og_description = description
     if share_request.logo:
         await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
     await _generate_segment_content_image_(share_request=share_request)
 
-    payload = _generate_short_url_payload_(share_request=share_request, og_description=og_description)
+    payload = _generate_short_url_payload_(
+        share_request=share_request,
+        og_title=og_title,
+        og_description=og_description,
+    )
     short_url: ShortUrlResponse = await get_short_url(payload=payload)
 
     return short_url
@@ -190,13 +205,12 @@ async def _generate_event_content_image_(
 ) -> None:
     site_name = get("SITE_NAME")
     event_id = _normalized_id(share_request.event_id)
-    title, language, background = await to_thread.run_sync(
-        partial(_load_event_share_card, event_id, share_request.language, site_name)
+    title, _description, language = await to_thread.run_sync(
+        partial(_load_event_share_metadata, event_id, share_request.language, site_name)
     )
     image_kwargs = {
         "title": title,
         "lang": language,
-        "background": background,
         "logo_path": WEBUDDHIST_LOGO_PATH,
     }
     if output_path is not None:
@@ -204,70 +218,35 @@ async def _generate_event_content_image_(
     await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
 
 
-def _load_event_share_card(
+def _load_event_share_metadata(
     event_id: Optional[str],
     language: Optional[str],
     site_name: str,
-) -> tuple[str, Optional[str], Optional[bytes]]:
+) -> tuple[str, Optional[str], Optional[str]]:
+    """The event name and description used on the short URL card.
+
+    The image is the WeBuddhist logo plus this name - the event photo is not
+    part of the share card.
+    """
     event_uuid = _parse_uuid(event_id) if event_id else None
     if event_uuid is None:
-        return site_name, language, None
+        return site_name, None, language
 
     with SessionLocal() as db:
         event = get_event_by_id(db=db, event_id=event_uuid)
         if event is None:
-            return site_name, language, None
+            return site_name, None, language
         metadata = _first_metadata(event.metadata_entries, language)
         title = (metadata.name if metadata is not None and metadata.name else None) or site_name
+        description = (
+            metadata.description.strip()
+            if metadata is not None and metadata.description
+            else None
+        ) or None
         resolved_language = (
             _language_code(metadata.language) if metadata is not None else None
         ) or language
-        image_url = event.image_url
-
-    background = _download_event_image(image_url)
-    return title, resolved_language, background
-
-
-def _download_event_image(image_url: Optional[str]) -> Optional[bytes]:
-    keys = _event_image_keys(image_url)
-    if not keys:
-        return None
-    try:
-        bucket_name = get("AWS_BUCKET_NAME")
-    except Exception:
-        logging.warning("Event share image skipped; storage bucket is not configured")
-        return None
-    for key in keys:
-        try:
-            image_bytes = download_bytes(bucket_name=bucket_name, s3_key=key)
-        except Exception:
-            logging.warning("Failed to download event image %s", key)
-            continue
-        if image_bytes:
-            return image_bytes
-    return None
-
-
-def _event_image_keys(image_url: Optional[str]) -> list[str]:
-    key = _event_image_s3_key(image_url)
-    if not key:
-        return []
-    if "original" not in key:
-        return [key]
-    medium_key = key.replace("original", "medium")
-    if medium_key == key:
-        return [key]
-    return [medium_key, key]
-
-
-def _event_image_s3_key(image_url: Optional[str]) -> Optional[str]:
-    cleaned = (image_url or "").strip()
-    if not cleaned:
-        return None
-    if cleaned.lower().startswith(("http://", "https://")):
-        key = urlparse(cleaned).path.lstrip("/")
-        return key or None
-    return cleaned
+    return title, description, resolved_language
 
 
 def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Optional[str]]:
@@ -288,7 +267,11 @@ def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Op
     return main_text, site_name, None
 
 
-def _generate_short_url_payload_(share_request: ShareRequest, og_description: str) -> dict:
+def _generate_short_url_payload_(
+    share_request: ShareRequest,
+    og_description: str,
+    og_title: Optional[str] = None,
+) -> dict:
     _apply_inferred_ids(share_request)
 
     if share_request.url is None:
@@ -301,7 +284,7 @@ def _generate_short_url_payload_(share_request: ShareRequest, og_description: st
 
     payload = {
         "url": share_request.url,
-        "og_title": DEFAULT_OG_DESCRIPTION,
+        "og_title": og_title or DEFAULT_OG_TITLE,
         "og_description": og_description,
         "og_image": _share_image_url(share_request),
         "tags": share_request.tags
