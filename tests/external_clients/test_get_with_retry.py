@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import httpx
 import pytest
@@ -11,14 +12,14 @@ from pecha_api.external_clients import (
 )
 
 
-def _http_client(*side_effects):
+def _http_client(*side_effects: Any) -> AsyncMock:
     """An AsyncClient double whose .get replays `side_effects` in order."""
     client = AsyncMock()
     client.get.side_effect = list(side_effects)
     return client
 
 
-def _response():
+def _response() -> MagicMock:
     response = MagicMock(spec=httpx.Response)
     response.status_code = 200
     return response
