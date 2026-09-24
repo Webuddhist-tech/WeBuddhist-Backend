@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone, date, timedelta
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -16,15 +16,16 @@ from pecha_api.plans.authors.plan_authors_service import (
     validate_cms_author_details,
 )
 from pecha_api.plans.groups.groups_enums import AuthorGroupMemberRole
+from pecha_api.plans.groups.groups_models import AuthorGroup
 from pecha_api.plans.groups.groups_repository import (
     get_author_group_ids,
-    get_group_by_id,
     get_groups_by_ids,
     is_group_published,
 )
 from pecha_api.plans.plans_enums import PlanStatus
-from pecha_api.plans.public.plan_repository import get_published_plan_by_id
-from pecha_api.plans.series.series_repository import get_series_by_id
+from pecha_api.plans.plans_models import Plan
+from pecha_api.plans.public.plan_repository import _series_published_or_standalone
+from pecha_api.plans.series.series_model import Series
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
@@ -507,42 +508,78 @@ def _event_to_dto(
     )
 
 
-def event_linked_content_publicly_viewable(
-    db,
+def collect_published_linked_resource_ids(
+    db: Session,
     *,
+    plan_ids: Sequence[UUID],
+    series_ids: Sequence[UUID],
+) -> Tuple[Set[UUID], Set[UUID]]:
+    """Batch-resolve which linked plan/series IDs are public-ready (published)."""
+    published_plan_ids: Set[UUID] = set()
+    unique_plan_ids = list(dict.fromkeys(plan_ids))
+    if unique_plan_ids:
+        published_plan_ids = {
+            row[0]
+            for row in db.query(Plan.id)
+            .filter(
+                Plan.id.in_(unique_plan_ids),
+                Plan.status == PlanStatus.PUBLISHED,
+                Plan.deleted_at.is_(None),
+                _series_published_or_standalone(),
+            )
+            .all()
+        }
+    published_series_ids: Set[UUID] = set()
+    unique_series_ids = list(dict.fromkeys(series_ids))
+    if unique_series_ids:
+        published_series_ids = {
+            row[0]
+            for row in db.query(Series.id)
+            .filter(
+                Series.id.in_(unique_series_ids),
+                Series.status == PlanStatus.PUBLISHED,
+                Series.deleted_at.is_(None),
+            )
+            .all()
+        }
+    return published_plan_ids, published_series_ids
+
+
+def event_has_publishable_linked_content(
     event: Event,
-    group=None,
+    *,
+    published_plan_ids: Set[UUID],
+    published_series_ids: Set[UUID],
 ) -> bool:
-    """Linked plan or series on a public published group is readable without joining."""
+    """False when an event points at a draft or missing plan/series."""
+    plan_id = event.plan_id
+    series_id = getattr(event, "series_id", None)
+    if not plan_id and not series_id:
+        return True
+    if plan_id:
+        return plan_id in published_plan_ids
+    return series_id in published_series_ids
+
+
+def can_view_event_linked_content_without_group_join(
+    event: Event,
+    *,
+    group: Optional[AuthorGroup],
+    published_plan_ids: Set[UUID],
+    published_series_ids: Set[UUID],
+) -> bool:
+    """Public browse of event-linked plan/series (distinct from group membership)."""
     if not event.plan_id and not getattr(event, "series_id", None):
         return False
-    if group is None:
-        group = get_group_by_id(db=db, group_id=event.group_id)
+    if not event_has_publishable_linked_content(
+        event,
+        published_plan_ids=published_plan_ids,
+        published_series_ids=published_series_ids,
+    ):
+        return False
     if not group or not group.is_public or not is_group_published(group):
         return False
-    if event.plan_id:
-        return get_published_plan_by_id(db=db, plan_id=event.plan_id) is not None
-    series = get_series_by_id(db=db, series_id=event.series_id)
-    if not series or series.deleted_at is not None:
-        return False
-    return series.status == PlanStatus.PUBLISHED
-
-
-def feed_item_is_joined_for_event(
-    db,
-    *,
-    event: Event,
-    joined_group_id_set: set,
-    group_by_id: dict,
-) -> bool:
-    """Feed card ``is_joined``: group member, or public event-linked plan/series."""
-    if event.group_id in joined_group_id_set:
-        return True
-    return event_linked_content_publicly_viewable(
-        db,
-        event=event,
-        group=group_by_id.get(event.group_id),
-    )
+    return True
 
 
 def _require_can_edit_event(db, group_id: UUID, author) -> None:

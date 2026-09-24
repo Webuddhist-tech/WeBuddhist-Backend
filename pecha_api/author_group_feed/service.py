@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -12,7 +12,12 @@ from pecha_api.events.event_participant_repository import (
     get_participation_types_by_user,
 )
 from pecha_api.events.event_repository import get_events, get_recurring_events
-from pecha_api.events.event_service import _event_to_dto, feed_item_is_joined_for_event
+from pecha_api.events.event_service import (
+    _event_to_dto,
+    can_view_event_linked_content_without_group_join,
+    collect_published_linked_resource_ids,
+    event_has_publishable_linked_content,
+)
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
     combine_occurrence_window,
@@ -79,11 +84,9 @@ def _group_display_name(group: AuthorGroup, language: Optional[str] = None) -> s
 
 
 def _build_group_card_map(
-    db: Session,
-    group_ids: List[UUID],
+    groups: Sequence[AuthorGroup],
     language: Optional[str],
 ) -> Dict[UUID, dict]:
-    groups = get_groups_by_ids(db=db, group_ids=group_ids)
     return {
         group.id: {
             "group_id": group.id,
@@ -171,7 +174,7 @@ def _get_author_group_feed(
     today = now.date()
 
     # Get one-shot events that have not already ended (including plan/series-linked).
-    one_shot_events, one_shot_total = get_events(
+    one_shot_events, _one_shot_total = get_events(
         db=db,
         restrict_group_ids=group_ids,
         skip=0,
@@ -190,10 +193,42 @@ def _get_author_group_feed(
     # recurrences like Feb 29 and include active multi-day occurrences.
     
     expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
-    
-    # Combine one-shot events with next occurrences of recurring templates
+
+    linked_candidates = list(one_shot_events) + [
+        item["event"] for item in expanded_recurring
+    ]
+    plan_ids = [event.plan_id for event in linked_candidates if event.plan_id]
+    series_ids = [
+        event.series_id
+        for event in linked_candidates
+        if getattr(event, "series_id", None)
+    ]
+    published_plan_ids, published_series_ids = collect_published_linked_resource_ids(
+        db,
+        plan_ids=plan_ids,
+        series_ids=series_ids,
+    )
+    one_shot_events = [
+        event
+        for event in one_shot_events
+        if event_has_publishable_linked_content(
+            event,
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        )
+    ]
+    expanded_recurring = [
+        item
+        for item in expanded_recurring
+        if event_has_publishable_linked_content(
+            item["event"],
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        )
+    ]
+
     events = one_shot_events
-    events_total = one_shot_total + len(expanded_recurring)
+    events_total = len(one_shot_events) + len(expanded_recurring)
     event_ids = [event.id for event in events] + [item['event'].id for item in expanded_recurring]
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     joined_event_ids: Set[UUID] = set()
@@ -218,11 +253,11 @@ def _get_author_group_feed(
         *[event.group_id for event in events],
         *[item['event'].group_id for item in expanded_recurring],
     })
-    group_cards = _build_group_card_map(db, page_group_ids, language)
-    group_by_id = {
-        group.id: group
-        for group in get_groups_by_ids(db=db, group_ids=page_group_ids)
-    }
+    page_groups = (
+        get_groups_by_ids(db=db, group_ids=page_group_ids) if page_group_ids else []
+    )
+    group_by_id = {group.id: group for group in page_groups}
+    group_cards = _build_group_card_map(page_groups, language)
 
     cards: List[Tuple[datetime, AuthorGroupFeedItemDTO]] = []
 
@@ -255,11 +290,12 @@ def _get_author_group_feed(
                 AuthorGroupFeedItemDTO(
                     type=AuthorGroupFeedItemType.EVENT,
                     feed_at=_isoformat(feed_at),
-                    is_joined=feed_item_is_joined_for_event(
-                        db,
-                        event=event,
-                        joined_group_id_set=joined_group_id_set,
-                        group_by_id=group_by_id,
+                    is_joined=event.group_id in joined_group_id_set,
+                    can_view_linked_content=can_view_event_linked_content_without_group_join(
+                        event,
+                        group=group_by_id.get(event.group_id),
+                        published_plan_ids=published_plan_ids,
+                        published_series_ids=published_series_ids,
                     ),
                     group_id=event.group_id,
                     group_name=group_info.get("group_name"),
@@ -306,11 +342,12 @@ def _get_author_group_feed(
                 AuthorGroupFeedItemDTO(
                     type=AuthorGroupFeedItemType.EVENT,
                     feed_at=_isoformat(feed_at),
-                    is_joined=feed_item_is_joined_for_event(
-                        db,
-                        event=event,
-                        joined_group_id_set=joined_group_id_set,
-                        group_by_id=group_by_id,
+                    is_joined=event.group_id in joined_group_id_set,
+                    can_view_linked_content=can_view_event_linked_content_without_group_join(
+                        event,
+                        group=group_by_id.get(event.group_id),
+                        published_plan_ids=published_plan_ids,
+                        published_series_ids=published_series_ids,
                     ),
                     group_id=event.group_id,
                     group_name=group_info.get("group_name"),
