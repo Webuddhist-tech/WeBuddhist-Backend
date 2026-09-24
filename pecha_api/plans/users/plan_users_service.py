@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 from typing import List
 from typing import Set
+from typing import Dict
 from pecha_api.config import get
 from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content
 
@@ -686,7 +687,26 @@ async def get_user_plan_days_completion_status_service(token: str, plan_id: UUID
         )
     
 async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    from pecha_api.plans.audio.dto_helpers import (
+        build_plan_day_audio_fields,
+        build_plan_day_shareable_image_fields,
+    )
+    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
     current_user = validate_and_extract_user_details(token=token)
+
+    # Every read this response needs happens in the block below, and the
+    # connection goes back before the openpecha fan-out runs. Holding it across
+    # that await pinned a connection per in-flight reader for however long an
+    # external service took to answer - which is what emptied the pool and left
+    # unrelated endpoints timing out on checkout.
+    #
+    # The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
+    # eager-loads audio, shareable_images, videos, tasks, sub_tasks and
+    # timestamps, and nothing is committed here, so no attribute is expired and
+    # nothing lazy-loads once these objects detach. Adding a lazy relationship
+    # to this response means loading it inside the block too.
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
         plan = get_plan_by_id(db=db, plan_id=plan_id)
@@ -703,71 +723,94 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
             user_subtask_completions = get_user_subtask_completions_by_user_id_and_sub_task_ids(db=db, user_id=current_user.id, sub_task_ids=sub_task_ids)
             completed_subtask_ids = {completion.sub_task_id for completion in user_subtask_completions}
 
-        from pecha_api.plans.audio.dto_helpers import (
-            build_plan_day_audio_fields,
-            build_plan_day_shareable_image_fields,
-        )
-
         audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
         thumbnail_url, _, shareable_image_url, _ = build_plan_day_shareable_image_fields(
             getattr(plan_item, "shareable_images", None)
         )
-        from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
-        tasks_sub_tasks = await asyncio.gather(
-            *[
-                _get_user_sub_tasks_dto_bulk(
-                    sub_tasks=task.sub_tasks,
-                    completed_subtask_ids=completed_subtask_ids,
-                    language=plan_language,
-                )
-                for task in plan_item.tasks
-            ]
+        # Resolved once for the whole day, on the session this request already
+        # holds. Per task each call opened a session of its own, and the gather
+        # below ran them at once: a five-task day checked out six connections
+        # and pinned them for as long as the openpecha fan-out took. Against a
+        # pool of fifteen, three readers were enough to starve it.
+        all_sub_tasks = [
+            sub_task for task in plan_item.tasks for sub_task in task.sub_tasks
+        ]
+        references_by_id = dict(
+            zip(
+                (sub_task.id for sub_task in all_sub_tasks),
+                resolve_subtask_references(
+                    subtasks=all_sub_tasks, db=db, language=plan_language
+                ),
+            )
         )
-        user_day_details = UserPlanDayDetailsResponse(
-            id=plan_item.id,
-            day_number=plan_item.day_number,
-            is_completed=is_day_completed(db=db, user_id=current_user.id, day_id=plan_item.id),
-            audio_url=audio_url,
-            audio_duration_ms=audio_duration_ms,
-            thumbnail_url=thumbnail_url,
-            shareable_image_url=shareable_image_url,
-            tasks=[
-                UserTaskDTO(
-                    id=task.id,
-                    title=task.title,
-                    estimated_time=task.estimated_time,
-                    display_order=task.display_order,
-                    is_completed=(task.id in completed_task_ids),
-                    sub_tasks=sub_tasks_dto
-                ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
-            ],
-            videos=[
-                DayVideoSummaryDTO(
-                    id=video.id,
-                    url=video.url,
-                    video_id=video.video_id,
-                    title=video.title,
-                    display_order=video.display_order,
-                )
-                for video in sorted(plan_item.videos, key=lambda v: v.display_order)
-            ],
+
+        day_is_completed = is_day_completed(
+            db=db, user_id=current_user.id, day_id=plan_item.id
         )
-        return user_day_details
+
+    tasks_sub_tasks = await asyncio.gather(
+        *[
+            _get_user_sub_tasks_dto_bulk(
+                sub_tasks=task.sub_tasks,
+                completed_subtask_ids=completed_subtask_ids,
+                references_by_id=references_by_id,
+            )
+            for task in plan_item.tasks
+        ]
+    )
+
+    return UserPlanDayDetailsResponse(
+        id=plan_item.id,
+        day_number=plan_item.day_number,
+        is_completed=day_is_completed,
+        audio_url=audio_url,
+        audio_duration_ms=audio_duration_ms,
+        thumbnail_url=thumbnail_url,
+        shareable_image_url=shareable_image_url,
+        tasks=[
+            UserTaskDTO(
+                id=task.id,
+                title=task.title,
+                estimated_time=task.estimated_time,
+                display_order=task.display_order,
+                is_completed=(task.id in completed_task_ids),
+                sub_tasks=sub_tasks_dto
+            ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
+        ],
+        videos=[
+            DayVideoSummaryDTO(
+                id=video.id,
+                url=video.url,
+                video_id=video.video_id,
+                title=video.title,
+                display_order=video.display_order,
+            )
+            for video in sorted(plan_item.videos, key=lambda v: v.display_order)
+        ],
+    )
 
 def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID], language=None) -> List[UserSubTaskDTO]:
+async def _get_user_sub_tasks_dto_bulk(
+    sub_tasks: List[PlanSubTask],
+    completed_subtask_ids: Set[UUID],
+    references_by_id: Dict[UUID, Optional["SubTaskReferenceDTO"]],
+) -> List[UserSubTaskDTO]:
+    """Build a task's subtask DTOs. References arrive already resolved.
+
+    Everything here that touches the database has to happen before the caller
+    reaches this point: this runs inside a gather, around an await on a remote
+    service, which is no place to be holding a connection.
+    """
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
-    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
-
     resolved_contents = await resolve_subtasks_content(sub_tasks)
-    resolved_references = resolve_subtask_references(subtasks=sub_tasks, language=language)
 
     result = []
-    for sub_task, resolved_content, reference in zip(sub_tasks, resolved_contents, resolved_references):
+    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+        reference = references_by_id.get(sub_task.id)
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
             _get_presigned_url(content=sub_task.audio_url)

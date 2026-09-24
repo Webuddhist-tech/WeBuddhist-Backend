@@ -24,6 +24,13 @@ DEFAULTS = dict(
     AUTH0_GOOGLE_EMAIL_VERIFIED_CLAIM="https://webuddhist.com/email_verified",
     COMPRESSED_QUALITY=80,
     DATABASE_URL="postgresql://admin:pechaAdmin@localhost:5434/pecha",
+    # Connection pool. The ceiling is DB_POOL_SIZE + DB_MAX_OVERFLOW per
+    # instance, so replica count has to be multiplied in before comparing
+    # against the server's max_connections.
+    DB_POOL_SIZE=10,
+    DB_MAX_OVERFLOW=20,
+    DB_POOL_TIMEOUT=30,
+    DB_POOL_RECYCLE=1800,
     DEFAULT_LANGUAGE="en",
     DEFAULT_PAGE_SIZE=10,
     DEPLOYMENT_MODE="DEBUG",
