@@ -579,9 +579,11 @@ def event_has_publishable_linked_content(
     series_id = getattr(event, "series_id", None)
     if not plan_id and not series_id:
         return True
-    if plan_id:
-        return plan_id in published_plan_ids
-    return series_id in published_series_ids
+    if plan_id and plan_id not in published_plan_ids:
+        return False
+    if series_id and series_id not in published_series_ids:
+        return False
+    return True
 
 
 def redact_public_linked_plan_and_series_from_event_dto(dto: EventDTO) -> EventDTO:

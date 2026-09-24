@@ -332,6 +332,22 @@ def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
     )
 
 
+def test_event_has_publishable_linked_content_rejects_draft_series_when_both_linked() -> None:
+    plan_id = uuid4()
+    series_id = uuid4()
+    event = MagicMock(plan_id=plan_id, series_id=series_id)
+    assert not event_has_publishable_linked_content(
+        event,
+        published_plan_ids={plan_id},
+        published_series_ids=set(),
+    )
+    assert event_has_publishable_linked_content(
+        event,
+        published_plan_ids={plan_id},
+        published_series_ids={series_id},
+    )
+
+
 def test_should_redact_linked_plan_series_on_feed_event_card() -> None:
     group_id = uuid4()
     plan_id = uuid4()

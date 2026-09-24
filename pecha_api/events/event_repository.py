@@ -3,7 +3,7 @@ from typing import Callable, List, Tuple, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query, Session, selectinload
@@ -246,7 +246,7 @@ def _apply_event_filters(
     return query
 
 
-def _plan_series_published_or_standalone():
+def _plan_series_published_or_standalone() -> ColumnElement[bool]:
     return or_(
         Plan.series_id.is_(None),
         exists(
@@ -260,7 +260,7 @@ def _plan_series_published_or_standalone():
     )
 
 
-def _publishable_linked_content_filter():
+def _publishable_linked_content_filter() -> ColumnElement[bool]:
     """SQL equivalent of event_has_publishable_linked_content for feed totals."""
     published_plan = and_(
         Plan.status == PlanStatus.PUBLISHED,
@@ -271,18 +271,15 @@ def _publishable_linked_content_filter():
         Series.status == PlanStatus.PUBLISHED,
         Series.deleted_at.is_(None),
     )
-    return or_(
-        and_(Event.plan_id.is_(None), Event.series_id.is_(None)),
-        and_(
-            Event.plan_id.isnot(None),
-            exists(select(1).where(Plan.id == Event.plan_id, published_plan)),
-        ),
-        and_(
-            Event.plan_id.is_(None),
-            Event.series_id.isnot(None),
-            exists(select(1).where(Series.id == Event.series_id, published_series)),
-        ),
+    plan_ok = or_(
+        Event.plan_id.is_(None),
+        exists(select(1).where(Plan.id == Event.plan_id, published_plan)),
     )
+    series_ok = or_(
+        Event.series_id.is_(None),
+        exists(select(1).where(Series.id == Event.series_id, published_series)),
+    )
+    return and_(plan_ok, series_ok)
 
 
 def count_publishable_one_shot_feed_events(
@@ -375,13 +372,15 @@ def get_one_shot_event_feed_keys(
         restrict_group_ids=restrict_group_ids,
     )
 
+    rows_query = _apply_event_filters(
+        db.query(Event.id, Event.created_at).filter(Event.is_recurring == False),
+        restrict_group_ids=restrict_group_ids,
+        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
+    )
+    if not exclude_plan_or_series_linked:
+        rows_query = rows_query.filter(_publishable_linked_content_filter())
     rows = (
-        _apply_event_filters(
-            db.query(Event.id, Event.created_at).filter(Event.is_recurring == False),
-            restrict_group_ids=restrict_group_ids,
-            exclude_plan_or_series_linked=exclude_plan_or_series_linked,
-        )
-        .order_by(Event.created_at.desc(), Event.id.desc())
+        rows_query.order_by(Event.created_at.desc(), Event.id.desc())
         .limit(limit)
         .all()
     )
