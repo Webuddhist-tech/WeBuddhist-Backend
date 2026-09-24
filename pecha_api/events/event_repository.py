@@ -327,16 +327,27 @@ def get_one_shot_event_feed_keys(
     return rows, total
 
 
-def get_events_by_ids(db: Session, event_ids: List[UUID]) -> List[Event]:
-    if not event_ids:
+def get_events_by_ids(
+    db: Session,
+    event_ids: List[UUID],
+    restrict_group_ids: List[UUID],
+    exclude_plan_or_series_linked: bool = False,
+) -> List[Event]:
+    """Fully load one-shot events by id, re-checking the same scope used to
+    rank them so an event that moved out of the viewer's groups (or was
+    linked to a plan or series) in between is not returned."""
+    if not event_ids or not restrict_group_ids:
         return []
     return (
-        db.query(Event)
-        .options(
-            selectinload(Event.metadata_entries),
-            selectinload(Event.links),
-            selectinload(Event.location),
-            *_linked_resource_options(),
+        _apply_event_filters(
+            db.query(Event).options(
+                selectinload(Event.metadata_entries),
+                selectinload(Event.links),
+                selectinload(Event.location),
+                *_linked_resource_options(),
+            ).filter(Event.is_recurring == False),
+            restrict_group_ids=restrict_group_ids,
+            exclude_plan_or_series_linked=exclude_plan_or_series_linked,
         )
         .filter(Event.id.in_(event_ids))
         .all()

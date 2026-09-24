@@ -72,5 +72,11 @@ class TestFeedEventLoaders:
     def test_events_by_ids_skip_query_without_ids(self) -> None:
         db = MagicMock()
 
-        assert get_events_by_ids(db, event_ids=[]) == []
+        assert get_events_by_ids(db, event_ids=[], restrict_group_ids=[uuid4()]) == []
+        db.query.assert_not_called()
+
+    def test_events_by_ids_skip_query_without_group_scope(self) -> None:
+        db = MagicMock()
+
+        assert get_events_by_ids(db, event_ids=[uuid4()], restrict_group_ids=[]) == []
         db.query.assert_not_called()

@@ -125,6 +125,48 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
     return expanded_recurring
 
 
+def _load_page_entries(
+    db: Session,
+    ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]],
+    skip: int,
+    limit: int,
+    group_ids: List[UUID],
+) -> List[Tuple[datetime, AuthorGroupFeedItemType, object]]:
+    """Slice the ranked candidates into a page, loading full one-shot events
+    for that page only.
+
+    A one-shot event that was deleted or moved out of scope after ranking is
+    dropped, and the page is topped up from the next candidates so it still
+    holds `limit` items while more remain.
+    """
+    page: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
+    position = skip
+    while len(page) < limit and position < len(ranked):
+        window = ranked[position:position + limit - len(page)]
+        position += len(window)
+        window_ids = [
+            source['event_id'] for _, item_type, source in window
+            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source
+        ]
+        events_by_id = {
+            event.id: event
+            for event in get_events_by_ids(
+                db=db,
+                event_ids=window_ids,
+                restrict_group_ids=group_ids,
+                exclude_plan_or_series_linked=True,
+            )
+        } if window_ids else {}
+        for feed_at, item_type, source in window:
+            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source:
+                event = events_by_id.get(source['event_id'])
+                if event is None:
+                    continue
+                source = {'event': event, 'occurrence_date': None}
+            page.append((feed_at, item_type, source))
+    return page
+
+
 def _get_author_group_feed(
     db: Session,
     token: Optional[str],
@@ -235,28 +277,7 @@ def _get_author_group_feed(
         }))
 
     ranked.sort(key=lambda entry: (entry[0], entry[1].value), reverse=True)
-    page_entries = ranked[skip:skip + limit]
-
-    # Load full one-shot events for the page only. An event deleted between
-    # the two queries is dropped from the page.
-    page_one_shot_ids = [
-        source['event_id'] for _, item_type, source in page_entries
-        if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source
-    ]
-    if page_one_shot_ids:
-        events_by_id = {
-            event.id: event
-            for event in get_events_by_ids(db=db, event_ids=page_one_shot_ids)
-        }
-        loaded_entries = []
-        for feed_at, item_type, source in page_entries:
-            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source:
-                event = events_by_id.get(source['event_id'])
-                if event is None:
-                    continue
-                source = {'event': event, 'occurrence_date': None}
-            loaded_entries.append((feed_at, item_type, source))
-        page_entries = loaded_entries
+    page_entries = _load_page_entries(db, ranked, skip, limit, group_ids)
 
     page_posts = [
         source for _, item_type, source in page_entries
