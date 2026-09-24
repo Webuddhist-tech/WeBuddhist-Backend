@@ -9,6 +9,15 @@ from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
+from pecha_api.plans.groups.group_ban_guard import get_group_ban_expiry
+from pecha_api.plans.groups.groups_enums import AuthorGroupType
+from pecha_api.plans.groups.groups_repository import (
+    get_group_by_id,
+    is_group_published,
+    is_user_joined_group,
+    lock_group_membership_changes,
+    upsert_group_join,
+)
 from pecha_api.plans.shared.permissions import require_can_read_group_content
 from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
@@ -19,7 +28,6 @@ from .event_response_models import EventParticipantDTO, EventParticipantsRespons
 from .event_participant_repository import (
     get_event_participants_paginated,
     remove_event_participant,
-    set_event_participation_type,
     upsert_event_participant,
 )
 
@@ -108,6 +116,57 @@ def _resolve_participation_type(
     return event_format
 
 
+def _to_group_type(value) -> AuthorGroupType:
+    if hasattr(value, "value"):
+        return AuthorGroupType(value.value)
+    return AuthorGroupType(value)
+
+
+def _join_parent_group(db, event, user_id: UUID) -> None:
+    """Attending an event also makes the user a joiner of the event's group,
+    the way joining one of its accumulators does.
+
+    Best effort on purpose. The RSVP is the user's actual intent, and the
+    cases where the membership is not ours to grant - a PAGE group, which is
+    followed rather than joined; a private group, which goes through the
+    join-request flow; a user serving a ban from the group - are skipped
+    rather than turned into an error that would also stop them saying how
+    they attend."""
+    group = get_group_by_id(db=db, group_id=event.group_id)
+    if not group or not is_group_published(group):
+        return
+    if _to_group_type(group.group_type) != AuthorGroupType.COMMUNITY:
+        return
+    # Locked before the ban is read, for the reason lock_group_membership_changes
+    # documents: a removal that is mid-flight holds this lock until its ban has
+    # committed, so the check below cannot miss it.
+    lock_group_membership_changes(db=db, group_id=event.group_id)
+    if is_user_joined_group(db=db, group_id=event.group_id, user_id=user_id):
+        return
+    if not group.is_public:
+        return
+    if get_group_ban_expiry(db=db, group_id=event.group_id, user_id=user_id) is not None:
+        return
+    upsert_group_join(db=db, group_id=event.group_id, user_id=user_id)
+
+
+def _join_event_chat_room(db, event_id: UUID, user: Users) -> None:
+    """Put the user into the event's chat room, so it shows up in their inbox
+    before they ever type in it. Best effort: the RSVP is the user's actual
+    intent, and a chat-room hiccup must not undo it. The room is joined again
+    on their first message anyway."""
+    try:
+        # Deferred: chat imports events at module level, so events cannot
+        # import chat back at module level.
+        from pecha_api.chat.service import join_event_chat_room
+
+        join_event_chat_room(db=db, event_id=event_id, user=user)
+    except Exception:
+        logging.exception(
+            f"Failed to add user {user.id} to chat room for event {event_id}"
+        )
+
+
 def join_event_service(
     token: str,
     event_id: UUID,
@@ -131,18 +190,7 @@ def join_event_service(
             user_id=current_user.id,
             participation_type=resolved,
         )
-        try:
-            # Deferred: chat imports events at module level, so events cannot
-            # import chat back at module level.
-            from pecha_api.chat.service import join_event_chat_room
-
-            join_event_chat_room(db=db, event_id=event_id, user=current_user)
-        except Exception:
-            # The RSVP is the user's actual intent; a chat-room hiccup must not
-            # undo it. The room is joined again on their first message anyway.
-            logging.exception(
-                f"Failed to add user {current_user.id} to chat room for event {event_id}"
-            )
+        _join_event_chat_room(db=db, event_id=event_id, user=current_user)
 
 
 def leave_event_service(token: str, event_id: UUID) -> None:
@@ -176,23 +224,26 @@ def update_participation_type_service(
     event_id: UUID,
     participation_type: ParticipationType,
 ) -> None:
-    """Switch how a participant attends. 404 when the caller had not joined."""
+    """Switch how the caller attends an event.
+
+    An upsert, not an edit: a caller who has not joined yet is joined by the
+    same call, so the client can drive the online/offline control without
+    first working out whether an RSVP already exists. Attending also joins
+    the event's group and its chat room, exactly as `join_event_service`
+    does, so the two entry points cannot leave a user in different states."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
         event = _get_event_or_404(db, event_id)
         resolved = _resolve_participation_type(event, participation_type)
-        updated = set_event_participation_type(
+        upsert_event_participant(
             db=db,
             event_id=event_id,
             user_id=current_user.id,
             participation_type=resolved,
         )
-        if not updated:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"You have not joined event '{event_id}'",
-            )
+        _join_parent_group(db=db, event=event, user_id=current_user.id)
+        _join_event_chat_room(db=db, event_id=event_id, user=current_user)
 
 
 def get_event_participants_service(

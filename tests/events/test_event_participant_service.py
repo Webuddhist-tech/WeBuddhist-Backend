@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -237,46 +238,144 @@ def test_join_rejects_participation_type_the_event_does_not_offer():
     mock_upsert.assert_not_called()
 
 
-def test_update_participation_type_writes_choice():
-    event = _event_obj("hybrid")
-    user = _user()
+def _group_obj(group_type="COMMUNITY", is_public=True):
+    return SimpleNamespace(
+        id=uuid4(), group_type=group_type, is_public=is_public, status="PUBLISHED"
+    )
+
+
+@contextmanager
+def _update_patches(event, user, group=None, joined=False, ban_expiry=None):
+    """The surface update_participation_type_service touches, so each test
+    only spells out the part it is actually about."""
     with patch(f"{_SVC}.validate_and_extract_user_details", return_value=user), \
          patch(f"{_SVC}.SessionLocal"), \
          patch(f"{_SVC}.get_event_by_id", return_value=event), \
-         patch(f"{_SVC}.set_event_participation_type", return_value=True) as mock_set:
+         patch(f"{_SVC}.upsert_event_participant") as mock_upsert, \
+         patch(f"{_SVC}.get_group_by_id", return_value=group), \
+         patch(f"{_SVC}.is_group_published", return_value=group is not None), \
+         patch(f"{_SVC}.lock_group_membership_changes"), \
+         patch(f"{_SVC}.is_user_joined_group", return_value=joined), \
+         patch(f"{_SVC}.get_group_ban_expiry", return_value=ban_expiry), \
+         patch(f"{_SVC}.upsert_group_join") as mock_join, \
+         patch(f"{_SVC}._join_event_chat_room"):
+        yield mock_upsert, mock_join
+
+
+def test_update_participation_type_writes_choice():
+    event = _event_obj("hybrid")
+    user = _user()
+    with _update_patches(event, user, group=_group_obj()) as (mock_upsert, _):
         update_participation_type_service(
             token="tok",
             event_id=event.id,
             participation_type=ParticipationType.ONLINE,
         )
 
-    kwargs = mock_set.call_args.kwargs
+    kwargs = mock_upsert.call_args.kwargs
     assert kwargs["event_id"] == event.id
     assert kwargs["user_id"] == user.id
     assert kwargs["participation_type"] == "online"
 
 
-def test_update_participation_type_404_when_not_joined():
+def test_update_participation_type_joins_caller_who_had_not_joined():
+    """The upsert is the point of the change: no 404 for a first-time caller."""
     event = _event_obj("hybrid")
-    with patch(f"{_SVC}.validate_and_extract_user_details", return_value=_user()), \
-         patch(f"{_SVC}.SessionLocal"), \
-         patch(f"{_SVC}.get_event_by_id", return_value=event), \
-         patch(f"{_SVC}.set_event_participation_type", return_value=False):
-        with pytest.raises(HTTPException) as exc:
-            update_participation_type_service(
-                token="tok",
-                event_id=event.id,
-                participation_type=ParticipationType.ONLINE,
-            )
+    user = _user()
+    with _update_patches(event, user, group=_group_obj()) as (mock_upsert, _):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.OFFLINE,
+        )
 
-    assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+    assert mock_upsert.call_args.kwargs["participation_type"] == "offline"
+
+
+def test_update_participation_type_joins_parent_group():
+    event = _event_obj("hybrid")
+    user = _user()
+    with _update_patches(event, user, group=_group_obj()) as (_, mock_join):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    kwargs = mock_join.call_args.kwargs
+    assert kwargs['group_id'] == event.group_id
+    assert kwargs['user_id'] == user.id
+
+
+def test_update_participation_type_skips_group_join_when_already_joined():
+    event = _event_obj("hybrid")
+    with _update_patches(event, _user(), group=_group_obj(), joined=True) as (
+        mock_upsert,
+        mock_join,
+    ):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    mock_upsert.assert_called_once()
+    mock_join.assert_not_called()
+
+
+def test_update_participation_type_skips_group_join_for_page_group():
+    """A PAGE group is followed, not joined, so there is no membership to add."""
+    event = _event_obj("hybrid")
+    with _update_patches(event, _user(), group=_group_obj(group_type="PAGE")) as (
+        mock_upsert,
+        mock_join,
+    ):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    mock_upsert.assert_called_once()
+    mock_join.assert_not_called()
+
+
+def test_update_participation_type_skips_group_join_for_private_group():
+    event = _event_obj("hybrid")
+    with _update_patches(event, _user(), group=_group_obj(is_public=False)) as (
+        mock_upsert,
+        mock_join,
+    ):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    mock_upsert.assert_called_once()
+    mock_join.assert_not_called()
+
+
+def test_update_participation_type_does_not_slip_a_banned_user_back_in():
+    event = _event_obj("hybrid")
+    expiry = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    with _update_patches(event, _user(), group=_group_obj(), ban_expiry=expiry) as (
+        mock_upsert,
+        mock_join,
+    ):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    # The RSVP still lands - the ban blocks rejoining the group, nothing else.
+    mock_upsert.assert_called_once()
+    mock_join.assert_not_called()
 
 
 def test_update_participation_type_404_when_event_missing():
-    with patch(f"{_SVC}.validate_and_extract_user_details", return_value=_user()), \
-         patch(f"{_SVC}.SessionLocal"), \
-         patch(f"{_SVC}.get_event_by_id", return_value=None), \
-         patch(f"{_SVC}.set_event_participation_type") as mock_set:
+    with _update_patches(None, _user()) as (mock_upsert, _):
         with pytest.raises(HTTPException) as exc:
             update_participation_type_service(
                 token="tok",
@@ -285,15 +384,12 @@ def test_update_participation_type_404_when_event_missing():
             )
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
-    mock_set.assert_not_called()
+    mock_upsert.assert_not_called()
 
 
 def test_update_participation_type_rejects_format_mismatch():
     event = _event_obj("offline")
-    with patch(f"{_SVC}.validate_and_extract_user_details", return_value=_user()), \
-         patch(f"{_SVC}.SessionLocal"), \
-         patch(f"{_SVC}.get_event_by_id", return_value=event), \
-         patch(f"{_SVC}.set_event_participation_type") as mock_set:
+    with _update_patches(event, _user(), group=_group_obj()) as (mock_upsert, mock_join):
         with pytest.raises(HTTPException) as exc:
             update_participation_type_service(
                 token="tok",
@@ -302,4 +398,5 @@ def test_update_participation_type_rejects_format_mismatch():
             )
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
-    mock_set.assert_not_called()
+    mock_upsert.assert_not_called()
+    mock_join.assert_not_called()

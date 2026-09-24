@@ -172,7 +172,8 @@ def update_participation_type_endpoint(
 ) -> None:
     """Switch how the caller attends an event: 'online' or 'offline'.
 
-    404 when the caller has not joined; 400 when the event only runs the
+    An upsert: a caller who has not joined yet is joined by this call, and
+    joining an event also joins its group. 400 when the event only runs the
     other way."""
     update_participation_type_service(
         token=credentials.credentials,
