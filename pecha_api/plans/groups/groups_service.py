@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.config import get, get_int
 from pecha_api.db.database import SessionLocal
@@ -90,6 +91,7 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_member,
     get_groups_paginated,
     get_member_roles_map,
+    get_group_member_roles_by_user_ids,
     get_invite_by_id,
     get_join_request_by_id,
     get_join_request_status_map,
@@ -229,6 +231,7 @@ JOIN_REQUEST_NOT_FOUND = "Join request not found"
 GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
 GROUP_BAN_NOT_FOUND = "Ban not found"
 USER_NOT_JOINED_GROUP = "This user has not joined the group"
+GROUP_MEMBER_DEFAULT_ROLE = "MEMBER"
 USER_BANNED_FROM_GROUP = (
     "This user is banned from the group; lift the ban before admitting them"
 )
@@ -1340,11 +1343,35 @@ def get_group_practices_feed(
     )
 
 
-def list_group_members(
+async def list_group_members(
     group_id: UUID,
     skip: int,
     limit: int,
+    token: Optional[str] = None,
 ) -> AuthorGroupMembersListResponse:
+    # Token validation and the member/role queries are synchronous SQLAlchemy,
+    # so they run in one worker thread rather than on the event loop.
+    return await run_in_threadpool(
+        _list_group_members_sync,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        token=token,
+    )
+
+
+def _list_group_members_sync(
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    token: Optional[str] = None,
+) -> AuthorGroupMembersListResponse:
+    viewer_id = None
+    if token:
+        try:
+            viewer_id = validate_and_extract_user_details(token=token).id
+        except Exception:
+            pass
     with SessionLocal() as db:
         group = get_group_by_id(db=db, group_id=group_id)
         # Intended behaviour, not an oversight: this endpoint is unauthenticated
@@ -1363,10 +1390,33 @@ def list_group_members(
             skip=skip,
             limit=limit,
         )
+        # Staff roles follow the same rule as the group detail teaser: a private
+        # group's staff are only revealed to callers who have joined it.
+        roles_visible = group.is_public or (
+            viewer_id is not None
+            and is_user_joined_group(db=db, group_id=group_id, user_id=viewer_id)
+        )
+        # Joiners linked to a staff Author (Author.user_id) carry their staff
+        # role; everyone else is a plain MEMBER.
+        roles_by_user_id = (
+            get_group_member_roles_by_user_ids(
+                db=db,
+                group_id=group_id,
+                user_ids=[user.id for user in users],
+            )
+            if roles_visible
+            else {}
+        )
         return AuthorGroupMembersListResponse(
             total_members=total,
             list=[
                 AuthorGroupMemberProfileDTO(
+                    user_id=user.id,
+                    role=(
+                        roles_by_user_id.get(user.id, GROUP_MEMBER_DEFAULT_ROLE)
+                        if roles_visible
+                        else None
+                    ),
                     username=user.username,
                     fullname=_user_fullname(user),
                     avatar_url=_user_avatar_url(user),

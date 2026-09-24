@@ -648,17 +648,27 @@ async def get_public_group_practices(
     status_code=status.HTTP_200_OK,
     response_model=AuthorGroupMembersListResponse,
 )
-def get_public_group_members(
+async def get_public_group_members(
     group_id: UUID,
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
     """List a group's members, for both public and private groups.
 
     Intentionally unauthenticated: the frontend gates who sees the members
-    list. See list_group_members for the rationale and its trade-off.
+    list. See list_group_members for the rationale and its trade-off. The
+    optional token only decides whether staff roles are revealed for a
+    private group (joiners only).
     """
-    return list_group_members(group_id=group_id, skip=skip, limit=limit)
+    return await list_group_members(
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        token=authentication_credential.credentials if authentication_credential else None,
+    )
 
 
 @public_groups_router.get("", status_code=status.HTTP_200_OK, response_model=PublicAuthorGroupListResponse)
