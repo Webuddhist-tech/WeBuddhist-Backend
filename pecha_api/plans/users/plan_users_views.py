@@ -41,9 +41,23 @@ from pecha_api.plans.users.plan_users_service import (
 
 oauth2_scheme = HTTPBearer()
 
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.plans.users.user_plans_cache_service import (
+    USER_PLAN_CACHE_TYPES,
+    get_user_plan_day_details_cached,
+    get_user_plan_days_completion_status_cached,
+    get_user_plan_progress_cached,
+    get_user_plans_cached,
+    get_user_series_days_completed_cached,
+    get_user_series_enrollments_cached,
+    get_user_series_progress_cached,
+)
+
 user_progress_router = APIRouter(
     prefix="/users/me",
-    tags=["User Progress"]
+    tags=["User Progress"],
+    # Completing a subtask or enrolling changes only this caller's progress.
+    dependencies=[Depends(invalidate_caller_on_write(*USER_PLAN_CACHE_TYPES))],
 )
 
 
@@ -60,7 +74,7 @@ async def get_user_plans(
     limit: int = Query(20, ge=1, le=50)
 ):
 
-    return await get_user_enrolled_plans(
+    return await get_user_plans_cached(
         token=authentication_credential.credentials,
         status_filter=status_filter,
         series_id=series_id,
@@ -96,7 +110,7 @@ async def get_user_plan_progress_details(
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
     """Get user's progress for specific plan"""
-    return get_user_plan_progress(
+    return await get_user_plan_progress_cached(
         token=authentication_credential.credentials,
         plan_id=plan_id
     )
@@ -106,7 +120,9 @@ async def get_user_plan_days_completion_status(
     plan_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return await get_user_plan_days_completion_status_service(token=authentication_credential.credentials, plan_id=plan_id)
+    return await get_user_plan_days_completion_status_cached(
+        token=authentication_credential.credentials, plan_id=plan_id
+    )
 
 @user_progress_router.post("/sub-tasks/{sub_task_id}/complete", status_code=status.HTTP_204_NO_CONTENT)
 def complete_sub_task(
@@ -146,7 +162,7 @@ async def get_user_plan_day_details(
     day_number: int,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return await get_user_plan_day_details_service(
+    return await get_user_plan_day_details_cached(
         token=authentication_credential.credentials,
         plan_id=plan_id,
         day_number=day_number
@@ -179,7 +195,7 @@ async def get_user_series_enrollments_endpoint(
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ):
     """Get user's series enrollments"""
-    return get_user_series_enrollments(
+    return await get_user_series_enrollments_cached(
         token=authentication_credential.credentials,
         status_filter=status_filter,
         language=language,
@@ -203,7 +219,7 @@ async def get_user_series_days_completed_endpoint(
     limit: Annotated[int, Query(ge=1, le=50)] = 20,
 ):
     """Get paginated list of series with completed day counts for the current user."""
-    return get_user_series_days_completed(
+    return await get_user_series_days_completed_cached(
         token=authentication_credential.credentials,
         language=language,
         skip=skip,
@@ -221,7 +237,7 @@ async def get_user_series_progress_endpoint(
     ] = None,
 ):
     """Get detailed progress for a specific series"""
-    return get_user_series_progress(
+    return await get_user_series_progress_cached(
         token=authentication_credential.credentials,
         series_id=series_id,
         language=language,

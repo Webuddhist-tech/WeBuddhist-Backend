@@ -14,7 +14,12 @@ POSITION_TTL_SECONDS = 12 * 60 * 60
 
 # Per-event publish ceiling. An operator clicks a handful of times a minute, so
 # anything near this is a stuck key or a rogue client, not a fast reader.
-MAX_SETS_PER_SECOND = 50
+#
+# Kept low because every accepted frame costs one WebSocket send per subscriber
+# on every instance: with a thousand phones in a room, 50/s would be 50,000
+# sends a second on a single event loop. The ceiling is the blast radius of a
+# stuck client, not a rate anyone recites at.
+MAX_SETS_PER_SECOND = 5
 RATE_WINDOW_SECONDS = 1
 
 

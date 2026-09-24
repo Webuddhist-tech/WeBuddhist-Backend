@@ -18,17 +18,19 @@ from pecha_api.plans.public.plan_response_models import (
     TagsResponse,
     DailyPlanResponse,
 )
+from pecha_api.plans.public.plans_read_cache import (
+    get_plan_daily_content_cached,
+    get_plan_days_cached,
+    get_published_plan_cached,
+    get_published_plans_cached,
+    get_tags_cached,
+)
 from pecha_api.plans.public.plans_cache_service import (
     invalidate_all_plan_day_detail_caches_for_plan,
     invalidate_plan_day_detail_cache,
 )
 from pecha_api.plans.public.plan_service import (
-    get_published_plans, 
-    get_published_plan, 
-    get_plan_days,
     get_plan_day_details,
-    get_plan_daily_content,
-    get_tags,
     auto_enroll_plan
 )
 from pecha_api.users.users_service import validate_and_extract_user_details
@@ -69,7 +71,7 @@ async def get_plans(
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted plans are hidden for Chinese timezones."),
     ] = None,
 ):
-    return await get_published_plans(
+    return await get_published_plans_cached(
         tag=tag,
         group_id=group_id,
         search=search,
@@ -85,13 +87,13 @@ async def get_plans(
 @public_plans_router.get(
     "/tags", status_code=status.HTTP_200_OK, response_model=TagsResponse
 )
-def get_plan_tags(
+async def get_plan_tags(
     language: Annotated[
         str,
         Query(description="Filter by language code (e.g., 'bo', 'en', 'zh'). Defaults to 'en'."),
     ] = "en",
 ):
-    return get_tags(language=language)
+    return await get_tags_cached(language=language)
 
 
 @public_plans_router.get("/{plan_id}", status_code=status.HTTP_200_OK, response_model=PublicPlanDTO)
@@ -102,7 +104,7 @@ async def get_plan_details(
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted plans are hidden for Chinese timezones."),
     ] = None,
 ):
-    return await get_published_plan(plan_id=plan_id, timezone_name=x_timezone)
+    return await get_published_plan_cached(plan_id=plan_id, timezone_name=x_timezone)
 
 
 @public_plans_router.get("/{plan_id}/daily", status_code=status.HTTP_200_OK, response_model=DailyPlanResponse)
@@ -117,7 +119,9 @@ async def get_plan_daily(
         Query(description=language_query_description("Filter series navigation and metadata by language", lowercase_example=True)),
     ] = None,
 ):
-    return await get_plan_daily_content(plan_id=plan_id, requested_date=date, language=language)
+    return await get_plan_daily_content_cached(
+        plan_id=plan_id, requested_date=date, language=language
+    )
 
 
 @public_plans_router.delete(
@@ -166,7 +170,7 @@ async def get_plan_days_list(
 
     # Enrollment is a synchronous DB transaction; keep it off the event loop.
     await run_in_threadpool(auto_enroll_plan, plan_id=plan_id, user_id=user_id)
-    return await get_plan_days(plan_id=plan_id)
+    return await get_plan_days_cached(plan_id=plan_id)
 
 
 @public_plans_router.get("/{plan_id}/days/{day_number}", status_code=status.HTTP_200_OK, response_model=PlanDayDTO)

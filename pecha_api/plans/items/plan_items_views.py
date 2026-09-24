@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_on_write
 from fastapi import APIRouter
 from .plan_items_response_models import CreateDaysRequest, DeleteDaysRequest, ItemDTO, ReorderDaysRequest
 from .plan_items_services import create_plan_item, delete_plan_days, update_plans_day_number
@@ -28,6 +30,17 @@ oauth2_scheme = HTTPBearer()
 items_router = APIRouter(
     prefix="/cms/plans",
     tags=["CMS Items"],
+    # Every write on this router clears the namespaces it can affect.
+    dependencies=[Depends(invalidate_on_write(
+        CacheType.PLAN_LIST,
+        CacheType.PLAN_DETAIL,
+        CacheType.PLAN_DAYS_LIST,
+        CacheType.PLAN_DAILY,
+        CacheType.PLAN_DAY_DETAIL,
+        CacheType.SERIES_LIST,
+        CacheType.SERIES_FEATURED,
+        CacheType.SERIES_DETAIL,
+    ))],
 )
 
 @items_router.post("/{plan_id}/days", status_code=status.HTTP_201_CREATED, response_model=List[ItemDTO])

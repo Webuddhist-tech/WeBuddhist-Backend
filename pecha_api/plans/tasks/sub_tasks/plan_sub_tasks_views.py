@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_on_write
 from fastapi import APIRouter, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated
@@ -11,7 +13,18 @@ from pecha_api.plans.audio.timestamp_service import delete_plan_subtask_timestam
 
 sub_tasks_router = APIRouter(
     prefix="/cms/sub-tasks",
-    tags=["CMS Sub Tasks"]
+    tags=["CMS Sub Tasks"],
+    # Every write on this router clears the namespaces it can affect.
+    dependencies=[Depends(invalidate_on_write(
+        CacheType.PLAN_LIST,
+        CacheType.PLAN_DETAIL,
+        CacheType.PLAN_DAYS_LIST,
+        CacheType.PLAN_DAILY,
+        CacheType.PLAN_DAY_DETAIL,
+        CacheType.SERIES_LIST,
+        CacheType.SERIES_FEATURED,
+        CacheType.SERIES_DETAIL,
+    ))],
 )
 
 oauth2_scheme = HTTPBearer()

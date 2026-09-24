@@ -951,7 +951,7 @@ def get_events_service(
     with SessionLocal() as db:
         current_user = None
         if token:
-            current_user = validate_and_extract_user_details(token=token)
+            current_user = validate_and_extract_user_details(token=token, db=db)
             if restrict_group_ids is None:
                 restrict_group_ids, _ = resolve_event_listing_group_ids(
                     db=db,
@@ -1146,7 +1146,7 @@ def get_event_by_id_service(
         is_joined = None
         my_participation_type = None
         if token:
-            current_user = validate_and_extract_user_details(token=token)
+            current_user = validate_and_extract_user_details(token=token, db=db)
             is_joined = is_user_joined_event(
                 db=db, event_id=event_id, user_id=current_user.id
             )
@@ -1618,7 +1618,7 @@ def get_featured_events_service(
         joined_ids: set[UUID] = set()
         participation_types: dict[UUID, str] = {}
         if token:
-            current_user = validate_and_extract_user_details(token=token)
+            current_user = validate_and_extract_user_details(token=token, db=db)
             joined_ids = set(
                 get_joined_event_ids_by_user(
                     db=db,

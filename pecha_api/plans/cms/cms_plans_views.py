@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_on_write
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import APIRouter, Depends,Query
 from typing import Optional
@@ -34,7 +36,18 @@ oauth2_scheme = HTTPBearer()
 # Create router for CMS plan endpoints
 cms_plans_router = APIRouter(
     prefix="/cms/plans",
-    tags=["CMS Plans"]
+    tags=["CMS Plans"],
+    # Every write on this router clears the namespaces it can affect.
+    dependencies=[Depends(invalidate_on_write(
+        CacheType.PLAN_LIST,
+        CacheType.PLAN_DETAIL,
+        CacheType.PLAN_DAYS_LIST,
+        CacheType.PLAN_DAILY,
+        CacheType.PLAN_DAY_DETAIL,
+        CacheType.SERIES_LIST,
+        CacheType.SERIES_FEATURED,
+        CacheType.SERIES_DETAIL,
+    ))],
 )
 
 

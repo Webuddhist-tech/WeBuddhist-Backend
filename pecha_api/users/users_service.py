@@ -1,6 +1,7 @@
 import logging
 import random
 import string
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import jose
@@ -172,10 +173,21 @@ def resolve_user_from_token_payload(db, payload: Dict[str, Any]) -> Users:
     )
 
 
-def validate_and_extract_user_details(token: str) -> Users:
+def validate_and_extract_user_details(token: str, db=None) -> Users:
+    """Resolve the token's user.
+
+    `db` lets a caller that already holds a session lend it to us. Without it
+    this opens a second connection while the caller still holds its own, so a
+    request costs two connections at once - and above `DB_POOL_SIZE +
+    DB_MAX_OVERFLOW` concurrent requests every one of them holds the first
+    while waiting for a second that nobody can give back. Pass the session
+    whenever this is called from inside a `with SessionLocal()` block.
+    """
     try:
         payload = validate_token(token)
-        with SessionLocal() as db_session:
+        # nullcontext: a lent session belongs to the caller, so it is not ours
+        # to close when we are done with it.
+        with nullcontext(db) if db is not None else SessionLocal() as db_session:
             try:
                 user = resolve_user_from_token_payload(db_session, payload)
             except HTTPException as exception:
