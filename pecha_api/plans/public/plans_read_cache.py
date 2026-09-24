@@ -18,6 +18,7 @@ from functools import partial
 from typing import Optional
 from uuid import UUID
 from datetime import date as DateType
+from datetime import datetime, timezone
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
@@ -61,6 +62,11 @@ TAG_CACHE_TYPES = (CacheType.PLAN_TAGS, CacheType.PLAN_TAG_DETAIL)
 
 def _timeout() -> int:
     return config.get_int("CACHE_CONTENT_TIMEOUT")
+
+
+def _utc_today() -> DateType:
+    """The same clock `get_plan_daily_content` reads when it defaults a date."""
+    return datetime.now(timezone.utc).date()
 
 
 async def get_published_plans_cached(
@@ -126,10 +132,13 @@ async def get_plan_daily_content_cached(
 ) -> DailyPlanResponse:
     return await cached_response(
         cache_type=CacheType.PLAN_DAILY,
-        # The date is in the key explicitly. The service defaults it to today
-        # when it is None, so a None entry would otherwise still be served
-        # tomorrow, showing yesterday's reading.
-        parts=[plan_id, requested_date, language],
+        # `requested_date` is the caller's, which is often None; the service
+        # then resolves "today" itself. Keying on the None would pin an entry
+        # built at 23:59 to a day that has ended, and it would go on serving
+        # yesterday's reading - and yesterday's prev/next links - until its
+        # timeout. Keying on today's UTC date as well, which is the clock the
+        # service reads, rolls the key over at midnight on its own.
+        parts=[plan_id, requested_date, _utc_today(), language],
         model=DailyPlanResponse,
         loader=partial(
             get_plan_daily_content,

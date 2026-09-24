@@ -71,7 +71,7 @@ async def get_user_plans_cached(
             limit=limit,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -82,7 +82,7 @@ async def get_user_plan_progress_cached(token: str, plan_id: UUID) -> UserPlanPr
         model=UserPlanProgressResponse,
         loader=partial(get_user_plan_progress, token=token, plan_id=plan_id),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -97,7 +97,7 @@ async def get_user_plan_days_completion_status_cached(
             get_user_plan_days_completion_status_service, token=token, plan_id=plan_id
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -115,7 +115,7 @@ async def get_user_plan_day_details_cached(
             day_number=day_number,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -139,7 +139,7 @@ async def get_user_series_enrollments_cached(
             limit=limit,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -161,7 +161,7 @@ async def get_user_series_days_completed_cached(
             limit=limit,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -181,5 +181,5 @@ async def get_user_series_progress_cached(
             language=language,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )

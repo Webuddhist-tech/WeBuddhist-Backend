@@ -12,7 +12,7 @@ failed one.
 
 import asyncio
 import logging
-from typing import Callable, Optional, Sequence, Type, TypeVar
+from typing import Callable, Optional, Sequence, Set, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -30,6 +30,35 @@ from pecha_api.cache.cache_repository import cache_is_available, get_cache_data,
 logger = logging.getLogger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+# Namespaces whose invalidation could not be carried out, usually because
+# Redis was unreachable at the moment of the write. They are retried on the
+# next cache operation, and until one succeeds those namespaces are not served
+# from cache at all: an entry a write has already superseded must not come
+# back when the cache does. Without this a CMS edit made during a Redis blip
+# would go on showing the old content for the whole 3.5h timeout.
+#
+# This is per-process. Another instance that never attempted the write knows
+# nothing about the debt and can still serve its own stale entry until the
+# timeout - the durable version of this needs a queue, which is more machinery
+# than the failure deserves.
+_pending_invalidations: Set[CacheType] = set()
+
+
+async def _drain_pending_invalidations() -> None:
+    """Retry invalidations that could not be carried out earlier."""
+    if not _pending_invalidations or not cache_is_available():
+        return
+    for cache_type in list(_pending_invalidations):
+        try:
+            deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))
+        except Exception as cache_error:
+            logger.error("Retry of invalidation for %s failed: %s", cache_type.value, cache_error)
+            return
+        _pending_invalidations.discard(cache_type)
+        logger.info(
+            "Retried invalidation for %s: %d entries removed", cache_type.value, deleted
+        )
 
 
 async def cached_response(
@@ -50,7 +79,12 @@ async def cached_response(
         cache_type=cache_type, parts=parts, user_identity=user_identity
     )
 
-    cached = await get_cache_data(hash_key=hash_key)
+    await _drain_pending_invalidations()
+    # A namespace we still owe an eviction for is not safe to read: the entry
+    # sitting there may be the one a write already replaced.
+    cached = None if cache_type in _pending_invalidations else await get_cache_data(
+        hash_key=hash_key
+    )
     if isinstance(cached, dict):
         try:
             return model(**cached)
@@ -84,27 +118,44 @@ async def invalidate_namespace(cache_type: CacheType) -> int:
     the cache could not be reached afterwards. The cost of swallowing it is a
     stale entry until its timeout, which is exactly what the timeout is for.
     """
-    if not cache_is_available():
-        # The breaker is open, so there is nothing to invalidate that anyone
-        # is reading: every request is going to the database anyway.
-        return 0
+    # Attempted even when the breaker is open. The breaker exists to stop
+    # reads paying a timeout each; an invalidation that is skipped is not
+    # deferred, it is lost, and these namespaces hold content for hours.
     try:
         deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))
     except Exception as cache_error:
+        _pending_invalidations.add(cache_type)
         logger.error(
-            "Could not invalidate cache namespace %s: %s",
+            "Could not invalidate cache namespace %s (queued for retry): %s",
             cache_type.value,
             cache_error,
         )
         return 0
+    _pending_invalidations.discard(cache_type)
     logger.info("Invalidated %d cache entries in %s", deleted, cache_type.value)
     return deleted
 
 
 async def invalidate_namespaces(cache_types: Sequence[CacheType]) -> int:
+    """Invalidate several namespaces, stopping at the first sign Redis is gone.
+
+    A plan write touches eight namespaces. Attempting all eight against an
+    unreachable Redis would cost the author eight connect timeouts on one
+    save, so the first failure is taken as the answer for the rest: they are
+    queued rather than retried here, which costs nothing now and loses
+    nothing, since the queue is drained on the next cache operation.
+    """
     total = 0
-    for cache_type in cache_types:
+    remaining = list(cache_types)
+    while remaining:
+        cache_type = remaining.pop(0)
         total += await invalidate_namespace(cache_type)
+        if cache_type in _pending_invalidations:
+            _pending_invalidations.update(remaining)
+            logger.error(
+                "Cache unreachable; queued %d further namespaces for retry", len(remaining)
+            )
+            break
     return total
 
 

@@ -11,13 +11,15 @@ to no position. Only keys under CACHE_PREFIX are touched.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import HTTPException
 from starlette import status
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
+from redis.asyncio import Redis
+
 from pecha_api.cache.cache_repository import get_client, note_cache_failure
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 SCAN_BATCH_SIZE = 500
 
 
-async def _delete_batch(client, keys: list) -> int:
+async def _delete_batch(client: Redis, keys: List[str]) -> int:
     if not keys:
         return 0
     try:
@@ -47,7 +49,7 @@ async def delete_by_pattern(pattern: str) -> int:
     """
     client = get_client()
     deleted = 0
-    batch: list = []
+    batch: List[str] = []
 
     try:
         async for key in client.scan_iter(match=pattern, count=SCAN_BATCH_SIZE):

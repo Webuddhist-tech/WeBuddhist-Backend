@@ -59,7 +59,7 @@ async def get_group_accumulators_service_cached(
             language=language,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -81,5 +81,5 @@ async def get_group_accumulator_service_cached(
             language=language,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )

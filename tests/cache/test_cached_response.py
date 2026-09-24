@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import BaseModel
 
+from pecha_api.cache import cached_response as cached_response_module
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cached_response import (
     cached_response,
@@ -14,6 +15,13 @@ from pecha_api.cache.cached_response import (
 class Sample(BaseModel):
     value: str
     count: int = 0
+
+
+@pytest.fixture
+def clean_pending():
+    cached_response_module._pending_invalidations.clear()
+    yield
+    cached_response_module._pending_invalidations.clear()
 
 
 def _loader(value="fresh", calls=None):
@@ -140,8 +148,67 @@ async def test_user_invalidation_targets_only_that_user():
 
 
 @pytest.mark.asyncio
-async def test_invalidation_is_skipped_while_the_breaker_is_open():
-    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=False), \
-         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock) as mock_delete:
+async def test_namespace_invalidation_is_attempted_even_with_the_breaker_open():
+    """Skipping it would not defer the eviction, it would lose it - and these
+    namespaces hold content for hours."""
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=False),          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=4) as mock_delete:
+        assert await invalidate_namespace(CacheType.PLAN_LIST) == 4
+    mock_delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_invalidation_is_queued_and_retried(clean_pending):
+    with patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               side_effect=ConnectionError("redis down")):
         assert await invalidate_namespace(CacheType.PLAN_LIST) == 0
-    mock_delete.assert_not_awaited()
+    assert CacheType.PLAN_LIST in cached_response_module._pending_invalidations
+
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=2) as mock_delete:
+        await cached_response_module._drain_pending_invalidations()
+    mock_delete.assert_awaited_once()
+    assert cached_response_module._pending_invalidations == set()
+
+
+@pytest.mark.asyncio
+async def test_a_namespace_owed_an_eviction_is_not_served_from_cache(clean_pending):
+    """The entry sitting there may be the one the write already replaced."""
+    cached_response_module._pending_invalidations.add(CacheType.PLAN_LIST)
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=False),          patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value={"value": "stale", "count": 1}) as mock_get,          patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
+        result = await cached_response(
+            cache_type=CacheType.PLAN_LIST, parts=["a"], model=Sample,
+            loader=_loader("fresh"), timeout=60,
+        )
+    assert result.value == "fresh"
+    mock_get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_debt_is_cleared_once_the_retry_succeeds(clean_pending):
+    cached_response_module._pending_invalidations.add(CacheType.PLAN_LIST)
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=1),          patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value={"value": "cached", "count": 1}) as mock_get,          patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
+        result = await cached_response(
+            cache_type=CacheType.PLAN_LIST, parts=["a"], model=Sample,
+            loader=_loader("fresh"), timeout=60,
+        )
+    # Debt settled, so the cache is trusted again on this same call.
+    assert result.value == "cached"
+    mock_get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_one_failure_queues_the_rest_instead_of_retrying_each(clean_pending):
+    """A plan write touches eight namespaces; an author saving against a dead
+    Redis should wait for one timeout, not eight."""
+    from pecha_api.cache.cached_response import invalidate_namespaces
+
+    types = [CacheType.PLAN_LIST, CacheType.PLAN_DETAIL, CacheType.SERIES_LIST]
+    with patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               side_effect=ConnectionError("redis down")) as mock_delete:
+        assert await invalidate_namespaces(types) == 0
+    assert mock_delete.await_count == 1
+    assert set(types) == cached_response_module._pending_invalidations

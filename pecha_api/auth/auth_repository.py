@@ -101,7 +101,7 @@ def _fetch_auth0_public_key() -> Dict[str, Any]:
     return {key["kid"]: key for key in response.json()["keys"]}
 
 
-def get_auth0_public_key(force_refresh: bool = False):
+def get_auth0_public_key(force_refresh: bool = False) -> Dict[str, Any]:
     """The Auth0 key set, cached.
 
     The lock is held across the fetch on purpose: when the cache expires under

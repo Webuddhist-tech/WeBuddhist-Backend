@@ -117,7 +117,7 @@ async def get_events_service_cached(
             token=token,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -137,7 +137,7 @@ async def get_event_by_id_service_cached(
             token=token,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -157,7 +157,7 @@ async def get_featured_events_service_cached(
         model=_FeaturedEvents,
         loader=_load,
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
     return wrapped.events
 
@@ -165,7 +165,7 @@ async def get_featured_events_service_cached(
 async def invalidate_user_event_caches(token: Optional[str]) -> int:
     """Clear the caller's event entries after they join, leave or switch."""
     return await invalidate_user_namespaces(
-        EVENT_CACHE_TYPES, cache_identity_from_token(token)
+        EVENT_CACHE_TYPES, await cache_identity_from_token(token)
     )
 
 

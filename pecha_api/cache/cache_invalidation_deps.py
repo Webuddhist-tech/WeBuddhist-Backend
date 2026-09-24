@@ -11,7 +11,7 @@ succeeded into an error the client sees.
 """
 
 import logging
-from typing import Callable, Optional
+from typing import AsyncGenerator, Callable, Optional
 
 from starlette.requests import Request
 from starlette.websockets import WebSocket
@@ -34,7 +34,9 @@ def invalidate_on_write(*cache_types: CacheType) -> Callable:
     failures left the database untouched.
     """
 
-    async def _invalidate(request: Request = None, websocket: WebSocket = None):
+    async def _invalidate(
+        request: Request = None, websocket: WebSocket = None
+    ) -> AsyncGenerator[None, None]:
         yield
         # A WebSocket route on this router gets `websocket` and no `request`;
         # a socket is not a write, so there is nothing to invalidate.
@@ -69,12 +71,14 @@ def invalidate_caller_on_write(*cache_types: CacheType) -> Callable:
     people - a count, a total - rides on the namespace's short timeout.
     """
 
-    async def _invalidate(request: Request = None, websocket: WebSocket = None):
+    async def _invalidate(
+        request: Request = None, websocket: WebSocket = None
+    ) -> AsyncGenerator[None, None]:
         yield
         if request is None or request.method not in WRITE_METHODS:
             return
         try:
-            await invalidate_user_namespaces(cache_types, cache_identity_from_token(_bearer_token(request)))
+            await invalidate_user_namespaces(cache_types, await cache_identity_from_token(_bearer_token(request)))
         except Exception as cache_error:
             logger.error("Post-write cache invalidation failed: %s", cache_error)
 

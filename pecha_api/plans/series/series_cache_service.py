@@ -64,7 +64,7 @@ async def get_filtered_series_cached(
             timezone_name=timezone_name,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -86,7 +86,7 @@ async def get_random_featured_series_cached(
             token=token,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
@@ -108,7 +108,7 @@ async def get_series_detail_cached(
             timezone_name=timezone_name,
         ),
         timeout=_timeout(),
-        user_identity=cache_identity_from_token(token),
+        user_identity=await cache_identity_from_token(token),
     )
 
 
