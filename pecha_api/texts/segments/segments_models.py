@@ -32,7 +32,10 @@ class Segment(Document):
     
     @classmethod
     async def get_segment_by_pecha_segment_id(cls, pecha_segment_id: str) -> Optional["Segment"]:
-        return await cls.find_one(cls.pecha_segment_id == pecha_segment_id)
+        # Dict query: Pydantic v2's model metaclass does not expose
+        # `cls.pecha_segment_id` as a Beanie ExpressionField, so
+        # `cls.pecha_segment_id == value` raises AttributeError.
+        return await cls.find_one({"pecha_segment_id": pecha_segment_id})
 
     @classmethod
     async def get_segments_by_text_id(cls, text_id: str) -> List["Segment"]:

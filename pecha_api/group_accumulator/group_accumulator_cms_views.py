@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Annotated
+from typing import Annotated, Optional
 from uuid import UUID
 from starlette import status
 
@@ -49,12 +49,14 @@ async def get_group_accumulators(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(20, ge=1, le=100, description="Maximum number of records to return"),
+    search: Optional[str] = Query(None, description="Filter by title"),
 ):
     return get_group_accumulators_cms_service(
         token=credentials.credentials,
         group_id=group_id,
         skip=skip,
         limit=limit,
+        search=search,
     )
 
 

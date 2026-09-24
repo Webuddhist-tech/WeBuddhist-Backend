@@ -42,7 +42,8 @@ async def search(
 async def multilingual_search(
     query: str = Query(...),
     search_type: MultilingualSearchType = Query(default=MultilingualSearchType.SIMILAR),
-    text_id: Optional[str] = Query(default=None),
+    text_id: Optional[str] = Query(default=None, description="Restrict the search to every edition of this text"),
+    edition_id: Optional[str] = Query(default=None, description="Restrict the search to a single edition"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=10, ge=1, le=100),
 ) -> MultilingualSearchResponse:
@@ -50,6 +51,7 @@ async def multilingual_search(
         query=query,
         search_type=search_type.value,
         text_id=text_id,
+        edition_id=edition_id,
         skip=skip,
         limit=limit,
     )

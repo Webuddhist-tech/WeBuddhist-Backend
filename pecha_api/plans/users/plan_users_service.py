@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 from typing import List
 from typing import Set
@@ -114,8 +115,10 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_ids_by_plan_ids,
     get_group_ids_by_series_ids,
     get_user_series_enrollment_partner_map,
+    lock_group_membership_changes,
     upsert_group_join,
 )
+from pecha_api.plans.groups.group_ban_guard import assert_user_not_banned_from_group
 from pecha_api.plans.groups.groups_service import get_group_summaries_by_ids
 from pecha_api.plans.groups.group_summary_models import AuthorGroupSummaryDTO
 from pecha_api.plans.series.series_service import (
@@ -686,6 +689,8 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
     current_user = validate_and_extract_user_details(token=token)
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
+        plan = get_plan_by_id(db=db, plan_id=plan_id)
+        plan_language = getattr(plan, "language", None)
         completed_task_ids = []
         completed_subtask_ids = set()
         task_ids = [task.id for task in plan_item.tasks]
@@ -710,7 +715,11 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
         from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
         tasks_sub_tasks = await asyncio.gather(
             *[
-                _get_user_sub_tasks_dto_bulk(sub_tasks=task.sub_tasks, completed_subtask_ids=completed_subtask_ids)
+                _get_user_sub_tasks_dto_bulk(
+                    sub_tasks=task.sub_tasks,
+                    completed_subtask_ids=completed_subtask_ids,
+                    language=plan_language,
+                )
                 for task in plan_item.tasks
             ]
         )
@@ -749,13 +758,16 @@ def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID]) -> List[UserSubTaskDTO]:
+async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID], language=None) -> List[UserSubTaskDTO]:
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
     resolved_contents = await resolve_subtasks_content(sub_tasks)
+    resolved_references = resolve_subtask_references(subtasks=sub_tasks, language=language)
 
     result = []
-    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+    for sub_task, resolved_content, reference in zip(sub_tasks, resolved_contents, resolved_references):
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
             _get_presigned_url(content=sub_task.audio_url)
@@ -774,6 +786,8 @@ async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_s
                 pecha_segment_id=sub_task.pecha_segment_id,
                 segment_ids=sub_task.segment_ids,
                 segment_numbers=sub_task.segment_numbers,
+                reference_id=sub_task.reference_id,
+                reference=reference,
                 start_ms=start_ms,
                 end_ms=end_ms,
             )
@@ -922,6 +936,17 @@ def _resolve_series_partner_id(
     return series_partner.id
 
 
+def _assert_may_join_partner_group(db: Session, group_id: UUID, user_id: UUID) -> None:
+    """Enrolling in a series joins its partner group, so the same ban applies.
+
+    Picking a partner group here is an ordinary membership write, and it is the
+    one the group's moderators cannot see coming, so it goes through the same
+    lock-then-check the direct join paths use.
+    """
+    lock_group_membership_changes(db=db, group_id=group_id)
+    assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user_id)
+
+
 def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -> None:
     """Enroll user in a series, or update partner group when already enrolled."""
     current_user = validate_and_extract_user_details(token=token)
@@ -943,6 +968,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
             new_partner_id = _resolve_series_partner_id(
                 db, enroll_request.series_id, enroll_request.group_id
             )
+            # Checked before anything is written, so a banned user is turned
+            # away rather than left with the partner switched and no membership.
+            if enroll_request.group_id is not None:
+                _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
             if existing_enrollment.series_partner_id != new_partner_id:
                 existing_enrollment.series_partner_id = new_partner_id
                 update_user_series_enrollment(db, existing_enrollment)
@@ -954,6 +983,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
         new_partner_id = _resolve_series_partner_id(
             db, enroll_request.series_id, enroll_request.group_id
         )
+        # Before the enrolment is written: a ban refuses the whole call, so it
+        # cannot leave an enrolment behind that never joined its partner group.
+        if enroll_request.group_id is not None:
+            _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
 
         first_plan = None
         if enroll_request.start_immediately:

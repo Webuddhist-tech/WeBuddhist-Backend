@@ -2,11 +2,18 @@ from datetime import datetime
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette import status
 
-from .event_response_models import EventFormat, EventsResponse, EventDTO, EventParticipantsResponse
+from .event_response_models import (
+    EventFormat,
+    EventsResponse,
+    EventDTO,
+    EventParticipantsResponse,
+    JoinEventRequest,
+    UpdateParticipationTypeRequest,
+)
 from .event_service import (
     EventContentFilter,
     get_events_service,
@@ -17,6 +24,7 @@ from .event_service import (
 from .event_participant_service import (
     join_event_service,
     leave_event_service,
+    update_participation_type_service,
     get_event_participants_service,
 )
 
@@ -46,8 +54,8 @@ def get_events_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,
@@ -88,8 +96,8 @@ def get_events_today_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,
@@ -138,9 +146,39 @@ def get_featured_events_endpoint(
 def join_event_endpoint(
     event_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    payload: Annotated[Optional[JoinEventRequest], Body()] = None,
 ) -> None:
-    """Join an event. Idempotent: joining again succeeds without creating a duplicate."""
-    join_event_service(token=credentials.credentials, event_id=event_id)
+    """Join an event. Idempotent: joining again succeeds without creating a duplicate.
+
+    The body is optional. With `participation_type` set, it also records how
+    the user attends - and re-sending it on an existing participation updates
+    the choice. Online-only and offline-only events fill it in themselves and
+    reject the other value with a 400."""
+    join_event_service(
+        token=credentials.credentials,
+        event_id=event_id,
+        participation_type=payload.participation_type if payload else None,
+    )
+
+
+@events_router.patch(
+    "/{event_id}/participants/me",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def update_participation_type_endpoint(
+    event_id: UUID,
+    payload: UpdateParticipationTypeRequest,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> None:
+    """Switch how the caller attends an event: 'online' or 'offline'.
+
+    404 when the caller has not joined; 400 when the event only runs the
+    other way."""
+    update_participation_type_service(
+        token=credentials.credentials,
+        event_id=event_id,
+        participation_type=payload.participation_type,
+    )
 
 
 @events_router.delete(

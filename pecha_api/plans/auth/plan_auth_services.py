@@ -11,6 +11,7 @@ from pecha_api.auth.auth0_sms import AUTH0_SMS_PROVIDER, verify_auth0_sms_token
 from pecha_api.auth.auth0_google import AUTH0_GOOGLE_PROVIDER, verify_auth0_google_token
 from pecha_api.auth.auth0_email import AUTH0_EMAIL_PROVIDER, verify_auth0_email_token
 from pecha_api.plans.authors.plan_authors_model import Author, AuthorPasswordReset
+from pecha_api.plans.authors.author_user_link_service import link_or_create_user_for_author
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_repository import (
     check_author_exists,
@@ -78,7 +79,12 @@ def _create_user(create_user_request: CreateAuthorRequest) -> AuthorDetails:
     _validate_password(new_author.password)
     hashed_password = get_hashed_password(new_author.password)
     new_author.password = hashed_password
-    saved_author = _execute_with_session(lambda db: save_author(db=db, author=new_author))
+    def _save_and_link(db):
+        author = save_author(db=db, author=new_author)
+        link_or_create_user_for_author(db=db, author=author)
+        return author
+
+    saved_author = _execute_with_session(_save_and_link)
     _send_verification_email(email=saved_author.email)
     return AuthorDetails(
         first_name=saved_author.first_name,
@@ -366,6 +372,7 @@ def exchange_phone_token(request: PhoneExchangeRequest) -> PhoneExchangeResponse
             created_by=f"{AUTH0_SMS_PROVIDER}:{sms_identity.subject}",
         )
         author = save_phone_author(db=db, author=author)
+        link_or_create_user_for_author(db=db, author=author)
         notify_pending_group_invites(author)
         return _phone_exchange_response(author, sms_identity.phone_number)
 
@@ -456,6 +463,7 @@ def exchange_google_token(request: GoogleExchangeRequest) -> GoogleExchangeRespo
             created_by=f"{AUTH0_GOOGLE_PROVIDER}:{google_identity.subject}",
         )
         author = save_google_author(db=db, author=author)
+        link_or_create_user_for_author(db=db, author=author)
         notify_pending_group_invites(author)
         return _google_exchange_response(author, google_identity.email)
 
@@ -511,6 +519,7 @@ def exchange_email_token(request: EmailExchangeRequest) -> EmailExchangeResponse
             created_by=f"{AUTH0_EMAIL_PROVIDER}:{email_identity.subject}",
         )
         author = save_google_author(db=db, author=author)
+        link_or_create_user_for_author(db=db, author=author)
         notify_pending_group_invites(author)
         return _email_exchange_response(author, email_identity.email)
 

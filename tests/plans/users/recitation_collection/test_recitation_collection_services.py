@@ -14,6 +14,7 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_service i
     add_items_to_collection_service,
     delete_collection_service,
     delete_collection_item_service,
+    update_collection_item_display_order_service,
     _generate_presigned_url
 )
 from pecha_api.plans.users.recitation_collection.recitation_collection_response_models import (
@@ -24,6 +25,7 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_response_
     CreateCollectionRequest,
     CreateCollectionResponse,
     UpdateCollectionRequest,
+    UpdateCollectionItemRequest,
     AddItemsRequest,
     AddItemsResponse
 )
@@ -1506,3 +1508,241 @@ class TestDeleteCollectionItemService:
             )
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestUpdateCollectionItemDisplayOrderService:
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.SessionLocal')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_item_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.collection_item_display_order_taken')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.update_collection_item')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_texts_by_edition_or_text_ids')
+    @pytest.mark.asyncio
+    async def test_updates_fractional_display_order(
+        self,
+        mock_get_texts,
+        mock_update_item,
+        mock_order_taken,
+        mock_get_item,
+        mock_get_collection,
+        mock_session,
+        mock_validate
+    ):
+        user_id = uuid4()
+        collection_id = uuid4()
+        item_id = uuid4()
+        text_id = uuid4()
+
+        mock_validate.return_value = MockUser(id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_collection.return_value = MockCollection(id=collection_id, user_id=user_id)
+
+        item = MockCollectionItem(
+            id=item_id,
+            recitation_collection_id=collection_id,
+            text_id=text_id,
+            display_order=2
+        )
+        mock_get_item.return_value = item
+        mock_order_taken.return_value = False
+
+        def _save(db, item):
+            return item
+        mock_update_item.side_effect = _save
+        mock_get_texts.return_value = {
+            str(text_id): MockTextDTO(title="Heart Sutra", language="bo")
+        }
+
+        result = await update_collection_item_display_order_service(
+            token="valid_token",
+            collection_id=collection_id,
+            item_id=item_id,
+            request=UpdateCollectionItemRequest(display_order=1.4),
+        )
+
+        assert result.id == item_id
+        assert result.display_order == 1.4
+        assert result.title == "Heart Sutra"
+        mock_order_taken.assert_called_once_with(
+            db=mock_db,
+            collection_id=collection_id,
+            display_order=1.4,
+            exclude_item_id=item_id,
+        )
+        mock_update_item.assert_called_once()
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.SessionLocal')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_item_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.collection_item_display_order_taken')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.update_collection_item')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_texts_by_edition_or_text_ids')
+    @pytest.mark.asyncio
+    async def test_same_display_order_is_noop(
+        self,
+        mock_get_texts,
+        mock_update_item,
+        mock_order_taken,
+        mock_get_item,
+        mock_get_collection,
+        mock_session,
+        mock_validate
+    ):
+        user_id = uuid4()
+        collection_id = uuid4()
+        text_id = uuid4()
+
+        mock_validate.return_value = MockUser(id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_collection.return_value = MockCollection(id=collection_id, user_id=user_id)
+        item = MockCollectionItem(
+            recitation_collection_id=collection_id,
+            text_id=text_id,
+            display_order=1.4
+        )
+        mock_get_item.return_value = item
+        mock_get_texts.return_value = {str(text_id): MockTextDTO(title="Heart Sutra")}
+
+        result = await update_collection_item_display_order_service(
+            token="valid_token",
+            collection_id=collection_id,
+            item_id=item.id,
+            request=UpdateCollectionItemRequest(display_order=1.4),
+        )
+
+        assert result.display_order == 1.4
+        mock_order_taken.assert_not_called()
+        mock_update_item.assert_not_called()
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.SessionLocal')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_item_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.collection_item_display_order_taken')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.update_collection_item')
+    @pytest.mark.asyncio
+    async def test_rejects_duplicate_display_order(
+        self,
+        mock_update_item,
+        mock_order_taken,
+        mock_get_item,
+        mock_get_collection,
+        mock_session,
+        mock_validate
+    ):
+        user_id = uuid4()
+        collection_id = uuid4()
+
+        mock_validate.return_value = MockUser(id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_collection.return_value = MockCollection(id=collection_id, user_id=user_id)
+        mock_get_item.return_value = MockCollectionItem(
+            recitation_collection_id=collection_id,
+            display_order=2
+        )
+        mock_order_taken.return_value = True
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order_service(
+                token="valid_token",
+                collection_id=collection_id,
+                item_id=uuid4(),
+                request=UpdateCollectionItemRequest(display_order=1.0),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_update_item.assert_not_called()
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.SessionLocal')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_by_id')
+    @pytest.mark.asyncio
+    async def test_collection_not_found(
+        self,
+        mock_get_collection,
+        mock_session,
+        mock_validate
+    ):
+        mock_validate.return_value = MockUser()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_collection.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order_service(
+                token="valid_token",
+                collection_id=uuid4(),
+                item_id=uuid4(),
+                request=UpdateCollectionItemRequest(display_order=1.4),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.SessionLocal')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_by_id')
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.get_collection_item_by_id')
+    @pytest.mark.asyncio
+    async def test_item_not_found(
+        self,
+        mock_get_item,
+        mock_get_collection,
+        mock_session,
+        mock_validate
+    ):
+        user_id = uuid4()
+        collection_id = uuid4()
+        mock_validate.return_value = MockUser(id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__ = MagicMock(return_value=mock_db)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_collection.return_value = MockCollection(id=collection_id, user_id=user_id)
+        mock_get_item.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order_service(
+                token="valid_token",
+                collection_id=collection_id,
+                item_id=uuid4(),
+                request=UpdateCollectionItemRequest(display_order=1.4),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_service.validate_and_extract_user_details')
+    @pytest.mark.asyncio
+    async def test_invalid_token(self, mock_validate):
+        mock_validate.side_effect = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order_service(
+                token="invalid_token",
+                collection_id=uuid4(),
+                item_id=uuid4(),
+                request=UpdateCollectionItemRequest(display_order=1.4),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_request_rejects_non_finite_display_order(self):
+        with pytest.raises(ValidationError):
+            UpdateCollectionItemRequest(display_order=float("inf"))
+        with pytest.raises(ValidationError):
+            UpdateCollectionItemRequest(display_order=float("nan"))
+
+    def test_request_rejects_extra_fields(self):
+        with pytest.raises(ValidationError):
+            UpdateCollectionItemRequest(display_order=1.4, name="nope")

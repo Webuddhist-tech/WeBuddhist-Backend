@@ -7,6 +7,7 @@ from pecha_api.shared.sqs_client import send_sqs_message
 
 EVENT_CREATED_EVENT = "EVENT_CREATED"
 EVENT_REMINDER_EVENT = "EVENT_REMINDER"
+EVENT_ANNOUNCEMENT_EVENT = "EVENT_ANNOUNCEMENT"
 EVENT_NOTIFICATION_EVENT_VERSION = 1
 
 
@@ -42,6 +43,35 @@ def build_event_reminder_event_body(
         # even though the row itself looks valid again by the time it's
         # processed.
         "fire_at": fire_at,
+    }
+
+
+def build_event_announcement_event_body(
+    *,
+    event_id: str,
+    announcement_id: str,
+    audience: str,
+    title: str,
+    body: str,
+) -> Dict[str, Any]:
+    """One organizer-written push.
+
+    The copy rides in the message rather than being looked up later: it is
+    typed by a person for this moment and is not stored anywhere else, so a
+    consumer that had only ids would have nothing to render.
+
+    announcement_id makes each send its own delivery. Two sends of identical
+    text are two announcements, while a redelivered message is the same one -
+    which is exactly the distinction per-device idempotency needs.
+    """
+    return {
+        "event_type": EVENT_ANNOUNCEMENT_EVENT,
+        "version": EVENT_NOTIFICATION_EVENT_VERSION,
+        "event_id": event_id,
+        "announcement_id": announcement_id,
+        "audience": audience,
+        "title": title,
+        "body": body,
     }
 
 

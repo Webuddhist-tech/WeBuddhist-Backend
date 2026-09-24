@@ -38,6 +38,7 @@ def sample_verse_public_dto():
         },
         image_url="https://example.com/image1.jpg",
         ref_id="text-123",
+        source="Dhp 1.5",
         ref_type="sutra",
         date=date(2025, 6, 5)
     )
@@ -68,6 +69,7 @@ def sample_verse_dto():
         image_url="https://example.com/image1.jpg",
         verse_id="verse-456",
         ref_id="text-123",
+        source="Dhp 1.5",
         ref_type="sutra",
         group_id=uuid4(),
         date=date(2025, 6, 5)
@@ -86,6 +88,7 @@ def sample_create_request():
         image_url="https://example.com/image1.jpg",
         verse_id="verse-456",
         ref_id="text-123",
+        source="Dhp 1.5",
         ref_type="sutra",
         group_id=uuid4(),
         date=date(2025, 6, 5)
@@ -132,6 +135,7 @@ def sample_verse_public_dto_with_group_info(sample_group_info):
         },
         image_url="https://example.com/image1.jpg",
         ref_id="text-123",
+        source="Dhp 1.5",
         ref_type="sutra",
         date=date(2025, 6, 5),
         group_info=sample_group_info
@@ -154,6 +158,7 @@ def sample_update_request():
         verses={"en": "Updated verse text."},
         image_urls=["https://example.com/updated-image.jpg"],
         ref_id="text-updated",
+        source="Lamrim Chenmo",
         ref_type="commentary"
     )
 
@@ -176,6 +181,7 @@ async def test_get_verse_of_day_success(sample_verse_public_response):
         assert "verses" in data["verse_of_day"]
         assert "en" in data["verse_of_day"]["verses"]
         assert data["verse_of_day"]["ref_id"] == "text-123"
+        assert data["verse_of_day"]["source"] == "Dhp 1.5"
         assert data["verse_of_day"]["ref_type"] == "sutra"
         assert "image_url" in data["verse_of_day"]
         assert "date" in data["verse_of_day"]
@@ -348,6 +354,7 @@ async def test_get_verse_of_day_today_success(sample_verse_public_response):
         assert data["verse_of_day"] is not None
         assert "verses" in data["verse_of_day"]
         assert data["verse_of_day"]["ref_id"] == "text-123"
+        assert data["verse_of_day"]["source"] == "Dhp 1.5"
         
         mock_service.assert_called_once_with(lang=None, timezone=None)
 
@@ -597,6 +604,7 @@ async def test_create_verse_of_day_success(sample_verse_dto):
             "image_urls": ["https://example.com/image1.jpg"],
             "verse_id": "verse-456",
             "ref_id": "text-123",
+            "source": "Dhp 1.5",
             "ref_type": "sutra",
             "group_id": str(uuid4()),
             "date": "2025-06-05"
@@ -615,6 +623,7 @@ async def test_create_verse_of_day_success(sample_verse_dto):
         assert "verses" in data
         assert data["verse_id"] == sample_verse_dto.verse_id
         assert data["ref_id"] == sample_verse_dto.ref_id
+        assert data["source"] == sample_verse_dto.source
         assert data["ref_type"] == sample_verse_dto.ref_type
         
         mock_validate.assert_called_once_with("valid-token")
@@ -666,6 +675,28 @@ async def test_create_verse_of_day_missing_required_fields():
             headers={"Authorization": "Bearer valid-token"}
         )
         
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.asyncio
+async def test_create_verse_of_day_source_exceeds_max_length():
+    """Test creation rejects source values longer than the 255-character column."""
+    mock_author = MagicMock()
+    mock_author.email = "test@example.com"
+
+    with patch("pecha_api.verse_of_day.verse_of_day_views.validate_cms_author_details", return_value=mock_author):
+        request_data = {
+            "verses": {"en": "May all beings be happy."},
+            "source": "a" * 256,
+            "date": "2025-06-06"
+        }
+
+        response = client.post(
+            "/cms/verse-of-day",
+            json=request_data,
+            headers={"Authorization": "Bearer valid-token"}
+        )
+
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
@@ -1135,6 +1166,23 @@ async def test_cms_update_verse_of_day_partial(sample_verse_dto):
         assert response.status_code == status.HTTP_200_OK
         mock_validate.assert_called_once_with("valid-token")
         mock_update.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cms_update_verse_of_day_source_exceeds_max_length():
+    """Test update rejects source values longer than the 255-character column."""
+    mock_author = MagicMock()
+    mock_author.email = "test@example.com"
+    verse_id = uuid4()
+
+    with patch("pecha_api.verse_of_day.verse_of_day_views.validate_cms_author_details", return_value=mock_author):
+        response = client.put(
+            f"/cms/verse-of-day/{verse_id}",
+            json={"source": "a" * 256},
+            headers={"Authorization": "Bearer valid-token"}
+        )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
 @pytest.mark.asyncio

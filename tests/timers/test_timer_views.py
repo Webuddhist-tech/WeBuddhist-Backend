@@ -12,6 +12,7 @@ from pecha_api.timers.timer_views import (
     create_user_timer,
     update_user_timer,
     delete_user_timer,
+    restore_user_timer,
     record_timer_stop,
     get_user_timer_history
 )
@@ -21,6 +22,7 @@ from pecha_api.timers.timer_response_models import (
     CreateTimerRequest,
     UpdateTimerRequest,
     RecordTimerStopRequest,
+    RecordTimerStopResponse,
     TimerHistoryResponse,
     TimerHistoryDTO,
     TimerSessionDTO
@@ -43,23 +45,29 @@ class TestDataFactory:
     def create_timer_dto(
         timer_id=None,
         user_id=None,
-        group_id=None,
+        group_id="_default",
         timer_type=TimerType.USER,
         name="Test Timer",
         duration=300,
         description=None,
-        audio_url=None
+        ambient_sound_id=None,
+        bell_at_start=True,
+        bell_at_end=True,
+        parent_preset_id=None
     ) -> TimerDTO:
         """Create a TimerDTO with specified attributes."""
         return TimerDTO(
             id=timer_id or uuid4(),
             user_id=user_id or uuid4(),
-            group_id=group_id or uuid4(),
+            group_id=uuid4() if group_id == "_default" else group_id,
             type=timer_type,
             name=name,
             description=description,
             duration=duration,
-            audio_url=audio_url,
+            ambient_sound_id=ambient_sound_id,
+            bell_at_start=bell_at_start,
+            bell_at_end=bell_at_end,
+            parent_preset_id=parent_preset_id,
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
@@ -76,34 +84,34 @@ class TestDataFactory:
     
     @staticmethod
     def create_timer_request(
-        group_id=None,
+        group_id="_default",
         name="New Timer",
         duration=600,
         description=None,
-        audio_url=None
+        ambient_sound_id=None
     ) -> CreateTimerRequest:
         """Create a CreateTimerRequest with specified attributes."""
         return CreateTimerRequest(
-            group_id=group_id or uuid4(),
+            group_id=uuid4() if group_id == "_default" else group_id,
             name=name,
             description=description,
             duration=duration,
-            audio_url=audio_url
+            ambient_sound_id=ambient_sound_id
         )
-    
+
     @staticmethod
     def create_update_request(
         name=None,
         duration=None,
         description=None,
-        audio_url=None
+        ambient_sound_id=None
     ) -> UpdateTimerRequest:
         """Create an UpdateTimerRequest with specified attributes."""
         return UpdateTimerRequest(
             name=name,
             description=description,
             duration=duration,
-            audio_url=audio_url
+            ambient_sound_id=ambient_sound_id
         )
 
 
@@ -136,7 +144,9 @@ class TestGetAllTimers:
         assert result.timers[0].name == "Timer 1"
         assert result.timers[1].name == "Timer 2"
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=0, limit=20, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
@@ -158,7 +168,9 @@ class TestGetAllTimers:
         assert len(result.timers) == 0
         assert result.total == 0
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=0, limit=20, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
@@ -181,12 +193,14 @@ class TestGetAllTimers:
         assert result.limit == 1
         assert result.total == 10
         
-        mock_service.assert_called_once_with(group_id=group_id, skip=5, limit=1)
+        mock_service.assert_called_once_with(
+            group_id=group_id, skip=5, limit=1, user_id=None
+        )
     
     @patch('pecha_api.timers.timer_views.get_all_timers_service')
     @pytest.mark.asyncio
     async def test_get_all_timers_without_group_id(self, mock_service):
-        """Test get_all_timers without group_id filter (returns all timers)."""
+        """Test get_all_timers without group_id filter (returns catalogue presets)."""
         timer1 = TestDataFactory.create_timer_dto(name="Timer 1")
         timer2 = TestDataFactory.create_timer_dto(name="Timer 2")
         
@@ -204,7 +218,32 @@ class TestGetAllTimers:
         assert len(result.timers) == 2
         assert result.total == 2
         
-        mock_service.assert_called_once_with(group_id=None, skip=0, limit=20)
+        mock_service.assert_called_once_with(
+            group_id=None, skip=0, limit=20, user_id=None
+        )
+
+    @patch('pecha_api.timers.timer_views.validate_and_extract_user_details')
+    @patch('pecha_api.timers.timer_views.get_all_timers_service')
+    @pytest.mark.asyncio
+    async def test_get_all_timers_with_token_passes_user_id(
+        self, mock_service, mock_validate
+    ):
+        """A bearer token merges the caller's timers into the catalogue list."""
+        user_id = uuid4()
+        mock_user = MagicMock()
+        mock_user.id = user_id
+        mock_validate.return_value = mock_user
+        mock_service.return_value = TestDataFactory.create_timers_response()
+        credentials = TestDataFactory.create_auth_credentials()
+
+        await get_all_timers(
+            group_id=None, skip=0, limit=20, credentials=credentials
+        )
+
+        mock_validate.assert_called_once_with(token="valid_token")
+        mock_service.assert_called_once_with(
+            group_id=None, skip=0, limit=20, user_id=user_id
+        )
 
 
 class TestGetUserTimers:
@@ -420,37 +459,95 @@ class TestCreateUserTimer:
     
     @patch('pecha_api.timers.timer_views.create_timer_service')
     @pytest.mark.asyncio
-    async def test_create_user_timer_with_audio_url(self, mock_service):
-        """Test creating timer with audio URL."""
+    async def test_create_user_timer_with_ambient_sound(self, mock_service):
+        """A timer created with a background sound returns its catalogue id."""
         token = "valid_token"
         group_id = uuid4()
-        audio_url = "audio/timer_sounds/bell.mp3"
-        
+        ambient_sound_id = uuid4()
+
         auth_credentials = TestDataFactory.create_auth_credentials(token=token)
         request = TestDataFactory.create_timer_request(
             group_id=group_id,
-            name="Timer with Audio",
+            name="Timer with Ambient Sound",
             duration=300,
             description="Meditation timer",
-            audio_url=audio_url
+            ambient_sound_id=ambient_sound_id
         )
-        
+
         created_timer = TestDataFactory.create_timer_dto(
             group_id=group_id,
-            name="Timer with Audio",
+            name="Timer with Ambient Sound",
             duration=300,
             description="Meditation timer",
-            audio_url="https://presigned-url.com/audio/timer_sounds/bell.mp3"
+            ambient_sound_id=ambient_sound_id
         )
         mock_service.return_value = created_timer
-        
+
         result = await create_user_timer(
             request=request,
             credentials=auth_credentials
         )
-        
-        assert result.audio_url is not None
+
+        assert result.ambient_sound_id == ambient_sound_id
         assert result.description == "Meditation timer"
+
+    @patch('pecha_api.timers.timer_views.create_timer_service')
+    @pytest.mark.asyncio
+    async def test_create_user_timer_without_group_id(self, mock_service):
+        """Test creating a personal timer with no group."""
+        token = "valid_token"
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        request = TestDataFactory.create_timer_request(
+            group_id=None,
+            name="Personal Timer",
+            duration=600
+        )
+
+        created_timer = TestDataFactory.create_timer_dto(
+            group_id=None,
+            name="Personal Timer",
+            duration=600,
+            timer_type=TimerType.USER
+        )
+        mock_service.return_value = created_timer
+
+        result = await create_user_timer(
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.group_id is None
+        assert result.name == "Personal Timer"
+        mock_service.assert_called_once_with(token=token, request=request)
+
+    @patch('pecha_api.timers.timer_views.create_timer_service')
+    @pytest.mark.asyncio
+    async def test_create_user_timer_without_audio(self, mock_service):
+        """Audio is optional: a timer can be created without one."""
+        token = "valid_token"
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        request = TestDataFactory.create_timer_request(
+            group_id=None,
+            name="Timer without Audio",
+            duration=300
+        )
+
+        created_timer = TestDataFactory.create_timer_dto(
+            group_id=None,
+            name="Timer without Audio",
+            duration=300
+        )
+        mock_service.return_value = created_timer
+
+        result = await create_user_timer(
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.ambient_sound_id is None
+        assert result.group_id is None
 
 
 class TestUpdateUserTimer:
@@ -542,27 +639,38 @@ class TestUpdateUserTimer:
     
     @patch('pecha_api.timers.timer_views.update_timer_service')
     @pytest.mark.asyncio
-    async def test_update_user_timer_preset_forbidden(self, mock_service):
-        """Test update_user_timer when trying to update preset timer."""
+    async def test_update_user_timer_preset_returns_personal_copy(self, mock_service):
+        """Updating a preset returns the caller's personal copy, not 403."""
         token = "valid_token"
-        timer_id = uuid4()
-        
+        preset_id = uuid4()
+        user_id = uuid4()
+        ambient_sound_id = uuid4()
+
         auth_credentials = TestDataFactory.create_auth_credentials(token=token)
-        request = TestDataFactory.create_update_request(name="Updated")
-        
-        mock_service.side_effect = HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "FORBIDDEN", "message": "Only user-created timers can be updated"}
+        request = TestDataFactory.create_update_request(ambient_sound_id=ambient_sound_id)
+
+        personal_copy = TestDataFactory.create_timer_dto(
+            user_id=user_id,
+            timer_type=TimerType.USER,
+            ambient_sound_id=ambient_sound_id,
+            parent_preset_id=preset_id
         )
-        
-        with pytest.raises(HTTPException) as exc_info:
-            await update_user_timer(
-                timer_id=timer_id,
-                request=request,
-                credentials=auth_credentials
-            )
-        
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_service.return_value = personal_copy
+
+        result = await update_user_timer(
+            timer_id=preset_id,
+            request=request,
+            credentials=auth_credentials
+        )
+
+        assert result.type == TimerType.USER
+        assert result.parent_preset_id == preset_id
+        assert result.ambient_sound_id == ambient_sound_id
+        mock_service.assert_called_once_with(
+            token=token,
+            timer_id=preset_id,
+            request=request
+        )
     
     @patch('pecha_api.timers.timer_views.update_timer_service')
     @pytest.mark.asyncio
@@ -700,6 +808,73 @@ class TestDeleteUserTimer:
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
 
 
+class TestRestoreUserTimer:
+    """Test cases for restore_user_timer endpoint."""
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_success(self, mock_service):
+        """Test successful restore of a soft-deleted timer."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        expected_dto = TestDataFactory.create_timer_dto(timer_id=timer_id)
+        mock_service.return_value = expected_dto
+
+        result = await restore_user_timer(
+            timer_id=timer_id,
+            credentials=auth_credentials
+        )
+
+        assert result == expected_dto
+        mock_service.assert_called_once_with(token=token, timer_id=timer_id)
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_not_deleted(self, mock_service):
+        """Test restore_user_timer when the timer was never deleted."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "Conflict", "message": "Timer is not deleted"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await restore_user_timer(
+                timer_id=timer_id,
+                credentials=auth_credentials
+            )
+
+        assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+
+    @patch('pecha_api.timers.timer_views.restore_timer_service')
+    @pytest.mark.asyncio
+    async def test_restore_user_timer_not_found(self, mock_service):
+        """Test restore_user_timer when timer doesn't exist."""
+        token = "valid_token"
+        timer_id = uuid4()
+
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": "Timer not found"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await restore_user_timer(
+                timer_id=timer_id,
+                credentials=auth_credentials
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
 class TestRecordTimerStop:
     """Test cases for record_timer_stop endpoint."""
     
@@ -712,12 +887,13 @@ class TestRecordTimerStop:
         
         auth_credentials = TestDataFactory.create_auth_credentials(token=token)
         request = RecordTimerStopRequest(timer_id=timer_id, duration=600)
-        
-        mock_service.return_value = None
-        
+
+        expected_response = RecordTimerStopResponse(timer_id=timer_id, name="Test Timer", duration_ms=600)
+        mock_service.return_value = expected_response
+
         result = await record_timer_stop(request=request, credentials=auth_credentials)
-        
-        assert result == {"message": "Timer session recorded successfully"}
+
+        assert result == expected_response
         mock_service.assert_called_once_with(token=token, request=request)
     
     @patch('pecha_api.timers.timer_views.record_timer_stop_service')

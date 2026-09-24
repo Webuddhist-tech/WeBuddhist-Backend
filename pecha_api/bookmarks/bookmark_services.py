@@ -62,6 +62,13 @@ async def get_bookmarks_service(
 
         bookmarks_dto = []
         for bookmark in bookmarks:
+            enrichment = await enrich_bookmark(bookmark=bookmark, db=db, language=language)
+            # enrich_bookmark returns {} when the bookmarked item no longer
+            # exists or isn't visible to the user anymore (e.g. its
+            # recitation collection, plan, series... was deleted) - drop the
+            # bookmark from the response rather than showing a dangling entry.
+            if not enrichment:
+                continue
             bookmark_data = {
                 "id": bookmark.id,
                 "type": bookmark.type,
@@ -70,9 +77,7 @@ async def get_bookmarks_service(
                 "created_at": bookmark.created_at,
                 "updated_at": bookmark.updated_at,
             }
-            bookmark_data.update(
-                await enrich_bookmark(bookmark=bookmark, db=db, language=language)
-            )
+            bookmark_data.update(enrichment)
             bookmarks_dto.append(BookmarkDTO(**bookmark_data))
 
         return BookmarksResponse(

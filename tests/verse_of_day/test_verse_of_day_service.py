@@ -66,6 +66,7 @@ def sample_verse_model(sample_verse_metadata):
     verse.id = uuid4()
     verse.verse_id = "verse-456"
     verse.ref_id = "text-123"
+    verse.source = "Dhp 1.5"
     verse.ref_type = "sutra"
     verse.image_urls = ["images/verse_images/uuid1/image1.jpg", "images/verse_images/uuid2/image2.jpg"]  # S3 keys
     verse.group_id = uuid4()
@@ -87,6 +88,7 @@ def sample_create_request():
         image_urls=["https://example.com/image1.jpg"],
         verse_id="verse-456",
         ref_id="text-123",
+        source="Dhp 1.5",
         ref_type="sutra",
         group_id=uuid4(),
         date=date(2025, 6, 5)
@@ -130,6 +132,7 @@ def sample_verse_with_group_id(sample_verse_metadata):
     verse.id = uuid4()
     verse.verse_id = "verse-456"
     verse.ref_id = "text-123"
+    verse.source = "Dhp 1.5"
     verse.ref_type = "sutra"
     verse.image_urls = ["images/verse_images/uuid1/image1.jpg"]  # S3 key
     verse.group_id = uuid4()
@@ -145,6 +148,7 @@ def sample_verse_without_group_id(sample_verse_metadata):
     verse.id = uuid4()
     verse.verse_id = "verse-789"
     verse.ref_id = "text-456"
+    verse.source = None
     verse.ref_type = "commentary"
     verse.image_urls = None
     verse.group_id = None
@@ -163,6 +167,7 @@ def sample_update_request():
         },
         image_urls=["https://example.com/updated-image.jpg"],
         ref_id="text-updated",
+        source="Lamrim Chenmo",
         ref_type="commentary"
     )
 
@@ -174,6 +179,7 @@ def sample_verse_list(sample_verse_metadata):
     verse1.id = uuid4()
     verse1.verse_id = "verse-1"
     verse1.ref_id = "text-1"
+    verse1.source = "Dhp 1.5"
     verse1.ref_type = "sutra"
     verse1.image_urls = ["images/verse1.jpg"]
     verse1.group_id = uuid4()
@@ -184,6 +190,7 @@ def sample_verse_list(sample_verse_metadata):
     verse2.id = uuid4()
     verse2.verse_id = "verse-2"
     verse2.ref_id = "text-2"
+    verse2.source = None
     verse2.ref_type = "tantra"
     verse2.image_urls = ["images/verse2.jpg"]
     verse2.group_id = None
@@ -679,6 +686,7 @@ async def test_create_verse_of_day_service_success(sample_verse_model, sample_cr
         assert result.verses == sample_create_request.verses
         assert result.verse_id == sample_verse_model.verse_id
         assert result.ref_id == sample_verse_model.ref_id
+        assert result.source == sample_verse_model.source
         assert result.ref_type == sample_verse_model.ref_type
         assert result.image_urls == sample_verse_model.image_urls
         assert result.group_id == sample_verse_model.group_id
@@ -707,6 +715,7 @@ async def test_create_verse_of_day_service_with_optional_fields(mock_db_session)
     created_verse.id = uuid4()
     created_verse.verse_id = request.verse_id
     created_verse.ref_id = request.ref_id
+    created_verse.source = None
     created_verse.ref_type = request.ref_type
     created_verse.image_urls = None
     created_verse.group_id = None
@@ -726,6 +735,7 @@ async def test_create_verse_of_day_service_with_optional_fields(mock_db_session)
         assert result.verses == {"en": "Simple verse without extras."}
         assert result.image_urls is None
         assert result.group_id is None
+        assert result.source is None
 
 
 @pytest.mark.asyncio
@@ -749,6 +759,7 @@ async def test_create_verse_of_day_service_model_creation(sample_create_request,
     created_verse.id = uuid4()
     created_verse.verse_id = sample_create_request.verse_id
     created_verse.ref_id = sample_create_request.ref_id
+    created_verse.source = sample_create_request.source
     created_verse.ref_type = sample_create_request.ref_type
     created_verse.image_urls = sample_create_request.image_urls
     created_verse.group_id = sample_create_request.group_id
@@ -768,6 +779,7 @@ async def test_create_verse_of_day_service_model_creation(sample_create_request,
         mock_model.assert_called_once_with(
             verse_id=sample_create_request.verse_id,
             ref_id=sample_create_request.ref_id,
+            source=sample_create_request.source,
             ref_type=sample_create_request.ref_type,
             image_urls=sample_create_request.image_urls,
             group_id=sample_create_request.group_id,
@@ -980,6 +992,7 @@ async def test_update_verse_of_day_service_success_full(sample_verse_model, samp
     updated_verse.id = verse_id
     updated_verse.verse_id = "verse-updated"
     updated_verse.ref_id = sample_update_request.ref_id
+    updated_verse.source = sample_update_request.source
     updated_verse.ref_type = sample_update_request.ref_type
     updated_verse.image_urls = sample_update_request.image_urls
     updated_verse.group_id = None
@@ -1001,6 +1014,7 @@ async def test_update_verse_of_day_service_success_full(sample_verse_model, samp
         assert isinstance(result, VerseOfDayDTO)
         assert result.id == verse_id
         assert result.ref_id == sample_update_request.ref_id
+        assert result.source == sample_update_request.source
         assert result.ref_type == sample_update_request.ref_type
         
         mock_get.assert_called_once_with(mock_db_session.__enter__.return_value, verse_id)
@@ -1019,6 +1033,7 @@ async def test_update_verse_of_day_service_success_partial(sample_verse_model, m
     updated_verse.id = verse_id
     updated_verse.verse_id = sample_verse_model.verse_id
     updated_verse.ref_id = "text-partial-update"
+    updated_verse.source = sample_verse_model.source
     updated_verse.ref_type = sample_verse_model.ref_type
     updated_verse.image_urls = sample_verse_model.image_urls
     updated_verse.group_id = sample_verse_model.group_id
@@ -1057,6 +1072,7 @@ async def test_update_verse_of_day_service_update_verses_only(sample_verse_model
     updated_verse.id = verse_id
     updated_verse.verse_id = sample_verse_model.verse_id
     updated_verse.ref_id = sample_verse_model.ref_id
+    updated_verse.source = sample_verse_model.source
     updated_verse.ref_type = sample_verse_model.ref_type
     updated_verse.image_urls = sample_verse_model.image_urls
     updated_verse.group_id = sample_verse_model.group_id
@@ -1113,6 +1129,7 @@ async def test_update_verse_of_day_service_updates_correct_fields(sample_verse_m
     updated_verse.id = verse_id
     updated_verse.verse_id = sample_verse_model.verse_id
     updated_verse.ref_id = "new-ref"
+    updated_verse.source = sample_verse_model.source
     updated_verse.ref_type = "new-type"
     updated_verse.image_urls = sample_verse_model.image_urls
     updated_verse.group_id = sample_verse_model.group_id
@@ -1139,6 +1156,70 @@ async def test_update_verse_of_day_service_updates_correct_fields(sample_verse_m
 
 
 @pytest.mark.asyncio
+async def test_update_verse_of_day_service_source(sample_verse_model, mock_db_session):
+    """Test updating only the source field."""
+    verse_id = uuid4()
+    source_request = UpdateVerseOfDayRequest(source="Lamrim Chenmo")
+
+    updated_verse = MagicMock()
+    updated_verse.id = verse_id
+    updated_verse.verse_id = sample_verse_model.verse_id
+    updated_verse.ref_id = sample_verse_model.ref_id
+    updated_verse.source = "Lamrim Chenmo"
+    updated_verse.ref_type = sample_verse_model.ref_type
+    updated_verse.image_urls = sample_verse_model.image_urls
+    updated_verse.group_id = sample_verse_model.group_id
+    updated_verse.date = sample_verse_model.date
+    updated_verse.verse_metadata = sample_verse_model.verse_metadata
+
+    with patch("pecha_api.verse_of_day.verse_of_day_service.SessionLocal", return_value=mock_db_session), \
+         patch("pecha_api.verse_of_day.verse_of_day_service.get_verse_of_day_by_id", return_value=sample_verse_model), \
+         patch("pecha_api.verse_of_day.verse_of_day_service.update_verse_of_day", return_value=updated_verse) as mock_update:
+
+        result = update_verse_of_day_service(
+            verse_id=verse_id,
+            request=source_request,
+            updated_by="test@example.com"
+        )
+
+        assert result.source == "Lamrim Chenmo"
+        updates_dict = mock_update.call_args[0][2]
+        assert updates_dict == {"source": "Lamrim Chenmo"}
+
+
+@pytest.mark.asyncio
+async def test_update_verse_of_day_service_clears_source(sample_verse_model, mock_db_session):
+    """Test that an explicit null source clears the stored abbreviation."""
+    verse_id = uuid4()
+    clear_request = UpdateVerseOfDayRequest(source=None)
+
+    updated_verse = MagicMock()
+    updated_verse.id = verse_id
+    updated_verse.verse_id = sample_verse_model.verse_id
+    updated_verse.ref_id = sample_verse_model.ref_id
+    updated_verse.source = None
+    updated_verse.ref_type = sample_verse_model.ref_type
+    updated_verse.image_urls = sample_verse_model.image_urls
+    updated_verse.group_id = sample_verse_model.group_id
+    updated_verse.date = sample_verse_model.date
+    updated_verse.verse_metadata = sample_verse_model.verse_metadata
+
+    with patch("pecha_api.verse_of_day.verse_of_day_service.SessionLocal", return_value=mock_db_session), \
+         patch("pecha_api.verse_of_day.verse_of_day_service.get_verse_of_day_by_id", return_value=sample_verse_model), \
+         patch("pecha_api.verse_of_day.verse_of_day_service.update_verse_of_day", return_value=updated_verse) as mock_update:
+
+        result = update_verse_of_day_service(
+            verse_id=verse_id,
+            request=clear_request,
+            updated_by="test@example.com"
+        )
+
+        assert result.source is None
+        updates_dict = mock_update.call_args[0][2]
+        assert updates_dict == {"source": None}
+
+
+@pytest.mark.asyncio
 async def test_update_verse_of_day_service_refreshes_verse(sample_verse_model, sample_update_request, mock_db_session):
     """Test that db.refresh is called on updated verse."""
     verse_id = uuid4()
@@ -1146,6 +1227,7 @@ async def test_update_verse_of_day_service_refreshes_verse(sample_verse_model, s
     updated_verse.id = verse_id
     updated_verse.verse_id = "verse-updated"
     updated_verse.ref_id = sample_update_request.ref_id
+    updated_verse.source = sample_update_request.source
     updated_verse.ref_type = sample_update_request.ref_type
     updated_verse.image_urls = sample_update_request.image_urls
     updated_verse.group_id = None
@@ -1176,6 +1258,7 @@ async def test_update_verse_of_day_service_deletes_old_metadata(sample_verse_mod
     updated_verse.id = verse_id
     updated_verse.verse_id = "verse-updated"
     updated_verse.ref_id = sample_update_request.ref_id
+    updated_verse.source = sample_update_request.source
     updated_verse.ref_type = sample_update_request.ref_type
     updated_verse.image_urls = sample_update_request.image_urls
     updated_verse.group_id = None
@@ -1221,6 +1304,7 @@ async def test_update_verse_of_day_service_returns_dto(sample_verse_model, sampl
     updated_verse.id = verse_id
     updated_verse.verse_id = "verse-updated"
     updated_verse.ref_id = sample_update_request.ref_id
+    updated_verse.source = sample_update_request.source
     updated_verse.ref_type = sample_update_request.ref_type
     updated_verse.image_urls = sample_update_request.image_urls
     updated_verse.group_id = None
@@ -1336,6 +1420,7 @@ async def test_get_verse_of_day_service_empty_image_urls(mock_db_session):
     verse = MagicMock()
     verse.id = uuid4()
     verse.ref_id = "text-empty"
+    verse.source = None
     verse.ref_type = "commentary"
     verse.image_urls = []
     verse.group_id = None
@@ -1357,6 +1442,7 @@ async def test_get_verse_of_day_service_none_image_urls(mock_db_session):
     verse = MagicMock()
     verse.id = uuid4()
     verse.ref_id = "text-none"
+    verse.source = None
     verse.ref_type = "commentary"
     verse.image_urls = None
     verse.group_id = None
@@ -1377,6 +1463,7 @@ async def test_get_verse_of_day_service_empty_verse_metadata(mock_db_session):
     verse = MagicMock()
     verse.id = uuid4()
     verse.ref_id = "text-no-metadata"
+    verse.source = None
     verse.ref_type = "commentary"
     verse.image_urls = None
     verse.group_id = None
@@ -1424,6 +1511,7 @@ def test_build_public_dto_all_languages(sample_verse_model):
     assert "en" in result.verses
     assert "bo" in result.verses
     assert "zh" in result.verses
+    assert result.source == "Dhp 1.5"
 
 
 def test_build_public_dto_single_language(sample_verse_model):
@@ -1432,6 +1520,7 @@ def test_build_public_dto_single_language(sample_verse_model):
     
     assert result.verse == "May all beings be happy and free from suffering."
     assert result.verses is None
+    assert result.source == "Dhp 1.5"
 
 
 def test_build_public_dto_invalid_language(sample_verse_model):

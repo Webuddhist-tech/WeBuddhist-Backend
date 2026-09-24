@@ -34,6 +34,7 @@ from pecha_api.plans.tags.tag_response_models import PublicTagsListResponse
 from pecha_api.plans.plans_enums import PlanStatus, DifficultyLevel, LanguageCode
 from pecha_api.error_contants import ErrorConstants
 from pecha_api.plans.plans_enums import ContentType
+from pecha_api.plans.shared.subtask_reference_resolver import SubTaskReferenceDTO
 
 FIXTURE_GROUP_ID = uuid4()
 FIXTURE_SERIES_ID = uuid4()
@@ -1253,6 +1254,7 @@ async def test_get_plan_day_details_success():
     mock_subtask_1.source_text_id = None
     mock_subtask_1.pecha_segment_id = None
     mock_subtask_1.segment_ids = None
+    mock_subtask_1.reference_id = None
     
     mock_task = MagicMock()
     mock_task.id = uuid4()
@@ -2029,3 +2031,186 @@ def test_is_within_plan_date_range_no_next_plan(mock_plan_for_enrollment):
         result = is_within_plan_date_range(mock_db, mock_plan_for_enrollment)
         
         assert result is True
+
+# ---------------------------------------------------------------------------
+# Subtask references are resolved in the threaded query phase
+#
+# The resolver opens a session and runs SQLAlchemy queries. Reaching for it from
+# build_task_dto() would run that on the event loop and stall the worker, so the
+# day's references are resolved up front, in one batch, while the loader still
+# holds its session.
+# ---------------------------------------------------------------------------
+
+RESOLVER = "pecha_api.plans.shared.subtask_reference_resolver.resolve_subtask_references"
+
+
+def _reference_dto(subtask, title="An event"):
+    return SubTaskReferenceDTO(
+        id=subtask.reference_id, content_type=ContentType.EVENT, title=title
+    )
+
+
+def _reference_subtask(display_order=1, reference_id=None):
+    subtask = MagicMock()
+    subtask.id = uuid4()
+    subtask.content_type = ContentType.EVENT
+    subtask.content = None
+    subtask.duration = None
+    subtask.display_order = display_order
+    subtask.source_text_id = None
+    subtask.pecha_segment_id = None
+    subtask.segment_ids = None
+    subtask.segment_numbers = None
+    subtask.audio_url = None
+    subtask.reference_id = reference_id or uuid4()
+    return subtask
+
+
+def _task_with(subtasks, display_order=1):
+    task = MagicMock()
+    task.id = uuid4()
+    task.title = f"Task {display_order}"
+    task.estimated_time = 10
+    task.display_order = display_order
+    task.sub_tasks = subtasks
+    return task
+
+
+def _day_with(tasks):
+    plan_item = MagicMock()
+    plan_item.id = uuid4()
+    plan_item.day_number = 1
+    plan_item.tasks = tasks
+    plan_item.shareable_images = None
+    plan_item.videos = []
+    return plan_item
+
+
+@pytest.mark.asyncio
+async def test_plan_day_details_resolves_references_while_the_session_is_open():
+    """The resolver is handed the loader's own session, not left to open one of
+    its own on the event loop."""
+    subtask = _reference_subtask()
+    plan_item = _day_with([_task_with([subtask])])
+    reference = _reference_dto(subtask)
+
+    with patch("pecha_api.plans.public.plan_service.SessionLocal") as mock_session_local, \
+         patch("pecha_api.plans.public.plan_service.get_plan_day_with_tasks_and_subtasks",
+               return_value=plan_item), \
+         patch("pecha_api.plans.public.plan_service.get_plan_day_detail_cache", return_value=None), \
+         patch("pecha_api.plans.public.plan_service.set_plan_day_detail_cache"), \
+         patch(RESOLVER, return_value=[reference]) as mock_resolve:
+
+        db_session = _mock_session_local(mock_session_local)
+
+        response = await get_plan_day_details(plan_id=uuid4(), day_number=1)
+
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args.kwargs["db"] is db_session
+    assert mock_resolve.call_args.kwargs["subtasks"] == [subtask]
+    assert response.tasks[0].subtasks[0].reference is reference
+
+
+@pytest.mark.asyncio
+async def test_plan_day_details_batches_references_across_every_task():
+    """One resolver pass for the whole day, not one per task."""
+    first, second, third = (
+        _reference_subtask(display_order=1),
+        _reference_subtask(display_order=2),
+        _reference_subtask(display_order=1),
+    )
+    plan_item = _day_with([
+        _task_with([first, second], display_order=1),
+        _task_with([third], display_order=2),
+    ])
+
+    with patch("pecha_api.plans.public.plan_service.SessionLocal") as mock_session_local, \
+         patch("pecha_api.plans.public.plan_service.get_plan_day_with_tasks_and_subtasks",
+               return_value=plan_item), \
+         patch("pecha_api.plans.public.plan_service.get_plan_day_detail_cache", return_value=None), \
+         patch("pecha_api.plans.public.plan_service.set_plan_day_detail_cache"), \
+         patch(RESOLVER, return_value=[None, None, None]) as mock_resolve:
+
+        _mock_session_local(mock_session_local)
+
+        await get_plan_day_details(plan_id=uuid4(), day_number=1)
+
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args.kwargs["subtasks"] == [first, second, third]
+
+
+@pytest.mark.asyncio
+async def test_daily_content_resolves_references_while_the_session_is_open():
+    plan_id = uuid4()
+    series_id = uuid4()
+    subtask = _reference_subtask()
+    plan_item = _day_with([_task_with([subtask])])
+    mock_plan = _daily_content_series_plan(plan_id, series_id, display_order=1)
+    mock_db = _daily_content_mock_db_session(total_days=1)
+    reference = _reference_dto(subtask)
+
+    with patch("pecha_api.plans.public.plan_service.SessionLocal", return_value=mock_db), \
+         patch("pecha_api.plans.public.plan_service.get_published_plan_by_id", return_value=mock_plan), \
+         patch("pecha_api.plans.public.plan_service.get_published_plans_in_series", return_value=[mock_plan]), \
+         patch("pecha_api.plans.public.plan_service.get_plan_day_with_tasks_and_subtasks",
+               return_value=plan_item), \
+         patch("pecha_api.plans.public.plan_service.get_image_url", new_callable=AsyncMock, return_value=None), \
+         patch("pecha_api.plans.public.plan_service.get_previous_plan_in_series", return_value=None), \
+         patch("pecha_api.plans.public.plan_service.get_next_plan_in_series", return_value=None), \
+         patch(RESOLVER, return_value=[reference]) as mock_resolve:
+
+        result = await get_plan_daily_content(
+            plan_id=plan_id, requested_date=DateType(2026, 5, 1), language="en"
+        )
+
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args.kwargs["db"] is mock_db
+    assert result.tasks[0].subtasks[0].reference is reference
+
+
+@pytest.mark.asyncio
+async def test_build_task_dto_without_a_map_still_keeps_the_resolver_off_the_loop():
+    """Any caller that has no prebuilt map gets the lookups in a worker thread."""
+    from pecha_api.plans.public import plan_service
+
+    subtask = _reference_subtask()
+    task = _task_with([subtask])
+    reference = _reference_dto(subtask)
+
+    with patch.object(plan_service, "run_in_threadpool",
+                      new_callable=AsyncMock) as mock_threadpool, \
+         patch(RESOLVER, return_value=[reference]):
+        mock_threadpool.return_value = {subtask.id: reference}
+
+        result = await plan_service.build_task_dto(task, language="en")
+
+    mock_threadpool.assert_awaited_once()
+    assert mock_threadpool.await_args.args[0] is plan_service.resolve_day_references
+    assert result.subtasks[0].reference is reference
+
+
+def test_resolve_day_references_skips_the_query_when_there_is_nothing_to_resolve():
+    from pecha_api.plans.public.plan_service import resolve_day_references
+
+    with patch(RESOLVER) as mock_resolve:
+        assert resolve_day_references(MagicMock(), [], language="en") == {}
+        assert resolve_day_references(MagicMock(), [_task_with([])], language="en") == {}
+
+    mock_resolve.assert_not_called()
+
+
+def test_resolve_day_references_leaves_out_what_did_not_resolve():
+    """A non-reference subtask, or one whose target is gone, is simply absent -
+    both read back as None rather than shifting other subtasks' references."""
+    from pecha_api.plans.public.plan_service import resolve_day_references
+
+    resolved, missing = _reference_subtask(1), _reference_subtask(2)
+    reference = _reference_dto(resolved)
+
+    with patch(RESOLVER, return_value=[reference, None]):
+        references = resolve_day_references(
+            MagicMock(), [_task_with([resolved, missing])], language="en"
+        )
+
+    assert references == {resolved.id: reference}
+    assert references.get(missing.id) is None

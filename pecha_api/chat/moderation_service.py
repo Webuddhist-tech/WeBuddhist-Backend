@@ -19,7 +19,46 @@ from pecha_api.users.users_models import Users
 
 logger = logging.getLogger(__name__)
 
-profanity.load_censor_words()
+# `better_profanity`'s bundled wordlist is monolingual English and flags a
+# number of words that are ordinary vocabulary for this community. Left in, it
+# rejects the message *and* files an automatic report against the sender, so a
+# member discussing the precepts is recorded as a content violator.
+#
+# Each group below is a false positive in this app's context, not a relaxation
+# of the standard: genuine profanity is untouched.
+
+# Buddhist doctrine and practice. "kill" is the first precept, "sex" the third,
+# "god" and "hell" are unavoidable in doctrine and cosmology, "lust" is a
+# klesha, "oral" appears in oral transmission, and "womb" in Tathagatagarbha.
+# Inflected forms are separate entries in the wordlist, so each one that
+# carries the innocent sense is listed too ("sexual misconduct", "transmitted
+# orally", "lusting after"). The "goddamn" family stays blocked.
+_DHARMA_TERMS = (
+    "god", "hell", "kill", "womb",
+    "lust", "lusting",
+    "sex", "sexual",
+    "oral", "orally",
+)
+
+# Fifth-precept discussion, and ordinary household words in their own right
+# ("pot" far more often means a cooking pot).
+_INTOXICANT_TERMS = ("weed", "hemp", "pot")
+
+# Ordinary names and words in users' own languages. "wang" is Tibetan dbang
+# (empowerment) and the surname 王; "dong" is a Vietnamese/Chinese name and the
+# currency; "fook" is a romanization of 福, fortune.
+_LOANWORDS_AND_NAMES = ("wang", "dong", "fook")
+
+# Neutral self-description. Blocking this auto-reports members for saying who
+# they are. Slurs are deliberately not included here.
+# "gaylord" and "gaysex" stay blocked.
+_IDENTITY_TERMS = ("gay", "gays")
+
+ALLOWED_TERMS = (
+    _DHARMA_TERMS + _INTOXICANT_TERMS + _LOANWORDS_AND_NAMES + _IDENTITY_TERMS
+)
+
+profanity.load_censor_words(whitelist_words=list(ALLOWED_TERMS))
 
 INAPPROPRIATE_LANGUAGE = "INAPPROPRIATE_LANGUAGE"
 INAPPROPRIATE_LANGUAGE_MESSAGE = (

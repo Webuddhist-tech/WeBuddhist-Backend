@@ -4,6 +4,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 from starlette import status
 
+from pecha_api.plans.language_constants import language_query_description
 from .group_accumulator_service import (
     get_group_accumulator_service,
     get_group_accumulators_service,
@@ -42,6 +43,10 @@ async def get_group_accumulators(
         Optional[HTTPAuthorizationCredentials],
         Depends(optional_oauth2_scheme),
     ] = None,
+    language: Annotated[
+        Optional[str],
+        Query(description=language_query_description("Language code for the About description")),
+    ] = None,
     x_timezone: Annotated[
         Optional[str],
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted group accumulators are hidden for Chinese timezones."),
@@ -54,6 +59,7 @@ async def get_group_accumulators(
         limit=limit,
         token=token,
         timezone_name=x_timezone,
+        language=language,
     )
 
 
@@ -63,6 +69,10 @@ async def get_group_accumulator(
     credentials: Annotated[
         Optional[HTTPAuthorizationCredentials],
         Depends(optional_oauth2_scheme),
+    ] = None,
+    language: Annotated[
+        Optional[str],
+        Query(description=language_query_description("Language code for the About description")),
     ] = None,
     x_timezone: Annotated[
         Optional[str],
@@ -75,6 +85,7 @@ async def get_group_accumulator(
         group_accumulator_id=group_accumulator_id,
         timezone_name=x_timezone,
         token=token,
+        language=language,
     )
 
 

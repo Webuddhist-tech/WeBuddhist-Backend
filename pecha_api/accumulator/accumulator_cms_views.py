@@ -15,8 +15,8 @@ from .accumulator_cms_service import (
 from .accumulator_response_models import (
     CreatePresetAccumulatorRequest,
     UpdatePresetAccumulatorRequest,
-    PublicAccumulatorDTO,
-    PublicAccumulatorsResponse,
+    CMSPublicAccumulatorDTO,
+    CMSPublicAccumulatorsResponse,
 )
 
 accumulator_cms_router = APIRouter(
@@ -28,7 +28,7 @@ oauth2_scheme = HTTPBearer()
 
 @accumulator_cms_router.get(
     "",
-    response_model=PublicAccumulatorsResponse,
+    response_model=CMSPublicAccumulatorsResponse,
     summary="List preset accumulators (CMS)",
 )
 async def list_preset_accumulators(
@@ -55,7 +55,7 @@ async def list_preset_accumulators(
 
 @accumulator_cms_router.get(
     "/{preset_id}",
-    response_model=PublicAccumulatorDTO,
+    response_model=CMSPublicAccumulatorDTO,
     summary="Get a preset accumulator (CMS)",
 )
 async def get_preset_accumulator(
@@ -76,7 +76,7 @@ async def get_preset_accumulator(
 @accumulator_cms_router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    response_model=PublicAccumulatorDTO,
+    response_model=CMSPublicAccumulatorDTO,
     summary="Create a preset accumulator (CMS)",
 )
 async def create_preset_accumulator(
@@ -91,7 +91,7 @@ async def create_preset_accumulator(
 
 @accumulator_cms_router.put(
     "/{preset_id}",
-    response_model=PublicAccumulatorDTO,
+    response_model=CMSPublicAccumulatorDTO,
     summary="Update a preset accumulator (CMS)",
 )
 async def update_preset_accumulator(

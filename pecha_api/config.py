@@ -36,13 +36,8 @@ DEFAULTS = dict(
     MAX_FILE_SIZE_MB=1,
     MAX_FILE_SIZE = 5 * 1024 * 1024,
     MAX_AUDIO_FILE_SIZE = 50 * 1024 * 1024,
-    MAX_OTR_FILE_SIZE = 5 * 1024 * 1024,
     ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'},
     ALLOWED_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'},
-    AUDIO_MP3_BITRATE="128k",
-    FFMPEG_BINARY="ffmpeg",
-    FFPROBE_BINARY="ffprobe",
-    ALLOWED_OTR_EXTENSIONS = {'.otr', '.json'},
     MONGO_CONNECTION_STRING="",
 
     WEBUDDHIST_STUDIO_BASE_URL="https://studio.webuddhist.com",
@@ -128,6 +123,8 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
+    # Prayers for the same request inside this window raise one push, not one each
+    PRAYER_NOTIFICATION_COALESCE_SECONDS=900,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",
@@ -135,7 +132,15 @@ DEFAULTS = dict(
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
 
-    # Internal routine notification dispatch (worker -> backend)
+    # Shared secret for machines emitting live recitation positions over HTTP
+    # (controller/pedal/OBS -> backend). Empty disables those endpoints.
+    RECITATION_EMIT_SECRET_TOKEN="",
+
+    # Internal routine notification dispatch (worker -> backend). Empty on
+    # purpose: this is the whole credential for the /internal/* routes, which
+    # are mounted on the public API and both expose recipient data and mutate
+    # dispatch state. A value here would be a published password for any
+    # deployment that forgot to set the env var, so it fails closed instead.
     NOTIFICATION_DISPATCH_SECRET_TOKEN="",
     NOTIFICATION_DEFAULT_TITLE="WebBuddhist",
     NOTIFICATION_DEFAULT_BODY="Time for your daily practice.",
@@ -143,6 +148,9 @@ DEFAULTS = dict(
     # Verse of the day retention (days); scheduler deletes older rows daily
     VERSE_OF_DAY_EXPIRY_DAYS=7,
     VERSE_OF_DAY_NOTIFICATION_TITLE="Verse of the Day",
+
+    # Soft-deleted timer retention (days) before the purge job hard-deletes them
+    TIMER_DELETED_RETENTION_DAYS=30,
 
     # Group post notification SQS queue (backend producer -> worker consumer)
     GROUP_POST_NOTIFICATION_SQS_QUEUE_URL="",
@@ -163,6 +171,26 @@ DEFAULTS = dict(
     EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE=50,
+    # Per-day reminders for multi-day events, and reminders for recurring
+    # events at all. Separate flags so the recurring blast radius - an
+    # indefinite series, with no per-occurrence way to decline - can be
+    # turned on well after the one-time case has settled.
+    EVENT_REMINDER_DAILY_ENABLED="false",
+    EVENT_REMINDER_RECURRING_ENABLED="false",
+    # How far ahead a recurring series' reminders are materialized. Rows are
+    # topped up on this schedule, so losing more than HORIZON_DAYS of
+    # materializer runs is what starts dropping reminders.
+    EVENT_REMINDER_HORIZON_DAYS=14,
+    EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS=3600,
+    EVENT_REMINDER_MATERIALIZE_BATCH_SIZE=200,
+    # A recurring series never ends, so its rows need sweeping.
+    EVENT_REMINDER_RETENTION_DAYS=30,
+    EVENT_REMINDER_PURGE_INTERVAL_SECONDS=86400,
+    # Sanity bound on how long one event may run. Set high enough that a
+    # real retreat never hits it, so what it actually catches is a
+    # mistyped end_date - which would otherwise materialize reminders for
+    # every day between here and the typo.
+    EVENT_MAX_SPAN_DAYS=366,
     DEFAULT_EVENT_TIMEZONE="Asia/Kolkata",
 
     # Sentry error tracking (disabled unless SENTRY_DSN is set)

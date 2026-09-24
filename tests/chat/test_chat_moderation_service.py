@@ -11,6 +11,7 @@ import pecha_api.app  # noqa: F401
 
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageReportSource
 from pecha_api.chat.moderation_service import (
+    ALLOWED_TERMS,
     INAPPROPRIATE_LANGUAGE,
     INAPPROPRIATE_LANGUAGE_MESSAGE,
     contains_inappropriate_language,
@@ -296,18 +297,18 @@ class TestProfanityWebSocket:
         mock_require_member.return_value = MockMember(room_id=room.id, user_id=user.id)
         mock_get_auto_report.return_value = None
 
-        class FakePubSub:
-            async def listen(self):
-                if False:
-                    yield  # makes this an async generator
-                while True:
-                    await asyncio.sleep(3600)
+        class FakeSubscriber:
+            """A live channel with nothing published on it: get() waits.
 
-            async def unsubscribe(self, channel):
-                return None
+            Returning instead would mean the channel stopped, which closes the
+            socket, and this case needs it open long enough to be answered."""
+
+            async def get(self):
+                await asyncio.Event().wait()
 
         broadcaster = MagicMock()
-        broadcaster.subscribe_to_room = AsyncMock(return_value=FakePubSub())
+        broadcaster.subscribe_to_room = AsyncMock(return_value=FakeSubscriber())
+        broadcaster.unsubscribe_from_room = AsyncMock()
         broadcaster.add_connection = AsyncMock()
         broadcaster.remove_connection = AsyncMock()
         broadcaster.broadcast_presence = AsyncMock()
@@ -332,3 +333,58 @@ class TestProfanityWebSocket:
 
         broadcaster.broadcast_message.assert_not_called()
         mock_create_report.assert_called_once()
+
+
+# --- Allowlisted community vocabulary -------------------------------------
+# The bundled English wordlist flags terms that are ordinary vocabulary here.
+# These assert the allowlist is applied and that profanity still gets caught.
+
+@pytest.mark.parametrize("term", list(ALLOWED_TERMS))
+def test_allowlisted_term_is_not_profanity(term: str) -> None:
+    assert contains_inappropriate_language(term) is False
+
+
+@pytest.mark.parametrize("message", [
+    "Do Buddhists believe in god?",
+    "the hell realms are described in the Abhidharma",
+    "the first precept is not to kill",
+    "lust is one of the three poisons",
+    "I received the oral transmission and the wang from Rinpoche",
+    "Tathagatagarbha means the womb of the Buddha",
+    "the third precept concerns sexual misconduct",
+    "the fifth precept covers alcohol and weed",
+    "Lama Wang Chuk will teach tonight",
+    "I am gay and new to this sangha",
+    "please put the pot on the shrine",
+])
+def test_community_vocabulary_is_allowed(message: str) -> None:
+    assert contains_inappropriate_language(message) is False
+
+
+@pytest.mark.parametrize("message", [
+    PROFANE_MESSAGE,
+    "fuck this",
+    "you are an asshole",
+    "what a bitch",
+    # Compounds built on an allowlisted root: allowlisting "god", "gay" must
+    # not carry the compounds out of the wordset with them.
+    "goddamn",
+    "gaylord",
+    "gaysex",
+])
+def test_genuine_profanity_is_still_blocked(message: str) -> None:
+    assert contains_inappropriate_language(message) is True
+
+
+def test_allowlist_is_actually_applied_to_the_wordset() -> None:
+    """Guard against a library upgrade silently dropping `whitelist_words`.
+
+    If the kwarg is renamed or ignored, the terms fall back into the active
+    wordset and every message above starts being rejected again.
+    """
+    from better_profanity import profanity
+
+    active = {str(word) for word in profanity.CENSOR_WORDSET}
+    for term in ALLOWED_TERMS:
+        assert term not in active, f"{term!r} is still censored; allowlist not applied"
+    assert "fuck" in active, "wordlist did not load at all"

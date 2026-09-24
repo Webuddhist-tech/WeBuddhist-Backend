@@ -6,15 +6,19 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.config import get, get_int
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
-from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id
+from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id, \
+    find_author_by_user_id
 from pecha_api.auth.auth_repository import validate_token
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details, validate_cms_author_details
 from pecha_api.plans.shared.permissions import (
     _STATUS_CHANGE_ROLES,
+    can_create_group_content,
     get_member_role,
     is_reviewer,
     is_super_admin,
@@ -39,6 +43,7 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_models import (
     AuthorGroup,
+    AuthorGroupBan,
     AuthorGroupInvite,
     AuthorGroupJoinRequest,
     AuthorGroupMember,
@@ -56,10 +61,17 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
     get_joined_group_accumulator_ids_by_user,
     remove_group_accumulator_joins_for_group,
 )
+from pecha_api.chat.repository import get_room_by_group_id
+from pecha_api.chat.service import leave_group_chat_room
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.group_ban_guard import (
+    assert_user_not_banned_from_group,
+    get_group_ban_expiry,
+)
 from pecha_api.plans.groups.groups_repository import (
     add_group_member,
     create_group,
+    create_group_ban,
     create_group_invite,
     create_group_join_request,
     get_followers_count_map,
@@ -69,14 +81,17 @@ from pecha_api.plans.groups.groups_repository import (
     is_user_following_group,
     is_group_published,
     is_user_joined_group,
+    lock_group_membership_changes,
     lock_group_status,
     lock_group_visibility,
+    get_group_ban_by_id,
     get_group_by_id,
     get_group_by_slug,
     get_groups_by_ids,
     get_group_member,
     get_groups_paginated,
     get_member_roles_map,
+    get_group_member_roles_by_user_ids,
     get_invite_by_id,
     get_join_request_by_id,
     get_join_request_status_map,
@@ -91,8 +106,11 @@ from pecha_api.plans.groups.groups_repository import (
     has_pending_invite,
     has_pending_join_request,
     leave_group_membership,
+    lift_group_ban,
     list_invites_by_group,
+    list_group_bans_paginated,
     list_group_joiners_paginated,
+    list_group_joiners_with_join_date_paginated,
     list_group_member_ids_by_roles,
     list_join_requests_by_group,
     list_pending_invites_by_email,
@@ -144,9 +162,13 @@ from pecha_api.plans.groups.groups_response_models import (
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupBanDTO,
+    GroupBanListResponse,
     GroupInviteCreatedResponse,
     GroupInviteDTO,
     GroupInviteListResponse,
+    GroupJoinedUserDTO,
+    GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
     GroupJoinRequestUserDTO,
@@ -167,6 +189,7 @@ from pecha_api.plans.groups.groups_response_models import (
     UserFollowedAuthorGroupListResponse,
     UserJoinedAuthorGroupDTO,
     UserJoinedAuthorGroupListResponse,
+    RemoveGroupUserRequest,
     ReplaceGroupPlansRequest,
     ReplaceGroupSeriesRequest,
     ReplaceGroupSocialLinksRequest,
@@ -206,6 +229,12 @@ OWNER_ROLE_NOT_ASSIGNABLE = (
 GROUP_ALREADY_HAS_OWNER = "This group already has an owner"
 JOIN_REQUEST_NOT_FOUND = "Join request not found"
 GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
+GROUP_BAN_NOT_FOUND = "Ban not found"
+USER_NOT_JOINED_GROUP = "This user has not joined the group"
+GROUP_MEMBER_DEFAULT_ROLE = "MEMBER"
+USER_BANNED_FROM_GROUP = (
+    "This user is banned from the group; lift the ban before admitting them"
+)
 NOTIFICATION_CATEGORY_GROUP_INVITE = "group_invite"
 NOTIFICATION_CATEGORY_GROUP_JOIN_REQUEST = "group_join_request"
 _PRACTICES_FETCH_LIMIT = 1000
@@ -702,6 +731,7 @@ def _group_to_detail(
     user_id: Optional[UUID] = None,
     teaser: bool = False,
     my_join_request_status: Optional[str] = None,
+    chat_room_id: Optional[UUID] = None,
 ) -> AuthorGroupDetailDTO:
     if teaser:
         db = None
@@ -746,6 +776,9 @@ def _group_to_detail(
             if public and my_join_request_status
             else {}
         ),
+        # Only the public DTO carries it: the CMS view is an author's, not a
+        # chat participant's.
+        **({"chat_room_id": chat_room_id} if public else {}),
     )
 
 
@@ -909,6 +942,28 @@ def delete_author_group(token: str, group_id: UUID) -> None:
         update_group(db=db, group=group)
 
 
+def _chat_room_id_for_viewer(
+    db: Session, group_id: UUID, user_id: Optional[UUID]
+) -> Optional[UUID]:
+    """The group's chat room id, for a caller who can actually open it.
+
+    Joiners and followers both get one, because both may chat (the same gate
+    the chat routes apply). Read-only on purpose: the room is created on first
+    use by the chat routes, so opening a group page never creates one, nor
+    makes the viewer its creator. None means there is nothing for this caller
+    to open yet - they are anonymous, outside the group, or nobody has started
+    the chat."""
+    if user_id is None:
+        return None
+    eligible = is_user_joined_group(
+        db=db, group_id=group_id, user_id=user_id
+    ) or is_user_following_group(db=db, group_id=group_id, user_id=user_id)
+    if not eligible:
+        return None
+    room = get_room_by_group_id(db=db, group_id=group_id)
+    return room.id if room is not None else None
+
+
 def get_author_group_detail(
     group_id: UUID,
     language: Optional[str] = None,
@@ -947,6 +1002,9 @@ def get_author_group_detail(
             user_id=user_id,
             teaser=teaser,
             my_join_request_status=join_request_status,
+            chat_room_id=_chat_room_id_for_viewer(
+                db=db, group_id=group_id, user_id=user_id
+            ),
         )
 
 
@@ -1069,7 +1127,7 @@ def _group_card_title(group: AuthorGroup, language: Optional[str] = None) -> Opt
 
 
 def get_group_practices_feed(
-    token: str,
+    token: Optional[str] = None,
     group_id: Optional[UUID] = None,
     should_include_unfollowed: bool = False,
     skip: int = 0,
@@ -1080,13 +1138,15 @@ def get_group_practices_feed(
     """Merged feed of practices (series, group accumulators, plans that are
     not part of a series, and recitation collections) across the user's
     joined public groups; with should_include_unfollowed=True, across all
-    public groups."""
-    current_user = validate_and_extract_user_details(token=token)
+    public groups. Guests (no token) always see published public groups."""
+    current_user = None
+    if token:
+        current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
         scope_group_ids, joined_group_id_set = resolve_public_group_scope(
             db=db,
-            user_id=current_user.id,
+            user_id=current_user.id if current_user else None,
             should_include_unfollowed=should_include_unfollowed,
         )
         if group_id is not None:
@@ -1170,7 +1230,7 @@ def get_group_practices_feed(
                 group_id=owning_group_id,
                 language=language,
                 published_only=True,
-                user_id=current_user.id,
+                user_id=current_user.id if current_user else None,
             )
             series_pairs.extend(zip(group_series, dtos))
 
@@ -1182,13 +1242,15 @@ def get_group_practices_feed(
         }
 
         accumulator_ids = [accumulator.id for accumulator in accumulators]
-        joined_accumulator_ids = set(
-            get_joined_group_accumulator_ids_by_user(
-                db=db,
-                user_id=current_user.id,
-                group_accumulator_ids=accumulator_ids,
+        joined_accumulator_ids = set()
+        if current_user:
+            joined_accumulator_ids = set(
+                get_joined_group_accumulator_ids_by_user(
+                    db=db,
+                    user_id=current_user.id,
+                    group_accumulator_ids=accumulator_ids,
+                )
             )
-        )
         accumulator_member_counts = get_group_accumulator_joiners_counts(
             db=db, group_accumulator_ids=accumulator_ids
         )
@@ -1281,11 +1343,35 @@ def get_group_practices_feed(
     )
 
 
-def list_group_members(
+async def list_group_members(
     group_id: UUID,
     skip: int,
     limit: int,
+    token: Optional[str] = None,
 ) -> AuthorGroupMembersListResponse:
+    # Token validation and the member/role queries are synchronous SQLAlchemy,
+    # so they run in one worker thread rather than on the event loop.
+    return await run_in_threadpool(
+        _list_group_members_sync,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        token=token,
+    )
+
+
+def _list_group_members_sync(
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    token: Optional[str] = None,
+) -> AuthorGroupMembersListResponse:
+    viewer_id = None
+    if token:
+        try:
+            viewer_id = validate_and_extract_user_details(token=token).id
+        except Exception:
+            pass
     with SessionLocal() as db:
         group = get_group_by_id(db=db, group_id=group_id)
         # Intended behaviour, not an oversight: this endpoint is unauthenticated
@@ -1304,10 +1390,33 @@ def list_group_members(
             skip=skip,
             limit=limit,
         )
+        # Staff roles follow the same rule as the group detail teaser: a private
+        # group's staff are only revealed to callers who have joined it.
+        roles_visible = group.is_public or (
+            viewer_id is not None
+            and is_user_joined_group(db=db, group_id=group_id, user_id=viewer_id)
+        )
+        # Joiners linked to a staff Author (Author.user_id) carry their staff
+        # role; everyone else is a plain MEMBER.
+        roles_by_user_id = (
+            get_group_member_roles_by_user_ids(
+                db=db,
+                group_id=group_id,
+                user_ids=[user.id for user in users],
+            )
+            if roles_visible
+            else {}
+        )
         return AuthorGroupMembersListResponse(
             total_members=total,
             list=[
                 AuthorGroupMemberProfileDTO(
+                    user_id=user.id,
+                    role=(
+                        roles_by_user_id.get(user.id, GROUP_MEMBER_DEFAULT_ROLE)
+                        if roles_visible
+                        else None
+                    ),
                     username=user.username,
                     fullname=_user_fullname(user),
                     avatar_url=_user_avatar_url(user),
@@ -1517,6 +1626,10 @@ def unfollow_group(token: str, group_id: UUID) -> None:
     user = validate_and_extract_user_details(token=token)
     with SessionLocal() as db:
         remove_group_follow(db=db, group_id=group_id, user_id=user.id)
+        # Mirrors leave_group: only drop chat room membership if the user
+        # isn't still eligible via an active join.
+        if not is_user_joined_group(db=db, group_id=group_id, user_id=user.id):
+            leave_group_chat_room(db=db, group_id=group_id, user_id=user.id)
 
 
 def get_followed_group(
@@ -1579,6 +1692,11 @@ def join_group(token: str, group_id: UUID) -> None:
         if not group or not is_group_published(group):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
         _assert_group_allows_engagement(group=group, action="join")
+        # Locked before the ban is read: a removal that is mid-flight holds this
+        # lock until its ban has committed, so the check below cannot miss it
+        # and re-create the membership it just deleted.
+        lock_group_membership_changes(db=db, group_id=group_id)
+        assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user.id)
         if not group.is_public:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1596,6 +1714,11 @@ def leave_group(token: str, group_id: UUID) -> None:
             group_id=group_id,
         )
         leave_group_membership(db=db, user_id=user.id, group_id=group_id)
+        # Chat access is granted to joiners AND followers (see
+        # _is_eligible_for_group_chat), so only drop the chat room membership
+        # if leaving the group didn't leave the user still eligible via follow.
+        if not is_user_following_group(db=db, group_id=group_id, user_id=user.id):
+            leave_group_chat_room(db=db, group_id=group_id, user_id=user.id)
 
 
 def get_joined_group(
@@ -1664,12 +1787,23 @@ def _join_request_to_dto(join_request: AuthorGroupJoinRequest) -> GroupJoinReque
     )
 
 
+def _requester_email(user: Optional[Users]) -> Optional[str]:
+    if user is None:
+        return None
+    email = getattr(user, "email", None)
+    if not email:
+        return None
+    stripped = email.strip()
+    return stripped or None
+
+
 def _join_request_to_user_dto(join_request: AuthorGroupJoinRequest) -> GroupJoinRequestUserDTO:
     user = join_request.user
     return GroupJoinRequestUserDTO(
         id=join_request.id,
         user_id=join_request.user_id,
         user_name=_user_fullname(user) if user else "",
+        email=_requester_email(user),
         user_avatar_url=_user_avatar_url(user) if user else None,
         message=join_request.message,
         status=_to_join_request_status(join_request.status),
@@ -1747,9 +1881,12 @@ def submit_group_join_request(
         _assert_group_allows_engagement(group=group, action="join")
         # Lock the group so a concurrent publish cannot flip it public after we
         # read it, which would strand this request as PENDING on a public group.
+        # It is the same lock membership writes take, so reading the ban after
+        # it also orders this against a moderator removal still committing.
         is_public = lock_group_visibility(db=db, group_id=group_id)
         if is_public is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user.id)
         if is_public:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1837,10 +1974,24 @@ def approve_group_join_request(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
         _assert_can_manage_join_requests(db, group_id=group_id, author=author)
 
+        # Taken before the join request row lock, matching the order the publish
+        # sweep uses (group first, then its requests), so the two cannot
+        # deadlock. It also orders this against a moderator removal, so the ban
+        # read below cannot miss one that is still committing.
+        lock_group_membership_changes(db=db, group_id=group_id)
         join_request = _get_join_request_for_group_or_404(
             db, group_id=group_id, request_id=request_id, for_update=True
         )
         _assert_join_request_pending(join_request)
+        # A request can outlive the applicant's membership: a series enrolment
+        # can join them to a partner group while their request is still pending,
+        # and they can then be removed and banned. Approving would put a banned
+        # user back in, so the ban has to be lifted first.
+        if get_group_ban_expiry(db=db, group_id=group_id, user_id=join_request.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=USER_BANNED_FROM_GROUP,
+            )
 
         # One transaction: the row lock taken above must hold until both the
         # membership and the APPROVED status are committed together.
@@ -1913,6 +2064,11 @@ def _approve_pending_join_requests_on_publish(db, *, group_id: UUID) -> None:
         db=db, group_id=group_id, for_update=True
     )
     for join_request in pending:
+        # Same reasoning as moderator approval: a banned applicant is left
+        # PENDING rather than admitted, for a moderator to decide once the ban
+        # has lifted.
+        if get_group_ban_expiry(db=db, group_id=group_id, user_id=join_request.user_id):
+            continue
         # commit=False keeps the row locks held until every membership and
         # status change lands in the same transaction, as moderator approval does.
         upsert_group_join(
@@ -2537,55 +2693,90 @@ def get_group_member_accumulations(
         )
 
 
-def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
-    """Check CMS management permission for a group.
+def _parse_subject_uuid(subject) -> Optional[UUID]:
+    try:
+        return UUID(str(subject)) if subject is not None else None
+    except (TypeError, ValueError):
+        return None
 
-    Resolution strategy (fixes cross-domain subject confusion):
-    1. User and Author accounts are independent tables whose ids can
-       coincide, and their tokens carry no distinguishing claim. Whether a
-       live User competes for a given id is decided by an exact-id lookup
-       (get_user_by_id on the subject UUID) - never through validate_and_
-       extract_user_details's own broader resolution rules, which also
-       fall back to matching a phone/email claim for non-UUID subjects
-       (Auth0-issued tokens). Collision detection here is id-only by
-       construction, so it can never be satisfied "through" a claim - a
-       stale or coincidentally-matching contact claim carries no weight in
-       deciding whether a competing User exists at all.
-    2. An id match against Author records is trusted outright whenever
-       that exact-id lookup finds no live User - a contact claim that no
-       longer matches the Author's current record is not treated as
-       evidence of a different account in that case, since there is no
-       other live account for the token to actually belong to; it just
-       means the Author's profile changed after their token was minted
-       (e.g. linking/changing a phone number does not force a new token to
-       be issued, so a routine profile update must never turn into a false
-       "unauthorized" for the same, rightful Author).
-    3. Only when a live User *also* resolves to that exact same id (a
-       genuine, currently-exploitable collision) do we require positive
-       evidence before trusting the Author match: the token's own contact
-       claims - "email" and "phone_number", each populated from the real
-       account at mint time - must positively match the Author's own email
-       or phone. Without that, the match is rejected and resolution falls
-       back to the User, so a live colliding User's token can never be
-       evaluated with an unrelated Author's group or super-admin
-       permissions.
-    4. Only when the subject does not resolve to a confirmed Author do we
-       fall back to the User domain - reusing the exact-id User match when
-       there is one, or validate_and_extract_user_details's broader rules
-       otherwise (e.g. a non-UUID Auth0 subject).
-    5. has_permission mirrors the OWNER/ADMIN "manage group" role set used
-       elsewhere in this module (see _GROUP_SETTINGS_ROLES), with the same
-       super-admin bypass those checks use - reviewer platform role is not
-       a blocker here since none of the actual group-settings/member-
-       management guards this endpoint represents check it (only content
-       operations do). has_permission is a coarse "can manage this group"
-       summary, not per-operation: several sub-actions (assigning/revoking
-       ADMIN, removing an OWNER/ADMIN member, transferring ownership) are
-       gated to the literal OWNER role only, with no ADMIN or super-admin
-       bypass. Callers needing that precise distinction should check
-       role == OWNER themselves - exactly how the Studio frontend derives
-       its own owner-only affordances (e.g. canTransferOwnership) from the
-       member's role rather than from a single coarse permission flag.
+
+def _live_user_at_id(db: Session, subject_uuid: UUID) -> Optional[Users]:
+    try:
+        return get_user_by_id(db=db, user_id=subject_uuid)
+    except HTTPException:
+        return None
+
+
+def _website_user_from_token(token: str) -> Optional[Users]:
+    try:
+        return validate_and_extract_user_details(token=token)
+    except HTTPException:
+        return None
+
+
+def _resolve_permission_caller(db: Session, subject_uuid: Optional[UUID], token: str):
+    """Resolve (author, user) from a stable token subject.
+
+    Trust an Author id only when no live User occupies that id - a
+    colliding User token must not inherit that Author's group membership
+    just because the ids happen to match. A website User is instead
+    matched to an Author through the persisted, explicitly-established
+    Author.user_id link (see plan_authors_repository.link_author_to_user);
+    contact claims (email/phone) are never used to disambiguate.
+    """
+    candidate_author = None
+    live_user = None
+    if subject_uuid is not None:
+        candidate_author = find_author_by_id(db=db, author_id=subject_uuid)
+        live_user = _live_user_at_id(db, subject_uuid)
+
+    if candidate_author is not None and live_user is None:
+        return candidate_author, None
+    if live_user is not None:
+        return find_author_by_user_id(db=db, user_id=live_user.id), live_user
+
+    user = _website_user_from_token(token)
+    if user is not None:
+        return find_author_by_user_id(db=db, user_id=user.id), user
+    return None, None
+
+
+def _no_cms_access_dto(group_id: UUID, author_id: Optional[UUID] = None) -> GroupPermissionDTO:
+    return GroupPermissionDTO(
+        group_id=group_id,
+        has_permission=False,
+        can_create_content=False,
+        role=None,
+        is_super_admin=False,
+        author_id=author_id,
+    )
+
+
+def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
+    """Check whether the authenticated caller has CMS management access.
+
+    Authentication is ID-bound. A matching email or phone on the token is
+    not treated as proof that the subject is that Author.
+
+    1. Validate the token, then resolve the caller from its stable ``sub``.
+    2. A UUID subject that matches an Author and no live User is a CMS
+       Author token. Check AuthorGroupMember for that Author id.
+    3. A UUID subject that matches a User - including when an Author row
+       happens to share the same id - is a website login. It resolves to
+       an Author only via the persisted Author.user_id link, never by
+       inferring one from the token's own email or phone claims.
+    4. A non-UUID subject (Auth0) is resolved as a website User when
+       possible, then the same Author.user_id link is checked; it never
+       becomes an Author through contact claims.
+    5. has_permission is the OWNER/ADMIN manage-group set used elsewhere
+       in this module (see _GROUP_SETTINGS_ROLES), with the same
+       super-admin bypass. It is a coarse flag, not per-operation: some
+       actions remain OWNER-only. Callers that need that distinction
+       should check role == OWNER.
+    6. can_create_content mirrors require_can_create_content's role set
+       (OWNER/ADMIN/AUTHOR) - it's what actually gates posts, events,
+       plans, etc. An AUTHOR gets has_permission=False (they can't manage
+       the group) but can_create_content=True (they can author content).
     """
     try:
         payload = validate_token(token)
@@ -2595,73 +2786,8 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
             detail="Invalid or expired token",
         )
 
-    subject = payload.get("sub")
-    try:
-        subject_uuid = UUID(str(subject)) if subject is not None else None
-    except (TypeError, ValueError):
-        subject_uuid = None
-
-    def _claim(name: str):
-        value = payload.get(name)
-        return value if isinstance(value, str) and value else None
-
-    token_email = _claim("email")
-    token_phone = _claim("phone_number")
-
-    def _claim_confirms(token_value, record_value):
-        """True/False when the claim is a definitive match/mismatch against
-        the record, or None when there is no evidence either way."""
-        if token_value is None or not record_value:
-            return None
-        return token_value == record_value
-
     with SessionLocal() as db:
-        candidate_author = None
-        if subject_uuid is not None:
-            candidate_author = find_author_by_id(db=db, author_id=subject_uuid)
-
-        # Exact-id collision check, independent of validate_and_extract_
-        # user_details's own resolution rules (which fall back to phone/
-        # email for non-UUID subjects such as Auth0-issued tokens). We only
-        # want to know one thing here: is there a live Users row at this
-        # precise id - never a claim-based match - so this check can never
-        # be satisfied "through" a stale or coincidental contact claim.
-        live_user_at_id = None
-        if subject_uuid is not None:
-            try:
-                live_user_at_id = get_user_by_id(db=db, user_id=subject_uuid)
-            except HTTPException:
-                live_user_at_id = None
-
-        author = None
-        if candidate_author is not None:
-            if live_user_at_id is None:
-                # No live competing User for this id - trust the id match
-                # unconditionally. A contact claim that no longer matches
-                # the Author's current record is not evidence of a
-                # different account here, since there is no other live
-                # account for the token to actually belong to - it just
-                # means the Author's profile changed after their token was
-                # minted (linking/changing a phone number, for instance,
-                # does not force a new token to be issued).
-                author = candidate_author
-            else:
-                # A live User also resolves to this id: only trust the
-                # Author when a contact claim positively identifies it.
-                email_match = _claim_confirms(token_email, getattr(candidate_author, "email", None))
-                phone_match = _claim_confirms(token_phone, getattr(candidate_author, "phone_number", None))
-                if email_match or phone_match:
-                    author = candidate_author
-
-        user = None
-        if author is None:
-            if live_user_at_id is not None:
-                user = live_user_at_id
-            else:
-                try:
-                    user = validate_and_extract_user_details(token=token)
-                except HTTPException:
-                    user = None
+        author, user = _resolve_permission_caller(db, _parse_subject_uuid(payload.get("sub")), token)
 
         if author is None and user is None:
             # Resolve identity before touching the group so a token whose
@@ -2677,30 +2803,195 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
 
         if author is None:
-            return GroupPermissionDTO(
-                group_id=group_id,
-                has_permission=False,
-                role=None,
-                is_super_admin=False,
-                author_id=None,
-            )
-
+            return _no_cms_access_dto(group_id)
         if not author.is_active:
-            return GroupPermissionDTO(
-                group_id=group_id,
-                has_permission=False,
-                role=None,
-                is_super_admin=False,
-                author_id=author.id,
-            )
+            return _no_cms_access_dto(group_id, author.id)
 
         role = get_member_role(db=db, group_id=group_id, author_id=author.id)
         author_is_super_admin = is_super_admin(author)
-        has_permission = author_is_super_admin or role in _GROUP_SETTINGS_ROLES
         return GroupPermissionDTO(
             group_id=group_id,
-            has_permission=has_permission,
+            has_permission=author_is_super_admin or role in _GROUP_SETTINGS_ROLES,
+            can_create_content=author_is_super_admin or can_create_group_content(role),
             role=role,
             is_super_admin=author_is_super_admin,
             author_id=author.id,
         )
+
+
+def _ban_to_dto(ban: AuthorGroupBan) -> GroupBanDTO:
+    user = ban.user
+    expires_at = _as_aware_utc(ban.expires_at)
+    return GroupBanDTO(
+        id=ban.id,
+        user_id=ban.user_id,
+        username=user.username if user else None,
+        fullname=_user_fullname(user) if user else "",
+        avatar_url=_user_avatar_url(user) if user else None,
+        reason=ban.reason,
+        expires_at=expires_at,
+        lifted_at=_as_aware_utc(ban.lifted_at) if ban.lifted_at else None,
+        created_at=_as_aware_utc(ban.created_at),
+        is_active=ban.lifted_at is None and expires_at > datetime.now(timezone.utc),
+    )
+
+
+def _assert_can_moderate_group_users(db: Session, *, group_id: UUID, author: Author) -> None:
+    """Same bar as reviewing join requests: group OWNER/ADMIN, or a super admin."""
+    if is_super_admin(author):
+        return
+    member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
+    _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
+
+
+def list_cms_group_joined_users(
+    token: str,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+) -> GroupJoinedUsersListResponse:
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        if not is_reviewer(author):
+            _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+        rows, total = list_group_joiners_with_join_date_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+        )
+        return GroupJoinedUsersListResponse(
+            users=[
+                GroupJoinedUserDTO(
+                    user_id=user.id,
+                    username=user.username,
+                    fullname=_user_fullname(user),
+                    avatar_url=_user_avatar_url(user),
+                    joined_at=_as_aware_utc(joined_at) if joined_at else None,
+                )
+                for user, joined_at in rows
+            ],
+            skip=skip,
+            limit=limit,
+            total=total,
+        )
+
+
+def remove_and_ban_group_user(
+    token: str,
+    group_id: UUID,
+    user_id: UUID,
+    request: RemoveGroupUserRequest,
+) -> GroupBanDTO:
+    """Remove a joined user from a group and block them from rejoining.
+
+    Removal mirrors what `leave_group` does for a user leaving on their own --
+    accumulator joins and chat room membership go too -- so a moderator removal
+    and a self-leave cannot drift apart. The ban is the only extra: it outlives
+    the join row and is what stops the user coming straight back.
+
+    All of it lands in one transaction, so a failure part way through cannot
+    leave the user removed but unbanned (a retry would then 404 on "not
+    joined", with no way to finish the moderation), or banned but still holding
+    chat access.
+    """
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+
+        # Raises 404 on an unknown user id.
+        get_user_by_id(db=db, user_id=user_id)
+        # Held until this transaction commits, so a join by the same user either
+        # runs before the delete below or reads the ban and is refused. Without
+        # it a join could read "not banned", then insert its row after the
+        # delete, leaving the user both banned and joined.
+        lock_group_membership_changes(db=db, group_id=group_id)
+        if not is_user_joined_group(db=db, group_id=group_id, user_id=user_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=USER_NOT_JOINED_GROUP,
+            )
+
+        # commit=False throughout: the removal and the ban are one unit, and the
+        # chat room lives in the same database, so all of it commits together.
+        remove_group_accumulator_joins_for_group(db=db, user_id=user_id, group_id=group_id)
+        leave_group_membership(db=db, user_id=user_id, group_id=group_id, commit=False)
+        # Chat access is granted to joiners AND followers, so a removed user who
+        # still follows the group keeps the room. Dropping the follow as well is
+        # deliberately out of scope: the ban blocks rejoining, not following.
+        if not is_user_following_group(db=db, group_id=group_id, user_id=user_id):
+            leave_group_chat_room(db=db, group_id=group_id, user_id=user_id, commit=False)
+
+        ban = create_group_ban(
+            db=db,
+            group_id=group_id,
+            user_id=user_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=request.ban_duration_days),
+            reason=request.reason,
+            created_by=author.id,
+            commit=False,
+        )
+        db.commit()
+        db.refresh(ban)
+        return _ban_to_dto(ban)
+
+
+def list_group_bans(
+    token: str,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    active_only: bool = True,
+) -> GroupBanListResponse:
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        if not is_reviewer(author):
+            _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+        bans, total = list_group_bans_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+            active_only=active_only,
+        )
+        return GroupBanListResponse(
+            bans=[_ban_to_dto(ban) for ban in bans],
+            skip=skip,
+            limit=limit,
+            total=total,
+        )
+
+
+def lift_group_ban_by_id(token: str, group_id: UUID, ban_id: UUID) -> GroupBanDTO:
+    """Let a removed user back in early. The row stays, stamped as lifted."""
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        group = get_group_by_id(db=db, group_id=group_id)
+        if not group:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+        _assert_can_moderate_group_users(db=db, group_id=group_id, author=author)
+
+        ban = get_group_ban_by_id(db=db, ban_id=ban_id)
+        if not ban or ban.group_id != group_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_BAN_NOT_FOUND)
+        if ban.lifted_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This ban has already been lifted",
+            )
+        if _as_aware_utc(ban.expires_at) <= datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This ban has already expired",
+            )
+        lifted = lift_group_ban(db=db, ban=ban, lifted_by=author.id)
+        return _ban_to_dto(lifted)

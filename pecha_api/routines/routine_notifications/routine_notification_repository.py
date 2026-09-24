@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from pecha_api.plans.items.plan_items_models import PlanItem
@@ -13,6 +13,10 @@ from pecha_api.plans.series.series_metadata_model import SeriesMetadata
 from pecha_api.plans.series.series_model import Series
 from pecha_api.plans.users.plan_users_models import UserPlanProgress
 from pecha_api.plans.users.recitation_collection.recitation_collection_models import RecitationCollection
+from pecha_api.notification.notification_preference_enums import NotificationType
+from pecha_api.notification.notification_preference_repository import (
+    global_preference_blocks,
+)
 from pecha_api.push_devices.push_device_models import PushDeviceToken
 from pecha_api.routines.routines_enums import SessionType
 from pecha_api.routines.routines_models import Routine, RoutineSession, RoutineTimeBlock
@@ -64,6 +68,17 @@ def get_users_with_matching_timeblocks(db: Session) -> list[RoutineNotificationR
             Routine.deleted_at.is_(None),
             PushDeviceToken.is_active.is_(True),
             RoutineSession.session_type.in_([SessionType.PLAN, SessionType.SERIES]),
+            # SERIES is a user-facing toggle, so a series reminder must not go
+            # out to someone who turned it off or snoozed it. SERIES is not
+            # group-scoped, so only the GLOBAL row applies. PLAN sessions map
+            # to ROUTINE_REMINDER, which has no toggle yet, and pass through.
+            or_(
+                RoutineSession.session_type != SessionType.SERIES,
+                ~global_preference_blocks(
+                    Routine.user_id,
+                    notification_type=NotificationType.SERIES,
+                ),
+            ),
         )
     )
 

@@ -12,6 +12,7 @@ import pecha_api.app  # noqa: F401
 from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
+    delete_messages_service,
     list_room_messages_service,
     remove_message_reaction_service,
     report_message_service,
@@ -217,6 +218,32 @@ class TestListRoomMessagesService:
         assert reactions["❤️"].count == 1
         assert reactions["❤️"].reacted_by_me is False
 
+    @patch('pecha_api.chat.message_service.get_reactions_map')
+    @patch('pecha_api.chat.message_service.get_room_messages')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_lists_reply_with_deleted_parent(
+        self, mock_session, mock_get_room, mock_require, mock_get_messages, mock_reactions_map
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Secret")
+        parent.deleted_at = datetime.now(tz.utc)
+        reply = MockMessage(body="Reply", parent=parent)
+        mock_get_messages.return_value = ([reply], 1)
+        mock_reactions_map.return_value = {}
+
+        result = list_room_messages_service(room_id=uuid4(), user=MockUser(), skip=0, limit=20)
+        parent_dto = result.messages[0].parent
+
+        assert parent_dto is not None
+        assert parent_dto.id == parent.id
+        assert parent_dto.body == ""
+        assert parent_dto.sender_email == "parent@example.com"
+        assert parent_dto.sender_name == "Bob"
+        assert parent_dto.deleted_at == parent.deleted_at.isoformat()
+
 
 class TestDeleteMessageService:
 
@@ -277,6 +304,118 @@ class TestDeleteMessageService:
             delete_message_service(room_id=uuid4(), message_id=uuid4(), user=MockUser())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestDeleteMessagesService:
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_deletes_own_messages(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        first = MockMessage(sender_id=user_id)
+        second = MockMessage(sender_id=user_id)
+        mock_get_messages.return_value = [second, first]
+        deleted_at = datetime.now(tz.utc)
+        mock_soft_delete.return_value = deleted_at
+
+        result = delete_messages_service(
+            room_id=uuid4(),
+            message_ids=[first.id, second.id],
+            user=MockUser(user_id=user_id),
+        )
+
+        mock_soft_delete.assert_called_once()
+        assert mock_soft_delete.call_args.kwargs["messages"] == [first, second]
+        assert result.message_ids == [first.id, second.id]
+        assert result.deleted_at == deleted_at.isoformat()
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_rejects_batch_containing_other_users_message(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        mine = MockMessage(sender_id=user_id)
+        theirs = MockMessage(sender_id=uuid4())
+        mock_get_messages.return_value = [mine, theirs]
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(),
+                message_ids=[mine.id, theirs.id],
+                user=MockUser(user_id=user_id),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        assert str(theirs.id) in exc_info.value.detail
+        assert str(mine.id) not in exc_info.value.detail
+        # Nothing is deleted when the selection is not entirely the caller's.
+        mock_soft_delete.assert_not_called()
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_unknown_message_id_deletes_nothing(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        mine = MockMessage(sender_id=user_id)
+        unknown_id = uuid4()
+        mock_get_messages.return_value = [mine]
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(),
+                message_ids=[mine.id, unknown_id],
+                user=MockUser(user_id=user_id),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert str(unknown_id) in exc_info.value.detail
+        mock_soft_delete.assert_not_called()
+
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_non_member_cannot_bulk_delete(
+        self, mock_session, mock_get_room, mock_require_member, mock_get_messages
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="NOT_A_MEMBER"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(), message_ids=[uuid4()], user=MockUser()
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_get_messages.assert_not_called()
 
 
 class TestAddMessageReactionService:

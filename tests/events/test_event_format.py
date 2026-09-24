@@ -1,10 +1,18 @@
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from pecha_api.events.event_filters import EventContentFilter
+from pecha_api.events.event_model import Event
+from pecha_api.events.event_repository import _apply_event_filters
 from pecha_api.events.event_response_models import (
     CreateEventRequest,
     UpdateEventRequest,
@@ -189,14 +197,18 @@ def test_create_event_service_sets_event_format() -> None:
     mock_event.updated_at = None
     mock_event.image_url = None
     mock_event.plan_id = None
+    mock_event.series_id = None
     mock_event.accumulator_id = None
+    mock_event.group_accumulator_id = None
     mock_event.mantra_id = None
     mock_event.timer_id = None
     mock_event.group_recitation_collection_id = None
     mock_event.location_id = None
     mock_event.location = None
     mock_event.plan = None
+    mock_event.series = None
     mock_event.accumulator = None
+    mock_event.group_accumulator = None
     mock_event.mantra = None
     mock_event.timer = None
     mock_event.group_recitation_collection = None
@@ -246,13 +258,17 @@ def test_update_event_service_updates_event_format() -> None:
     mock_event.image_url = None
     mock_event.location = None
     mock_event.plan_id = None
+    mock_event.series_id = None
     mock_event.accumulator_id = None
+    mock_event.group_accumulator_id = None
     mock_event.mantra_id = None
     mock_event.timer_id = None
     mock_event.group_recitation_collection_id = None
     mock_event.location_id = None
     mock_event.plan = None
+    mock_event.series = None
     mock_event.accumulator = None
+    mock_event.group_accumulator = None
     mock_event.mantra = None
     mock_event.timer = None
     mock_event.group_recitation_collection = None
@@ -274,3 +290,55 @@ def test_update_event_service_updates_event_format() -> None:
         
         # Verify the returned DTO includes updated event_format
         assert result.event_format == "offline"
+
+
+def _event_format_session() -> tuple[Session, type[Event], Callable[..., Any]]:
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Event.metadata.create_all(bind=engine, tables=[Event.__table__])
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for event_format in ("online", "offline", "hybrid"):
+        db.add(
+            Event(
+                id=uuid4(),
+                group_id=uuid4(),
+                start_date=now,
+                end_date=now,
+                created_by="test@example.com",
+                event_format=event_format,
+                featured=False,
+                is_recurring=False,
+            )
+        )
+    db.commit()
+    return db, Event, _apply_event_filters
+
+
+def _formats_for(event_format: str | None) -> set[str]:
+    db, event_cls, apply_filters = _event_format_session()
+    query = apply_filters(
+        db.query(event_cls),
+        content_filter=EventContentFilter(event_format=event_format),
+    )
+    return {event.event_format for event in query.all()}
+
+
+def test_apply_event_filters_online_includes_hybrid() -> None:
+    assert _formats_for("online") == {"online", "hybrid"}
+
+
+def test_apply_event_filters_offline_includes_hybrid() -> None:
+    assert _formats_for("offline") == {"offline", "hybrid"}
+
+
+def test_apply_event_filters_hybrid_is_exact() -> None:
+    assert _formats_for("hybrid") == {"hybrid"}
+
+
+def test_apply_event_filters_omits_format_clause_when_unset() -> None:
+    assert _formats_for(None) == {"online", "offline", "hybrid"}
+

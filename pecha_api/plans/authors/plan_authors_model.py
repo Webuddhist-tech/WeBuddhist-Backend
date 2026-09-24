@@ -18,6 +18,12 @@ class Author(Base):
     email = Column(String(255), nullable=True, unique=True, index=True)
     phone_number = Column(String(16), nullable=True, unique=True, index=True)
     password = Column(String(255), nullable=True)
+    # Links this Author to its owner's website (Users) account. Set only
+    # through a verified linking flow (e.g. accepting a group invite while
+    # authenticated as the User whose verified email matches the invite),
+    # never inferred from a token's own email/phone claims - see
+    # validate_and_extract_author_details for why that distinction matters.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
     is_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=False)
     platform_role = Column(PlatformRoleEnum, nullable=False, default="CREATOR")

@@ -26,7 +26,11 @@ def save_author(db: Session, author: Author):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{e.orig}")
 
 def get_all_authors(db: Session) -> List[Author]:
-    authors = db.query(Author).all()
+    # Only active authors belong in the public directory - author_user_link_
+    # service can create an inert (is_active=False) Author for anyone with a
+    # website account, and those aren't publishable authors until an admin
+    # activates them.
+    authors = db.query(Author).filter(Author.is_active.is_(True)).all()
     return authors
 
 def get_author_by_email(db: Session, email: str) -> Author:
@@ -75,6 +79,28 @@ def get_author_by_phone(
     return db.query(Author).options(joinedload(Author.social_media_accounts)).filter(
         Author.phone_number == phone_number,
     ).first()
+
+
+def find_author_by_user_id(db: Session, user_id: UUID) -> Optional[Author]:
+    """Return the Author linked to the given website User id, or None."""
+    return db.query(Author).options(joinedload(Author.social_media_accounts)).filter(
+        Author.user_id == user_id,
+    ).first()
+
+
+def link_author_to_user(db: Session, author: Author, user_id: UUID) -> Author:
+    try:
+        author.user_id = user_id
+        db.add(author)
+        db.commit()
+        db.refresh(author)
+        return author
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account is already linked to another author",
+        )
 
 
 def save_phone_author(

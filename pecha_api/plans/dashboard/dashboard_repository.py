@@ -12,7 +12,7 @@ from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.public.plan_repository import resolve_plans_language
 from pecha_api.plans.series.series_model import Series
 from pecha_api.plans.series.series_metadata_model import SeriesMetadata
-from pecha_api.plans.users.plan_users_models import UserPlanProgress
+from pecha_api.plans.users.plan_users_models import UserPlanProgress, SeriesPartner
 
 _SERIES_METADATA_JSON = (
     select(
@@ -84,6 +84,15 @@ def _plan_enrolled_count_subquery():
     )
 
 
+def _series_partner_exists(group_ids: Sequence[UUID]):
+    return exists(
+        select(literal(1)).where(
+            SeriesPartner.series_id == Series.id,
+            SeriesPartner.group_id.in_(group_ids),
+        )
+    )
+
+
 def _apply_series_filters(
     query: Query,
     *,
@@ -93,10 +102,16 @@ def _apply_series_filters(
     language: Optional[str],
     group_ids: Optional[Sequence[UUID]] = None,
     language_fallback: bool = False,
+    include_partner_groups: bool = False,
 ) -> Query:
     query = query.filter(Series.deleted_at.is_(None))
     if group_ids is not None:
-        query = query.filter(Series.group_id.in_(group_ids))
+        if include_partner_groups:
+            query = query.filter(
+                or_(Series.group_id.in_(group_ids), _series_partner_exists(group_ids))
+            )
+        else:
+            query = query.filter(Series.group_id.in_(group_ids))
     if search:
         query = query.filter(
             exists(
@@ -146,12 +161,26 @@ def _apply_plan_filters(
     language: Optional[str],
     group_ids: Optional[Sequence[UUID]] = None,
     standalone_only: bool,
+    include_partner_groups: bool = False,
 ) -> Query:
     query = query.filter(Plan.deleted_at.is_(None))
     if standalone_only:
         query = query.filter(Plan.series_id.is_(None))
     if group_ids is not None:
-        query = query.filter(Plan.group_id.in_(group_ids))
+        if include_partner_groups:
+            # A plan is in scope for `group_ids` if the group owns it directly,
+            # or the plan's parent series is partnered with one of `group_ids`.
+            partner_series_exists = exists(
+                select(literal(1)).where(
+                    SeriesPartner.series_id == Plan.series_id,
+                    SeriesPartner.group_id.in_(group_ids),
+                )
+            )
+            query = query.filter(
+                or_(Plan.group_id.in_(group_ids), partner_series_exists)
+            )
+        else:
+            query = query.filter(Plan.group_id.in_(group_ids))
     if search:
         query = query.filter(Plan.title.ilike(f"%{search}%"))
     if status is not None:
@@ -220,12 +249,14 @@ def get_dashboard_items(
     featured: Optional[bool],
     group_ids: Optional[Sequence[UUID]] = None,
     language_fallback: bool = False,
+    include_partner_groups: bool = False,
 ) -> Tuple[List, int]:
     common_kwargs = {
         "search": search,
         "status": status,
         "featured": featured,
         "group_ids": group_ids,
+        "include_partner_groups": include_partner_groups,
     }
 
     # Resolve once so the listing stays in a single language, never mixed.

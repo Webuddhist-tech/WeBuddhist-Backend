@@ -8,6 +8,7 @@ from fastapi import HTTPException, status, UploadFile
 from jose import JWTError
 from jose.exceptions import JWTClaimsError
 from jwt import ExpiredSignatureError
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.error_contants import ErrorConstants
 from .user_response_models import (
@@ -21,6 +22,7 @@ from .user_response_models import (
     UpdateOnboardingStatusRequest,
 )
 from .users_enums import SocialProfile
+from .reserved_usernames import is_reserved_username
 from .users_models import Users, SocialMediaAccount
 from ..auth.auth_repository import validate_token
 from .users_repository import (
@@ -39,15 +41,25 @@ from pecha_api.utils import Utils
 from pecha_api.image_utils import ImageUtils
 
 async def get_user_info(token: str) -> UserInfoResponse:
+    # Token validation and response building are both synchronous SQLAlchemy,
+    # so they run in one worker thread rather than on the event loop.
+    return await run_in_threadpool(_get_user_info_sync, token=token)
+
+
+def _get_user_info_sync(token: str) -> UserInfoResponse:
     current_user = validate_and_extract_user_details(token=token)
-    user_info_response = generate_user_info_response(user=current_user)
-    return user_info_response
+    return generate_user_info_response(user=current_user)
+
 
 async def get_user_info_by_username(username: str) -> UserInfoResponse:
+    return await run_in_threadpool(_get_user_info_by_username_sync, username=username)
+
+
+def _get_user_info_by_username_sync(username: str) -> UserInfoResponse:
     with SessionLocal() as db_session:
         user = get_user_by_username(db=db_session, username=username)
         db_session.close()
-    return generate_user_info_response(user=user)    
+    return generate_user_info_response(user=user)
 
 def fetch_user_by_email(email: str) -> Optional[UserInfoResponse]:
     with SessionLocal() as db_session:
@@ -264,6 +276,9 @@ def _generate_username_suggestions(base: str, count: int = 3) -> List[str]:
         while len(suggestions) < count and attempts < 20:
             suffix = ''.join(random.choices(string.digits, k=4))
             candidate = f"{base}{suffix}"
+            if is_reserved_username(candidate):
+                attempts += 1
+                continue
             if not find_user_by_username(db=db_session, username=candidate):
                 suggestions.append(candidate)
             attempts += 1

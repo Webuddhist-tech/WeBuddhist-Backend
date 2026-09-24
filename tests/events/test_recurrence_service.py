@@ -18,6 +18,7 @@ def _make_event(
     recurrence_calendar_type=None,
     recurrence_month=None,
     recurrence_day=None,
+    recurrence_day_of_week=None,
     duration_days=1,
 ):
     """Create a mock event with recurrence attributes."""
@@ -28,6 +29,7 @@ def _make_event(
     event.recurrence_calendar_type = recurrence_calendar_type
     event.recurrence_month = recurrence_month
     event.recurrence_day = recurrence_day
+    event.recurrence_day_of_week = recurrence_day_of_week
     event.duration_days = duration_days
     return event
 
@@ -106,10 +108,24 @@ class TestComputeInitialDates:
             day=1,
             duration_days=3,
         )
-        
+
         start_date, end_date = compute_initial_dates(recurrence)
-        
+
         assert (end_date - start_date).days == 2
+
+    def test_gregorian_weekly_computes_next_occurrence(self):
+        recurrence = RecurrenceInput(
+            frequency=RecurrenceFrequency.WEEKLY,
+            date_system=RecurrenceDateSystem.GREGORIAN,
+            day_of_week=2,  # Wednesday
+            duration_days=1,
+        )
+
+        start_date, end_date = compute_initial_dates(recurrence)
+
+        assert start_date.weekday() == 2
+        assert start_date.date() >= date.today()
+        assert end_date == start_date
 
 
 class TestExpandOccurrences:
@@ -233,6 +249,25 @@ class TestExpandOccurrences:
         
         assert len(occurrences) == 0
 
+    def test_gregorian_weekly_expands_every_week(self):
+        event = _make_event(
+            is_recurring=True,
+            recurrence_frequency=RecurrenceFrequency.WEEKLY.value,
+            recurrence_date_system=RecurrenceDateSystem.GREGORIAN.value,
+            recurrence_day_of_week=0,  # Monday
+            duration_days=1,
+        )
+
+        occurrences = expand_occurrences(
+            event,
+            date(2025, 1, 1),  # Wednesday
+            date(2025, 1, 31),
+        )
+
+        assert [start_d.weekday() for start_d, _ in occurrences] == [0] * len(occurrences)
+        assert occurrences[0][0] == date(2025, 1, 6)
+        assert occurrences[-1][0] == date(2025, 1, 27)
+
     def test_non_recurring_event_returns_empty(self):
         event = _make_event(
             is_recurring=False,
@@ -279,6 +314,21 @@ class TestResolveNextOccurrence:
         assert next_date is not None
         assert next_date.day == 15
         assert next_date >= date(2025, 4, 1)
+
+    def test_finds_next_gregorian_weekly_occurrence(self):
+        event = _make_event(
+            is_recurring=True,
+            recurrence_frequency=RecurrenceFrequency.WEEKLY.value,
+            recurrence_date_system=RecurrenceDateSystem.GREGORIAN.value,
+            recurrence_day_of_week=4,  # Friday
+            duration_days=1,
+        )
+
+        next_date = resolve_next_occurrence(event, after=date(2025, 3, 20))  # Thursday
+
+        assert next_date is not None
+        assert next_date.weekday() == 4
+        assert next_date == date(2025, 3, 21)
 
     def test_non_recurring_event_returns_none(self):
         event = _make_event(

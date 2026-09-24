@@ -448,3 +448,70 @@ async def test_delete_subtask_timestamp_success():
             token="valid_token",
             sub_task_id=sub_task_id,
         )
+
+@pytest.mark.asyncio
+async def test_create_sub_tasks_accepts_a_reference_subtask_without_content():
+    """A linked subtask carries no inline content, only a reference_id."""
+    task_id = uuid.uuid4()
+    reference_id = uuid.uuid4()
+    request = SubTaskRequest(
+        task_id=task_id,
+        sub_tasks=[
+            SubTaskRequestFields(content_type="EVENT", reference_id=reference_id),
+        ],
+    )
+
+    assert request.sub_tasks[0].content is None
+
+    expected = SubTaskResponse(
+        sub_tasks=[
+            SubTaskDTO(
+                id=uuid.uuid4(),
+                content_type="EVENT",
+                reference_id=reference_id,
+                display_order=1,
+            )
+        ]
+    )
+
+    with patch(
+        "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_views.create_new_sub_tasks",
+        new=AsyncMock(return_value=expected),
+    ) as mock_create:
+        response = await create_sub_tasks(
+            authentication_credential=_Creds("token"),
+            create_task_request=request,
+        )
+
+    assert response is expected
+    sent = mock_create.call_args.kwargs["create_task_request"]
+    assert sent.sub_tasks[0].reference_id == reference_id
+    assert sent.sub_tasks[0].content is None
+
+
+def test_request_model_requires_content_for_inline_content_types():
+    """Only reference types may omit content; inline types still require it."""
+    from pydantic import ValidationError
+
+    for inline_type in ("TEXT", "IMAGE", "AUDIO", "VIDEO", "SOURCE_REFERENCE"):
+        with pytest.raises(ValidationError):
+            SubTaskRequestFields(content_type=inline_type)
+
+    # An empty string is still content, as it was before reference types existed.
+    assert SubTaskRequestFields(content_type="TEXT", content="").content == ""
+
+
+def test_request_model_allows_reference_types_to_omit_content():
+    for reference_type in ("GROUP_ACCUMULATION", "GROUP_COLLECTION", "EVENT", "POST"):
+        fields = SubTaskRequestFields(
+            content_type=reference_type, reference_id=uuid.uuid4()
+        )
+        assert fields.content is None
+
+
+def test_request_model_still_requires_content_for_an_unknown_content_type():
+    """An unrecognised type is not a reference type, so the rule still applies."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SubTaskRequestFields(content_type="NOT_A_TYPE")

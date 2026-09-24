@@ -1,5 +1,7 @@
+import asyncio
 import json
 import pytest
+from typing import AsyncIterator
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 from datetime import datetime, timezone as tz
@@ -158,6 +160,12 @@ class TestChatBroadcasterUnit:
             chat_websocket_module.broadcaster = original
 
 
+async def _never_ending() -> AsyncIterator[None]:
+    """A subscription that stays open, as a real one does."""
+    await asyncio.Event().wait()
+    yield  # pragma: no cover
+
+
 class TestChatBroadcasterFailures:
 
     @pytest.mark.parametrize(
@@ -239,9 +247,11 @@ class TestChatBroadcasterFailures:
         broadcaster = ChatBroadcaster("redis://localhost:6379/0")
         broadcaster.redis = AsyncMock()
         broadcaster.redis.publish.side_effect = RuntimeError("publish failed")
+        room_id = uuid4()
+        message = _message_dto(room_id)
 
         with pytest.raises(RuntimeError, match="publish failed"):
-            await broadcaster.broadcast_message(uuid4(), _message_dto(uuid4()))
+            await broadcaster.broadcast_message(room_id, message)
 
     @pytest.mark.asyncio
     async def test_broadcast_typing_survives_redis_failure(self):
@@ -265,22 +275,42 @@ class TestChatBroadcasterFailures:
         await broadcaster.broadcast_presence(uuid4())
 
     @pytest.mark.asyncio
-    async def test_subscribe_to_room_subscribes_to_channel(self):
+    async def test_room_subscription_is_shared_and_released_once_empty(self):
+        """Two sockets in a room share one Redis subscription, and the last one
+        to leave closes it. Opening one per socket - or closing it without
+        aclose() - leaks a Redis connection per client until Redis refuses new
+        ones at maxclients."""
         from pecha_api.chat.chat_websocket import ChatBroadcaster
+        from pecha_api.realtime.channel_fanout import ChannelFanout
         from unittest.mock import MagicMock
 
         broadcaster = ChatBroadcaster("redis://localhost:6379/0")
         pubsub = MagicMock()
         pubsub.subscribe = AsyncMock()
+        pubsub.unsubscribe = AsyncMock()
+        pubsub.aclose = AsyncMock()
+        pubsub.listen = lambda: _never_ending()
         redis = MagicMock()
         redis.pubsub.return_value = pubsub
         broadcaster.redis = redis
+        broadcaster.fanout = ChannelFanout(redis)
 
         room_id = uuid4()
-        result = await broadcaster.subscribe_to_room(room_id)
+        channel = f"chat:room:{room_id}:messages"
 
-        assert result is pubsub
-        pubsub.subscribe.assert_awaited_once_with(f"chat:room:{room_id}:messages")
+        first = await broadcaster.subscribe_to_room(room_id)
+        second = await broadcaster.subscribe_to_room(room_id)
+
+        pubsub.subscribe.assert_awaited_once_with(channel)
+        assert redis.pubsub.call_count == 1
+
+        await broadcaster.unsubscribe_from_room(room_id, first)
+        pubsub.aclose.assert_not_awaited()
+
+        await broadcaster.unsubscribe_from_room(room_id, second)
+        pubsub.unsubscribe.assert_awaited_once_with(channel)
+        # The call that actually hands the connection back to the pool.
+        pubsub.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_connected_users_returns_empty_on_redis_failure(self):

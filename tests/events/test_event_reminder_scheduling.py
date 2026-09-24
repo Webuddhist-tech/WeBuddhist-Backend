@@ -1,10 +1,13 @@
 """Covers the reminder side effects wired into create/update event flows:
 which branch schedules, reschedules, or cancels reminders, and that the
 reminder mutation shares the same session as the event write."""
+import pytest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
+
+from fastapi import HTTPException
 
 from pecha_api.events.event_response_models import (
     CreateEventRequest,
@@ -35,6 +38,7 @@ def _event_stub(group_id=None, is_recurring=False, start_date=None) -> SimpleNam
         start_date=now,
         end_date=now,
         timezone=None,
+        notifications_enabled=True,
         image_url=None,
         event_format="hybrid",
         featured=False,
@@ -44,6 +48,7 @@ def _event_stub(group_id=None, is_recurring=False, start_date=None) -> SimpleNam
         recurrence_calendar_type=None,
         recurrence_month=6 if is_recurring else None,
         recurrence_day=15 if is_recurring else None,
+        recurrence_day_of_week=None,
         duration_days=1,
         metadata_entries=[],
         links=[],
@@ -101,9 +106,12 @@ class TestCreateEventSchedulesReminders:
 
             after_flush(saved)
 
-            mock_schedule.assert_called_once_with(mock_db, saved.id, saved.start_date)
+            mock_schedule.assert_called_once_with(mock_db, saved)
 
-    def test_recurring_event_hook_skips_reminder_scheduling(self) -> None:
+    def test_recurring_event_registers_the_same_hook(self) -> None:
+        """Recurring events are no longer filtered out here. Whether they are
+        owed anything is decided in event_reminder_service, which holds both
+        the occurrence expansion and the flag gating it."""
         group_id = uuid4()
         saved = _event_stub(group_id=group_id, is_recurring=True)
         request = _create_request(group_id, recurrence=_recurrence())
@@ -126,11 +134,11 @@ class TestCreateEventSchedulesReminders:
 
             after_flush(saved)
 
-            mock_schedule.assert_not_called()
+            mock_schedule.assert_called_once_with(mock_db, saved)
 
 
 class TestUpdateEventReminderBranches:
-    def test_converting_to_recurring_cancels_reminders(self) -> None:
+    def test_converting_to_recurring_rebuilds_reminders(self) -> None:
         group_id = uuid4()
         existing = _event_stub(group_id=group_id, is_recurring=False)
         request = UpdateEventRequest(recurrence=_recurrence())
@@ -143,16 +151,15 @@ class TestUpdateEventReminderBranches:
         ), patch(
             f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
         ), patch(
-            f"{MODULE}.cancel_event_reminders"
-        ) as mock_cancel, patch(
             f"{MODULE}.reschedule_event_reminders"
         ) as mock_reschedule:
             mock_session.return_value.__enter__.return_value = mock_db
 
             update_event_service(token="token", event_id=existing.id, request=request)
 
-        mock_cancel.assert_called_once_with(mock_db, existing.id)
-        mock_reschedule.assert_not_called()
+        # A new rule means new occurrence dates, so whatever was materialized
+        # for the old schedule has to be replaced rather than cancelled.
+        mock_reschedule.assert_called_once_with(mock_db, existing)
         assert existing.is_recurring is True
 
     def test_changing_start_date_on_non_recurring_event_reschedules(self) -> None:
@@ -169,16 +176,13 @@ class TestUpdateEventReminderBranches:
         ), patch(
             f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
         ), patch(
-            f"{MODULE}.cancel_event_reminders"
-        ) as mock_cancel, patch(
             f"{MODULE}.reschedule_event_reminders"
         ) as mock_reschedule:
             mock_session.return_value.__enter__.return_value = mock_db
 
             update_event_service(token="token", event_id=existing.id, request=request)
 
-        mock_reschedule.assert_called_once_with(mock_db, existing.id, new_start)
-        mock_cancel.assert_not_called()
+        mock_reschedule.assert_called_once_with(mock_db, existing)
 
     def test_unrelated_field_change_does_not_touch_reminders(self) -> None:
         group_id = uuid4()
@@ -193,21 +197,214 @@ class TestUpdateEventReminderBranches:
         ), patch(
             f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
         ), patch(
-            f"{MODULE}.cancel_event_reminders"
-        ) as mock_cancel, patch(
             f"{MODULE}.reschedule_event_reminders"
         ) as mock_reschedule:
             mock_session.return_value.__enter__.return_value = mock_db
 
             update_event_service(token="token", event_id=existing.id, request=request)
 
-        mock_cancel.assert_not_called()
         mock_reschedule.assert_not_called()
 
-    def test_already_recurring_event_start_date_change_does_not_reschedule(self) -> None:
-        """start_date on a recurring event is driven by recurrence rules, not
-        a direct edit, so a stray start_date change must not schedule reminders
-        (which are out of scope for recurring events)."""
+    def test_returns_chat_room_id_when_a_room_already_exists(self) -> None:
+        """update_event_service must surface chat_room_id like the read
+        endpoints do - the DTO's exclude_none serialization otherwise drops it
+        silently when it's left unset."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        request = UpdateEventRequest(image_url="https://example.com/banner.png")
+        mock_db = MagicMock()
+        room_id = uuid4()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ), patch(
+            f"{MODULE}._chat_room_id_for_event", return_value=room_id
+        ) as mock_chat_room:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            result = update_event_service(
+                token="token", event_id=existing.id, request=request
+            )
+
+        mock_chat_room.assert_called_once_with(db=mock_db, event_id=existing.id)
+        assert result.chat_room_id == room_id
+
+    def test_converting_to_one_time_clears_recurrence_and_reschedules(self) -> None:
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=True)
+        new_start = existing.start_date.replace(year=existing.start_date.year + 1)
+        new_end = new_start
+        request = UpdateEventRequest(
+            recurrence=None,
+            start_date=new_start,
+            end_date=new_end,
+        )
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        mock_reschedule.assert_called_once_with(mock_db, existing)
+        assert existing.is_recurring is False
+        assert existing.recurrence_frequency is None
+        assert existing.recurrence_date_system is None
+        assert existing.recurrence_month is None
+        assert existing.recurrence_day is None
+        assert existing.recurrence_day_of_week is None
+        assert existing.start_date == new_start
+        assert existing.end_date == new_end
+
+    def test_converting_to_one_time_requires_explicit_dates(self) -> None:
+        """Without dates the template would silently keep its old occurrence."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=True)
+        original_start = existing.start_date
+        request = UpdateEventRequest(recurrence=None)
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule, pytest.raises(
+            HTTPException
+        ) as exc:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        assert exc.value.status_code == 400
+        # The template is left untouched and no reminders are moved.
+        assert existing.is_recurring is True
+        assert existing.start_date == original_start
+        mock_reschedule.assert_not_called()
+
+    def test_converting_to_one_time_requires_both_dates_not_just_one(self) -> None:
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=True)
+        new_start = existing.start_date.replace(year=existing.start_date.year + 1)
+        request = UpdateEventRequest(recurrence=None, start_date=new_start)
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule, pytest.raises(
+            HTTPException
+        ) as exc:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        assert exc.value.status_code == 400
+        assert existing.is_recurring is True
+        mock_reschedule.assert_not_called()
+
+    def test_clearing_recurrence_on_a_one_time_event_needs_no_dates(self) -> None:
+        """`recurrence: null` on an already one-time event is a no-op."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        original_start = existing.start_date
+        original_end = existing.end_date
+        request = UpdateEventRequest(
+            recurrence=None, image_url="https://example.com/banner.png"
+        )
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        assert existing.is_recurring is False
+        assert existing.start_date == original_start
+        assert existing.end_date == original_end
+        # Nothing about the schedule changed, so reminders are left alone.
+        mock_reschedule.assert_not_called()
+
+    def test_clearing_recurrence_on_a_one_time_event_still_applies_dates(self) -> None:
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        new_start = existing.start_date.replace(year=existing.start_date.year + 1)
+        request = UpdateEventRequest(
+            recurrence=None, start_date=new_start, end_date=new_start
+        )
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        assert existing.is_recurring is False
+        assert existing.start_date == new_start
+        mock_reschedule.assert_called_once_with(mock_db, existing)
+
+    def test_omitting_recurrence_does_not_clear_an_existing_rule(self) -> None:
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=True)
+        request = UpdateEventRequest(image_url="https://example.com/banner.png")
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ):
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        assert existing.is_recurring is True
+        assert existing.recurrence_frequency == "YEARLY"
+
+    def test_already_recurring_event_date_change_rebuilds_reminders(self) -> None:
+        """A recurring template's start/end carry the time of day every
+        occurrence inherits, so moving either moves every occurrence's
+        reminders with it."""
         group_id = uuid4()
         existing = _event_stub(group_id=group_id, is_recurring=True)
         request = UpdateEventRequest(
@@ -223,16 +420,13 @@ class TestUpdateEventReminderBranches:
         ), patch(
             f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
         ), patch(
-            f"{MODULE}.cancel_event_reminders"
-        ) as mock_cancel, patch(
             f"{MODULE}.reschedule_event_reminders"
         ) as mock_reschedule:
             mock_session.return_value.__enter__.return_value = mock_db
 
             update_event_service(token="token", event_id=existing.id, request=request)
 
-        mock_cancel.assert_not_called()
-        mock_reschedule.assert_not_called()
+        mock_reschedule.assert_called_once_with(mock_db, existing)
 
     def test_timezone_change_is_applied_to_the_event(self) -> None:
         group_id = uuid4()
@@ -253,6 +447,79 @@ class TestUpdateEventReminderBranches:
 
         assert existing.timezone == "America/New_York"
 
+    def test_changing_only_the_end_date_rebuilds_reminders(self) -> None:
+        """Shortening a five-day event to two has to drop days three through
+        five, and a start-date-only check cannot see that."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        new_end = existing.end_date.replace(year=existing.end_date.year + 1)
+        request = UpdateEventRequest(end_date=new_end)
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        mock_reschedule.assert_called_once_with(mock_db, existing)
+        assert existing.end_date == new_end
+
+    def test_changing_only_the_timezone_rebuilds_reminders(self) -> None:
+        """The zone decides what local time each day of a multi-day event is
+        owed its reminder at. It is applied in the simple-field pass, which
+        the date/recurrence pass never sees, so without picking it up
+        separately a zone change would leave every day on the old clock."""
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        request = UpdateEventRequest(timezone="America/New_York")
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        mock_reschedule.assert_called_once_with(mock_db, existing)
+        assert existing.timezone == "America/New_York"
+
+    def test_resending_the_same_timezone_leaves_reminders_alone(self) -> None:
+        group_id = uuid4()
+        existing = _event_stub(group_id=group_id, is_recurring=False)
+        existing.timezone = "Asia/Kolkata"
+        request = UpdateEventRequest(timezone="Asia/Kolkata")
+        mock_db = MagicMock()
+
+        with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+            f"{MODULE}._require_can_edit_event"
+        ), patch(f"{MODULE}.SessionLocal") as mock_session, patch(
+            f"{MODULE}.get_event_by_id", return_value=existing
+        ), patch(
+            f"{MODULE}.update_event", side_effect=lambda db, event, **kwargs: event
+        ), patch(
+            f"{MODULE}.reschedule_event_reminders"
+        ) as mock_reschedule:
+            mock_session.return_value.__enter__.return_value = mock_db
+
+            update_event_service(token="token", event_id=existing.id, request=request)
+
+        mock_reschedule.assert_not_called()
+
     def test_reminder_mutation_happens_before_event_persistence(self) -> None:
         """The reminder call must be queued in the same session before
         update_event's commit, not after, so a later persistence failure
@@ -265,7 +532,7 @@ class TestUpdateEventReminderBranches:
 
         call_order = []
 
-        def _record_reschedule(db, event_id, start_date):
+        def _record_reschedule(db, event):
             call_order.append("reschedule")
 
         def _record_update_event(db, event, **kwargs):

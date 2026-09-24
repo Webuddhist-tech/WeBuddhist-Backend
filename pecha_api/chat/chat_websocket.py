@@ -6,8 +6,13 @@ from uuid import UUID
 from redis.asyncio import Redis
 
 from pecha_api.chat.response_models import ChatMessageDTO
+from pecha_api.realtime.channel_fanout import ChannelFanout, Subscriber
 
 logger = logging.getLogger(__name__)
+
+
+def room_channel(room_id: UUID) -> str:
+    return f"chat:room:{room_id}:messages"
 
 
 class ChatBroadcaster:
@@ -16,6 +21,9 @@ class ChatBroadcaster:
     def __init__(self, redis_url: str):
         self.redis_url = redis_url
         self.redis: Optional[Redis] = None
+        # One Redis subscription per room, shared by every socket in it on
+        # this instance.
+        self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {room_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
 
@@ -25,6 +33,7 @@ class ChatBroadcaster:
             self.redis = await Redis.from_url(
                 self.redis_url, decode_responses=True, socket_keepalive=True
             )
+            self.fanout = ChannelFanout(self.redis)
             logger.info("✅ Redis connection established for chat broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -51,6 +60,8 @@ class ChatBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self.fanout:
+            await self.fanout.aclose()
         if self.redis:
             await self.redis.close()
             logger.info("Redis connection closed for chat broadcaster")
@@ -64,7 +75,7 @@ class ChatBroadcaster:
         try:
             await self.redis.hset(f"chat:room:{room_id}:presence", str(user_id), email)
         except Exception as e:
-            logger.error(f"Failed to add presence to Redis: {e}")
+            logger.exception("Failed to add presence to Redis: %s", e)
 
     async def remove_connection(self, room_id: UUID, user_id: UUID) -> None:
         """Remove local WebSocket connection and cleanup presence in Redis."""
@@ -76,7 +87,7 @@ class ChatBroadcaster:
         try:
             await self.redis.hdel(f"chat:room:{room_id}:presence", str(user_id))
         except Exception as e:
-            logger.error(f"Failed to remove presence from Redis: {e}")
+            logger.exception("Failed to remove presence from Redis: %s", e)
 
     async def broadcast_message(
         self,
@@ -84,7 +95,7 @@ class ChatBroadcaster:
         message: ChatMessageDTO,
     ) -> None:
         """Publish a chat message to all servers via Redis pub/sub."""
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {
             "type": "message_created",
             "message": message.model_dump(mode="json"),
@@ -93,7 +104,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast message to Redis: {e}")
+            logger.exception("Failed to broadcast message to Redis: %s", e)
             raise
 
     async def broadcast_reactions(
@@ -106,7 +117,7 @@ class ChatBroadcaster:
 
         reacted_by_me is viewer-specific, so it is forced False here; clients
         must derive their own state from each summary's user_ids."""
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {
             "type": "reactions_updated",
             "message_id": str(message_id),
@@ -119,7 +130,30 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast reactions to Redis: {e}")
+            logger.exception("Failed to broadcast reactions to Redis: %s", e)
+            raise
+
+    async def broadcast_prayers(
+        self,
+        room_id: UUID,
+        prayers: list,
+    ) -> None:
+        """Publish updated prayer counts for one or more prayer requests.
+
+        A batch pray sends one payload for every message the user selected, so
+        praying for twenty requests is one publish, not twenty. prayed_by_me is
+        viewer-specific and cannot travel in a shared broadcast; clients derive
+        their own state from each entry's user_ids, as they do for reactions."""
+        channel = room_channel(room_id)
+        payload = {
+            "type": "prayers_updated",
+            "prayers": prayers,
+        }
+
+        try:
+            await self.redis.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.exception("Failed to broadcast prayers to Redis: %s", e)
             raise
 
     async def broadcast_message_deleted(
@@ -132,7 +166,7 @@ class ChatBroadcaster:
         """Publish a message deletion to the room, so every connected client
         can grey it out live (WhatsApp-style) instead of waiting for the next
         history fetch."""
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {
             "type": "message_deleted",
             "message_id": str(message_id),
@@ -143,7 +177,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast message deletion to Redis: {e}")
+            logger.exception("Failed to broadcast message deletion to Redis: %s", e)
             raise
 
     async def broadcast_typing(
@@ -154,7 +188,7 @@ class ChatBroadcaster:
         is_typing: bool,
     ) -> None:
         """Publish an ephemeral typing-indicator event (not persisted)."""
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {
             "type": "typing",
             "user_id": str(user_id),
@@ -165,7 +199,7 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast typing indicator to Redis: {e}")
+            logger.exception("Failed to broadcast typing indicator to Redis: %s", e)
 
     async def broadcast_room_closed(self, room_id: UUID, reason: str) -> None:
         """Tell every server holding a socket for this room to drop it.
@@ -174,18 +208,18 @@ class ChatBroadcaster:
         eviction across the fleet. Best-effort: a publish failure must not fail
         the hide, which is already gated at the request layer.
         """
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {"type": "room_closed", "reason": reason}
 
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast room close to Redis: {e}")
+            logger.exception("Failed to broadcast room close to Redis: %s", e)
 
     async def broadcast_presence(self, room_id: UUID) -> None:
         """Publish the current online roster for a room (not persisted)."""
         online = await self.get_connected_users(room_id)
-        channel = f"chat:room:{room_id}:messages"
+        channel = room_channel(room_id)
         payload = {
             "type": "presence",
             "count": len(online),
@@ -195,20 +229,22 @@ class ChatBroadcaster:
         try:
             await self.redis.publish(channel, json.dumps(payload))
         except Exception as e:
-            logger.error(f"Failed to broadcast presence to Redis: {e}")
+            logger.exception("Failed to broadcast presence to Redis: %s", e)
 
-    async def subscribe_to_room(self, room_id: UUID):
+    async def subscribe_to_room(self, room_id: UUID) -> Subscriber:
         """Subscribe to the message stream for a room."""
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe(f"chat:room:{room_id}:messages")
-        return pubsub
+        return await self.fanout.subscribe(room_channel(room_id))
+
+    async def unsubscribe_from_room(self, room_id: UUID, subscriber: Subscriber) -> None:
+        """Detach a socket; the last one out closes the Redis subscription."""
+        await self.fanout.unsubscribe(room_channel(room_id), subscriber)
 
     async def get_connected_users(self, room_id: UUID) -> Dict[str, str]:
         """Get all users connected to a room (across all servers) as {user_id: email}."""
         try:
             return await self.redis.hgetall(f"chat:room:{room_id}:presence")
         except Exception as e:
-            logger.error(f"Failed to get connected users from Redis: {e}")
+            logger.exception("Failed to get connected users from Redis: %s", e)
             return {}
 
 

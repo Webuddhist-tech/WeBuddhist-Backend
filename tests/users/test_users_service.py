@@ -1082,3 +1082,22 @@ def test_delete_user_account_db_error():
             delete_user_account(token)
         assert exc_info.value.status_code == 500
         assert exc_info.value.detail == "Failed to delete user account"
+
+
+def test_generate_username_suggestions_skips_reserved_candidates():
+    # The first candidate is treated as reserved and must not be suggested.
+    reserved_calls = {"count": 0}
+
+    def _is_reserved(candidate: str) -> bool:
+        reserved_calls["count"] += 1
+        return reserved_calls["count"] == 1
+
+    with patch("pecha_api.users.users_service.SessionLocal") as mock_session, \
+         patch("pecha_api.users.users_service.find_user_by_username", return_value=None), \
+         patch("pecha_api.users.users_service.is_reserved_username", side_effect=_is_reserved):
+
+        _mock_session_ctx(mock_session)
+        suggestions = _generate_username_suggestions(base="testuser", count=3)
+
+    assert len(suggestions) == 3
+    assert reserved_calls["count"] == 4

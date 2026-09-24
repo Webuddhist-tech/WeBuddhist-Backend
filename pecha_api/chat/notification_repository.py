@@ -1,11 +1,20 @@
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, select, true
+from sqlalchemy.orm import Session, aliased
 
-from pecha_api.chat.models import ChatRoom
+from pecha_api.chat.models import ChatRoom, ChatRoomMember
+from pecha_api.notification.notification_preference_enums import (
+    NotificationChannel,
+    NotificationScope,
+    NotificationType,
+)
+from pecha_api.notification.notification_preference_models import (
+    UserNotificationPreference,
+)
 from pecha_api.plans.groups.groups_models import author_group_joins
 from pecha_api.push_devices.push_device_models import PushDeviceToken
 from pecha_api.users.users_models import Users
@@ -30,6 +39,78 @@ def list_private_chat_recipient_user_ids(
     return []
 
 
+def _preference_filtered_join(
+    *,
+    group_id: UUID,
+    notification_type: NotificationType,
+    channel: NotificationChannel,
+    event_id: Optional[UUID] = None,
+):
+    """Join `author_group_joins` to the user's preferences for one notification.
+
+    Returns the join source plus the conditions that implement the resolution
+    rule: `enabled` is most-specific-wins (a GROUP row beats a GLOBAL one,
+    absent means allowed), while an unexpired `muted_until` on *any* row
+    suppresses — a global snooze silences a group the user explicitly enabled.
+
+    With `event_id`, an EVENT row joins the chain ahead of the group one, so a
+    notification sent about a single event respects a mute on that event. The
+    audience is still the whole group; this only decides who inside it has
+    asked to stop hearing about this one event.
+    """
+    event_pref = aliased(UserNotificationPreference)
+    group_pref = aliased(UserNotificationPreference)
+    global_pref = aliased(UserNotificationPreference)
+
+    source = author_group_joins.outerjoin(
+        group_pref,
+        and_(
+            group_pref.user_id == author_group_joins.c.user_id,
+            group_pref.notification_type == notification_type,
+            group_pref.channel == channel,
+            group_pref.scope_type == NotificationScope.GROUP,
+            group_pref.scope_id == group_id,
+        ),
+    ).outerjoin(
+        global_pref,
+        and_(
+            global_pref.user_id == author_group_joins.c.user_id,
+            global_pref.notification_type == notification_type,
+            global_pref.channel == channel,
+            global_pref.scope_id.is_(None),
+        ),
+    )
+
+    # An IS NULL check covers both the un-matched LEFT JOIN and the un-muted row.
+    enabled_chain = [group_pref.enabled, global_pref.enabled]
+    mute_conditions = [
+        or_(group_pref.muted_until.is_(None), group_pref.muted_until <= func.now()),
+        or_(global_pref.muted_until.is_(None), global_pref.muted_until <= func.now()),
+    ]
+
+    if event_id is not None:
+        source = source.outerjoin(
+            event_pref,
+            and_(
+                event_pref.user_id == author_group_joins.c.user_id,
+                event_pref.notification_type == notification_type,
+                event_pref.channel == channel,
+                event_pref.scope_type == NotificationScope.EVENT,
+                event_pref.scope_id == event_id,
+            ),
+        )
+        enabled_chain.insert(0, event_pref.enabled)
+        mute_conditions.append(
+            or_(event_pref.muted_until.is_(None), event_pref.muted_until <= func.now())
+        )
+
+    conditions = [
+        func.coalesce(*enabled_chain, true()).is_(True),
+        *mute_conditions,
+    ]
+    return source, conditions
+
+
 def list_group_chat_recipient_user_ids(
     db: Session,
     *,
@@ -37,28 +118,144 @@ def list_group_chat_recipient_user_ids(
     sender_id: UUID,
     skip: int,
     limit: int,
+    notification_type: Optional[NotificationType] = None,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+    event_id: Optional[UUID] = None,
 ) -> Tuple[List[UUID], int]:
+    """Members of a group who should receive one notification, paginated.
+
+    Preference filtering is applied to the page *and* the count, so `total`
+    stays consistent with what is returned — the worker pages off `total` and
+    `has_more`, which a post-filter would leave wrong. Passing no
+    `notification_type` skips filtering entirely.
+    """
+    source = author_group_joins
+    conditions = [
+        author_group_joins.c.group_id == group_id,
+        author_group_joins.c.user_id != sender_id,
+    ]
+
+    if notification_type is not None:
+        source, preference_conditions = _preference_filtered_join(
+            group_id=group_id,
+            notification_type=notification_type,
+            channel=channel,
+            event_id=event_id,
+        )
+        conditions.extend(preference_conditions)
+
     base = (
         select(author_group_joins.c.user_id)
-        .where(
-            author_group_joins.c.group_id == group_id,
-            author_group_joins.c.user_id != sender_id,
-        )
+        .select_from(source)
+        .where(*conditions)
         .order_by(author_group_joins.c.created_at.asc(), author_group_joins.c.user_id.asc())
     )
     total = (
-        db.execute(
-            select(func.count())
-            .select_from(author_group_joins)
-            .where(
-                author_group_joins.c.group_id == group_id,
-                author_group_joins.c.user_id != sender_id,
-            )
-        ).scalar()
+        db.execute(select(func.count()).select_from(source).where(*conditions)).scalar()
         or 0
     )
     rows = db.execute(base.offset(skip).limit(limit)).all()
     return [row[0] for row in rows], int(total)
+
+
+def list_event_chat_recipient_user_ids(
+    db: Session,
+    *,
+    room_id: UUID,
+    sender_id: UUID,
+    group_id: Optional[UUID],
+    skip: int,
+    limit: int,
+    notification_type: Optional[NotificationType] = None,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+) -> Tuple[List[UUID], int]:
+    """Active members of an event's room who should receive one notification.
+
+    Unlike a group room - whose audience is the group's joiners - an event
+    room's audience is whoever actually joined the room, so membership is the
+    source. Preferences still resolve against the group that owns the event.
+    """
+    conditions = [
+        ChatRoomMember.room_id == room_id,
+        ChatRoomMember.user_id != sender_id,
+        ChatRoomMember.left_at.is_(None),
+    ]
+    base = (
+        select(ChatRoomMember.user_id)
+        .where(*conditions)
+        .order_by(ChatRoomMember.joined_at.asc(), ChatRoomMember.user_id.asc())
+    )
+    user_ids = [row[0] for row in db.execute(base).all()]
+
+    if notification_type is not None:
+        user_ids = filter_users_by_notification_preference(
+            db=db,
+            user_ids=user_ids,
+            notification_type=notification_type,
+            channel=channel,
+            scope_id=group_id,
+        )
+
+    total = len(user_ids)
+    return user_ids[skip : skip + limit], total
+
+
+def filter_users_by_notification_preference(
+    db: Session,
+    *,
+    user_ids: Sequence[UUID],
+    notification_type: NotificationType,
+    channel: NotificationChannel = NotificationChannel.PUSH,
+    scope_id: Optional[UUID] = None,
+) -> List[UUID]:
+    """Drop users who have opted out of a notification.
+
+    With no `scope_id` only GLOBAL rows can apply (the private-chat path). With
+    one, the same resolution rule as the group paths applies: `enabled` is
+    most-specific-wins (a GROUP row beats a GLOBAL one), while an unexpired
+    `muted_until` on *either* row suppresses. Order of `user_ids` is preserved.
+    """
+    if not user_ids:
+        return []
+
+    scope_filter = UserNotificationPreference.scope_id.is_(None)
+    if scope_id is not None:
+        scope_filter = or_(scope_filter, UserNotificationPreference.scope_id == scope_id)
+
+    rows = db.execute(
+        select(
+            UserNotificationPreference.user_id,
+            UserNotificationPreference.enabled,
+            UserNotificationPreference.muted_until,
+            UserNotificationPreference.scope_id,
+        ).where(
+            UserNotificationPreference.user_id.in_(list(user_ids)),
+            UserNotificationPreference.notification_type == notification_type,
+            UserNotificationPreference.channel == channel,
+            scope_filter,
+        )
+    ).all()
+
+    now = datetime.now(timezone.utc)
+    blocked: set[UUID] = set()
+    # Most-specific-wins for `enabled`: a scoped row, when present, decides.
+    enabled_by_user: Dict[UUID, Tuple[bool, bool]] = {}
+    for user_id, enabled, muted_until, row_scope_id in rows:
+        is_scoped = row_scope_id is not None
+        previous = enabled_by_user.get(user_id)
+        if previous is None or (is_scoped and not previous[1]):
+            enabled_by_user[user_id] = (bool(enabled), is_scoped)
+        if muted_until is not None:
+            if muted_until.tzinfo is None:
+                muted_until = muted_until.replace(tzinfo=timezone.utc)
+            if muted_until > now:
+                blocked.add(user_id)
+
+    for user_id, (enabled, _) in enabled_by_user.items():
+        if not enabled:
+            blocked.add(user_id)
+
+    return [user_id for user_id in user_ids if user_id not in blocked]
 
 
 def get_active_push_devices_by_user_ids(

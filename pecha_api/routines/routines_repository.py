@@ -172,11 +172,13 @@ def update_time_block(
     time_utc: time,
     time_int: int,
     notification_enabled: bool,
+    title: Optional[str] = None,
 ) -> RoutineTimeBlock:
     try:
         time_block.time = time
         time_block.time_utc = time_utc
         time_block.time_int = time_int
+        time_block.title = title
         time_block.notification_enabled = notification_enabled
         db.commit()
         db.refresh(time_block)

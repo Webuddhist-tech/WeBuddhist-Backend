@@ -252,6 +252,7 @@ async def test_get_task_subtasks_service_image_content_uses_presigned_url():
         pecha_segment_id=None,
         segment_ids=None,
         segment_numbers=None,
+        reference_id=None,
         audio_url=None,
     )
 
@@ -262,6 +263,7 @@ async def test_get_task_subtasks_service_image_content_uses_presigned_url():
         duration=None,
         estimated_time=5,
         created_by="creator@example.com",
+        plan_item_id=uuid.uuid4(),
         sub_tasks=[subtask_image],
     )
 
@@ -563,6 +565,7 @@ async def test_get_task_subtasks_service_success():
         pecha_segment_id=None,
         segment_ids=None,
         segment_numbers=None,
+        reference_id=None,
         audio_url=None,
     )
     subtask2 = SimpleNamespace(
@@ -575,6 +578,7 @@ async def test_get_task_subtasks_service_success():
         pecha_segment_id=None,
         segment_ids=None,
         segment_numbers=None,
+        reference_id=None,
         audio_url=None,
     )
 
@@ -584,6 +588,7 @@ async def test_get_task_subtasks_service_success():
         display_order=2,
         estimated_time=30,
         created_by="creator@example.com",
+        plan_item_id=uuid.uuid4(),
         sub_tasks=[subtask1, subtask2],
     )
 

@@ -13,6 +13,7 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_models import (
     AuthorGroup,
+    AuthorGroupBan,
     AuthorGroupInvite,
     AuthorGroupJoinRequest,
     AuthorGroupMember,
@@ -22,9 +23,14 @@ from pecha_api.plans.groups.groups_models import (
     author_group_joins,
     author_group_tags,
 )
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_model import Series
+from pecha_api.plans.shared.event_linkage import (
+    plan_not_linked_to_event,
+    series_not_linked_to_event,
+)
 from pecha_api.plans.tags.tag_model import Tag
 from pecha_api.plans.users.plan_users_models import SeriesPartner, UserSeriesEnrollment
 from pecha_api.users.users_models import Users
@@ -106,6 +112,7 @@ def get_standalone_plans_for_group_ids(
         Plan.deleted_at.is_(None),
         Plan.series_id.is_(None),
         Plan.status == PlanStatus.PUBLISHED,
+        plan_not_linked_to_event(),
     )
     if exclude_ids:
         query = query.filter(Plan.id.not_in(exclude_ids))
@@ -201,7 +208,10 @@ def leave_group_membership(
     db: Session,
     user_id: UUID,
     group_id: UUID,
+    *,
+    commit: bool = True,
 ) -> None:
+    """Drop a membership. Pass commit=False to keep an enclosing transaction open."""
     db.execute(
         delete(author_group_joins).where(
             author_group_joins.c.group_id == group_id,
@@ -211,7 +221,8 @@ def leave_group_membership(
     _clear_user_series_partner_ids_for_group(
         db=db, user_id=user_id, group_id=group_id
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def get_series_by_group_id(db: Session, group_id: UUID) -> List[Series]:
@@ -249,6 +260,7 @@ def get_series_for_group_ids(
         Series.group_id.in_(group_ids),
         Series.deleted_at.is_(None),
         Series.status == PlanStatus.PUBLISHED,
+        series_not_linked_to_event(),
     )
     if exclude_ids:
         query = query.filter(Series.id.not_in(exclude_ids))
@@ -315,6 +327,23 @@ def lock_group_status(db: Session, group_id: UUID) -> None:
     db.query(AuthorGroup.id).filter(
         AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None)
     ).with_for_update().first()
+
+
+def lock_group_membership_changes(db: Session, group_id: UUID) -> None:
+    """Take the group row lock that serialises membership writes.
+
+    Joining writes `author_group_joins` while a moderator removal deletes that
+    row and writes a ban row in another table, so no row lock or unique
+    constraint can order the two on its own: a join reading "not banned" just
+    before the removal commits would otherwise re-create the membership of a
+    banned user. Every path that adds or removes a membership takes this lock
+    before reading the ban, so the two run one after the other.
+
+    This is the same row lock `lock_group_visibility` takes, so the paths that
+    already hold that one need nothing extra. Always taken before any join
+    request row lock, to keep a single lock order across the module.
+    """
+    lock_group_visibility(db=db, group_id=group_id)
 
 
 def lock_group_visibility(db: Session, group_id: UUID) -> Optional[bool]:
@@ -408,6 +437,26 @@ def get_member_roles_map(
         .all()
     )
     return {row.group_id: row.role for row in rows}
+
+
+def get_group_member_roles_by_user_ids(
+    db: Session,
+    group_id: UUID,
+    user_ids: Sequence[UUID],
+) -> Dict[UUID, str]:
+    """Map user id to their staff role in the group, via the linked Author (Author.user_id)."""
+    if not user_ids:
+        return {}
+    rows = (
+        db.query(Author.user_id, AuthorGroupMember.role)
+        .join(AuthorGroupMember, AuthorGroupMember.author_id == Author.id)
+        .filter(
+            AuthorGroupMember.group_id == group_id,
+            Author.user_id.in_(list(user_ids)),
+        )
+        .all()
+    )
+    return {row.user_id: row.role.value for row in rows}
 
 
 def list_group_member_ids_by_roles(
@@ -913,6 +962,17 @@ def upsert_group_follow(
             created_at=datetime.now(timezone.utc),
         )
     )
+    # Imported here, not at module scope: chat.repository reaches
+    # pecha_api.events, whose package __init__ pulls in views that land back
+    # here, so the module-level edge would be a cycle.
+    from pecha_api.chat.repository import rejoin_group_room_member
+
+    # Following is one of the two ways to be eligible for a group's chat, so a
+    # returning follower goes back into its room in the same transaction -
+    # otherwise unfollow's leave_group_chat_room stands and the room stays out
+    # of their inbox. Only on the insert path: an existing follower who is out
+    # of the room was taken out by the room itself, not by unfollowing.
+    rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
     db.commit()
 
 
@@ -976,7 +1036,8 @@ def upsert_group_join(
     *,
     commit: bool = True,
 ) -> None:
-    """Add a joiner. Pass commit=False to keep an enclosing transaction open."""
+    """Add a joiner, putting them back into the group's chat room if they had
+    left it. Pass commit=False to keep an enclosing transaction open."""
     exists_row = db.execute(
         select(author_group_joins.c.group_id).where(
             author_group_joins.c.group_id == group_id,
@@ -992,6 +1053,15 @@ def upsert_group_join(
             created_at=datetime.now(timezone.utc),
         )
     )
+    # Imported here, not at module scope: chat.repository reaches
+    # pecha_api.events, whose package __init__ pulls in views that land back
+    # here, so the module-level edge would be a cycle.
+    from pecha_api.chat.repository import rejoin_group_room_member
+
+    # Same as upsert_group_follow: rejoining undoes the leave that
+    # leave_group_chat_room recorded, so the group's room comes back to the
+    # user's inbox instead of waiting for their next message.
+    rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
     if commit:
         db.commit()
 
@@ -1094,3 +1164,129 @@ def update_group(db: Session, group: AuthorGroup) -> AuthorGroup:
     db.commit()
     db.refresh(group)
     return group
+
+
+def create_group_ban(
+    db: Session,
+    *,
+    group_id: UUID,
+    user_id: UUID,
+    expires_at: datetime,
+    reason: Optional[str],
+    created_by: Optional[UUID],
+    commit: bool = True,
+) -> AuthorGroupBan:
+    """Record a ban. Pass commit=False to keep an enclosing transaction open."""
+    ban = AuthorGroupBan(
+        group_id=group_id,
+        user_id=user_id,
+        expires_at=expires_at,
+        reason=reason,
+        created_by=created_by,
+    )
+    db.add(ban)
+    if commit:
+        db.commit()
+        db.refresh(ban)
+    return ban
+
+
+def get_active_group_ban(
+    db: Session,
+    *,
+    group_id: UUID,
+    user_id: UUID,
+) -> Optional[AuthorGroupBan]:
+    """The user's live ban on this group, or None.
+
+    Expired and lifted rows are kept for the audit trail, so "banned" is a
+    query on `lifted_at`/`expires_at`, never on the row existing.
+    """
+    return (
+        db.query(AuthorGroupBan)
+        .filter(
+            AuthorGroupBan.group_id == group_id,
+            AuthorGroupBan.user_id == user_id,
+            AuthorGroupBan.lifted_at.is_(None),
+            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
+        )
+        .order_by(AuthorGroupBan.expires_at.desc())
+        .first()
+    )
+
+
+def list_group_bans_paginated(
+    db: Session,
+    *,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    active_only: bool = True,
+) -> Tuple[List[AuthorGroupBan], int]:
+    query = (
+        db.query(AuthorGroupBan)
+        .options(joinedload(AuthorGroupBan.user))
+        .filter(AuthorGroupBan.group_id == group_id)
+    )
+    if active_only:
+        query = query.filter(
+            AuthorGroupBan.lifted_at.is_(None),
+            AuthorGroupBan.expires_at > datetime.now(timezone.utc),
+        )
+    total = query.count()
+    bans = (
+        query.order_by(AuthorGroupBan.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return bans, total
+
+
+def get_group_ban_by_id(
+    db: Session,
+    *,
+    ban_id: UUID,
+) -> Optional[AuthorGroupBan]:
+    return (
+        db.query(AuthorGroupBan)
+        .options(joinedload(AuthorGroupBan.user))
+        .filter(AuthorGroupBan.id == ban_id)
+        .first()
+    )
+
+
+def lift_group_ban(
+    db: Session,
+    *,
+    ban: AuthorGroupBan,
+    lifted_by: Optional[UUID],
+) -> AuthorGroupBan:
+    ban.lifted_at = datetime.now(timezone.utc)
+    ban.lifted_by = lifted_by
+    db.commit()
+    db.refresh(ban)
+    return ban
+
+
+def list_group_joiners_with_join_date_paginated(
+    db: Session,
+    *,
+    group_id: UUID,
+    skip: int,
+    limit: int,
+) -> Tuple[List[Tuple[Users, datetime]], int]:
+    """Joiners plus when they joined, for the Studio moderation list."""
+    query = (
+        db.query(Users, author_group_joins.c.created_at)
+        .join(author_group_joins, Users.id == author_group_joins.c.user_id)
+        .filter(author_group_joins.c.group_id == group_id)
+    )
+    total = query.count()
+    rows = (
+        query.order_by(author_group_joins.c.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return [(row[0], row[1]) for row in rows], total

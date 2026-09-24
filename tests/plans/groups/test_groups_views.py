@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 from starlette import status
@@ -455,10 +455,13 @@ def test_get_public_group_by_id_with_language():
 
 def test_get_public_group_members():
     group_id = uuid4()
+    user_id = uuid4()
     response_model = AuthorGroupMembersListResponse(
         total_members=1,
         list=[
             AuthorGroupMemberProfileDTO(
+                user_id=user_id,
+                role="ADMIN",
                 username="alice",
                 fullname="Alice Smith",
                 avatar_url="https://example.com/avatar.webp",
@@ -469,13 +472,15 @@ def test_get_public_group_members():
     )
     with patch(
         "pecha_api.plans.groups.groups_views.list_group_members",
-        return_value=response_model,
+        new=AsyncMock(return_value=response_model),
     ) as mock_service:
         response = client.get(f"/author/groups/{group_id}/members?skip=0&limit=20")
     assert response.status_code == status.HTTP_200_OK
-    mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+    mock_service.assert_awaited_once_with(group_id=group_id, skip=0, limit=20, token=None)
     body = response.json()
     assert body["total_members"] == 1
+    assert body["list"][0]["user_id"] == str(user_id)
+    assert body["list"][0]["role"] == "ADMIN"
     assert body["list"][0]["username"] == "alice"
     assert body["list"][0]["fullname"] == "Alice Smith"
     assert body["list"][0]["avatar_url"] == "https://example.com/avatar.webp"
@@ -615,9 +620,25 @@ def test_get_group_practices_feed_passes_filters():
     )
 
 
-def test_get_group_practices_feed_requires_auth():
-    response = client.get("/author/groups/practices")
-    assert response.status_code == status.HTTP_403_FORBIDDEN
+def test_get_group_practices_feed_allows_guest():
+    feed_response = GroupPracticesFeedResponse(
+        practices=[], skip=0, limit=20, total=0, include_unfollowed=False
+    )
+    with patch(
+        "pecha_api.plans.groups.groups_views.get_group_practices_feed",
+        return_value=feed_response,
+    ) as mock_service:
+        response = client.get("/author/groups/practices")
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(
+        token=None,
+        group_id=None,
+        should_include_unfollowed=False,
+        skip=0,
+        limit=20,
+        language=None,
+        timezone_name=None,
+    )
 
 
 def test_follow_and_unfollow_group():

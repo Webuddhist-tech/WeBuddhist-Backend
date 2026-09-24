@@ -1,6 +1,8 @@
+import asyncio
 import json
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone as tz
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -11,7 +13,11 @@ from starlette import status
 from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
-from pecha_api.chat.response_models import ChatMessageDTO
+from pecha_api.chat.response_models import (
+    ChatMessageDTO,
+    ChatSocketMessageFrame,
+)
+from pecha_api.realtime.channel_fanout import SubscriberLagged
 
 client = TestClient(api)
 
@@ -22,26 +28,43 @@ class MockUser:
         self.email = email
 
 
-class FakePubSub:
-    def __init__(self, messages=None, listen_error=None, unsubscribe_error=None):
-        self.messages = messages or []
+class FakeSubscriber:
+    """Stands in for realtime.channel_fanout.Subscriber.
+
+    Takes pubsub-shaped messages so the cases below still read as published
+    frames; filtering non-message frames is the fanout's job in production.
+
+    Once drained it waits, like a real subscriber on a live channel with
+    nothing being published. Returning None means the channel *stopped*, which
+    ends the session, so a case that wants that asks for it with ends=True.
+    """
+
+    def __init__(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        listen_error: Optional[BaseException] = None,
+        lagged: bool = False,
+        ends: bool = False,
+    ) -> None:
+        self.messages = list(messages or [])
         self.listen_error = listen_error
-        self.unsubscribe_error = unsubscribe_error
-        self.unsubscribed = []
+        self.lagged = lagged
+        self.ends = ends
+        self._index = 0
 
-    def listen(self):
-        return self._listen()
-
-    async def _listen(self):
+    async def get(self) -> Optional[str]:
         if self.listen_error is not None:
             raise self.listen_error
-        for message in self.messages:
-            yield message
-
-    async def unsubscribe(self, channel):
-        self.unsubscribed.append(channel)
-        if self.unsubscribe_error is not None:
-            raise self.unsubscribe_error
+        while self._index < len(self.messages):
+            message = self.messages[self._index]
+            self._index += 1
+            if message.get("type") == "message":
+                return message["data"]
+        if self.lagged:
+            raise SubscriberLagged("chat")
+        if self.ends:
+            return None
+        await asyncio.Event().wait()
 
 
 def _message_dto(room_id=None) -> ChatMessageDTO:
@@ -56,12 +79,26 @@ def _message_dto(room_id=None) -> ChatMessageDTO:
     )
 
 
-def _ws_url(group_id=None, receiver_id=None, token="test-token"):
+def _ws_url(group_id=None, receiver_id=None, event_id=None, token="test-token"):
     if group_id is not None:
         return f"/chat/live?token={token}&group_id={group_id}"
+    if event_id is not None:
+        return f"/chat/live?token={token}&event_id={event_id}"
     if receiver_id is not None:
         return f"/chat/live?token={token}&receiver_id={receiver_id}"
     return f"/chat/live?token={token}"
+
+
+def _sync(websocket):
+    """Wait until the server has finished handling everything sent so far.
+
+    The receive loop handles frames one at a time, in order, so a reply to this
+    frame proves every earlier frame was fully processed. Without this, a test
+    that sends and then closes races the handler, because handling a frame now
+    yields to the event loop (the DB work runs in a thread).
+    """
+    websocket.send_json({"type": "__sync__"})
+    websocket.receive_json()
 
 
 @contextmanager
@@ -69,13 +106,15 @@ def _websocket_env(
     user=None,
     auth_error=None,
     broadcaster=None,
-    pubsub=None,
+    subscriber=None,
     room=None,
     resolve_error=None,
 ):
     if broadcaster is None:
         broadcaster = AsyncMock()
-    broadcaster.subscribe_to_room.return_value = pubsub if pubsub is not None else FakePubSub()
+    broadcaster.subscribe_to_room.return_value = (
+        subscriber if subscriber is not None else FakeSubscriber()
+    )
 
     resolved_room = room or MagicMock(id=uuid4())
 
@@ -174,9 +213,9 @@ class TestWebSocketChatConnection:
     def test_registers_and_unregisters_group_connection(self):
         user = MockUser()
         room = MagicMock(id=uuid4())
-        pubsub = FakePubSub()
+        subscriber = FakeSubscriber()
 
-        with _websocket_env(user=user, room=room, pubsub=pubsub) as (broadcaster, *_):
+        with _websocket_env(user=user, room=room, subscriber=subscriber) as (broadcaster, *_):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 info = websocket.receive_json()
 
@@ -185,7 +224,7 @@ class TestWebSocketChatConnection:
         assert broadcaster.add_connection.await_args.args[:3] == (room.id, user.id, user.email)
         broadcaster.broadcast_presence.assert_awaited()
         broadcaster.remove_connection.assert_awaited_once_with(room.id, user.id)
-        assert pubsub.unsubscribed == [f"chat:room:{room.id}:messages"]
+        broadcaster.unsubscribe_from_room.assert_awaited_once_with(room.id, subscriber)
 
     def test_registers_dm_connection(self):
         room = MagicMock(id=uuid4())
@@ -197,41 +236,61 @@ class TestWebSocketChatConnection:
         broadcaster.subscribe_to_room.assert_awaited_once_with(room.id)
 
     def test_unsubscribe_failure_is_swallowed(self):
-        pubsub = FakePubSub(unsubscribe_error=RuntimeError("redis gone"))
+        broadcaster = AsyncMock()
+        broadcaster.unsubscribe_from_room.side_effect = RuntimeError("redis gone")
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(broadcaster=broadcaster):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
 
-        assert len(pubsub.unsubscribed) == 1
+        broadcaster.unsubscribe_from_room.assert_awaited_once()
 
 
 class TestWebSocketChatRedisStream:
 
     def test_forwards_published_messages_to_client(self):
         payload = json.dumps({"type": "message_created", "message": {"body": "from redis"}})
-        pubsub = FakePubSub(
+        subscriber = FakeSubscriber(
             messages=[
                 {"type": "subscribe", "data": 1},
                 {"type": "message", "data": payload},
             ]
         )
 
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 assert websocket.receive_json()["type"] == "room_info"
                 assert websocket.receive_text() == payload
 
-    def test_redis_listen_failure_does_not_break_connection(self):
-        pubsub = FakePubSub(listen_error=RuntimeError("pubsub exploded"))
+    def test_redis_listen_failure_closes_the_socket(self):
+        """A relay that died is a socket nothing can reach any more.
 
-        with _websocket_env(pubsub=pubsub) as (_, mock_send_group, *_):
-            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                websocket.receive_json()
-                websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+        Leaving it open looks connected and answers a ping, but no message
+        would ever arrive on it again, so it is closed instead and the client
+        reconnects onto a fresh subscription."""
+        subscriber = FakeSubscriber(listen_error=RuntimeError("pubsub exploded"))
 
+        with _websocket_env(subscriber=subscriber) as (_, mock_send_group, *_):
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                    websocket.receive_json()
+                    websocket.receive_json()
+
+        assert disconnect.value.code == status.WS_1011_INTERNAL_ERROR
         mock_send_group.assert_not_called()
+
+    def test_channel_stopping_closes_the_socket(self):
+        """The fanout retires a channel whose reader broke, ending every
+        subscriber on it. Same reasoning: no resubscribe happens under us."""
+        subscriber = FakeSubscriber(ends=True)
+
+        with _websocket_env(subscriber=subscriber):
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                    websocket.receive_json()
+                    websocket.receive_json()
+
+        assert disconnect.value.code == status.WS_1011_INTERNAL_ERROR
 
 
 class TestWebSocketChatMessages:
@@ -259,9 +318,14 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "message", "body": "Hello"})
+                _sync(websocket)
 
         mock_send_group.assert_called_once_with(
-            group_id=group_id, user=user, body="Hello", parent_message_id=None
+            group_id=group_id,
+            user=user,
+            body="Hello",
+            parent_message_id=None,
+            message_type="TEXT",
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -276,9 +340,14 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(receiver_id=receiver_id)) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "message", "body": "Hey"})
+                _sync(websocket)
 
         mock_send_direct.assert_called_once_with(
-            receiver_id=receiver_id, user=user, body="Hey", parent_message_id=None
+            receiver_id=receiver_id,
+            user=user,
+            body="Hey",
+            parent_message_id=None,
+            message_type="TEXT",
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -334,6 +403,7 @@ class TestWebSocketChatMessages:
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
                 websocket.send_json({"type": "typing", "is_typing": True})
+                _sync(websocket)
 
         broadcaster.broadcast_typing.assert_awaited_once_with(
             room.id, user.id, user.email, is_typing=True
@@ -361,7 +431,7 @@ class TestWebSocketChatMessages:
                 websocket.receive_json()
                 websocket.send_json({"type": "typing", "is_typing": False})
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
 
 class TestHiddenGroupEndsLiveSession:
@@ -377,12 +447,12 @@ class TestHiddenGroupEndsLiveSession:
                     status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
                 ),
             ):
-                with pytest.raises(WebSocketDisconnect):
-                    with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                        websocket.receive_json()
-                        websocket.send_json({"type": "typing", "is_typing": True})
-                        assert websocket.receive_json()["type"] == "error"
-                        # Session ended: nothing further is served.
+                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({"type": "typing", "is_typing": True})
+                    assert websocket.receive_json()["type"] == "error"
+                    # Session ended: nothing further is served.
+                    with pytest.raises(WebSocketDisconnect):
                         websocket.receive_json()
 
             broadcaster.broadcast_typing.assert_not_awaited()
@@ -392,11 +462,12 @@ class TestHiddenGroupEndsLiveSession:
             mock_send_group.side_effect = HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             )
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                    websocket.receive_json()
-                    websocket.send_json({"type": "message", "body": "hi"})
-                    assert websocket.receive_json()["type"] == "error"
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "message", "body": "hi"})
+                assert websocket.receive_json()["type"] == "error"
+                # Session ended: nothing further is served.
+                with pytest.raises(WebSocketDisconnect):
                     websocket.receive_json()
 
     def test_per_message_rejection_keeps_socket_open(self):
@@ -413,7 +484,7 @@ class TestHiddenGroupEndsLiveSession:
                 assert websocket.receive_json()["code"] == "INAPPROPRIATE_LANGUAGE"
 
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
 
 
 class TestRemoteEviction:
@@ -422,25 +493,252 @@ class TestRemoteEviction:
     than one server is running."""
 
     def test_room_closed_event_ends_the_session(self):
-        pubsub = FakePubSub(messages=[
+        subscriber = FakeSubscriber(messages=[
             {"type": "message", "data": json.dumps({"type": "room_closed", "reason": "GROUP_UNPUBLISHED"})},
         ])
-        with _websocket_env(pubsub=pubsub):
-            with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
-                    websocket.receive_json()   # room_info
-                    websocket.receive_json()   # room_closed, forwarded to the client
+        with _websocket_env(subscriber=subscriber):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()   # room_info
+                websocket.receive_json()   # room_closed, forwarded to the client
+                with pytest.raises(WebSocketDisconnect):
                     websocket.receive_json()   # session over
 
     def test_ordinary_events_do_not_end_the_session(self):
         """Regression guard: only room_closed evicts."""
-        pubsub = FakePubSub(messages=[
+        subscriber = FakeSubscriber(messages=[
             {"type": "message", "data": json.dumps({"type": "typing", "user_id": str(uuid4())})},
         ])
-        with _websocket_env(pubsub=pubsub):
+        with _websocket_env(subscriber=subscriber):
             with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json()["type"] == "typing"
 
                 websocket.send_json({"type": "ping"})
-                assert websocket.receive_json()["code"] == "INVALID_MESSAGE"
+                assert websocket.receive_json() == {"type": "pong"}
+
+
+class TestWebSocketEventRoomsAndPrayers:
+    """The socket's third room kind, and the PRAYER message type."""
+
+    def test_rejects_group_and_event_together(self):
+        url = f"/chat/live?token=test&group_id={uuid4()}&event_id={uuid4()}"
+        with client.websocket_connect(url) as websocket:
+            message = websocket.receive_json()
+
+        assert message["code"] == "INVALID_PARAMS"
+
+    def test_connects_to_an_event_room(self):
+        event_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(user=user, room=room):
+            with patch(
+                "pecha_api.chat.service.resolve_or_create_event_room",
+                return_value=room,
+            ) as mock_resolve:
+                with client.websocket_connect(_ws_url(event_id=event_id)) as websocket:
+                    message = websocket.receive_json()
+
+        assert message["type"] == "room_info"
+        assert message["room_id"] == str(room.id)
+        assert mock_resolve.call_args.kwargs["event_id"] == event_id
+
+    def test_sends_an_event_message(self):
+        event_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(user=user, room=room) as (broadcaster, _, _, _):
+            with patch(
+                "pecha_api.chat.service.resolve_or_create_event_room",
+                return_value=room,
+            ), patch(
+                "pecha_api.chat.views.send_event_message_service",
+                return_value=dto,
+            ) as mock_send_event:
+                with client.websocket_connect(_ws_url(event_id=event_id)) as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({"type": "message", "body": "Tashi delek"})
+                    _sync(websocket)
+
+        mock_send_event.assert_called_once_with(
+            event_id=event_id,
+            user=user,
+            body="Tashi delek",
+            parent_message_id=None,
+            message_type="TEXT",
+        )
+        broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
+
+    def test_sends_a_prayer_request(self):
+        group_id = uuid4()
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(user=user, room=room) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = dto
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {
+                        "type": "message",
+                        "body": "Please pray for my mother",
+                        "message_type": "PRAYER",
+                    }
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
+
+    def test_message_type_is_normalised_to_upper_case(self):
+        group_id = uuid4()
+        room = MagicMock(id=uuid4())
+        dto = _message_dto(room.id)
+
+        with _websocket_env(room=room) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = dto
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "message_type": "prayer"}
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
+
+    def test_rejected_message_type_keeps_the_socket_usable(self):
+        """A per-message rejection must not end the session, the way a
+        profanity rejection does not."""
+        group_id = uuid4()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(room=room) as (_, mock_send_group, _, _):
+            mock_send_group.side_effect = HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PRAYER_NOT_ALLOWED_IN_DM",
+            )
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "message_type": "PRAYER"}
+                )
+                error = websocket.receive_json()
+                # Still open: a second frame is still served.
+                websocket.send_json({"type": "typing", "is_typing": True})
+
+        assert error["type"] == "error"
+        assert error["code"] == "PRAYER_NOT_ALLOWED_IN_DM"
+
+
+class TestClientFrameValidation:
+    """The frames are Pydantic models now, so these pin the error each kind of
+    bad frame still produces and that only a room-level failure ends it."""
+
+    def test_bad_parent_message_id_keeps_its_own_code(self):
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "parent_message_id": "not-a-uuid"}
+                )
+                error = websocket.receive_json()
+                # Per-message rejection: the socket is still served.
+                websocket.send_json({"type": "ping"})
+                assert websocket.receive_json() == {"type": "pong"}
+
+        assert error["code"] == "INVALID_PARENT_MESSAGE_ID"
+        mock_send_group.assert_not_called()
+
+    def test_blank_parent_message_id_is_not_a_reply(self):
+        group_id = uuid4()
+        user = MockUser()
+
+        with _websocket_env(user=user) as (_, mock_send_group, _, _):
+            mock_send_group.return_value = _message_dto()
+            with client.websocket_connect(_ws_url(group_id=group_id)) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "parent_message_id": ""}
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["parent_message_id"] is None
+
+    def test_unknown_fields_are_ignored(self):
+        """A newer client must not break an older server."""
+        with _websocket_env() as (_, mock_send_group, _, _):
+            mock_send_group.return_value = _message_dto()
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {"type": "message", "body": "hi", "invented_later": {"a": 1}}
+                )
+                _sync(websocket)
+
+        assert mock_send_group.call_args.kwargs["body"] == "hi"
+
+    def test_frame_without_a_type_is_rejected(self):
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"body": "hi"})
+                error = websocket.receive_json()
+
+        assert error["code"] == "INVALID_MESSAGE"
+        mock_send_group.assert_not_called()
+
+    def test_non_object_frame_is_rejected_without_ending_the_session(self):
+        """Previously this crashed the handler and closed the socket; it is an
+        ordinary bad frame."""
+        with _websocket_env() as (_, mock_send_group, _, _):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json(["not", "an", "object"])
+                error = websocket.receive_json()
+                websocket.send_json({"type": "ping"})
+                assert websocket.receive_json() == {"type": "pong"}
+
+        assert error["code"] == "INVALID_MESSAGE"
+        mock_send_group.assert_not_called()
+
+    def test_typing_defaults_to_true_when_the_flag_is_absent(self):
+        user = MockUser()
+        room = MagicMock(id=uuid4())
+
+        with _websocket_env(user=user, room=room) as (broadcaster, *_):
+            with client.websocket_connect(_ws_url(group_id=uuid4())) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "typing"})
+                _sync(websocket)
+
+        assert broadcaster.broadcast_typing.await_args.kwargs["is_typing"] is True
+
+
+class TestChatSocketMessageFrame:
+    """The normalisation the socket used to do by hand, now on the model."""
+
+    def test_message_type_defaults_to_text_and_upper_cases(self):
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message"}
+        ).message_type == "TEXT"
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message", "message_type": "prayer"}
+        ).message_type == "PRAYER"
+
+    def test_unknown_message_type_is_left_for_the_service_to_reject(self):
+        """Not an enum on purpose: the message service answers with its own
+        error so the socket stays usable."""
+        frame = ChatSocketMessageFrame.model_validate(
+            {"type": "message", "message_type": "shout"}
+        )
+
+        assert frame.message_type == "SHOUT"
+
+    def test_null_body_reads_as_empty(self):
+        assert ChatSocketMessageFrame.model_validate(
+            {"type": "message", "body": None}
+        ).body == ""
+

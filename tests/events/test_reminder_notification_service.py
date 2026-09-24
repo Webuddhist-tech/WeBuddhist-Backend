@@ -7,10 +7,11 @@ import pytest
 from fastapi import HTTPException
 
 from pecha_api.events.event_reminder_service import REMINDER_TYPE_T_MINUS_10, REMINDER_TYPE_T_ZERO
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.events.reminder_notification_service import (
     _build_reminder_copy,
     _get_event_name,
-    _reminder_superseded,
+    _live_reminder,
     get_event_reminder_targets,
 )
 
@@ -41,80 +42,64 @@ class MockDevice:
         self.platform = platform
 
 
-def _reminder(fire_at=None, canceled_at=None):
+def _reminder(fire_at=None, canceled_at=None, day_index=None, day_total=None):
     return SimpleNamespace(
         fire_at=fire_at or datetime.now(timezone.utc) - timedelta(seconds=5),
         canceled_at=canceled_at,
+        day_index=day_index,
+        day_total=day_total,
     )
 
 
-class TestReminderSuperseded:
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_false_when_fire_at_matches_and_not_canceled(self, mock_get):
+class TestLiveReminder:
+    @patch(f"{MODULE}.get_event_reminder_for_schedule")
+    def test_returns_the_row_for_this_schedule(self, mock_get):
         fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)
-        mock_get.return_value = _reminder(fire_at=fire_at)
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is False
+        row = _reminder(fire_at=fire_at)
+        mock_get.return_value = row
 
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_true_when_canceled(self, mock_get):
+        assert _live_reminder(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is row
+
+    @patch(f"{MODULE}.get_event_reminder_for_schedule")
+    def test_none_when_canceled(self, mock_get):
         fire_at = datetime.now(timezone.utc)
         mock_get.return_value = _reminder(fire_at=fire_at, canceled_at=datetime.now(timezone.utc))
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is True
 
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_true_when_fire_at_moved_since_this_message_was_queued(self, mock_get):
-        """A reschedule's upsert overwrites fire_at on the same row - the
-        row itself can look perfectly valid (uncanceled, due) while no
-        longer matching what this specific delivery attempt was queued
-        for."""
-        queued_for = datetime.now(timezone.utc) - timedelta(days=2)
-        mock_get.return_value = _reminder(fire_at=datetime.now(timezone.utc) + timedelta(days=3))
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, queued_for) is True
+        assert _live_reminder(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is None
 
-    @patch(f"{MODULE}.get_event_reminder", return_value=None)
-    def test_true_when_row_no_longer_exists(self, _mock_get):
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, datetime.now(timezone.utc)) is True
+    @patch(f"{MODULE}.get_event_reminder_for_schedule", return_value=None)
+    def test_none_when_no_row_stands_on_that_schedule(self, _mock_get):
+        """A rebuild moves an event onto different days, so the day this
+        message was queued for may simply no longer exist - and a message
+        that outlived a cancel plus a fresh dispatch of the same day lands
+        here too."""
+        assert (
+            _live_reminder(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, datetime.now(timezone.utc))
+            is None
+        )
 
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_true_when_fire_at_is_missing(self, mock_get):
+    @patch(f"{MODULE}.get_event_reminder_for_schedule")
+    def test_none_when_fire_at_is_missing_without_querying(self, mock_get):
         """Regression guard: a caller with no schedule identity at all (only
         possible for a message queued before fire_at existed) must not fall
         back to a weaker "not yet due" heuristic and accept whatever
         reminder happens to be due now - that reopens exactly the race this
         check exists to close."""
-        mock_get.return_value = _reminder(fire_at=datetime.now(timezone.utc) - timedelta(seconds=5))
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, None) is True
+        assert _live_reminder(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, None) is None
+        mock_get.assert_not_called()
 
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_false_when_fire_at_matches_the_claimed_value(self, mock_get):
-        fire_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-        mock_get.return_value = _reminder(fire_at=fire_at)
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is False
-
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_true_when_row_reclaimed_for_a_different_schedule_since_this_message_was_queued(
-        self, mock_get,
-    ):
-        """Regression guard: a message that outlived a cancel + fresh
-        dispatch of the same (event_id, reminder_type) row must not be
-        delivered just because the row looks currently valid - it now
-        belongs to a different, newer dispatch."""
-        queued_for = datetime.now(timezone.utc) - timedelta(days=2)
-        current_row = _reminder(fire_at=datetime.now(timezone.utc) - timedelta(seconds=5))
-        mock_get.return_value = current_row
-
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, queued_for) is True
-
-    @patch(f"{MODULE}.get_event_reminder")
-    def test_true_when_fire_at_differs_by_even_a_millisecond(self, mock_get):
-        """The comparison is exact, not a tolerance window: fire_at
-        round-trips losslessly through the SQS message and query param, so
-        any mismatch - however small - means the row now belongs to a
-        different schedule than the one this delivery attempt was queued
-        for."""
+    @patch(f"{MODULE}.get_event_reminder_for_schedule", return_value=None)
+    def test_the_schedule_is_part_of_the_lookup(self, mock_get):
+        """An event holds one row per occurrence-day, so the row has to be
+        found by the schedule this delivery was claimed against - matching on
+        (event, type) alone would pick an arbitrary day."""
+        db = MagicMock()
+        event_id = uuid4()
         fire_at = datetime.now(timezone.utc)
-        mock_get.return_value = _reminder(fire_at=fire_at + timedelta(milliseconds=1))
-        assert _reminder_superseded(MagicMock(), uuid4(), REMINDER_TYPE_T_ZERO, fire_at) is True
+
+        _live_reminder(db, event_id, REMINDER_TYPE_T_ZERO, fire_at)
+
+        mock_get.assert_called_once_with(db, event_id, REMINDER_TYPE_T_ZERO, fire_at)
 
 
 class TestGetEventName:
@@ -142,17 +127,43 @@ class TestGetEventName:
 class TestBuildReminderCopy:
     def test_t_minus_10_includes_minutes(self):
         assert _build_reminder_copy(
-            reminder_type=REMINDER_TYPE_T_MINUS_10, event_name="Full Moon", minutes_before=10,
+            reminder_type=REMINDER_TYPE_T_MINUS_10, minutes_before=10,
         ) == "Starting in 10 minutes"
 
     def test_t_zero_says_starting_now(self):
         assert _build_reminder_copy(
-            reminder_type=REMINDER_TYPE_T_ZERO, event_name="Full Moon", minutes_before=10,
+            reminder_type=REMINDER_TYPE_T_ZERO, minutes_before=10,
         ) == "Starting now"
 
     def test_unknown_type_falls_back_to_starting_now(self):
         assert _build_reminder_copy(
-            reminder_type="SOMETHING_ELSE", event_name="Full Moon", minutes_before=10,
+            reminder_type="SOMETHING_ELSE", minutes_before=10,
+        ) == "Starting now"
+
+    def test_a_day_of_a_longer_run_says_which_day(self):
+        """Without it, day five of a retreat is word-for-word identical to
+        day one, every morning."""
+        assert _build_reminder_copy(
+            reminder_type=REMINDER_TYPE_T_MINUS_10,
+            minutes_before=10,
+            day_index=2,
+            day_total=5,
+        ) == "Day 2 of 5 · Starting in 10 minutes"
+
+    def test_single_day_event_copy_is_unchanged(self):
+        assert _build_reminder_copy(
+            reminder_type=REMINDER_TYPE_T_MINUS_10,
+            minutes_before=10,
+            day_index=None,
+            day_total=None,
+        ) == "Starting in 10 minutes"
+
+    def test_a_run_of_one_is_not_numbered(self):
+        assert _build_reminder_copy(
+            reminder_type=REMINDER_TYPE_T_ZERO,
+            minutes_before=10,
+            day_index=1,
+            day_total=1,
         ) == "Starting now"
 
 
@@ -165,7 +176,7 @@ class TestGetEventReminderTargets:
             get_event_reminder_targets(event_id=uuid4(), reminder_type=REMINDER_TYPE_T_ZERO, minutes_before=10)
         assert exc.value.status_code == 404
 
-    @patch(f"{MODULE}._reminder_superseded", return_value=False)
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder())
     @patch(f"{MODULE}.normalize_platform", side_effect=lambda p: p)
     @patch(f"{MODULE}.get_active_push_devices_by_user_ids")
     @patch(f"{MODULE}.get_event_participants_paginated")
@@ -173,7 +184,7 @@ class TestGetEventReminderTargets:
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
     def test_skips_recipients_without_devices_and_builds_body(
-        self, mock_session, mock_get_event, _mock_name, mock_participants, mock_devices, _mock_platform, _superseded,
+        self, mock_session, mock_get_event, _mock_name, mock_participants, mock_devices, _mock_platform, _live,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
         event = MockEvent()
@@ -197,14 +208,14 @@ class TestGetEventReminderTargets:
         assert result.total == 2
         assert result.has_more is False
 
-    @patch(f"{MODULE}._reminder_superseded", return_value=False)
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder())
     @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
     @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
     @patch(f"{MODULE}._get_event_name", return_value="Event")
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
-    def test_forwards_fire_at_to_the_superseded_check(
-        self, mock_session, mock_get_event, _mock_name, _mock_participants, _mock_devices, mock_superseded,
+    def test_forwards_fire_at_to_the_schedule_lookup(
+        self, mock_session, mock_get_event, _mock_name, _mock_participants, _mock_devices, mock_live,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
         event = MockEvent()
@@ -217,19 +228,45 @@ class TestGetEventReminderTargets:
 
         # Checked twice (fail-fast, then the authoritative recheck below) -
         # both calls must carry the same fire_at.
-        mock_superseded.assert_called_with(
+        mock_live.assert_called_with(
             mock_session.return_value.__enter__.return_value, event.id, REMINDER_TYPE_T_ZERO, fire_at,
         )
-        assert mock_superseded.call_count == 2
+        assert mock_live.call_count == 2
 
-    @patch(f"{MODULE}._reminder_superseded", return_value=False)
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder())
+    @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
+    @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
+    @patch(f"{MODULE}._get_event_name", return_value="Event")
+    @patch(f"{MODULE}.get_event_by_id")
+    @patch(f"{MODULE}.SessionLocal")
+    def test_participants_are_filtered_by_the_event_reminder_preference(
+        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, _live,
+    ):
+        """Regression guard: EVENT_REMINDER is a user-facing toggle, so the
+        participant query has to resolve it - otherwise the API reports the
+        reminder as off while it keeps being delivered. It must reach the
+        query, not post-filter the page, so `total` matches the page."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        event = MockEvent()
+        mock_get_event.return_value = event
+
+        get_event_reminder_targets(
+            event_id=event.id, reminder_type=REMINDER_TYPE_T_ZERO, minutes_before=10,
+        )
+
+        assert (
+            mock_participants.call_args.kwargs["notification_type"]
+            == NotificationType.EVENT_REMINDER
+        )
+
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder())
     @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
     @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
     @patch(f"{MODULE}._get_event_name", return_value="Event")
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
     def test_clamps_out_of_range_pagination(
-        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, _superseded,
+        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, _live,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
         event = MockEvent()
@@ -248,14 +285,14 @@ class TestGetEventReminderTargets:
         assert mock_participants.call_args.kwargs["skip"] == 0
         assert mock_participants.call_args.kwargs["limit"] == 500
 
-    @patch(f"{MODULE}._reminder_superseded", return_value=False)
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder())
     @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
     @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
     @patch(f"{MODULE}._get_event_name", return_value="Event")
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
     def test_limit_below_one_floors_to_one(
-        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, _superseded,
+        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, _live,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
         event = MockEvent()
@@ -270,12 +307,35 @@ class TestGetEventReminderTargets:
 
         assert result.limit == 1
 
-    @patch(f"{MODULE}._reminder_superseded", return_value=True)
+    @patch(f"{MODULE}._live_reminder", return_value=_reminder(day_index=3, day_total=5))
+    @patch(f"{MODULE}.normalize_platform", side_effect=lambda p: p)
+    @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
+    @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
+    @patch(f"{MODULE}._get_event_name", return_value="Winter Retreat")
+    @patch(f"{MODULE}.get_event_by_id")
+    @patch(f"{MODULE}.SessionLocal")
+    def test_body_carries_the_day_numbers_stored_on_the_reminder(
+        self, mock_session, mock_get_event, _mock_name, _mock_participants, _mock_devices, _mock_platform, _live,
+    ):
+        """The numbering is read off the row rather than recomputed here:
+        re-expanding occurrences on the send path would mean calendar file
+        reads for a lunar recurrence, on every delivery."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        event = MockEvent()
+        mock_get_event.return_value = event
+
+        result = get_event_reminder_targets(
+            event_id=event.id, reminder_type=REMINDER_TYPE_T_MINUS_10, minutes_before=10,
+        )
+
+        assert result.body == "Day 3 of 5 · Starting in 10 minutes"
+
+    @patch(f"{MODULE}._live_reminder", return_value=None)
     @patch(f"{MODULE}.get_event_participants_paginated")
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
     def test_superseded_reminder_returns_no_recipients(
-        self, mock_session, mock_get_event, mock_participants, _superseded,
+        self, mock_session, mock_get_event, mock_participants, _live,
     ):
         """Regression guard: this is the final gate closest to actual push
         delivery - a canceled or rescheduled reminder must not reach anyone,
@@ -292,14 +352,14 @@ class TestGetEventReminderTargets:
         assert result.total == 0
         mock_participants.assert_not_called()
 
-    @patch(f"{MODULE}._reminder_superseded")
+    @patch(f"{MODULE}._live_reminder")
     @patch(f"{MODULE}.get_active_push_devices_by_user_ids", return_value={})
     @patch(f"{MODULE}.get_event_participants_paginated", return_value=([], 0))
     @patch(f"{MODULE}._get_event_name", return_value="Event")
     @patch(f"{MODULE}.get_event_by_id")
     @patch(f"{MODULE}.SessionLocal")
     def test_authoritative_recheck_catches_a_change_during_participant_lookup(
-        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, mock_superseded,
+        self, mock_session, mock_get_event, _mock_name, mock_participants, _mock_devices, mock_live,
     ):
         """Regression guard: a cancellation or reschedule landing while
         participant/device data is being resolved (which can take a while
@@ -308,7 +368,7 @@ class TestGetEventReminderTargets:
         mock_session.return_value.__enter__.return_value = MagicMock()
         event = MockEvent()
         mock_get_event.return_value = event
-        mock_superseded.side_effect = [False, True]
+        mock_live.side_effect = [_reminder(), None]
 
         result = get_event_reminder_targets(
             event_id=event.id, reminder_type=REMINDER_TYPE_T_ZERO, minutes_before=10,
@@ -317,4 +377,4 @@ class TestGetEventReminderTargets:
         assert result.recipients == []
         assert result.total == 0
         mock_participants.assert_called_once()
-        assert mock_superseded.call_count == 2
+        assert mock_live.call_count == 2

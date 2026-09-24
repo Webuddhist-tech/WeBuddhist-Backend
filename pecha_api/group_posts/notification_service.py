@@ -8,6 +8,7 @@ from pecha_api.chat.notification_repository import (
     list_group_chat_recipient_user_ids,
     normalize_platform,
 )
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.config import get_int
 from pecha_api.db.database import SessionLocal
 from pecha_api.group_posts.enums import GroupPostStatus
@@ -85,6 +86,7 @@ def get_group_post_notification_targets(
             sender_id=author.id,
             skip=skip,
             limit=limit,
+            notification_type=NotificationType.GROUP_POST,
         )
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)

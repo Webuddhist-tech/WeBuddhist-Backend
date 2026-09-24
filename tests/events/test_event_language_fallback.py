@@ -21,7 +21,18 @@ def _metadata(language, name):
     )
 
 
-def _event(metadata_entries):
+def _link(language, type_="web"):
+    return SimpleNamespace(
+        id=uuid4(),
+        type=type_,
+        url="https://example.com",
+        label=None,
+        language=language,
+        display_order=1,
+    )
+
+
+def _event(metadata_entries, links=None):
     now = datetime.now(timezone.utc)
     return SimpleNamespace(
         id=uuid4(),
@@ -35,12 +46,14 @@ def _event(metadata_entries):
         location=None,
         start_date=now,
         end_date=now,
+        timezone=None,
+        notifications_enabled=True,
         image_url=None,
         featured=False,
         event_format="hybrid",
         is_recurring=False,
         metadata_entries=metadata_entries,
-        links=[],
+        links=links or [],
         created_at=now,
         created_by="author@example.com",
         updated_at=None,
@@ -146,3 +159,56 @@ def test_get_event_by_id_service_uses_fallback(mock_get_by_id, _mock_count, _moc
     assert dto.metadata is not None
     assert dto.metadata.language == "en"
     assert dto.is_joined is None
+
+
+# --------------------------- _event_to_dto links/youtube fallback behaviour ---------------------------
+# Mirrors the metadata fallback tests above, except links/youtube never
+# collapse to a single object - a "no match" result is an empty list, not None.
+
+
+def test_links_returns_selected_language_when_available():
+    event = _event([], links=[_link("bo"), _link("en")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert [link.language for link in dto.links] == ["bo"]
+
+
+def test_links_falls_back_to_english_when_selected_language_missing():
+    event = _event([], links=[_link("en")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert [link.language for link in dto.links] == ["en"]
+
+
+def test_links_returns_empty_list_when_neither_selected_nor_english_exists():
+    event = _event([], links=[_link("fr")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert dto.links == []
+
+
+def test_youtube_returns_selected_language_when_available():
+    event = _event([], links=[_link("bo", "youtube"), _link("en", "youtube")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert [item.language for item in dto.youtube] == ["bo"]
+
+
+def test_youtube_falls_back_to_english_when_selected_language_missing():
+    event = _event([], links=[_link("en", "youtube")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert [item.language for item in dto.youtube] == ["en"]
+
+
+def test_youtube_returns_empty_list_when_neither_selected_nor_english_exists():
+    event = _event([], links=[_link("fr", "youtube")])
+
+    dto = _event_to_dto(event, language="bo", fallback=True)
+
+    assert dto.youtube == []

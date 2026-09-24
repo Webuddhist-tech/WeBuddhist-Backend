@@ -13,8 +13,9 @@ from pecha_api.auth.auth_repository import validate_token
 from pecha_api.db.database import SessionLocal
 from pecha_api.error_contants import ErrorConstants
 from pecha_api.plans.authors.plan_authors_model import Author, AuthorSocialMediaAccount
-from pecha_api.plans.authors.plan_authors_repository import get_author_by_email, get_author_by_id, get_all_authors, \
-    update_author
+from pecha_api.plans.authors.plan_authors_repository import get_author_by_id, get_all_authors, \
+    update_author, find_author_by_id, find_author_by_user_id
+from pecha_api.users.user_resolution import resolve_user_from_payload
 import jose
 
 from pecha_api.plans.authors.plan_authors_response_models import AuthorInfoResponse, SocialMediaProfile, \
@@ -204,28 +205,35 @@ def validate_and_extract_author_details(token: str) -> Author:
         payload = validate_token(token)
         with SessionLocal() as db_session:
             subject = payload.get("sub")
-            email = payload.get("email")
             try:
                 author_id = UUID(str(subject)) if subject is not None else None
             except (TypeError, ValueError):
                 author_id = None
-            if author_id is not None:
-                author = get_author_by_id(db=db_session, author_id=author_id)
-            else:
-                if not isinstance(email, str) or not email:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail=ErrorConstants.TOKEN_ERROR_MESSAGE,
+
+            author = find_author_by_id(db=db_session, author_id=author_id) if author_id is not None else None
+            if author is None:
+                # Not a CMS Author token. Resolve the caller as a website
+                # User instead - the same identity resolution the group
+                # permission check uses (UUID sub, then phone, then email;
+                # see groups_service._resolve_permission_caller) - then look
+                # up the Author only via the persisted Author.user_id link,
+                # never through the token's own email/phone claims directly
+                # (see auth_service.create_user's Author collision check for
+                # why). This also covers raw, non-exchanged Auth0 tokens
+                # whose subject isn't a UUID at all.
+                try:
+                    user = resolve_user_from_payload(
+                        db=db_session,
+                        payload=payload,
+                        unauthorized_detail=ErrorConstants.TOKEN_ERROR_MESSAGE,
                     )
-                author = get_author_by_email(db=db_session, email=email)
+                    author = find_author_by_user_id(db=db_session, user_id=user.id)
+                except HTTPException:
+                    author = None
             if author is None:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=(
-                        f"User not found: {email} does not exist in the system"
-                        if email
-                        else ErrorConstants.TOKEN_ERROR_MESSAGE
-                    ),
+                    detail=ErrorConstants.TOKEN_ERROR_MESSAGE,
                 )
             return author
     except ExpiredSignatureError as exception:

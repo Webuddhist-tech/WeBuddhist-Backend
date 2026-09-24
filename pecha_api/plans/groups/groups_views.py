@@ -20,9 +20,12 @@ from pecha_api.plans.groups.groups_response_models import (
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupBanDTO,
+    GroupBanListResponse,
     GroupInviteCreatedResponse,
     GroupInviteDTO,
     GroupInviteListResponse,
+    GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
     GroupMemberAccumulationsResponse,
@@ -31,6 +34,7 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupPracticesResponse,
     PublicAuthorGroupDetailDTO,
     PublicAuthorGroupListResponse,
+    RemoveGroupUserRequest,
     ReplaceGroupSocialLinksRequest,
     ReplaceGroupTagsRequest,
     UpdateAuthorGroupRequest,
@@ -63,8 +67,11 @@ from pecha_api.plans.groups.groups_service import (
     get_joined_group,
     join_group,
     leave_group,
+    lift_group_ban_by_id,
+    list_cms_group_joined_users,
     list_cms_groups,
     list_followed_groups,
+    list_group_bans,
     list_joined_groups,
     list_group_members,
     list_group_invites,
@@ -73,6 +80,7 @@ from pecha_api.plans.groups.groups_service import (
     list_public_groups,
     reject_group_invite_by_id,
     reject_group_join_request,
+    remove_and_ban_group_user,
     submit_group_join_request,
     replace_group_social_links_by_id,
     replace_group_tags,
@@ -393,6 +401,92 @@ def post_cms_reject_group_join_request(
     )
 
 
+@cms_groups_router.get(
+    "/{group_id}/joined-users",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupJoinedUsersListResponse,
+)
+def get_cms_group_joined_users(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GroupJoinedUsersListResponse:
+    """Community users who joined this group, newest first.
+
+    Distinct from `/members`, which lists the group's staff authors and roles.
+    """
+    return list_cms_group_joined_users(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+    )
+
+
+# POST rather than DELETE: the call carries a body (ban length and reason).
+@cms_groups_router.post(
+    "/{group_id}/joined-users/{user_id}/remove",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanDTO,
+)
+def post_cms_remove_group_joined_user(
+    group_id: UUID,
+    user_id: UUID,
+    request: RemoveGroupUserRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> GroupBanDTO:
+    """Remove a joined user and block them from rejoining for `ban_duration_days`."""
+    return remove_and_ban_group_user(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        user_id=user_id,
+        request=request,
+    )
+
+
+@cms_groups_router.get(
+    "/{group_id}/bans",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanListResponse,
+)
+def get_cms_group_bans(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    active_only: Annotated[
+        bool,
+        Query(description="When false, also returns expired and lifted bans as a history."),
+    ] = True,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> GroupBanListResponse:
+    return list_group_bans(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        active_only=active_only,
+    )
+
+
+@cms_groups_router.post(
+    "/{group_id}/bans/{ban_id}/lift",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupBanDTO,
+)
+def post_cms_lift_group_ban(
+    group_id: UUID,
+    ban_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> GroupBanDTO:
+    """End a ban early. The user may rejoin, but is not re-added automatically."""
+    return lift_group_ban_by_id(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        ban_id=ban_id,
+    )
+
+
 @cms_groups_router.post("/{group_id}/members/invites/{invite_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
 def post_revoke_group_invite(
     group_id: UUID,
@@ -461,7 +555,9 @@ def delete_group_member_by_id(
     response_model=GroupPracticesFeedResponse,
 )
 def get_group_practices_feed_endpoint(
-    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
     group_id: Annotated[Optional[UUID], Query(description="Filter practices to a single group")] = None,
     should_include_unfollowed: Annotated[
         bool,
@@ -469,7 +565,8 @@ def get_group_practices_feed_endpoint(
             alias="include_unfollowed",
             description=(
                 "false = practices from joined groups only; "
-                "true = practices from all public groups"
+                "true = practices from all public groups. "
+                "Guests always see public groups."
             ),
         ),
     ] = False,
@@ -485,11 +582,12 @@ def get_group_practices_feed_endpoint(
     series, and recitation collections) across author groups, sorted newest
     first.
 
-    Requires auth. Defaults to groups the user joined. Pass
-    ``include_unfollowed=true`` to include all public groups.
+    Optional auth. Guests see published public groups. Logged-in users default
+    to groups they joined; pass ``include_unfollowed=true`` to include all
+    public groups.
     """
     return get_group_practices_feed(
-        token=authentication_credential.credentials,
+        token=authentication_credential.credentials if authentication_credential else None,
         group_id=group_id,
         should_include_unfollowed=should_include_unfollowed,
         skip=skip,
@@ -550,17 +648,27 @@ async def get_public_group_practices(
     status_code=status.HTTP_200_OK,
     response_model=AuthorGroupMembersListResponse,
 )
-def get_public_group_members(
+async def get_public_group_members(
     group_id: UUID,
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
+    ] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
     """List a group's members, for both public and private groups.
 
     Intentionally unauthenticated: the frontend gates who sees the members
-    list. See list_group_members for the rationale and its trade-off.
+    list. See list_group_members for the rationale and its trade-off. The
+    optional token only decides whether staff roles are revealed for a
+    private group (joiners only).
     """
-    return list_group_members(group_id=group_id, skip=skip, limit=limit)
+    return await list_group_members(
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        token=authentication_credential.credentials if authentication_credential else None,
+    )
 
 
 @public_groups_router.get("", status_code=status.HTTP_200_OK, response_model=PublicAuthorGroupListResponse)

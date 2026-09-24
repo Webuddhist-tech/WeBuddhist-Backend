@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
@@ -47,7 +48,7 @@ async def invalidate_plan_day_detail_cache(plan_id: UUID, day_number: int) -> in
 
 
 async def invalidate_all_plan_day_detail_caches_for_plan(db: Session, plan_id: UUID) -> int:
-    days = get_days_by_plan_id(db=db, plan_id=plan_id)
+    days = await run_in_threadpool(get_days_by_plan_id, db=db, plan_id=plan_id)
     keys_deleted = 0
     for day in days:
         keys_deleted += await invalidate_plan_day_detail_cache(

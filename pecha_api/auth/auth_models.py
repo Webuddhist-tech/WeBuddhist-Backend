@@ -1,7 +1,7 @@
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from pecha_api.auth.auth_enums import RegistrationSource
 
@@ -12,6 +12,21 @@ class CreateUserRequest(BaseModel):
     email: Optional[str] = None
     password: Optional[str] = None
     phone_number: Optional[str] = None
+
+    @field_validator("email", "password", "phone_number", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> Any:
+        """Treat a blank identifier as absent.
+
+        `email` and `phone_number` are UNIQUE columns, and Postgres exempts
+        NULL from a unique index but not ''. A client that sends '' for the
+        identifier its user does not have would take the single ''-slot for
+        the whole table, and every later caller doing the same collides with
+        it and is rejected as an already-existing user.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 class CreateSocialUserRequest(BaseModel):
     create_user_request: CreateUserRequest

@@ -9,6 +9,7 @@ from fastapi import HTTPException
 import pecha_api.app  # noqa: F401
 
 from pecha_api.events.event_response_models import CreateEventRequest
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.events.event_service import create_event_service
 from pecha_api.events.notification_dispatch_service import (
     enqueue_event_notification,
@@ -187,6 +188,10 @@ class TestGetEventNotificationTargets:
             sender_id=author.id,
             skip=0,
             limit=100,
+            notification_type=NotificationType.EVENT,
+            # The audience is the whole group, but someone who muted this one
+            # event should not hear about it anyway.
+            event_id=event.id,
         )
 
     @patch("pecha_api.events.notification_service.get_event_by_id", return_value=None)
@@ -230,6 +235,8 @@ class TestCreateEventEnqueuesNotification:
             location=None,
             start_date=now,
             end_date=now,
+            timezone=None,
+            notifications_enabled=True,
             image_url=None,
             featured=False,
             event_format="hybrid",

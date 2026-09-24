@@ -4,11 +4,11 @@ import logging
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from starlette import status
-from typing import List, Dict, Optional
+from typing import List, Dict, NoReturn, Optional
 from uuid import UUID
 
 from pecha_api.config import TIME_FORMAT_PATTERN, get
-from pecha_api.plans.authors.plan_authors_service import safe_get_image_url
+from pecha_api.plans.authors.plan_authors_service import get_image_url, safe_get_image_url
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.db.database import SessionLocal
@@ -20,6 +20,9 @@ from pecha_api.texts.texts_openpecha_api import fetch_edition_text_id
 from pecha_api.plans.users.plan_users_models import UserPlanProgress
 from pecha_api.plans.users.recitation_collection.recitation_collection_models import (
     RecitationCollection,
+)
+from pecha_api.plans.users.recitation_collection.recitation_collection_repository import (
+    get_collection_item_counts as get_recitation_collection_item_counts,
 )
 from pecha_api.group_recitation_collection.models import (
     GroupRecitationCollection,
@@ -42,6 +45,10 @@ from pecha_api.accumulator.accumulator_models import Accumulator
 from pecha_api.accumulator.accumulator_enums import AccumulatorType
 from pecha_api.accumulator.accumulator_service import (
     resolve_accumulator_bookmark_mala_image_url,
+)
+from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
+from pecha_api.group_accumulator.group_accumulator_repository import (
+    get_joined_group_accumulator_ids_by_user,
 )
 from pecha_api.mantra.mantra_repository import get_mantras_by_ids
 from pecha_api.recitations.recitations_services import (
@@ -81,6 +88,7 @@ from .response_message import (
     DUPLICATE_RECITATION_COLLECTION,
     DUPLICATE_GROUP_RECITATION_COLLECTION,
     DUPLICATE_ACCUMULATOR,
+    DUPLICATE_GROUP_ACCUMULATOR,
     INVALID_TIME_FORMAT,
     INVALID_TIMER_DURATION,
     ROUTINE_ALREADY_EXISTS,
@@ -94,6 +102,9 @@ from .response_message import (
     SERIES_NOT_FOUND,
     PRESET_ACCUMULATOR_NOT_FOUND,
     ACCUMULATOR_ID_REQUIRED,
+    GROUP_ACCUMULATOR_ID_REQUIRED,
+    GROUP_ACCUMULATOR_NOT_FOUND,
+    GROUP_ACCUMULATOR_NOT_JOINED,
 )
 from .routines_response_models import (
     SessionRequest,
@@ -169,55 +180,52 @@ def _time_block_dto(
         id=time_block.id,
         time=display_time,
         time_int=display_time_int,
+        title=time_block.title,
         notification_enabled=time_block.notification_enabled,
         sessions=sessions,
     )
 
 
+def _raise_unprocessable(message: str) -> NoReturn:
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=ResponseError(error=BAD_REQUEST, message=message).model_dump(),
+    )
+
+
+# Session types that report a type-specific message when source_id is missing;
+# everything else falls back to SOURCE_ID_REQUIRED.
+_MISSING_SOURCE_ID_MESSAGES = {
+    SessionType.ACCUMULATOR: ACCUMULATOR_ID_REQUIRED,
+    SessionType.GROUP_ACCUMULATOR: GROUP_ACCUMULATOR_ID_REQUIRED,
+}
+
+
+def _validate_session_source(session: SessionRequest) -> None:
+    """TIMER sessions carry a positive duration_ms; every other type carries a
+    source_id."""
+    if session.session_type == SessionType.TIMER:
+        if session.duration_ms is None or session.duration_ms <= 0:
+            _raise_unprocessable(INVALID_TIMER_DURATION)
+        return
+
+    if session.source_id is None:
+        _raise_unprocessable(
+            _MISSING_SOURCE_ID_MESSAGES.get(session.session_type, SOURCE_ID_REQUIRED)
+        )
+
+
 def _validate_time_block_request(request: CreateTimeBlockRequest) -> None:
     # At least one session required
     if not request.sessions:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=ResponseError(
-                error=BAD_REQUEST, message=SESSIONS_REQUIRED
-            ).model_dump(),
-        )
+        _raise_unprocessable(SESSIONS_REQUIRED)
 
     # Time must be valid HH:MM 24-hour format
     if not TIME_FORMAT_PATTERN.match(request.time):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=ResponseError(
-                error=BAD_REQUEST, message=INVALID_TIME_FORMAT
-            ).model_dump(),
-        )
+        _raise_unprocessable(INVALID_TIME_FORMAT)
 
-    # TIMER sessions carry a positive duration_ms; PLAN/SERIES/RECITATION carry a source_id
     for session in request.sessions:
-        if session.session_type == SessionType.TIMER:
-            if session.duration_ms is None or session.duration_ms <= 0:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=ResponseError(
-                        error=BAD_REQUEST, message=INVALID_TIMER_DURATION
-                    ).model_dump(),
-                )
-        elif session.session_type == SessionType.ACCUMULATOR:
-            if session.source_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=ResponseError(
-                        error=BAD_REQUEST, message=ACCUMULATOR_ID_REQUIRED
-                    ).model_dump(),
-                )
-        elif session.source_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=ResponseError(
-                    error=BAD_REQUEST, message=SOURCE_ID_REQUIRED
-            ).model_dump(),
-        )
+        _validate_session_source(session)
 
     _validate_session_uniqueness(request.sessions)
 
@@ -285,6 +293,19 @@ def _validate_session_uniqueness(sessions: List[SessionRequest]) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=ResponseError(
                 error=BAD_REQUEST, message=DUPLICATE_ACCUMULATOR
+            ).model_dump(),
+        )
+
+    group_accumulator_source_ids = [
+        session.source_id
+        for session in sessions
+        if session.session_type == SessionType.GROUP_ACCUMULATOR
+    ]
+    if len(group_accumulator_source_ids) != len(set(group_accumulator_source_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=ResponseError(
+                error=BAD_REQUEST, message=DUPLICATE_GROUP_ACCUMULATOR
             ).model_dump(),
         )
 
@@ -394,16 +415,31 @@ def _normalize_plan_sessions_to_series(db, sessions: List[SessionRequest]) -> Li
 
 
 def _validate_accumulators(db, sessions: List[SessionRequest]) -> None:
-    preset_ids = [
+    raw_ids = [
         session.source_id
         for session in sessions
         if session.session_type == SessionType.ACCUMULATOR and session.source_id is not None
     ]
-    if not preset_ids:
+    if not raw_ids:
         return
 
+    # source_id is a str (RECITATION sessions carry non-UUID pecha text ids),
+    # so normalize both sides before comparing against the UUID column values.
+    preset_ids = set()
+    for raw_id in raw_ids:
+        try:
+            preset_ids.add(_as_uuid(raw_id))
+        except (ValueError, AttributeError, TypeError):
+            # A non-UUID source_id can never match a preset row.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ResponseError(
+                    error=BAD_REQUEST, message=PRESET_ACCUMULATOR_NOT_FOUND
+                ).model_dump(),
+            )
+
     found_ids = {
-        row.id
+        _as_uuid(row.id)
         for row in db.query(Accumulator.id)
         .filter(
             Accumulator.id.in_(preset_ids),
@@ -412,7 +448,7 @@ def _validate_accumulators(db, sessions: List[SessionRequest]) -> None:
         )
         .all()
     }
-    if set(preset_ids) - found_ids:
+    if preset_ids - found_ids:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ResponseError(
@@ -421,10 +457,75 @@ def _validate_accumulators(db, sessions: List[SessionRequest]) -> None:
         )
 
 
-def _prepare_sessions(db, sessions: List[SessionRequest]) -> List[SessionRequest]:
+def _validate_group_accumulators(db, sessions: List[SessionRequest], user_id: UUID) -> None:
+    """A GROUP_ACCUMULATOR session's source_id is a group_accumulators.id.
+
+    The user must already have joined it: joining runs its own authorization
+    (published group, join policy, private-group request flow) in
+    join_group_accumulator_service, so the routine must not join on their
+    behalf and silently bypass those gates.
+    """
+    raw_ids = [
+        session.source_id
+        for session in sessions
+        if session.session_type == SessionType.GROUP_ACCUMULATOR
+        and session.source_id is not None
+    ]
+    if not raw_ids:
+        return
+
+    group_accumulator_ids = set()
+    for raw_id in raw_ids:
+        try:
+            group_accumulator_ids.add(_as_uuid(raw_id))
+        except (ValueError, AttributeError, TypeError):
+            # A non-UUID source_id can never match a group accumulator row.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ResponseError(
+                    error=BAD_REQUEST, message=GROUP_ACCUMULATOR_NOT_FOUND
+                ).model_dump(),
+            )
+
+    found_ids = {
+        _as_uuid(row.id)
+        for row in db.query(GroupAccumulator.id)
+        .filter(
+            GroupAccumulator.id.in_(group_accumulator_ids),
+            GroupAccumulator.deleted_at.is_(None),
+        )
+        .all()
+    }
+    if group_accumulator_ids - found_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ResponseError(
+                error=BAD_REQUEST, message=GROUP_ACCUMULATOR_NOT_FOUND
+            ).model_dump(),
+        )
+
+    joined_ids = {
+        _as_uuid(joined_id)
+        for joined_id in get_joined_group_accumulator_ids_by_user(
+            db=db,
+            user_id=user_id,
+            group_accumulator_ids=list(group_accumulator_ids),
+        )
+    }
+    if group_accumulator_ids - joined_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ResponseError(
+                error=BAD_REQUEST, message=GROUP_ACCUMULATOR_NOT_JOINED
+            ).model_dump(),
+        )
+
+
+def _prepare_sessions(db, sessions: List[SessionRequest], user_id: UUID) -> List[SessionRequest]:
     sessions = _normalize_plan_sessions_to_series(db=db, sessions=sessions)
     _validate_session_uniqueness(sessions)
     _validate_accumulators(db=db, sessions=sessions)
+    _validate_group_accumulators(db=db, sessions=sessions, user_id=user_id)
     return sessions
 
 
@@ -782,18 +883,10 @@ def _resolve_recitation_collection_sessions(
     )
     collection_map = {collection.id: collection for collection in collections}
 
-    # Get item counts for each collection
-    from sqlalchemy import func
-    from pecha_api.plans.users.recitation_collection.recitation_collection_models import RecitationCollectionItem
-
-    item_counts = dict(
-        db.query(
-            RecitationCollectionItem.recitation_collection_id,
-            func.count(RecitationCollectionItem.id)
-        )
-        .filter(RecitationCollectionItem.recitation_collection_id.in_(collection_ids))
-        .group_by(RecitationCollectionItem.recitation_collection_id)
-        .all()
+    # Item counts come from the shared helper so soft-deleted items
+    # (deleted_at set) are excluded, matching every other collection view.
+    item_counts = get_recitation_collection_item_counts(
+        db=db, collection_ids=collection_ids
     )
 
     resolved = []
@@ -988,6 +1081,51 @@ def _resolve_accumulator_sessions(
     return resolved
 
 
+def _resolve_group_accumulator_sessions(
+    db,
+    group_accumulator_sessions: List[RoutineSession],
+) -> List[SessionDTO]:
+    """Resolve group accumulator sessions; source_id is the group accumulator id."""
+    if not group_accumulator_sessions:
+        return []
+
+    group_accumulator_ids = [
+        _as_uuid(session.source_id) for session in group_accumulator_sessions
+    ]
+    group_accumulators = (
+        db.query(GroupAccumulator)
+        .filter(
+            GroupAccumulator.id.in_(group_accumulator_ids),
+            GroupAccumulator.deleted_at.is_(None),
+        )
+        .all()
+    )
+    group_accumulator_map = {
+        group_accumulator.id: group_accumulator
+        for group_accumulator in group_accumulators
+    }
+
+    resolved = []
+    for session in group_accumulator_sessions:
+        group_accumulator_id = _as_uuid(session.source_id)
+        group_accumulator = group_accumulator_map.get(group_accumulator_id)
+        if group_accumulator is None:
+            continue
+
+        resolved.append(
+            SessionDTO(
+                id=session.id,
+                session_type=session.session_type,
+                source_id=str(session.source_id) if session.source_id is not None else None,
+                group_accumulator_id=group_accumulator_id,
+                title=group_accumulator.title,
+                image=get_image_url(group_accumulator.image_key),
+                display_order=session.display_order,
+            )
+        )
+    return resolved
+
+
 def _series_metadata_language(metadata) -> Optional[str]:
     if metadata is None:
         return None
@@ -1131,6 +1269,11 @@ async def _resolve_sessions(db, sessions: List[RoutineSession], user_id: UUID, l
         for session in sessions
         if session.session_type == SessionType.ACCUMULATOR
     ]
+    group_accumulator_sessions = [
+        session
+        for session in sessions
+        if session.session_type == SessionType.GROUP_ACCUMULATOR
+    ]
 
     resolved_plans = _resolve_plan_sessions(db=db, plan_sessions=plan_sessions, user_id=user_id)
     resolved_series = _resolve_series_sessions(db=db, series_sessions=series_sessions, user_id=user_id, language=language)
@@ -1150,6 +1293,10 @@ async def _resolve_sessions(db, sessions: List[RoutineSession], user_id: UUID, l
         user_id=user_id,
         language=language,
     )
+    resolved_group_accumulators = _resolve_group_accumulator_sessions(
+        db=db,
+        group_accumulator_sessions=group_accumulator_sessions,
+    )
 
     resolved = (
         resolved_plans
@@ -1159,6 +1306,7 @@ async def _resolve_sessions(db, sessions: List[RoutineSession], user_id: UUID, l
         + resolved_group_collections
         + resolved_timers
         + resolved_accumulators
+        + resolved_group_accumulators
     )
     resolved.sort(key=lambda session: session.display_order)
 
@@ -1190,6 +1338,7 @@ async def build_time_block_dto(
         id=time_block.id,
         time=display_time,
         time_int=display_time_int,
+        title=time_block.title,
         notification_enabled=time_block.notification_enabled,
         sessions=resolved_sessions,
     )
@@ -1205,7 +1354,9 @@ async def create_routine_with_time_block(
     effective_timezone = _resolve_effective_timezone(timezone_name)
 
     with SessionLocal() as db:
-        prepared_sessions = _prepare_sessions(db=db, sessions=request.sessions)
+        prepared_sessions = _prepare_sessions(
+            db=db, sessions=request.sessions, user_id=current_user.id
+        )
 
         # Check routine doesn't already exist (business rule: exclude soft-deleted)
         existing_routine = get_routine_by_user_id(
@@ -1234,6 +1385,7 @@ async def create_routine_with_time_block(
             time=local_time,
             time_utc=time_utc,
             time_int=time_int,
+            title=request.title,
             notification_enabled=request.notification_enabled,
         )
         saved_time_block = save_time_block(db=db, time_block=time_block)
@@ -1379,7 +1531,9 @@ async def add_time_block_to_routine(
         _check_duplicate_collections(db=db, routine_id=routine_id, sessions=request.sessions)
         _check_duplicate_time(db=db, routine_id=routine_id, time=local_time)
 
-        prepared_sessions = _prepare_sessions(db=db, sessions=request.sessions)
+        prepared_sessions = _prepare_sessions(
+            db=db, sessions=request.sessions, user_id=current_user.id
+        )
 
         # Save time block
         time_block = RoutineTimeBlock(
@@ -1387,6 +1541,7 @@ async def add_time_block_to_routine(
             time=local_time,
             time_utc=time_utc,
             time_int=time_int,
+            title=request.title,
             notification_enabled=request.notification_enabled,
         )
         saved_time_block = save_time_block(db=db, time_block=time_block)
@@ -1485,7 +1640,9 @@ async def update_time_block_service(
                 ).model_dump(),
             )
 
-        prepared_sessions = _prepare_sessions(db=db, sessions=request.sessions)
+        prepared_sessions = _prepare_sessions(
+            db=db, sessions=request.sessions, user_id=current_user.id
+        )
 
         _validate_and_sync_update(
             db=db,
@@ -1504,6 +1661,7 @@ async def update_time_block_service(
             time=local_time,
             time_utc=time_utc,
             time_int=time_int,
+            title=request.title,
             notification_enabled=request.notification_enabled,
         )
 

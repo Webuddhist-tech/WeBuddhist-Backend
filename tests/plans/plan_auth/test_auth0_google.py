@@ -91,7 +91,6 @@ def test_verify_auth0_google_token_returns_normalized_identity():
     "payload",
     [
         _payload(sub="auth0|abc"),
-        _payload(**{"https://webuddhist.com/email_verified": False}),
         _payload(**{"https://webuddhist.com/email": None, "email": None}),
     ],
 )

@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from datetime import datetime, time, timezone
 
 import pytest
+from pydantic import ValidationError
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -26,12 +27,21 @@ from pecha_api.routines.routines_service import (
     _normalize_plan_sessions_to_series,
     _validate_session_uniqueness,
     _validate_accumulators,
+    _validate_group_accumulators,
     _resolve_accumulator_sessions,
+    _resolve_group_accumulator_sessions,
     build_session_models,
     group_sessions_by_block,
     build_time_block_dto,
 )
 from pecha_api.plans.media.media_response_models import ImageUrlModel
+from pecha_api.plans.users.recitation_collection.recitation_collection_models import (
+    RecitationCollection,
+    RecitationCollectionItem,
+)
+from pecha_api.plans.users.recitation_collection.recitation_collection_repository import (
+    soft_delete_collection_item,
+)
 from pecha_api.routines.routines_response_models import (
     CreateTimeBlockRequest,
     UpdateTimeBlockRequest,
@@ -58,6 +68,10 @@ from pecha_api.routines.response_message import (
     DUPLICATE_ACCUMULATOR,
     ACCUMULATOR_ID_REQUIRED,
     PRESET_ACCUMULATOR_NOT_FOUND,
+    DUPLICATE_GROUP_ACCUMULATOR,
+    GROUP_ACCUMULATOR_ID_REQUIRED,
+    GROUP_ACCUMULATOR_NOT_FOUND,
+    GROUP_ACCUMULATOR_NOT_JOINED,
 )
 
 def _mock_session_with_db():
@@ -368,6 +382,7 @@ async def test_create_routine_success():
         id=time_block_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -513,6 +528,7 @@ async def test_create_routine_without_timezone_defaults_to_utc():
         id=time_block_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=True,
         time_utc=time(12, 0, tzinfo=timezone.utc),
     )
@@ -602,6 +618,7 @@ async def test_create_routine_with_timer_session():
         id=time_block_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -1061,6 +1078,7 @@ async def test_add_time_block_success():
         id=time_block_id,
         time="08:00",
         time_int=800,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -1254,6 +1272,7 @@ async def test_add_time_block_allows_same_plan_in_different_time_block():
         id=time_block_id,
         time="08:00",
         time_int=800,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -1333,6 +1352,7 @@ async def test_add_time_block_allows_same_series_in_different_time_block():
         id=time_block_id,
         time="08:00",
         time_int=800,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -1961,12 +1981,14 @@ async def test_update_time_block_service_success():
         routine_id=routine_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=True,
     )
     updated_time_block = SimpleNamespace(
         id=time_block_id,
         time="14:00",
         time_int=1400,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -2201,6 +2223,7 @@ async def test_update_time_block_service_allows_same_plan_in_different_time_bloc
         id=time_block_id,
         time="14:00",
         time_int=1400,
+        title=None,
         notification_enabled=True,
     )
     mock_time_block = SimpleNamespace(
@@ -2208,6 +2231,7 @@ async def test_update_time_block_service_allows_same_plan_in_different_time_bloc
         routine_id=routine_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=True,
     )
     saved_session = SimpleNamespace(
@@ -2339,6 +2363,7 @@ async def test_get_user_routine_success():
         routine_id=routine_id,
         time="08:00",
         time_int=800,
+        title=None,
         notification_enabled=True,
     )
     mock_session = SimpleNamespace(
@@ -2456,6 +2481,7 @@ async def test_get_user_routine_with_pagination():
         routine_id=routine_id,
         time="12:00",
         time_int=1200,
+        title=None,
         notification_enabled=False,
     )
 
@@ -2503,6 +2529,7 @@ async def test_get_user_routine_with_multiple_time_blocks():
             routine_id=routine_id,
             time="06:00",
             time_int=600,
+            title=None,
             notification_enabled=True,
         ),
         SimpleNamespace(
@@ -2510,6 +2537,7 @@ async def test_get_user_routine_with_multiple_time_blocks():
             routine_id=routine_id,
             time="20:00",
             time_int=2000,
+            title=None,
             notification_enabled=True,
         ),
     ]
@@ -2652,6 +2680,7 @@ async def test_build_time_block_dto():
         id=time_block_id,
         time="08:00",
         time_int=800,
+        title=None,
         notification_enabled=True,
     )
     session = SimpleNamespace(
@@ -2686,6 +2715,140 @@ async def test_build_time_block_dto():
         assert result.notification_enabled is True
         assert len(result.sessions) == 1
         assert result.sessions[0].title == "Test Plan"
+
+
+@pytest.mark.asyncio
+async def test_build_time_block_dto_returns_title():
+    """The time block's own title is surfaced on the DTO."""
+    time_block_id = uuid.uuid4()
+
+    time_block = SimpleNamespace(
+        id=time_block_id,
+        time="08:00",
+        time_int=800,
+        title="Vesak Day Practice",
+        notification_enabled=True,
+    )
+
+    result = await build_time_block_dto(
+        db=MagicMock(), time_block=time_block, sessions=[], user_id=uuid.uuid4()
+    )
+
+    assert result.title == "Vesak Day Practice"
+    assert result.sessions == []
+
+
+@pytest.mark.asyncio
+async def test_update_time_block_service_persists_title():
+    """The requested title is passed through to the repository update."""
+    user_id = uuid.uuid4()
+    routine_id = uuid.uuid4()
+    time_block_id = uuid.uuid4()
+
+    request = UpdateTimeBlockRequest(
+        time="14:00",
+        time_int=1400,
+        title="  Morning Practice  ",
+        sessions=[
+            SessionRequest(
+                session_type=SessionType.TIMER, duration_ms=120000, display_order=0
+            )
+        ],
+    )
+
+    _db_mock, session_cm = _mock_session_with_db()
+
+    mock_routine = SimpleNamespace(id=routine_id, user_id=user_id, timezone="UTC")
+    mock_time_block = SimpleNamespace(
+        id=time_block_id,
+        routine_id=routine_id,
+        time="12:00",
+        time_int=1200,
+        title=None,
+        notification_enabled=True,
+    )
+    updated_time_block = SimpleNamespace(
+        id=time_block_id,
+        time="14:00",
+        time_int=1400,
+        title="Morning Practice",
+        notification_enabled=True,
+    )
+
+    with patch(
+        "pecha_api.routines.routines_service.validate_and_extract_user_details",
+        return_value=SimpleNamespace(id=user_id),
+    ), patch(
+        "pecha_api.routines.routines_service.SessionLocal",
+        return_value=session_cm,
+    ), patch(
+        "pecha_api.routines.routines_service.get_routine_by_id_and_user",
+        return_value=mock_routine,
+    ), patch(
+        "pecha_api.routines.routines_service.get_time_block_by_id_and_routine",
+        return_value=mock_time_block,
+    ), patch(
+        "pecha_api.routines.routines_service.get_time_block_by_routine_and_time",
+        return_value=None,
+    ), patch(
+        "pecha_api.routines.routines_service.delete_sessions_by_time_block_id",
+    ), patch(
+        "pecha_api.routines.routines_service.update_time_block_repo",
+        return_value=updated_time_block,
+    ) as update_repo_mock, patch(
+        "pecha_api.routines.routines_service.build_session_models",
+        return_value=[MagicMock()],
+    ), patch(
+        "pecha_api.routines.routines_service.save_sessions",
+        return_value=[],
+    ):
+        result = await update_time_block_service(
+            token="token123",
+            routine_id=routine_id,
+            time_block_id=time_block_id,
+            request=request,
+        )
+
+    assert update_repo_mock.call_args.kwargs["title"] == "Morning Practice"
+    assert result.title == "Morning Practice"
+
+
+def test_time_block_request_title_defaults_to_none():
+    request = CreateTimeBlockRequest(
+        time="08:00",
+        time_int=800,
+        sessions=[
+            SessionRequest(
+                session_type=SessionType.TIMER, duration_ms=120000, display_order=0
+            )
+        ],
+    )
+    assert request.title is None
+
+
+@pytest.mark.parametrize(
+    "raw_title,expected",
+    [
+        ("  Vesak Day Practice  ", "Vesak Day Practice"),
+        ("   ", None),
+        ("", None),
+    ],
+)
+def test_time_block_request_title_is_normalised(raw_title, expected):
+    sessions = [
+        SessionRequest(
+            session_type=SessionType.TIMER, duration_ms=120000, display_order=0
+        )
+    ]
+    create_request = CreateTimeBlockRequest(
+        time="08:00", time_int=800, title=raw_title, sessions=sessions
+    )
+    update_request = UpdateTimeBlockRequest(
+        time="08:00", time_int=800, title=raw_title, sessions=sessions
+    )
+
+    assert create_request.title == expected
+    assert update_request.title == expected
 
 
 @pytest.mark.asyncio
@@ -2903,6 +3066,91 @@ def test_resolve_recitation_collection_sessions_defaults_item_count_to_zero():
     assert result[0].image is None
 
 
+def _make_sqlite_collection_db():
+    """Real in-memory SQLite session. The mocked db above stubs out the count
+    query entirely, so it cannot see whether soft-deleted items are filtered -
+    this exercises the actual SQL."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    RecitationCollection.metadata.create_all(
+        bind=engine,
+        tables=[RecitationCollection.__table__, RecitationCollectionItem.__table__],
+    )
+    return sessionmaker(bind=engine)()
+
+
+def test_resolve_recitation_collection_sessions_excludes_soft_deleted_items():
+    """item_count must not count items removed from the collection.
+
+    Collection items are soft-deleted (deleted_at is stamped, the row stays so
+    chant completion history survives), so a count that does not filter on
+    deleted_at reports the pre-deletion number forever.
+    """
+    user_id = uuid.uuid4()
+    db = _make_sqlite_collection_db()
+
+    now = datetime.now(timezone.utc).isoformat()
+    collection = RecitationCollection(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        name="Daily Chants",
+        img_url="collections/img.jpg",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(collection)
+    db.commit()
+
+    for order, text_id in enumerate(["text-1", "text-2", "text-3"], start=1):
+        db.add(
+            RecitationCollectionItem(
+                id=uuid.uuid4(),
+                recitation_collection_id=collection.id,
+                text_id=text_id,
+                display_order=order,
+            )
+        )
+    db.commit()
+
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_type=SessionType.RECITATION_COLLECTION,
+        source_id=collection.id,
+        display_order=0,
+    )
+
+    with patch(
+        "pecha_api.routines.routines_service.safe_get_image_url",
+        return_value=None,
+    ):
+        before = _resolve_recitation_collection_sessions(
+            db=db, collection_sessions=[session], user_id=user_id
+        )
+        assert before[0].item_count == 3
+
+        # Remove two of the three items the way the API does.
+        removed = (
+            db.query(RecitationCollectionItem)
+            .filter(RecitationCollectionItem.text_id.in_(["text-2", "text-3"]))
+            .all()
+        )
+        for item in removed:
+            soft_delete_collection_item(db=db, item=item)
+
+        after = _resolve_recitation_collection_sessions(
+            db=db, collection_sessions=[session], user_id=user_id
+        )
+
+    assert after[0].item_count == 1
+
+
 def test_resolve_group_recitation_collection_sessions_empty():
     result = _resolve_group_recitation_collection_sessions(db=MagicMock(), collection_sessions=[])
     assert result == []
@@ -3072,6 +3320,36 @@ def test_validate_accumulators_not_found():
     assert exc_info.value.detail["message"] == PRESET_ACCUMULATOR_NOT_FOUND
 
 
+def test_validate_accumulators_found_does_not_raise():
+    """source_id is stored as a str while Accumulator.id comes back as a UUID;
+    the two must still compare equal."""
+    preset_id = uuid.uuid4()
+    sessions = [
+        SessionRequest(
+            session_type=SessionType.ACCUMULATOR,
+            accumulator_id=preset_id,
+            display_order=0,
+        )
+    ]
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = [SimpleNamespace(id=preset_id)]
+    db.query.return_value = query_chain
+
+    _validate_accumulators(db=db, sessions=sessions)
+
+
+def test_accumulator_session_rejects_non_uuid_source_id():
+    """Only RECITATION sessions may carry a non-UUID source_id."""
+    with pytest.raises(ValidationError):
+        SessionRequest(
+            session_type=SessionType.ACCUMULATOR,
+            source_id="not-a-uuid",
+            display_order=0,
+        )
+
+
 def test_resolve_accumulator_sessions_success():
     user_id = uuid.uuid4()
     preset_id = uuid.uuid4()
@@ -3180,3 +3458,282 @@ def test_resolve_accumulator_sessions_missing_preset_skipped():
         db=db, accumulator_sessions=[session], user_id=user_id
     )
     assert result == []
+
+
+# --- GROUP_ACCUMULATOR session type ---------------------------------------
+
+
+def test_group_accumulator_session_request_maps_id_to_source_id():
+    group_accumulator_id = uuid.uuid4()
+    session = SessionRequest(
+        session_type=SessionType.GROUP_ACCUMULATOR,
+        group_accumulator_id=group_accumulator_id,
+        display_order=0,
+    )
+    assert session.source_id == str(group_accumulator_id)
+
+
+def test_group_accumulator_session_request_maps_source_id_to_id():
+    group_accumulator_id = uuid.uuid4()
+    session = SessionRequest(
+        session_type=SessionType.GROUP_ACCUMULATOR,
+        source_id=str(group_accumulator_id),
+        display_order=0,
+    )
+    assert session.group_accumulator_id == group_accumulator_id
+
+
+def test_group_accumulator_session_dto_serialization():
+    group_accumulator_id = uuid.uuid4()
+    dto = SessionDTO(
+        id=uuid.uuid4(),
+        session_type=SessionType.GROUP_ACCUMULATOR,
+        source_id=str(group_accumulator_id),
+        group_accumulator_id=group_accumulator_id,
+        title="Group Mani",
+        display_order=0,
+    )
+    data = dto.model_dump()
+    assert data["group_accumulator_id"] == group_accumulator_id
+    assert "source_id" not in data
+    assert "accumulator_id" not in data
+    assert "duration_ms" not in data
+
+
+def test_accumulator_session_dto_omits_group_accumulator_id():
+    accumulator_id = uuid.uuid4()
+    dto = SessionDTO(
+        id=uuid.uuid4(),
+        session_type=SessionType.ACCUMULATOR,
+        source_id=str(accumulator_id),
+        accumulator_id=accumulator_id,
+        display_order=0,
+    )
+    assert "group_accumulator_id" not in dto.model_dump()
+
+
+def test_validate_group_accumulator_session_requires_id():
+    request = CreateTimeBlockRequest(
+        time="08:00",
+        time_int=800,
+        sessions=[
+            SessionRequest(
+                session_type=SessionType.GROUP_ACCUMULATOR,
+                display_order=0,
+            )
+        ],
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_time_block_request(request)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["message"] == GROUP_ACCUMULATOR_ID_REQUIRED
+
+
+def test_validate_duplicate_group_accumulator_in_time_block():
+    group_accumulator_id = uuid.uuid4()
+    sessions = [
+        SessionRequest(
+            session_type=SessionType.GROUP_ACCUMULATOR,
+            group_accumulator_id=group_accumulator_id,
+            display_order=0,
+        ),
+        SessionRequest(
+            session_type=SessionType.GROUP_ACCUMULATOR,
+            group_accumulator_id=group_accumulator_id,
+            display_order=1,
+        ),
+    ]
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_session_uniqueness(sessions)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["message"] == DUPLICATE_GROUP_ACCUMULATOR
+
+
+def _group_accumulator_session_request(group_accumulator_id):
+    return [
+        SessionRequest(
+            session_type=SessionType.GROUP_ACCUMULATOR,
+            group_accumulator_id=group_accumulator_id,
+            display_order=0,
+        )
+    ]
+
+
+def test_validate_group_accumulators_not_found():
+    group_accumulator_id = uuid.uuid4()
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = []
+    db.query.return_value = query_chain
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_group_accumulators(
+            db=db,
+            sessions=_group_accumulator_session_request(group_accumulator_id),
+            user_id=uuid.uuid4(),
+        )
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["message"] == GROUP_ACCUMULATOR_NOT_FOUND
+
+
+def test_validate_group_accumulators_requires_membership():
+    """Joining runs its own authorization, so the routine must not join on the
+    user's behalf; an unjoined group accumulator is rejected."""
+    group_accumulator_id = uuid.uuid4()
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = [SimpleNamespace(id=group_accumulator_id)]
+    db.query.return_value = query_chain
+
+    with patch(
+        "pecha_api.routines.routines_service.get_joined_group_accumulator_ids_by_user",
+        return_value=[],
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_group_accumulators(
+                db=db,
+                sessions=_group_accumulator_session_request(group_accumulator_id),
+                user_id=uuid.uuid4(),
+            )
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["message"] == GROUP_ACCUMULATOR_NOT_JOINED
+
+
+def test_validate_group_accumulators_joined_does_not_raise():
+    group_accumulator_id = uuid.uuid4()
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = [SimpleNamespace(id=group_accumulator_id)]
+    db.query.return_value = query_chain
+
+    with patch(
+        "pecha_api.routines.routines_service.get_joined_group_accumulator_ids_by_user",
+        return_value=[group_accumulator_id],
+    ):
+        _validate_group_accumulators(
+            db=db,
+            sessions=_group_accumulator_session_request(group_accumulator_id),
+            user_id=uuid.uuid4(),
+        )
+
+
+def test_validate_group_accumulators_skips_when_no_such_session():
+    db = MagicMock()
+    _validate_group_accumulators(
+        db=db,
+        sessions=[
+            SessionRequest(
+                session_type=SessionType.TIMER,
+                duration_ms=1000,
+                display_order=0,
+            )
+        ],
+        user_id=uuid.uuid4(),
+    )
+    db.query.assert_not_called()
+
+
+def test_resolve_group_accumulator_sessions_success():
+    group_accumulator_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    session = SimpleNamespace(
+        id=session_id,
+        session_type=SessionType.GROUP_ACCUMULATOR,
+        source_id=str(group_accumulator_id),
+        display_order=3,
+    )
+    group_accumulator = SimpleNamespace(
+        id=group_accumulator_id,
+        title="Group Mani",
+        image_key=None,
+    )
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = [group_accumulator]
+    db.query.return_value = query_chain
+
+    resolved = _resolve_group_accumulator_sessions(
+        db=db, group_accumulator_sessions=[session]
+    )
+
+    assert len(resolved) == 1
+    dto = resolved[0]
+    assert dto.id == session_id
+    assert dto.session_type == SessionType.GROUP_ACCUMULATOR
+    assert dto.group_accumulator_id == group_accumulator_id
+    assert dto.title == "Group Mani"
+    assert dto.display_order == 3
+
+
+def test_resolve_group_accumulator_sessions_skips_missing():
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_type=SessionType.GROUP_ACCUMULATOR,
+        source_id=str(uuid.uuid4()),
+        display_order=0,
+    )
+    db = MagicMock()
+    query_chain = MagicMock()
+    query_chain.filter.return_value = query_chain
+    query_chain.all.return_value = []
+    db.query.return_value = query_chain
+
+    assert _resolve_group_accumulator_sessions(
+        db=db, group_accumulator_sessions=[session]
+    ) == []
+
+
+def test_resolve_group_accumulator_sessions_empty():
+    db = MagicMock()
+    assert _resolve_group_accumulator_sessions(
+        db=db, group_accumulator_sessions=[]
+    ) == []
+    db.query.assert_not_called()
+
+
+def test_build_session_models_persists_group_accumulator_source_id():
+    group_accumulator_id = uuid.uuid4()
+    time_block_id = uuid.uuid4()
+    models = build_session_models(
+        time_block_id=time_block_id,
+        sessions=_group_accumulator_session_request(group_accumulator_id),
+    )
+    assert len(models) == 1
+    assert models[0].session_type == SessionType.GROUP_ACCUMULATOR
+    assert models[0].source_id == str(group_accumulator_id)
+    assert models[0].duration_ms is None
+
+
+def _raw_session(session_type, source_id):
+    """A stand-in for SessionRequest that skips its UUID-format validator, to
+    reach the services' own defensive guard."""
+    return SimpleNamespace(session_type=session_type, source_id=source_id)
+
+
+def test_validate_accumulators_guards_non_uuid_source_id():
+    db = MagicMock()
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_accumulators(
+            db=db,
+            sessions=[_raw_session(SessionType.ACCUMULATOR, "not-a-uuid")],
+        )
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["message"] == PRESET_ACCUMULATOR_NOT_FOUND
+    db.query.assert_not_called()
+
+
+def test_validate_group_accumulators_guards_non_uuid_source_id():
+    db = MagicMock()
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_group_accumulators(
+            db=db,
+            sessions=[_raw_session(SessionType.GROUP_ACCUMULATOR, "not-a-uuid")],
+            user_id=uuid.uuid4(),
+        )
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["message"] == GROUP_ACCUMULATOR_NOT_FOUND
+    db.query.assert_not_called()

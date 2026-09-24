@@ -25,6 +25,21 @@ class _AsyncCursor:
 SEGMENT_UUID = "efb26a06-f373-450b-ba57-e7a8d4dd5b64"
 
 
+@pytest.mark.asyncio
+async def test_get_segment_by_pecha_segment_id_uses_dict_query():
+    mock_segment = MagicMock()
+
+    with patch.object(
+        Segment, "find_one", new_callable=AsyncMock, return_value=mock_segment
+    ) as mock_find_one:
+        result = await Segment.get_segment_by_pecha_segment_id(
+            pecha_segment_id="pecha-seg-1"
+        )
+
+    mock_find_one.assert_awaited_once_with({"pecha_segment_id": "pecha-seg-1"})
+    assert result is mock_segment
+
+
 def test_partition_segment_identifiers_splits_uuids_and_pecha_ids():
     uuids, pecha_ids = Segment._partition_segment_identifiers(
         [SEGMENT_UUID, "pecha-seg-1", "", SEGMENT_UUID, "pecha-seg-1"]

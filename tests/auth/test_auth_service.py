@@ -345,17 +345,17 @@ def test_create_user_with_email_success():
     with patch('pecha_api.auth.auth_service.save_user') as mock_save_user, \
             patch('pecha_api.auth.auth_service.get_hashed_password') as mock_get_hashed_password, \
             patch('pecha_api.auth.auth_service.generate_and_validate_username') as mock_generate_and_validate_username, \
-            patch('pecha_api.auth.auth_service.get_user_by_email_or_none') as mock_get_user_by_email_or_none:
+            patch('pecha_api.auth.auth_service.link_or_create_author_for_user') as mock_link_or_create_author:
         mock_user = MagicMock()
         mock_save_user.return_value = mock_user
         mock_get_hashed_password.return_value = "hashed_password123"
         mock_generate_and_validate_username.return_value = 'john_doe.0003'
-        mock_get_user_by_email_or_none.return_value = None
 
         response = create_user(create_user_request, registration_source)
 
         mock_get_hashed_password.assert_called_once_with("password123")
         mock_save_user.assert_called_once()
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
         assert response == mock_user
 
 
@@ -370,15 +370,15 @@ def test_create_user_with_google_success():
 
     with patch('pecha_api.auth.auth_service.save_user') as mock_save_user, \
             patch('pecha_api.auth.auth_service.generate_and_validate_username') as mock_generate_and_validate_username, \
-            patch('pecha_api.auth.auth_service.get_user_by_email_or_none') as mock_get_user_by_email_or_none:
+            patch('pecha_api.auth.auth_service.link_or_create_author_for_user') as mock_link_or_create_author:
         mock_user = MagicMock()
         mock_save_user.return_value = mock_user
         mock_generate_and_validate_username.return_value = 'john_doe.0003'
-        mock_get_user_by_email_or_none.return_value = None
 
         response = create_user(create_user_request, registration_source)
 
         mock_save_user.assert_called_once()
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
         assert response == mock_user
 
 
@@ -393,15 +393,44 @@ def test_create_user_with_facebook_success():
 
     with patch('pecha_api.auth.auth_service.save_user') as mock_save_user, \
             patch('pecha_api.auth.auth_service.generate_and_validate_username') as mock_generate_and_validate_username, \
-            patch('pecha_api.auth.auth_service.get_user_by_email_or_none') as mock_get_user_by_email_or_none:
+            patch('pecha_api.auth.auth_service.link_or_create_author_for_user') as mock_link_or_create_author:
         mock_user = MagicMock()
         mock_save_user.return_value = mock_user
         mock_generate_and_validate_username.return_value = 'john_doe.0003'
-        mock_get_user_by_email_or_none.return_value = None
 
         response = create_user(create_user_request, registration_source)
 
         mock_save_user.assert_called_once()
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
+        assert response == mock_user
+
+
+def test_create_user_links_existing_author_with_matching_email():
+    """A new website User whose email matches an existing Author gets
+    linked to that Author (Author.user_id) so both surfaces recognize the
+    same person - handled by link_or_create_author_for_user, not by
+    blocking the registration."""
+    create_user_request = CreateUserRequest(
+        firstname="John",
+        lastname="Doe",
+        email="author@example.com",
+        password="password123"
+    )
+    registration_source = RegistrationSource.EMAIL
+
+    with patch('pecha_api.auth.auth_service.save_user') as mock_save_user, \
+            patch('pecha_api.auth.auth_service.get_hashed_password') as mock_get_hashed_password, \
+            patch('pecha_api.auth.auth_service.generate_and_validate_username') as mock_generate_and_validate_username, \
+            patch('pecha_api.auth.auth_service.link_or_create_author_for_user') as mock_link_or_create_author:
+        mock_user = MagicMock()
+        mock_save_user.return_value = mock_user
+        mock_get_hashed_password.return_value = "hashed_password123"
+        mock_generate_and_validate_username.return_value = 'john_doe.0003'
+
+        response = create_user(create_user_request, registration_source)
+
+        mock_save_user.assert_called_once()
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
         assert response == mock_user
 
 
@@ -829,3 +858,35 @@ def test_retrieve_client_info():
         assert props.client_id == "test-client-id"
         assert props.domain == "test-domain"
         assert props.audience == "test-audience"
+
+
+def test_create_user_request_treats_blank_identifiers_as_absent() -> None:
+    """`email` and `phone_number` are UNIQUE columns: '' would claim the one
+    ''-slot in the table and make every later blank collide as a duplicate."""
+    from pecha_api.auth.auth_models import CreateUserRequest
+
+    request = CreateUserRequest(
+        firstname="Webuddhist",
+        lastname="_user_123456",
+        email="someone@example.com",
+        password="",
+        phone_number="",
+    )
+
+    assert request.phone_number is None
+    assert request.password is None
+    assert request.email == "someone@example.com"
+
+
+def test_create_user_request_keeps_real_identifiers() -> None:
+    from pecha_api.auth.auth_models import CreateUserRequest
+
+    request = CreateUserRequest(
+        firstname="Webuddhist",
+        lastname="_user_123456",
+        email="",
+        phone_number="+15551234567",
+    )
+
+    assert request.email is None
+    assert request.phone_number == "+15551234567"

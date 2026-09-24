@@ -13,7 +13,8 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_views imp
     upload_collection_image,
     add_items_to_collection,
     delete_collection,
-    delete_collection_item
+    delete_collection_item,
+    update_collection_item_display_order
 )
 from pecha_api.plans.users.recitation_collection.recitation_collection_response_models import (
     RecitationCollectionsResponse,
@@ -23,6 +24,7 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_response_
     CreateCollectionRequest,
     CreateCollectionResponse,
     UpdateCollectionRequest,
+    UpdateCollectionItemRequest,
     AddItemsRequest,
     AddItemsResponse
 )
@@ -1389,3 +1391,125 @@ class TestDeleteCollectionItemView:
             )
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+class TestUpdateCollectionItemDisplayOrderView:
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_views.update_collection_item_display_order_service')
+    @pytest.mark.asyncio
+    async def test_update_display_order_success(self, mock_service):
+        token = "valid_token"
+        collection_id = uuid4()
+        item_id = uuid4()
+        auth_credentials = TestDataFactory.create_auth_credentials(token=token)
+        request = UpdateCollectionItemRequest(display_order=1.4)
+        mock_response = TestDataFactory.create_collection_item_dto(
+            id=item_id,
+            display_order=1.4
+        )
+        mock_service.return_value = mock_response
+
+        result = await update_collection_item_display_order(
+            collection_id=collection_id,
+            item_id=item_id,
+            authentication_credential=auth_credentials,
+            request=request
+        )
+
+        assert isinstance(result, RecitationCollectionItemDTO)
+        assert result.id == item_id
+        assert result.display_order == 1.4
+        mock_service.assert_awaited_once_with(
+            token=token,
+            collection_id=collection_id,
+            item_id=item_id,
+            request=request
+        )
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_views.update_collection_item_display_order_service')
+    @pytest.mark.asyncio
+    async def test_update_display_order_collection_not_found(self, mock_service):
+        collection_id = uuid4()
+        item_id = uuid4()
+        auth_credentials = TestDataFactory.create_auth_credentials()
+        request = UpdateCollectionItemRequest(display_order=2.5)
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": f"Collection with ID {collection_id} not found"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order(
+                collection_id=collection_id,
+                item_id=item_id,
+                authentication_credential=auth_credentials,
+                request=request
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_views.update_collection_item_display_order_service')
+    @pytest.mark.asyncio
+    async def test_update_display_order_item_not_found(self, mock_service):
+        collection_id = uuid4()
+        item_id = uuid4()
+        auth_credentials = TestDataFactory.create_auth_credentials()
+        request = UpdateCollectionItemRequest(display_order=2.5)
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "NOT_FOUND", "message": f"Item with ID {item_id} not found"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order(
+                collection_id=collection_id,
+                item_id=item_id,
+                authentication_credential=auth_credentials,
+                request=request
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_views.update_collection_item_display_order_service')
+    @pytest.mark.asyncio
+    async def test_update_display_order_duplicate(self, mock_service):
+        collection_id = uuid4()
+        item_id = uuid4()
+        auth_credentials = TestDataFactory.create_auth_credentials()
+        request = UpdateCollectionItemRequest(display_order=1.0)
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": "Display order must be unique among items in this collection"}
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order(
+                collection_id=collection_id,
+                item_id=item_id,
+                authentication_credential=auth_credentials,
+                request=request
+            )
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @patch('pecha_api.plans.users.recitation_collection.recitation_collection_views.update_collection_item_display_order_service')
+    @pytest.mark.asyncio
+    async def test_update_display_order_invalid_token(self, mock_service):
+        collection_id = uuid4()
+        item_id = uuid4()
+        auth_credentials = TestDataFactory.create_auth_credentials(token="invalid_token")
+        request = UpdateCollectionItemRequest(display_order=1.4)
+        mock_service.side_effect = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_collection_item_display_order(
+                collection_id=collection_id,
+                item_id=item_id,
+                authentication_credential=auth_credentials,
+                request=request
+            )
+
+        assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED

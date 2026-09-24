@@ -21,6 +21,7 @@ from pecha_api.group_posts.notification_repository import (
     get_group_notification_title,
     get_user_by_email,
 )
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.plans.response_message import NOT_FOUND
 
 
@@ -86,6 +87,10 @@ def get_event_notification_targets(
             sender_id=author.id,
             skip=skip,
             limit=limit,
+            notification_type=NotificationType.EVENT,
+            # Group-wide audience, but someone who muted this one event is
+            # still entitled not to hear about it.
+            event_id=event.id,
         )
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)

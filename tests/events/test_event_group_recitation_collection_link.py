@@ -34,6 +34,8 @@ def _saved_event_stub(group_id=None, collection_id=None) -> SimpleNamespace:
         location=None,
         start_date=now,
         end_date=now,
+        timezone=None,
+        notifications_enabled=True,
         image_url=None,
         featured=False,
         event_format="hybrid",
@@ -261,4 +263,4 @@ def test_get_events_service_forwards_collection_filter_to_repository() -> None:
         )
 
     _, _, kwargs = mock_get_events.mock_calls[0]
-    assert kwargs["group_recitation_collection_id"] == collection_id
+    assert kwargs["content_filter"].group_recitation_collection_id == collection_id
