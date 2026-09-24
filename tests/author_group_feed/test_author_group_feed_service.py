@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone as tz
+from typing import Iterator, List
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -44,9 +45,39 @@ class MockPost:
         self.links = []
 
 
+# get_events_by_ids is resolved against every MockEvent built in a test, so
+# tests can hand MockEvents to get_one_shot_event_feed_keys as (id,
+# created_at) rows and get the same objects back for the page.
+_MOCK_EVENTS_BY_ID: dict = {}
+
+
+def _events_by_ids(
+    db: object,
+    event_ids: List[UUID],
+    restrict_group_ids: List[UUID],
+    exclude_plan_or_series_linked: bool = False,
+) -> List["MockEvent"]:
+    return [
+        _MOCK_EVENTS_BY_ID[event_id]
+        for event_id in event_ids
+        if event_id in _MOCK_EVENTS_BY_ID
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _mock_get_events_by_ids() -> Iterator[MagicMock]:
+    _MOCK_EVENTS_BY_ID.clear()
+    with patch(
+        "pecha_api.author_group_feed.service.get_events_by_ids",
+        side_effect=_events_by_ids,
+    ) as mock:
+        yield mock
+
+
 class MockEvent:
     def __init__(self, group_id, created_at=None):
         self.id = uuid4()
+        _MOCK_EVENTS_BY_ID[self.id] = self
         self.group_id = group_id
         self.created_at = created_at or datetime(2026, 8, 3, 12, 0, tzinfo=tz.utc)
         self.updated_at = None
@@ -91,7 +122,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -166,15 +197,15 @@ class TestGetAuthorGroupFeedService:
 
         _, event_kwargs = mock_get_events.call_args
         assert event_kwargs["restrict_group_ids"] == [joined_id]
-        assert event_kwargs["should_sort_newest_first"] is True
-        assert event_kwargs["not_ended_before"] is not None
+        # Ended events stay in the feed.
+        assert "not_ended_before" not in event_kwargs
         assert event_kwargs["exclude_plan_or_series_linked"] is True
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -229,7 +260,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
     @patch("pecha_api.author_group_feed.service.resolve_current_or_next_occurrence")
     @patch("pecha_api.author_group_feed.service.get_recurring_events")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -367,7 +398,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
     @patch("pecha_api.author_group_feed.service.resolve_current_or_next_occurrence")
     @patch("pecha_api.author_group_feed.service.get_recurring_events")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -448,6 +479,176 @@ class TestGetAuthorGroupFeedService:
         )
         assert captured["end_date"] == captured["start_date"]
 
+    @pytest.mark.asyncio
+    @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
+    @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
+    @patch("pecha_api.author_group_feed.service._event_to_dto")
+    @patch("pecha_api.author_group_feed.service.build_post_dtos")
+    @patch("pecha_api.author_group_feed.service.get_recurring_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
+    @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
+    @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
+    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
+    async def test_builds_dtos_only_for_requested_page(
+        self,
+        mock_validate: MagicMock,
+        mock_scope: MagicMock,
+        mock_groups_by_ids: MagicMock,
+        mock_get_posts: MagicMock,
+        mock_get_events: MagicMock,
+        mock_get_recurring: MagicMock,
+        mock_build_posts: MagicMock,
+        mock_event_dto: MagicMock,
+        mock_counts: MagicMock,
+        mock_joined: MagicMock,
+        _mock_get_events_by_ids: MagicMock,
+    ) -> None:
+        """Candidates outside the requested page (e.g. old, ended events)
+        are ranked from lightweight keys but never fully loaded, turned into
+        DTOs or counted."""
+        user = MockUser()
+        joined_id = uuid4()
+        mock_db = MagicMock()
+        mock_validate.return_value = user
+        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_groups_by_ids.return_value = [MockGroup(joined_id)]
+
+        now = datetime.now(tz.utc)
+        newest_post = MockPost(joined_id, published_at=now - timedelta(days=1))
+        page_event = MockEvent(joined_id, created_at=now - timedelta(days=2))
+        old_post = MockPost(joined_id, published_at=now - timedelta(days=300))
+        ended_event = MockEvent(joined_id, created_at=now - timedelta(days=400))
+
+        mock_get_posts.return_value = ([newest_post, old_post], 2)
+        mock_build_posts.side_effect = lambda db, posts, user_id: [
+            _post_dto(post) for post in posts
+        ]
+        mock_get_events.return_value = ([page_event, ended_event], 2)
+        mock_get_recurring.return_value = []
+        mock_counts.return_value = {}
+        mock_joined.return_value = []
+
+        def _event_to_dto(event: MockEvent, **kwargs: object) -> EventDTO:
+            return EventDTO(
+                id=event.id,
+                group_id=joined_id,
+                start_date=event.start_date,
+                end_date=event.end_date,
+                is_one_day=True,
+                featured=False,
+                metadata=None,
+                links=[],
+                participant_count=0,
+                is_joined=False,
+                created_at=event.created_at,
+                created_by=event.created_by,
+            )
+
+        mock_event_dto.side_effect = _event_to_dto
+
+        result = await get_author_group_feed_service(
+            db=mock_db,
+            token="token",
+            should_include_unfollowed=False,
+            skip=0,
+            limit=2,
+        )
+
+        assert result.total == 4
+        assert [item.type for item in result.items] == [
+            AuthorGroupFeedItemType.POST,
+            AuthorGroupFeedItemType.EVENT,
+        ]
+        assert result.items[1].event.id == page_event.id
+        mock_build_posts.assert_called_once_with(
+            mock_db, [newest_post], user_id=user.id
+        )
+        assert [call.args[0] for call in mock_event_dto.call_args_list] == [page_event]
+        assert mock_counts.call_args.kwargs["event_ids"] == [page_event.id]
+        _mock_get_events_by_ids.assert_called_once_with(
+            db=mock_db,
+            event_ids=[page_event.id],
+            restrict_group_ids=[joined_id],
+            exclude_plan_or_series_linked=True,
+        )
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
+    @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
+    @patch("pecha_api.author_group_feed.service._event_to_dto")
+    @patch("pecha_api.author_group_feed.service.build_post_dtos")
+    @patch("pecha_api.author_group_feed.service.get_recurring_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
+    @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
+    @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
+    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
+    async def test_page_is_topped_up_when_ranked_event_is_no_longer_loadable(
+        self,
+        mock_validate: MagicMock,
+        mock_scope: MagicMock,
+        mock_groups_by_ids: MagicMock,
+        mock_get_posts: MagicMock,
+        mock_get_event_keys: MagicMock,
+        mock_get_recurring: MagicMock,
+        mock_build_posts: MagicMock,
+        mock_event_dto: MagicMock,
+        mock_counts: MagicMock,
+        mock_joined: MagicMock,
+    ) -> None:
+        """An event ranked into the page but deleted or moved out of the
+        viewer's groups before full loading is skipped, and the next
+        candidate fills its slot instead of leaving the page short."""
+        user = MockUser()
+        joined_id = uuid4()
+        mock_db = MagicMock()
+        mock_validate.return_value = user
+        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_groups_by_ids.return_value = [MockGroup(joined_id)]
+
+        now = datetime.now(tz.utc)
+        first = MockEvent(joined_id, created_at=now - timedelta(days=1))
+        gone = MockEvent(joined_id, created_at=now - timedelta(days=2))
+        third = MockEvent(joined_id, created_at=now - timedelta(days=3))
+        # Not returned by the scoped full load, e.g. deleted or made private.
+        _MOCK_EVENTS_BY_ID.pop(gone.id)
+
+        mock_get_posts.return_value = ([], 0)
+        mock_build_posts.return_value = []
+        mock_get_event_keys.return_value = ([first, gone, third], 3)
+        mock_get_recurring.return_value = []
+        mock_counts.return_value = {}
+        mock_joined.return_value = []
+
+        def _event_to_dto(event: MockEvent, **kwargs: object) -> EventDTO:
+            return EventDTO(
+                id=event.id,
+                group_id=joined_id,
+                start_date=event.start_date,
+                end_date=event.end_date,
+                is_one_day=True,
+                featured=False,
+                metadata=None,
+                links=[],
+                participant_count=0,
+                is_joined=False,
+                created_at=event.created_at,
+                created_by=event.created_by,
+            )
+
+        mock_event_dto.side_effect = _event_to_dto
+
+        result = await get_author_group_feed_service(
+            db=mock_db,
+            token="token",
+            should_include_unfollowed=False,
+            skip=0,
+            limit=2,
+        )
+
+        assert [item.event.id for item in result.items] == [first.id, third.id]
+
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -476,7 +677,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -524,7 +725,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
@@ -590,7 +791,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
     @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
