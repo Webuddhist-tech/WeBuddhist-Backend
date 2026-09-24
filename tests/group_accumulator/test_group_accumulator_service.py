@@ -184,7 +184,9 @@ class TestGetGroupAccumulatorsService:
         assert result.accumulators[0].mantra_id is None
         assert result.accumulators[1].text_id is None
         assert result.accumulators[1].mantra_id == mantra_id
-        mock_get.assert_called_once_with(mock_db, group_id, 0, 20)
+        mock_get.assert_called_once_with(
+            mock_db, group_id, 0, 20, exclude_event_linked=True
+        )
 
     @patch('pecha_api.group_accumulator.group_accumulator_service.SessionLocal')
     @patch('pecha_api.group_accumulator.group_accumulator_service.get_group_accumulators')
