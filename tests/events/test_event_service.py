@@ -60,9 +60,11 @@ def test_get_events_today_service_uses_day_bounds() -> None:
     assert result == expected
 
 
-def test_get_events_service_limits_authenticated_user_to_followed_groups() -> None:
+def test_get_events_service_includes_public_groups_for_authenticated_user() -> None:
     user = MagicMock(id=uuid4())
     followed_group_id = uuid4()
+    public_group_id = uuid4()
+    listing_group_ids = [followed_group_id, public_group_id]
 
     with patch(
         "pecha_api.events.event_service.SessionLocal"
@@ -70,8 +72,8 @@ def test_get_events_service_limits_authenticated_user_to_followed_groups() -> No
         "pecha_api.events.event_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
-        "pecha_api.events.event_service.resolve_public_group_scope",
-        return_value=([followed_group_id], {followed_group_id}),
+        "pecha_api.events.event_service.resolve_event_listing_group_ids",
+        return_value=(listing_group_ids, {followed_group_id}),
     ) as mock_scope, patch(
         "pecha_api.events.event_service.get_events",
         return_value=([], 0),
@@ -89,9 +91,7 @@ def test_get_events_service_limits_authenticated_user_to_followed_groups() -> No
     assert result.events == []
     mock_scope.assert_called_once()
     assert mock_scope.call_args.kwargs["should_include_unfollowed"] is False
-    assert mock_get_events.call_args.kwargs["restrict_group_ids"] == [
-        followed_group_id
-    ]
+    assert mock_get_events.call_args.kwargs["restrict_group_ids"] == listing_group_ids
 
 
 def test_get_events_service_can_include_unfollowed_public_groups() -> None:
@@ -104,7 +104,7 @@ def test_get_events_service_can_include_unfollowed_public_groups() -> None:
         "pecha_api.events.event_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
-        "pecha_api.events.event_service.resolve_public_group_scope",
+        "pecha_api.events.event_service.resolve_event_listing_group_ids",
         return_value=(public_group_ids, set()),
     ) as mock_scope, patch(
         "pecha_api.events.event_service.get_events",

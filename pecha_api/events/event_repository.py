@@ -387,6 +387,45 @@ def get_one_shot_event_feed_keys(
     return rows, total
 
 
+def iter_recurring_publishable_template_batches(
+    db: Session,
+    restrict_group_ids: List[UUID],
+    *,
+    batch_size: int = 200,
+    after_id: Optional[UUID] = None,
+) -> Tuple[List[Event], Optional[UUID]]:
+    """Keyset page of in-scope publishable recurring templates (id ascending).
+
+    Returns the batch and the last id for the next page, or ``( [], None )``
+    when there are no more rows. Callers walk the full scope in bounded chunks
+    so occurrence-based feed ranking is not skewed by ``created_at``.
+    """
+    if not restrict_group_ids or batch_size <= 0:
+        return [], None
+
+    query = (
+        _apply_event_filters(
+            db.query(Event)
+            .options(
+                selectinload(Event.metadata_entries),
+                selectinload(Event.links),
+                selectinload(Event.location),
+                *_linked_resource_options(),
+            )
+            .filter(Event.is_recurring.is_(True)),
+            restrict_group_ids=restrict_group_ids,
+        )
+        .filter(_publishable_linked_content_filter())
+        .order_by(Event.id.asc())
+    )
+    if after_id is not None:
+        query = query.filter(Event.id > after_id)
+    batch = query.limit(batch_size).all()
+    if not batch:
+        return [], None
+    return batch, batch[-1].id
+
+
 def get_events_by_ids(
     db: Session,
     event_ids: List[UUID],

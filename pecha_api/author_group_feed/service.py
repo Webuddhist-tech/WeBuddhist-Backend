@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
@@ -15,7 +15,7 @@ from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
     get_events_by_ids,
     get_one_shot_event_feed_keys,
-    get_recurring_events,
+    iter_recurring_publishable_template_batches,
 )
 from pecha_api.events.event_service import (
     _event_to_dto,
@@ -34,7 +34,7 @@ from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_posts_for_group_ids
 from pecha_api.group_posts.service import build_post_dtos
 from pecha_api.plans.groups.groups_models import AuthorGroup
-from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.follow_scope import resolve_author_group_feed_scope
 from pecha_api.plans.groups.groups_repository import get_groups_by_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.users.users_service import validate_and_extract_user_details
@@ -130,6 +130,56 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
             'is_active': is_active,
         })
     return expanded_recurring
+
+
+def _collect_recurring_author_group_feed_items(
+    db: Session,
+    restrict_group_ids: List[UUID],
+    today: date,
+) -> Tuple[List[Dict], int]:
+    """Expand all in-scope publishable recurring templates with an occurrence.
+
+    Templates without a resolvable occurrence are omitted from both the list
+    and the count so feed ``total`` matches returnable items.
+    """
+    templates: List[Event] = []
+    after_id: Optional[UUID] = None
+    while True:
+        batch, after_id = iter_recurring_publishable_template_batches(
+            db,
+            restrict_group_ids,
+            after_id=after_id,
+        )
+        if not batch:
+            break
+        templates.extend(batch)
+
+    expanded_recurring = _expand_recurring_occurrences(templates, today)
+    if not expanded_recurring:
+        return [], 0
+
+    recurring_events = [item["event"] for item in expanded_recurring]
+    plan_ids = [event.plan_id for event in recurring_events if event.plan_id]
+    series_ids = [
+        event.series_id
+        for event in recurring_events
+        if getattr(event, "series_id", None)
+    ]
+    published_plan_ids, published_series_ids = collect_published_linked_resource_ids(
+        db,
+        plan_ids=plan_ids,
+        series_ids=series_ids,
+    )
+    expanded_recurring = [
+        item
+        for item in expanded_recurring
+        if event_has_publishable_linked_content(
+            item["event"],
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        )
+    ]
+    return expanded_recurring, len(expanded_recurring)
 
 
 def _publishable_events_by_id(
@@ -264,20 +314,22 @@ def _get_author_group_feed(
     """Mixed feed of posts and events from author groups.
 
     Guests (no token) always see published public groups.
-    Logged-in default: groups the user joined.
-    With should_include_unfollowed=True: mix in other public groups.
+    Logged-in default: posts from joined groups; events also from public groups.
+    With should_include_unfollowed=True: posts from public groups too.
     """
     current_user: Optional[Users] = None
     if token:
         current_user = validate_and_extract_user_details(token=token)
 
-    group_ids, joined_group_id_set = resolve_public_group_scope(
-        db=db,
-        user_id=current_user.id if current_user else None,
-        should_include_unfollowed=should_include_unfollowed,
+    post_group_ids, event_group_ids, joined_group_id_set = (
+        resolve_author_group_feed_scope(
+            db=db,
+            user_id=current_user.id if current_user else None,
+            should_include_unfollowed=should_include_unfollowed,
+        )
     )
 
-    if not group_ids:
+    if not post_group_ids and not event_group_ids:
         return AuthorGroupFeedResponse(
             items=[],
             skip=skip,
@@ -291,7 +343,7 @@ def _get_author_group_feed(
 
     posts, posts_total = get_posts_for_group_ids(
         db=db,
-        group_ids=group_ids,
+        group_ids=post_group_ids,
         skip=0,
         limit=fetch_limit,
         status=GroupPostStatus.PUBLISHED,
@@ -301,42 +353,19 @@ def _get_author_group_feed(
 
     one_shot_keys, one_shot_publishable_total = get_one_shot_event_feed_keys(
         db=db,
-        restrict_group_ids=group_ids,
+        restrict_group_ids=event_group_ids,
         limit=fetch_limit,
     )
 
-    recurring_templates = get_recurring_events(
-        db=db,
-        restrict_group_ids=group_ids,
+    expanded_recurring, recurring_feed_total = (
+        _collect_recurring_author_group_feed_items(
+            db=db,
+            restrict_group_ids=event_group_ids,
+            today=today,
+        )
     )
 
-    expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
-    if expanded_recurring:
-        recurring_events = [item["event"] for item in expanded_recurring]
-        plan_ids = [event.plan_id for event in recurring_events if event.plan_id]
-        series_ids = [
-            event.series_id
-            for event in recurring_events
-            if getattr(event, "series_id", None)
-        ]
-        published_plan_ids, published_series_ids = (
-            collect_published_linked_resource_ids(
-                db,
-                plan_ids=plan_ids,
-                series_ids=series_ids,
-            )
-        )
-        expanded_recurring = [
-            item
-            for item in expanded_recurring
-            if event_has_publishable_linked_content(
-                item["event"],
-                published_plan_ids=published_plan_ids,
-                published_series_ids=published_series_ids,
-            )
-        ]
-
-    events_total = one_shot_publishable_total + len(expanded_recurring)
+    events_total = one_shot_publishable_total + recurring_feed_total
 
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     for post in posts:
@@ -371,7 +400,7 @@ def _get_author_group_feed(
         )
 
     ranked.sort(key=lambda entry: (entry[0], entry[1].value), reverse=True)
-    page_entries = _load_page_entries(db, ranked, skip, limit, group_ids)
+    page_entries = _load_page_entries(db, ranked, skip, limit, event_group_ids)
 
     page_posts = [
         source
