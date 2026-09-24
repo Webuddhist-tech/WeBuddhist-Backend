@@ -13,6 +13,7 @@ from pecha_api.events.event_participant_repository import (
 )
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
+    get_events,
     get_events_by_ids,
     get_one_shot_event_feed_keys,
     get_recurring_events,
@@ -158,6 +159,36 @@ def _publishable_events_by_id(
     }
 
 
+def _count_publishable_one_shot_feed_events(
+    db: Session,
+    *,
+    group_ids: List[UUID],
+) -> int:
+    """Count in-scope one-shot events that may appear in the feed."""
+    publishable_total = 0
+    db_skip = 0
+    batch_size = 100
+    db_total: Optional[int] = None
+
+    while True:
+        batch, batch_total = get_events(
+            db=db,
+            restrict_group_ids=group_ids,
+            skip=db_skip,
+            limit=batch_size,
+            should_sort_newest_first=True,
+        )
+        if db_total is None:
+            db_total = batch_total
+        if not batch:
+            break
+        publishable_total += len(_publishable_events_by_id(db, batch))
+        db_skip += len(batch)
+        if db_total is not None and db_skip >= db_total:
+            break
+    return publishable_total
+
+
 def _load_page_entries(
     db: Session,
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]],
@@ -299,10 +330,14 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    one_shot_keys, one_shot_total = get_one_shot_event_feed_keys(
+    one_shot_keys, _ = get_one_shot_event_feed_keys(
         db=db,
         restrict_group_ids=group_ids,
         limit=fetch_limit,
+    )
+    one_shot_publishable_total = _count_publishable_one_shot_feed_events(
+        db,
+        group_ids=group_ids,
     )
 
     recurring_templates = get_recurring_events(
@@ -336,7 +371,7 @@ def _get_author_group_feed(
             )
         ]
 
-    events_total = one_shot_total + len(expanded_recurring)
+    events_total = one_shot_publishable_total + len(expanded_recurring)
 
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     for post in posts:

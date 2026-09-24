@@ -64,6 +64,33 @@ def _events_by_ids(
     ]
 
 
+def _get_events_for_publishable_count(
+    db: object,
+    restrict_group_ids: List[UUID],
+    skip: int = 0,
+    limit: int = 20,
+    should_sort_newest_first: bool = True,
+    **kwargs: object,
+) -> tuple[List["MockEvent"], int]:
+    events = [
+        event
+        for event in _MOCK_EVENTS_BY_ID.values()
+        if event.group_id in restrict_group_ids
+    ]
+    events.sort(key=lambda event: event.created_at, reverse=True)
+    total = len(events)
+    return events[skip : skip + limit], total
+
+
+@pytest.fixture(autouse=True)
+def _mock_get_events_for_publishable_count() -> Iterator[MagicMock]:
+    with patch(
+        "pecha_api.author_group_feed.service.get_events",
+        side_effect=_get_events_for_publishable_count,
+    ) as mock:
+        yield mock
+
+
 @pytest.fixture(autouse=True)
 def _mock_get_events_by_ids() -> Iterator[MagicMock]:
     _MOCK_EVENTS_BY_ID.clear()
@@ -838,3 +865,45 @@ class TestGetAuthorGroupFeedService:
 
         mock_types.assert_not_called()
         assert mock_event_dto.call_args.kwargs["my_participation_type"] is None
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.author_group_feed.service.collect_published_linked_resource_ids")
+    @patch("pecha_api.author_group_feed.service.get_recurring_events")
+    @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
+    @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
+    @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
+    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
+    async def test_total_excludes_one_shots_linked_to_unpublished_plans(
+        self,
+        mock_validate,
+        mock_scope,
+        mock_groups_by_ids,
+        mock_get_posts,
+        mock_get_event_keys,
+        mock_get_recurring,
+        mock_collect_published,
+    ):
+        user = MockUser()
+        joined_id = uuid4()
+        mock_db = MagicMock()
+        mock_validate.return_value = user
+        mock_scope.return_value = ([joined_id], {joined_id})
+
+        publishable = MockEvent(joined_id)
+        draft_plan_id = uuid4()
+        draft_linked = MockEvent(joined_id, created_at=datetime(2026, 8, 2, 12, 0, tzinfo=tz.utc))
+        draft_linked.plan_id = draft_plan_id
+
+        mock_get_posts.return_value = ([], 0)
+        mock_get_event_keys.return_value = ([publishable, draft_linked], 2)
+        mock_get_recurring.return_value = []
+        mock_collect_published.return_value = (set(), set())
+
+        result = await get_author_group_feed_service(
+            db=mock_db,
+            token="token",
+            should_include_unfollowed=False,
+        )
+
+        assert result.total == 1
