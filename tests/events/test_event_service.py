@@ -4,7 +4,6 @@ from uuid import uuid4
 
 from pecha_api.events.event_response_models import (
     EventDTO,
-    EventMetadataResponse,
     EventsResponse,
     LinkedResourceDTO,
 )
@@ -391,7 +390,7 @@ def test_redact_public_linked_plan_and_series_from_event_dto() -> None:
         is_one_day=True,
         featured=False,
         is_recurring=False,
-        metadata=EventMetadataResponse(entries=[]),
+        metadata=[],
         created_at=now,
         created_by="author@example.com",
     )
