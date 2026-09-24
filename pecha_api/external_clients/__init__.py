@@ -23,14 +23,24 @@ _LIMITS = httpx.Limits(
     keepalive_expiry=15.0,
 )
 
-# A disconnect before any response bytes arrive means the request was never
-# processed, so replaying these idempotent reads is safe.
+# Every one of these leaves the caller with no response at all. The reads
+# behind them are idempotent GETs, so replaying is safe even for the timeouts,
+# where the request may well have reached the server.
 _RETRYABLE_ERRORS = (
     httpx.RemoteProtocolError,
     httpx.ConnectError,
     httpx.ConnectTimeout,
     httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
 )
+
+# Gate every openpecha call, not just one caller's: plan resolution, bookmarks
+# and search all fan out over segments independently, so a per-caller cap still
+# lets them collectively exhaust the pool and fail on PoolTimeout. Held below
+# max_connections so the pool itself never becomes the bottleneck.
+_MAX_CONCURRENT_REQUESTS = 10
+_request_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)
 
 
 def _resolve_pecha_base_url() -> str:
@@ -50,13 +60,16 @@ async def get_with_retry(
 ) -> httpx.Response:
     """GET `url`, retrying transport-level failures with exponential backoff.
 
-    Only connection faults are retried; a response that arrives with an error
-    status is returned untouched for the caller to raise on.
+    Only transport faults are retried; a response that arrives with an error
+    status is returned untouched for the caller to raise on. Concurrency across
+    all openpecha callers is capped while the request is in flight, and released
+    over the backoff so a retrying request does not hold a slot it is not using.
     """
     kwargs: Dict[str, Any] = {} if params is None else {"params": params}
     for attempt in range(attempts):
         try:
-            return await http_client.get(url, **kwargs)
+            async with _request_semaphore:
+                return await http_client.get(url, **kwargs)
         except _RETRYABLE_ERRORS as error:
             if attempt == attempts - 1:
                 raise
