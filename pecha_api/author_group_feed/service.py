@@ -12,7 +12,7 @@ from pecha_api.events.event_participant_repository import (
     get_participation_types_by_user,
 )
 from pecha_api.events.event_repository import get_events, get_recurring_events
-from pecha_api.events.event_service import _event_to_dto
+from pecha_api.events.event_service import _event_to_dto, feed_item_is_joined_for_event
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
     combine_occurrence_window,
@@ -170,8 +170,7 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    # Get one-shot events that have not already ended
-    # Get one-shot events. Events merged with a plan or series are left out of the feed.
+    # Get one-shot events that have not already ended (including plan/series-linked).
     one_shot_events, one_shot_total = get_events(
         db=db,
         restrict_group_ids=group_ids,
@@ -179,14 +178,11 @@ def _get_author_group_feed(
         limit=fetch_limit,
         should_sort_newest_first=True,
         not_ended_before=now,
-        exclude_plan_or_series_linked=True,
     )
 
-    # Get recurring events and find next occurrence for each template
     recurring_templates = get_recurring_events(
         db=db,
         restrict_group_ids=group_ids,
-        exclude_plan_or_series_linked=True,
     )
     
     # For feed context, show the current (active) or next upcoming occurrence per template.
@@ -223,6 +219,10 @@ def _get_author_group_feed(
         *[item['event'].group_id for item in expanded_recurring],
     })
     group_cards = _build_group_card_map(db, page_group_ids, language)
+    group_by_id = {
+        group.id: group
+        for group in get_groups_by_ids(db=db, group_ids=page_group_ids)
+    }
 
     cards: List[Tuple[datetime, AuthorGroupFeedItemDTO]] = []
 
@@ -255,7 +255,12 @@ def _get_author_group_feed(
                 AuthorGroupFeedItemDTO(
                     type=AuthorGroupFeedItemType.EVENT,
                     feed_at=_isoformat(feed_at),
-                    is_joined=event.group_id in joined_group_id_set,
+                    is_joined=feed_item_is_joined_for_event(
+                        db,
+                        event=event,
+                        joined_group_id_set=joined_group_id_set,
+                        group_by_id=group_by_id,
+                    ),
                     group_id=event.group_id,
                     group_name=group_info.get("group_name"),
                     group_slug=group_info.get("group_slug"),
@@ -301,7 +306,12 @@ def _get_author_group_feed(
                 AuthorGroupFeedItemDTO(
                     type=AuthorGroupFeedItemType.EVENT,
                     feed_at=_isoformat(feed_at),
-                    is_joined=event.group_id in joined_group_id_set,
+                    is_joined=feed_item_is_joined_for_event(
+                        db,
+                        event=event,
+                        joined_group_id_set=joined_group_id_set,
+                        group_by_id=group_by_id,
+                    ),
                     group_id=event.group_id,
                     group_name=group_info.get("group_name"),
                     group_slug=group_info.get("group_slug"),

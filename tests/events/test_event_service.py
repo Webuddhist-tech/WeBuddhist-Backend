@@ -6,6 +6,7 @@ from pecha_api.events.event_response_models import EventDTO, EventsResponse
 from pecha_api.events.event_service import (
     EventContentFilter,
     _expand_earliest_occurrences,
+    feed_item_is_joined_for_event,
     get_events_service,
     get_events_today_service,
 )
@@ -309,4 +310,41 @@ def test_get_events_service_accepts_naive_from_date() -> None:
     passed = mock_get_events.call_args.kwargs["from_date"]
     assert passed.tzinfo is not None
     assert passed == datetime(2026, 9, 17, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_feed_item_is_joined_true_for_public_plan_linked_event_without_group_join() -> None:
+    group_id = uuid4()
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    group = MagicMock(is_public=True, status="PUBLISHED")
+    mock_db = MagicMock()
+
+    with patch(
+        "pecha_api.events.event_service.is_group_published",
+        return_value=True,
+    ), patch(
+        "pecha_api.events.event_service.get_published_plan_by_id",
+        return_value=MagicMock(),
+    ):
+        assert feed_item_is_joined_for_event(
+            mock_db,
+            event=event,
+            joined_group_id_set=set(),
+            group_by_id={group_id: group},
+        )
+
+
+def test_feed_item_is_joined_false_when_not_group_member_and_no_public_link() -> None:
+    group_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=None, series_id=None)
+
+    assert (
+        feed_item_is_joined_for_event(
+            MagicMock(),
+            event=event,
+            joined_group_id_set=set(),
+            group_by_id={},
+        )
+        is False
+    )
 

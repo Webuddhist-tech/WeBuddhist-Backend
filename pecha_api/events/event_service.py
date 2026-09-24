@@ -16,7 +16,15 @@ from pecha_api.plans.authors.plan_authors_service import (
     validate_cms_author_details,
 )
 from pecha_api.plans.groups.groups_enums import AuthorGroupMemberRole
-from pecha_api.plans.groups.groups_repository import get_author_group_ids, get_groups_by_ids
+from pecha_api.plans.groups.groups_repository import (
+    get_author_group_ids,
+    get_group_by_id,
+    get_groups_by_ids,
+    is_group_published,
+)
+from pecha_api.plans.plans_enums import PlanStatus
+from pecha_api.plans.public.plan_repository import get_published_plan_by_id
+from pecha_api.plans.series.series_repository import get_series_by_id
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
@@ -496,6 +504,44 @@ def _event_to_dto(
         created_at=event.created_at,
         created_by=event.created_by,
         updated_at=event.updated_at,
+    )
+
+
+def event_linked_content_publicly_viewable(
+    db,
+    *,
+    event: Event,
+    group=None,
+) -> bool:
+    """Linked plan or series on a public published group is readable without joining."""
+    if not event.plan_id and not getattr(event, "series_id", None):
+        return False
+    if group is None:
+        group = get_group_by_id(db=db, group_id=event.group_id)
+    if not group or not group.is_public or not is_group_published(group):
+        return False
+    if event.plan_id:
+        return get_published_plan_by_id(db=db, plan_id=event.plan_id) is not None
+    series = get_series_by_id(db=db, series_id=event.series_id)
+    if not series or series.deleted_at is not None:
+        return False
+    return series.status == PlanStatus.PUBLISHED
+
+
+def feed_item_is_joined_for_event(
+    db,
+    *,
+    event: Event,
+    joined_group_id_set: set,
+    group_by_id: dict,
+) -> bool:
+    """Feed card ``is_joined``: group member, or public event-linked plan/series."""
+    if event.group_id in joined_group_id_set:
+        return True
+    return event_linked_content_publicly_viewable(
+        db,
+        event=event,
+        group=group_by_id.get(event.group_id),
     )
 
 
