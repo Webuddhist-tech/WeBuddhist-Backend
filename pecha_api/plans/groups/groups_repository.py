@@ -23,6 +23,7 @@ from pecha_api.plans.groups.groups_models import (
     author_group_joins,
     author_group_tags,
 )
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_model import Series
@@ -436,6 +437,26 @@ def get_member_roles_map(
         .all()
     )
     return {row.group_id: row.role for row in rows}
+
+
+def get_group_member_roles_by_emails(
+    db: Session,
+    group_id: UUID,
+    emails: Sequence[str],
+) -> Dict[str, str]:
+    """Map author email to their role in the group (only emails with a membership)."""
+    if not emails:
+        return {}
+    rows = (
+        db.query(Author.email, AuthorGroupMember.role)
+        .join(AuthorGroupMember, AuthorGroupMember.author_id == Author.id)
+        .filter(
+            AuthorGroupMember.group_id == group_id,
+            Author.email.in_(list(emails)),
+        )
+        .all()
+    )
+    return {row.email: row.role.value for row in rows}
 
 
 def list_group_member_ids_by_roles(

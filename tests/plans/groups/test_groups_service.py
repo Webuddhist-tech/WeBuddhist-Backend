@@ -371,19 +371,29 @@ def test_list_group_members_not_found():
     assert exc.value.detail == GROUP_NOT_FOUND
 
 
+def _make_joiner(username, email, firstname="Alice", lastname="Smith"):
+    user = MagicMock()
+    user.id = uuid4()
+    user.email = email
+    user.username = username
+    user.firstname = firstname
+    user.lastname = lastname
+    user.avatar_url = f"images/profile_images/{username}.webp"
+    return user
+
+
 def test_list_group_members_returns_paginated_profiles():
     group = _make_group()
-    user = MagicMock()
-    user.username = "alice"
-    user.firstname = "Alice"
-    user.lastname = "Smith"
-    user.avatar_url = "images/profile_images/alice.webp"
+    user = _make_joiner("alice", "alice@example.org")
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
     ), patch(
         "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
         return_value=([user], 1),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_emails",
+        return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service._user_avatar_url",
         return_value="https://example.com/avatar.webp",
@@ -395,9 +405,38 @@ def test_list_group_members_returns_paginated_profiles():
     assert result.skip == 0
     assert result.limit == 20
     assert len(result.list) == 1
+    assert result.list[0].user_id == user.id
+    assert result.list[0].role == "MEMBER"
     assert result.list[0].username == "alice"
     assert result.list[0].fullname == "Alice Smith"
     assert result.list[0].avatar_url == "https://example.com/avatar.webp"
+
+
+def test_list_group_members_returns_staff_role_for_matching_email():
+    group = _make_group()
+    admin_user = _make_joiner("alice", "alice@example.org")
+    plain_user = _make_joiner("bob", "bob@example.org", firstname="Bob")
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
+        return_value=([admin_user, plain_user], 2),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_emails",
+        return_value={"alice@example.org": "ADMIN"},
+    ) as mock_roles, patch(
+        "pecha_api.plans.groups.groups_service._user_avatar_url",
+        return_value=None,
+    ):
+        _session_local_context(mock_session)
+        result = list_group_members(group_id=group.id, skip=0, limit=20)
+
+    assert mock_roles.call_args.kwargs["emails"] == ["alice@example.org", "bob@example.org"]
+    assert [(m.user_id, m.role) for m in result.list] == [
+        (admin_user.id, "ADMIN"),
+        (plain_user.id, "MEMBER"),
+    ]
 
 
 def test_list_public_groups_defaults_to_community_type():
@@ -4992,16 +5031,16 @@ def test_get_author_group_detail_public_group_unaffected():
 
 def test_list_group_members_private_group_returns_members_without_token():
     group = _make_group(is_public=False)
-    user = MagicMock()
-    user.username = "bob"
-    user.firstname = "Bob"
-    user.lastname = "Jones"
+    user = _make_joiner("bob", "bob@example.org", firstname="Bob", lastname="Jones")
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
     ), patch(
         "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
         return_value=([user], 1),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_emails",
+        return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service._user_avatar_url",
         return_value=None,

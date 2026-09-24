@@ -90,6 +90,7 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_member,
     get_groups_paginated,
     get_member_roles_map,
+    get_group_member_roles_by_emails,
     get_invite_by_id,
     get_join_request_by_id,
     get_join_request_status_map,
@@ -229,6 +230,7 @@ JOIN_REQUEST_NOT_FOUND = "Join request not found"
 GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
 GROUP_BAN_NOT_FOUND = "Ban not found"
 USER_NOT_JOINED_GROUP = "This user has not joined the group"
+GROUP_MEMBER_DEFAULT_ROLE = "MEMBER"
 USER_BANNED_FROM_GROUP = (
     "This user is banned from the group; lift the ban before admitting them"
 )
@@ -1363,10 +1365,19 @@ def list_group_members(
             skip=skip,
             limit=limit,
         )
+        # Joiners who are also group staff (matched by email) carry their staff
+        # role; everyone else is a plain MEMBER.
+        roles_by_email = get_group_member_roles_by_emails(
+            db=db,
+            group_id=group_id,
+            emails=[user.email for user in users if user.email],
+        )
         return AuthorGroupMembersListResponse(
             total_members=total,
             list=[
                 AuthorGroupMemberProfileDTO(
+                    user_id=user.id,
+                    role=roles_by_email.get(user.email, GROUP_MEMBER_DEFAULT_ROLE),
                     username=user.username,
                     fullname=_user_fullname(user),
                     avatar_url=_user_avatar_url(user),

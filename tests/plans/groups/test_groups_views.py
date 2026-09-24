@@ -455,10 +455,13 @@ def test_get_public_group_by_id_with_language():
 
 def test_get_public_group_members():
     group_id = uuid4()
+    user_id = uuid4()
     response_model = AuthorGroupMembersListResponse(
         total_members=1,
         list=[
             AuthorGroupMemberProfileDTO(
+                user_id=user_id,
+                role="ADMIN",
                 username="alice",
                 fullname="Alice Smith",
                 avatar_url="https://example.com/avatar.webp",
@@ -476,6 +479,8 @@ def test_get_public_group_members():
     mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
     body = response.json()
     assert body["total_members"] == 1
+    assert body["list"][0]["user_id"] == str(user_id)
+    assert body["list"][0]["role"] == "ADMIN"
     assert body["list"][0]["username"] == "alice"
     assert body["list"][0]["fullname"] == "Alice Smith"
     assert body["list"][0]["avatar_url"] == "https://example.com/avatar.webp"

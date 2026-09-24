@@ -329,6 +329,8 @@ class GroupMemberAccumulationsResponse(BaseModel):
 
 
 class AuthorGroupMemberProfileDTO(BaseModel):
+    user_id: UUID
+    role: str
     username: Optional[str] = None
     fullname: str
     avatar_url: Optional[str] = None
