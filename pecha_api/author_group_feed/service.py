@@ -16,6 +16,7 @@ from pecha_api.events.event_service import _event_to_dto
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
     combine_occurrence_window,
+    expand_occurrences,
 )
 from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_posts_for_group_ids
@@ -98,15 +99,23 @@ def _build_group_card_map(
 def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
     """The current (active) or next upcoming occurrence per recurring template.
 
-    Templates with no occurrence in the resolver's horizon are dropped, so the
-    result is not parallel to the input.
+    Finished series fall back to their last past occurrence (flagged
+    is_past) so they stay in the feed. Templates with no occurrence at all
+    are dropped, so the result is not parallel to the input.
     """
     expanded_recurring = []
     for template in recurring_templates:
         result = resolve_current_or_next_occurrence(template, after=today)
-        if not result:
-            continue
-        start_d, end_d, is_active = result
+        is_past = False
+        if result:
+            start_d, end_d, is_active = result
+        else:
+            past = expand_occurrences(template, _as_aware_utc(template.start_date).date(), today)
+            if not past:
+                continue
+            start_d, end_d = past[-1]
+            is_active = False
+            is_past = True
         # Carry the template's own time-of-day onto the occurrence,
         # instead of defaulting to midnight / end-of-day.
         occurrence_start, occurrence_end = combine_occurrence_window(
@@ -117,6 +126,7 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
             'start_date': occurrence_start,
             'end_date': occurrence_end,
             'is_active': is_active,
+            'is_past': is_past,
         })
     return expanded_recurring
 
@@ -170,15 +180,14 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    # Get one-shot events that have not already ended
-    # Get one-shot events. Events merged with a plan or series are left out of the feed.
+    # Get one-shot events, including ones that have already ended.
+    # Events merged with a plan or series are left out of the feed.
     one_shot_events, one_shot_total = get_events(
         db=db,
         restrict_group_ids=group_ids,
         skip=0,
         limit=fetch_limit,
         should_sort_newest_first=True,
-        not_ended_before=now,
         exclude_plan_or_series_linked=True,
     )
 
@@ -281,10 +290,12 @@ def _get_author_group_feed(
     # (now - (occurrence_date - now)) keeps imminent occurrences competitive
     # with recent content while distant ones sink below it. Active events rank
     # by their start_date (not now) so multiple active events don't all tie at
-    # the top.
+    # the top. Finished series rank by when their last occurrence ended.
     for item in expanded_recurring:
         event = item['event']
-        if item.get('is_active'):
+        if item.get('is_past'):
+            feed_at = item['end_date']
+        elif item.get('is_active'):
             feed_at = item['start_date']  # Active events rank by when they started
         else:
             occurrence_at = item['start_date']

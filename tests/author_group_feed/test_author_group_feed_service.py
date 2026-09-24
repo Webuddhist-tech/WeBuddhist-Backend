@@ -167,7 +167,8 @@ class TestGetAuthorGroupFeedService:
         _, event_kwargs = mock_get_events.call_args
         assert event_kwargs["restrict_group_ids"] == [joined_id]
         assert event_kwargs["should_sort_newest_first"] is True
-        assert event_kwargs["not_ended_before"] is not None
+        # Ended events stay in the feed.
+        assert "not_ended_before" not in event_kwargs
         assert event_kwargs["exclude_plan_or_series_linked"] is True
 
     @pytest.mark.asyncio
@@ -447,6 +448,106 @@ class TestGetAuthorGroupFeedService:
             17, 0, tzinfo=tz.utc,
         )
         assert captured["end_date"] == captured["start_date"]
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
+    @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
+    @patch("pecha_api.author_group_feed.service._event_to_dto")
+    @patch("pecha_api.author_group_feed.service.build_post_dtos")
+    @patch("pecha_api.author_group_feed.service.expand_occurrences")
+    @patch("pecha_api.author_group_feed.service.resolve_current_or_next_occurrence")
+    @patch("pecha_api.author_group_feed.service.get_recurring_events")
+    @patch("pecha_api.author_group_feed.service.get_events")
+    @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
+    @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
+    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
+    async def test_finished_recurring_series_stays_with_last_occurrence(
+        self,
+        mock_validate,
+        mock_scope,
+        mock_groups_by_ids,
+        mock_get_posts,
+        mock_get_events,
+        mock_get_recurring,
+        mock_resolve,
+        mock_expand,
+        mock_build_posts,
+        mock_event_dto,
+        mock_counts,
+        mock_joined,
+    ):
+        """A recurring series with no current or upcoming occurrence stays in
+        the feed, showing its last occurrence and ranked by when it ended."""
+        user = MockUser()
+        joined_id = uuid4()
+        mock_db = MagicMock()
+        mock_validate.return_value = user
+        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_groups_by_ids.return_value = [MockGroup(joined_id)]
+
+        now = datetime.now(tz.utc)
+        template = MockEvent(joined_id, created_at=now - timedelta(days=100))
+        template.start_date = datetime(2020, 1, 1, 9, 0, tzinfo=tz.utc)
+        template.end_date = datetime(2020, 1, 1, 10, 0, tzinfo=tz.utc)
+        newer_post = MockPost(joined_id, published_at=now - timedelta(days=1))
+
+        mock_get_posts.return_value = ([newer_post], 1)
+        mock_build_posts.return_value = [_post_dto(newer_post)]
+        mock_get_events.return_value = ([], 0)
+        mock_get_recurring.return_value = [template]
+        mock_counts.return_value = {}
+        mock_joined.return_value = []
+        mock_resolve.return_value = None
+
+        first_day = (now - timedelta(days=20)).date()
+        last_day = (now - timedelta(days=10)).date()
+        mock_expand.return_value = [(first_day, first_day), (last_day, last_day)]
+
+        captured: dict = {}
+
+        def _event_to_dto(event, **kwargs):
+            captured["start_date"] = event.start_date
+            captured["end_date"] = event.end_date
+            return EventDTO(
+                id=event.id,
+                group_id=joined_id,
+                start_date=event.start_date,
+                end_date=event.end_date,
+                is_one_day=True,
+                featured=False,
+                metadata=None,
+                links=[],
+                participant_count=0,
+                is_joined=False,
+                created_at=event.created_at,
+                created_by=event.created_by,
+            )
+
+        mock_event_dto.side_effect = _event_to_dto
+
+        result = await get_author_group_feed_service(
+            db=mock_db,
+            token="token",
+            should_include_unfollowed=False,
+            skip=0,
+            limit=20,
+        )
+
+        assert result.total == 2
+        assert [item.type for item in result.items] == [
+            AuthorGroupFeedItemType.POST,
+            AuthorGroupFeedItemType.EVENT,
+        ]
+        assert result.items[1].event.id == template.id
+        assert captured["start_date"] == datetime(
+            last_day.year, last_day.month, last_day.day, 9, 0, tzinfo=tz.utc
+        )
+        assert captured["end_date"] == datetime(
+            last_day.year, last_day.month, last_day.day, 10, 0, tzinfo=tz.utc
+        )
+        # Dates on the template are restored after building the card.
+        assert template.start_date == datetime(2020, 1, 1, 9, 0, tzinfo=tz.utc)
 
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
