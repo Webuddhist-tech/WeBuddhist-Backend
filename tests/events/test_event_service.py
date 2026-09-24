@@ -16,6 +16,7 @@ from pecha_api.events.event_service import (
     get_events_service,
     get_events_today_service,
     redact_public_linked_plan_and_series_from_event_dto,
+    should_redact_linked_plan_series_on_feed_event_card,
 )
 
 
@@ -329,6 +330,28 @@ def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
             published_series_ids=set(),
         )
         is False
+    )
+
+
+def test_should_redact_linked_plan_series_on_feed_event_card() -> None:
+    group_id = uuid4()
+    assert should_redact_linked_plan_series_on_feed_event_card(
+        can_view_linked_content=False,
+        group_id=group_id,
+        joined_group_id_set=set(),
+        has_linked_plan_or_series=True,
+    )
+    assert not should_redact_linked_plan_series_on_feed_event_card(
+        can_view_linked_content=False,
+        group_id=group_id,
+        joined_group_id_set={group_id},
+        has_linked_plan_or_series=True,
+    )
+    assert not should_redact_linked_plan_series_on_feed_event_card(
+        can_view_linked_content=True,
+        group_id=group_id,
+        joined_group_id_set=set(),
+        has_linked_plan_or_series=True,
     )
 
 

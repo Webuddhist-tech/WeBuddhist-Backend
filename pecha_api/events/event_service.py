@@ -596,6 +596,23 @@ def redact_public_linked_plan_and_series_from_event_dto(dto: EventDTO) -> EventD
     )
 
 
+def should_redact_linked_plan_series_on_feed_event_card(
+    *,
+    can_view_linked_content: bool,
+    group_id: UUID,
+    joined_group_id_set: Set[UUID],
+    has_linked_plan_or_series: bool,
+) -> bool:
+    """Hide linked metadata from guests when public browse is blocked (e.g. timezone).
+
+    Group members still receive plan/series fields on the card even for private
+    groups, where ``can_view_linked_content`` is false but membership grants access.
+    """
+    if not has_linked_plan_or_series or can_view_linked_content:
+        return False
+    return group_id not in joined_group_id_set
+
+
 def can_view_event_linked_content_without_group_join(
     event: Event,
     *,
