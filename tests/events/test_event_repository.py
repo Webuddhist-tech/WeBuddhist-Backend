@@ -9,7 +9,11 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
 from pecha_api.events.event_model import Event
-from pecha_api.events.event_repository import save_event
+from pecha_api.events.event_repository import (
+    get_events_by_ids,
+    get_one_shot_event_feed_keys,
+    save_event,
+)
 
 
 def _event() -> Event:
@@ -56,3 +60,17 @@ class TestSaveEventAfterFlushHook:
         assert exc.value.status_code == 400
         db.rollback.assert_called_once()
         db.commit.assert_not_called()
+
+
+class TestFeedEventLoaders:
+    def test_feed_keys_skip_query_without_groups(self) -> None:
+        db = MagicMock()
+
+        assert get_one_shot_event_feed_keys(db, restrict_group_ids=[], limit=20) == ([], 0)
+        db.query.assert_not_called()
+
+    def test_events_by_ids_skip_query_without_ids(self) -> None:
+        db = MagicMock()
+
+        assert get_events_by_ids(db, event_ids=[]) == []
+        db.query.assert_not_called()

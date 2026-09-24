@@ -11,7 +11,11 @@ from pecha_api.events.event_participant_repository import (
     get_joined_event_ids_by_user,
     get_participation_types_by_user,
 )
-from pecha_api.events.event_repository import get_events, get_recurring_events
+from pecha_api.events.event_repository import (
+    get_events_by_ids,
+    get_one_shot_event_feed_keys,
+    get_recurring_events,
+)
 from pecha_api.events.event_service import _event_to_dto
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
@@ -167,14 +171,13 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    # Get one-shot events, including ones that have already ended.
+    # Rank one-shot events, including ones that have already ended, from
+    # their (id, created_at) alone; full events are loaded for the page only.
     # Events merged with a plan or series are left out of the feed.
-    one_shot_events, one_shot_total = get_events(
+    one_shot_keys, one_shot_total = get_one_shot_event_feed_keys(
         db=db,
         restrict_group_ids=group_ids,
-        skip=0,
         limit=fetch_limit,
-        should_sort_newest_first=True,
         exclude_plan_or_series_linked=True,
     )
 
@@ -200,10 +203,10 @@ def _get_author_group_feed(
         ranked.append(
             (_as_aware_utc(post.published_at), AuthorGroupFeedItemType.POST, post)
         )
-    for event in one_shot_events:
+    for key in one_shot_keys:
         ranked.append(
-            (_as_aware_utc(event.created_at), AuthorGroupFeedItemType.EVENT, {
-                'event': event,
+            (_as_aware_utc(key.created_at), AuthorGroupFeedItemType.EVENT, {
+                'event_id': key.id,
                 'occurrence_date': None,
             })
         )
@@ -233,6 +236,27 @@ def _get_author_group_feed(
 
     ranked.sort(key=lambda entry: (entry[0], entry[1].value), reverse=True)
     page_entries = ranked[skip:skip + limit]
+
+    # Load full one-shot events for the page only. An event deleted between
+    # the two queries is dropped from the page.
+    page_one_shot_ids = [
+        source['event_id'] for _, item_type, source in page_entries
+        if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source
+    ]
+    if page_one_shot_ids:
+        events_by_id = {
+            event.id: event
+            for event in get_events_by_ids(db=db, event_ids=page_one_shot_ids)
+        }
+        loaded_entries = []
+        for feed_at, item_type, source in page_entries:
+            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source:
+                event = events_by_id.get(source['event_id'])
+                if event is None:
+                    continue
+                source = {'event': event, 'occurrence_date': None}
+            loaded_entries.append((feed_at, item_type, source))
+        page_entries = loaded_entries
 
     page_posts = [
         source for _, item_type, source in page_entries

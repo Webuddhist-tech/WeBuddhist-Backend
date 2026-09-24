@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import func
+from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query, Session, selectinload
 from starlette import status
@@ -290,6 +291,56 @@ def get_events(
         events_query = events_query.limit(limit)
     events = events_query.all()
     return events, total
+
+
+def get_one_shot_event_feed_keys(
+    db: Session,
+    restrict_group_ids: List[UUID],
+    limit: int,
+    exclude_plan_or_series_linked: bool = False,
+) -> Tuple[List[Row], int]:
+    """Newest-first (id, created_at) rows for one-shot events, plus the total.
+
+    Only the two ranking columns are selected, with no eager loads, so the
+    feed can rank a deep window cheaply and load full events for the page
+    alone via get_events_by_ids.
+    """
+    if not restrict_group_ids:
+        return [], 0
+
+    total = _apply_event_filters(
+        db.query(func.count(Event.id)).filter(Event.is_recurring == False),
+        restrict_group_ids=restrict_group_ids,
+        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
+    ).scalar()
+
+    rows = (
+        _apply_event_filters(
+            db.query(Event.id, Event.created_at).filter(Event.is_recurring == False),
+            restrict_group_ids=restrict_group_ids,
+            exclude_plan_or_series_linked=exclude_plan_or_series_linked,
+        )
+        .order_by(Event.created_at.desc(), Event.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return rows, total
+
+
+def get_events_by_ids(db: Session, event_ids: List[UUID]) -> List[Event]:
+    if not event_ids:
+        return []
+    return (
+        db.query(Event)
+        .options(
+            selectinload(Event.metadata_entries),
+            selectinload(Event.links),
+            selectinload(Event.location),
+            *_linked_resource_options(),
+        )
+        .filter(Event.id.in_(event_ids))
+        .all()
+    )
 
 
 def get_featured_events(
