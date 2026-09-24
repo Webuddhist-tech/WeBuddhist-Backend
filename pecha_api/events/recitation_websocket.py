@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -15,6 +15,7 @@ POSITION_TTL_SECONDS = 12 * 60 * 60
 # Per-event publish ceiling. An operator clicks a handful of times a minute, so
 # anything near this is a stuck key or a rogue client, not a fast reader.
 MAX_SETS_PER_SECOND = 50
+RATE_WINDOW_SECONDS = 1
 
 
 def position_channel(event_id: UUID) -> str:
@@ -27,6 +28,16 @@ def position_state_key(event_id: UUID) -> str:
 
 def position_revision_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:rev"
+
+
+def position_rate_key(event_id: UUID) -> str:
+    return f"recitation:event:{event_id}:rate"
+
+
+# Matches every key position_rate_key can produce, for the startup sweep.
+_RATE_KEY_PATTERN = "recitation:event:*:rate"
+# Deleted in chunks so a long-lived keyspace does not arrive as one huge DEL.
+_RATE_KEY_DELETE_BATCH = 500
 
 
 # Allocating the revision and writing the snapshot have to be one step. As two
@@ -47,6 +58,23 @@ redis.call('HSET', KEYS[1],
 redis.call('EXPIRE', KEYS[1], ARGV[6])
 redis.call('EXPIRE', KEYS[2], ARGV[6])
 return revision
+"""
+
+# Counting the window and stamping its expiry have to be one step. As two round
+# trips the EXPIRE can be lost - a connection blip, a restart, a client-side
+# retry of an INCR that already landed - and the key is then immortal: the
+# counter only ever sees 1 once, so nothing reapplies the TTL and every later
+# request for that event is refused forever. The TTL branch heals a key already
+# stuck that way instead of waiting for someone to delete it by hand.
+_ALLOW_SET_SCRIPT = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+elseif redis.call('TTL', KEYS[1]) < 0 then
+    redis.call('SET', KEYS[1], 1, 'EX', ARGV[1])
+    count = 1
+end
+return count
 """
 
 
@@ -293,18 +321,61 @@ class RecitationBroadcaster:
         """Fleet-wide throttle for operator publishes: at most
         MAX_SETS_PER_SECOND per event, counted in a one-second Redis window.
 
+        Runs as a script so the count and its window can never come apart; see
+        _ALLOW_SET_SCRIPT for what splitting them costs.
+
         Fails open - if Redis cannot answer, the puja keeps running rather than
         going silent over a rate counter.
         """
-        key = f"recitation:event:{event_id}:rate"
         try:
-            count = await self.redis.incr(key)
-            if count == 1:
-                await self.redis.expire(key, 1)
-            return count <= MAX_SETS_PER_SECOND
+            count = await self.redis.eval(
+                _ALLOW_SET_SCRIPT,
+                1,
+                position_rate_key(event_id),
+                str(RATE_WINDOW_SECONDS),
+            )
+            return int(count) <= MAX_SETS_PER_SECOND
         except Exception as e:
             logger.exception("Failed to check recitation rate limit in Redis: %s", e)
             return True
+
+    async def clear_rate_keys(self) -> int:
+        """Drop every per-event throttle counter. Returns how many went.
+
+        Run at startup, so a redeploy always begins on clean windows. The
+        script behind allow_set already re-arms a key that lost its TTL, so
+        this is a backstop rather than the cure - but it is also the only thing
+        that collects counters belonging to events that have since ended.
+
+        SCAN, never KEYS: the pattern is walked incrementally instead of
+        blocking the server for the length of the keyspace. A rolling deploy
+        can land here mid-puja, which at worst lets one extra window through
+        for a live event - cheaper than leaving a counter nobody can reset.
+
+        Swallows its own failures: a missed sweep costs nothing now that the
+        counters heal themselves, and it must never be the reason an instance
+        refuses to start.
+        """
+        if self.redis is None:
+            return 0
+
+        deleted = 0
+        batch: List[str] = []
+        try:
+            async for key in self.redis.scan_iter(match=_RATE_KEY_PATTERN, count=100):
+                batch.append(key)
+                if len(batch) >= _RATE_KEY_DELETE_BATCH:
+                    deleted += await self.redis.delete(*batch)
+                    batch = []
+            if batch:
+                deleted += await self.redis.delete(*batch)
+        except Exception as e:
+            logger.exception("Failed to clear recitation rate keys in Redis: %s", e)
+            return deleted
+
+        if deleted:
+            logger.info("Cleared %d stale recitation rate key(s) on startup", deleted)
+        return deleted
 
     def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
         """Sockets this server holds for an event (local only - position is the
@@ -342,4 +413,7 @@ async def init_broadcaster(redis_url: str) -> RecitationBroadcaster:
     global broadcaster
     broadcaster = RecitationBroadcaster(redis_url)
     await broadcaster.connect()
+    # A redeploy is the one moment every instance agrees is a fresh start, so
+    # it is where stale throttle counters go.
+    await broadcaster.clear_rate_keys()
     return broadcaster

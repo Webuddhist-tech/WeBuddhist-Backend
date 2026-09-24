@@ -7,10 +7,14 @@ import pytest
 from pecha_api.events.recitation_websocket import (
     MAX_SETS_PER_SECOND,
     POSITION_TTL_SECONDS,
+    RATE_WINDOW_SECONDS,
     RecitationBroadcaster,
+    _ALLOW_SET_SCRIPT,
+    _RATE_KEY_PATTERN,
     get_broadcaster,
     init_broadcaster,
     position_channel,
+    position_rate_key,
     position_revision_key,
     position_state_key,
 )
@@ -19,7 +23,24 @@ from pecha_api.events.recitation_websocket import (
 def _broadcaster() -> RecitationBroadcaster:
     broadcaster = RecitationBroadcaster("redis://localhost:6379/0")
     broadcaster.redis = AsyncMock()
+    _stub_scan_iter(broadcaster.redis, [])
     return broadcaster
+
+
+def _stub_scan_iter(redis, keys, seen=None):
+    """AsyncMock returns a coroutine; scan_iter has to be an async iterator."""
+
+    def scan_iter(**kwargs):
+        if seen is not None:
+            seen.update(kwargs)
+
+        async def _iter():
+            for key in keys:
+                yield key
+
+        return _iter()
+
+    redis.scan_iter = scan_iter
 
 
 class TestRecitationBroadcasterLifecycle:
@@ -74,6 +95,8 @@ class TestRecitationBroadcasterLifecycle:
         async def mock_from_url(*args, **kwargs):
             return mock_redis
 
+        _stub_scan_iter(mock_redis, [])
+
         with patch(
             "pecha_api.events.recitation_websocket.Redis.from_url",
             side_effect=mock_from_url,
@@ -81,6 +104,24 @@ class TestRecitationBroadcasterLifecycle:
             created = await init_broadcaster("redis://localhost:6379/0")
 
         assert get_broadcaster() is created
+
+    @pytest.mark.asyncio
+    async def test_init_broadcaster_sweeps_rate_keys(self):
+        mock_redis = AsyncMock()
+        stale = f"recitation:event:{uuid4()}:rate"
+        _stub_scan_iter(mock_redis, [stale])
+        mock_redis.delete.return_value = 1
+
+        async def mock_from_url(*args, **kwargs):
+            return mock_redis
+
+        with patch(
+            "pecha_api.events.recitation_websocket.Redis.from_url",
+            side_effect=mock_from_url,
+        ):
+            await init_broadcaster("redis://localhost:6379/0")
+
+        mock_redis.delete.assert_awaited_once_with(stale)
 
     @pytest.mark.asyncio
     async def test_add_and_remove_connection(self):
@@ -339,26 +380,92 @@ class TestRecitationRevision:
 class TestRecitationRateLimit:
 
     @pytest.mark.asyncio
-    async def test_first_set_in_window_sets_expiry(self):
+    async def test_window_is_counted_in_one_round_trip(self):
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.return_value = 1
+        broadcaster.redis.eval.return_value = 1
         event_id = uuid4()
 
         assert await broadcaster.allow_set(event_id) is True
-        broadcaster.redis.expire.assert_awaited_once_with(
-            f"recitation:event:{event_id}:rate", 1
+        # The count and its expiry travel together, so no dropped EXPIRE can
+        # leave the key windowless and refuse the event forever.
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _ALLOW_SET_SCRIPT,
+            1,
+            position_rate_key(event_id),
+            str(RATE_WINDOW_SECONDS),
         )
+        broadcaster.redis.incr.assert_not_awaited()
+        broadcaster.redis.expire.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_allows_at_the_ceiling(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = MAX_SETS_PER_SECOND
+
+        assert await broadcaster.allow_set(uuid4()) is True
 
     @pytest.mark.asyncio
     async def test_rejects_beyond_ceiling(self):
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.return_value = MAX_SETS_PER_SECOND + 1
+        broadcaster.redis.eval.return_value = MAX_SETS_PER_SECOND + 1
 
         assert await broadcaster.allow_set(uuid4()) is False
 
     @pytest.mark.asyncio
     async def test_fails_open_when_redis_errors(self):
         broadcaster = _broadcaster()
-        broadcaster.redis.incr.side_effect = Exception("redis down")
+        broadcaster.redis.eval.side_effect = Exception("redis down")
 
         assert await broadcaster.allow_set(uuid4()) is True
+
+
+class TestRecitationRateKeySweep:
+
+    @pytest.mark.asyncio
+    async def test_deletes_every_matching_key_in_one_call(self):
+        broadcaster = _broadcaster()
+        keys = [f"recitation:event:{uuid4()}:rate" for _ in range(3)]
+        _stub_scan_iter(broadcaster.redis, keys)
+        broadcaster.redis.delete.return_value = len(keys)
+
+        assert await broadcaster.clear_rate_keys() == 3
+        broadcaster.redis.delete.assert_awaited_once_with(*keys)
+
+    @pytest.mark.asyncio
+    async def test_scan_is_scoped_to_rate_keys(self):
+        broadcaster = _broadcaster()
+        seen = {}
+        _stub_scan_iter(broadcaster.redis, [], seen=seen)
+
+        assert await broadcaster.clear_rate_keys() == 0
+        # Never KEYS, and never a pattern that could reach state or revisions.
+        assert seen["match"] == _RATE_KEY_PATTERN
+        assert _RATE_KEY_PATTERN == "recitation:event:*:rate"
+        broadcaster.redis.delete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deletes_in_batches(self):
+        broadcaster = _broadcaster()
+        keys = [f"recitation:event:{i}:rate" for i in range(1200)]
+        _stub_scan_iter(broadcaster.redis, keys)
+        broadcaster.redis.delete.side_effect = [500, 500, 200]
+
+        assert await broadcaster.clear_rate_keys() == 1200
+        assert broadcaster.redis.delete.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_never_blocks_startup_when_redis_errors(self):
+        broadcaster = _broadcaster()
+
+        def boom(**kwargs):
+            raise Exception("redis down")
+
+        broadcaster.redis.scan_iter = boom
+
+        assert await broadcaster.clear_rate_keys() == 0
+
+    @pytest.mark.asyncio
+    async def test_no_op_before_connect(self):
+        broadcaster = RecitationBroadcaster("redis://localhost:6379/0")
+
+        assert await broadcaster.clear_rate_keys() == 0
