@@ -34,7 +34,7 @@ from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_posts_for_group_ids
 from pecha_api.group_posts.service import build_post_dtos
 from pecha_api.plans.groups.groups_models import AuthorGroup
-from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.follow_scope import resolve_author_group_feed_scope
 from pecha_api.plans.groups.groups_repository import get_groups_by_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.users.users_service import validate_and_extract_user_details
@@ -264,20 +264,22 @@ def _get_author_group_feed(
     """Mixed feed of posts and events from author groups.
 
     Guests (no token) always see published public groups.
-    Logged-in default: groups the user joined.
-    With should_include_unfollowed=True: mix in other public groups.
+    Logged-in default: posts from joined groups; events also from public groups.
+    With should_include_unfollowed=True: posts from public groups too.
     """
     current_user: Optional[Users] = None
     if token:
         current_user = validate_and_extract_user_details(token=token)
 
-    group_ids, joined_group_id_set = resolve_public_group_scope(
-        db=db,
-        user_id=current_user.id if current_user else None,
-        should_include_unfollowed=should_include_unfollowed,
+    post_group_ids, event_group_ids, joined_group_id_set = (
+        resolve_author_group_feed_scope(
+            db=db,
+            user_id=current_user.id if current_user else None,
+            should_include_unfollowed=should_include_unfollowed,
+        )
     )
 
-    if not group_ids:
+    if not post_group_ids and not event_group_ids:
         return AuthorGroupFeedResponse(
             items=[],
             skip=skip,
@@ -291,7 +293,7 @@ def _get_author_group_feed(
 
     posts, posts_total = get_posts_for_group_ids(
         db=db,
-        group_ids=group_ids,
+        group_ids=post_group_ids,
         skip=0,
         limit=fetch_limit,
         status=GroupPostStatus.PUBLISHED,
@@ -301,13 +303,13 @@ def _get_author_group_feed(
 
     one_shot_keys, one_shot_publishable_total = get_one_shot_event_feed_keys(
         db=db,
-        restrict_group_ids=group_ids,
+        restrict_group_ids=event_group_ids,
         limit=fetch_limit,
     )
 
     recurring_templates = get_recurring_events(
         db=db,
-        restrict_group_ids=group_ids,
+        restrict_group_ids=event_group_ids,
     )
 
     expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
@@ -371,7 +373,7 @@ def _get_author_group_feed(
         )
 
     ranked.sort(key=lambda entry: (entry[0], entry[1].value), reverse=True)
-    page_entries = _load_page_entries(db, ranked, skip, limit, group_ids)
+    page_entries = _load_page_entries(db, ranked, skip, limit, event_group_ids)
 
     page_posts = [
         source

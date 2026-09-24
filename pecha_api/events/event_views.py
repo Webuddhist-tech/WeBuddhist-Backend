@@ -54,8 +54,8 @@ def get_events_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,
@@ -96,8 +96,8 @@ def get_events_today_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,

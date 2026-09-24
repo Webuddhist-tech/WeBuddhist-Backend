@@ -136,7 +136,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_joined_only_mixes_posts_and_events_newest_first(
         self,
@@ -154,7 +154,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         post = MockPost(joined_id, published_at=datetime(2026, 8, 4, 15, 0, tzinfo=tz.utc))
@@ -218,7 +218,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_should_include_unfollowed_mixes_other_public_groups(
         self,
@@ -236,7 +236,11 @@ class TestGetAuthorGroupFeedService:
         other_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id, other_id], {joined_id})
+        mock_scope.return_value = (
+            [joined_id, other_id],
+            [joined_id, other_id],
+            {joined_id},
+        )
         mock_groups_by_ids.return_value = [
             MockGroup(joined_id),
             MockGroup(other_id, title="Other Group"),
@@ -273,7 +277,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_recurring_occurrences_ranked_by_proximity_and_active_start_date(
         self,
@@ -296,7 +300,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         now = datetime.now(tz.utc)
@@ -411,7 +415,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_recurring_occurrence_clamps_an_inverted_legacy_template(
         self,
@@ -434,7 +438,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         template = MockEvent(joined_id)
@@ -498,7 +502,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_builds_dtos_only_for_requested_page(
         self,
@@ -521,7 +525,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         now = datetime.now(tz.utc)
@@ -591,7 +595,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_page_is_topped_up_when_ranked_event_is_no_longer_loadable(
         self,
@@ -613,7 +617,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         now = datetime.now(tz.utc)
@@ -660,7 +664,7 @@ class TestGetAuthorGroupFeedService:
 
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     @pytest.mark.asyncio
     async def test_empty_when_user_joined_nothing(
@@ -672,7 +676,7 @@ class TestGetAuthorGroupFeedService:
     ):
         mock_validate.return_value = MockUser()
         mock_db = MagicMock()
-        mock_scope.return_value = ([], set())
+        mock_scope.return_value = ([], [], set())
 
         result = await get_author_group_feed_service(db=mock_db, token="token")
 
@@ -689,7 +693,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_guest_sees_public_groups_without_validating_token(
         self,
@@ -705,7 +709,7 @@ class TestGetAuthorGroupFeedService:
     ):
         public_id = uuid4()
         mock_db = MagicMock()
-        mock_scope.return_value = ([public_id], set())
+        mock_scope.return_value = ([public_id], [public_id], set())
         mock_groups_by_ids.return_value = [MockGroup(public_id)]
         post = MockPost(public_id)
         mock_get_posts.return_value = ([post], 1)
@@ -737,7 +741,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_feed_event_card_carries_my_participation_type(
         self,
@@ -758,7 +762,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
         mock_groups_by_ids.return_value = [MockGroup(joined_id)]
 
         event = MockEvent(joined_id, created_at=datetime(2026, 8, 4, 10, 0, tzinfo=tz.utc))
@@ -803,7 +807,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_feed_skips_participation_lookup_for_anonymous_viewers(
         self,
@@ -820,7 +824,7 @@ class TestGetAuthorGroupFeedService:
     ):
         public_id = uuid4()
         mock_db = MagicMock()
-        mock_scope.return_value = ([public_id], set())
+        mock_scope.return_value = ([public_id], [public_id], set())
         mock_groups_by_ids.return_value = [MockGroup(public_id)]
 
         event = MockEvent(public_id, created_at=datetime(2026, 8, 4, 10, 0, tzinfo=tz.utc))
@@ -859,7 +863,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
-    @patch("pecha_api.author_group_feed.service.resolve_public_group_scope")
+    @patch("pecha_api.author_group_feed.service.resolve_author_group_feed_scope")
     @patch("pecha_api.author_group_feed.service.validate_and_extract_user_details")
     async def test_total_excludes_one_shots_linked_to_unpublished_plans(
         self,
@@ -878,7 +882,7 @@ class TestGetAuthorGroupFeedService:
         joined_id = uuid4()
         mock_db = MagicMock()
         mock_validate.return_value = user
-        mock_scope.return_value = ([joined_id], {joined_id})
+        mock_scope.return_value = ([joined_id], [joined_id], {joined_id})
 
         publishable = MockEvent(joined_id)
         draft_plan_id = uuid4()

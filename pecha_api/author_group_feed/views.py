@@ -34,8 +34,9 @@ async def get_author_group_feed(
         Query(
             alias="include_unfollowed",
             description=(
-                "false = joined groups only (My tab); "
-                "true = also mix in other public groups (Discover tab). "
+                "false = posts from joined groups only (My tab); "
+                "events still include all public groups. "
+                "true = posts from public groups too (Discover tab). "
                 "Guests always see public groups."
             ),
         ),
@@ -58,8 +59,8 @@ async def get_author_group_feed(
     """Mixed chronological feed of posts and events from author groups.
 
     Optional auth. Guests see published public groups. Logged-in users default
-    to groups they joined. Pass ``include_unfollowed=true`` to also mix in
-    other public groups.
+    to joined groups for posts; events include public groups without join.
+    Pass ``include_unfollowed=true`` to mix public posts in too.
     """
     return await get_author_group_feed_service(
         db=db,

@@ -31,7 +31,7 @@ from pecha_api.region_restrictions.region_restriction_service import (
     should_hide_for_timezone,
 )
 from pecha_api.users.users_models import Users
-from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.follow_scope import resolve_event_listing_group_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
 from pecha_api.plans.shared.metadata_utils import (
@@ -923,7 +923,7 @@ def get_events_service(
         if token:
             current_user = validate_and_extract_user_details(token=token)
             if restrict_group_ids is None:
-                restrict_group_ids, _ = resolve_public_group_scope(
+                restrict_group_ids, _ = resolve_event_listing_group_ids(
                     db=db,
                     user_id=current_user.id,
                     should_include_unfollowed=should_include_unfollowed,
