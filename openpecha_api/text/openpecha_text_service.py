@@ -1,7 +1,7 @@
 import logging
 from typing import Optional, Dict, Any
 
-from pecha_api.external_clients import get_open_pecha_client
+from pecha_api.external_clients import get_open_pecha_client, get_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ async def fetch_texts_by_category(
 
     client = get_open_pecha_client()
     http_client = client.get_async_httpx_client()
-    response = await http_client.get("/v2/texts", params=params)
+    response = await get_with_retry(http_client, "/v2/texts", params=params)
     response.raise_for_status()
     return response.json()
 
@@ -34,7 +34,7 @@ async def fetch_texts_by_category(
 async def fetch_text_by_id(text_id: str) -> Optional[Dict[str, Any]]:
     client = get_open_pecha_client()
     http_client = client.get_async_httpx_client()
-    response = await http_client.get(f"/v2/texts/{text_id}")
+    response = await get_with_retry(http_client, f"/v2/texts/{text_id}")
     response.raise_for_status()
     return response.json()
 
@@ -60,6 +60,6 @@ async def search_by_content(
         
     client = get_open_pecha_client()
     http_client = client.get_async_httpx_client()
-    response = await http_client.get("/v2/content-search", params=params)
+    response = await get_with_retry(http_client, "/v2/content-search", params=params)
     response.raise_for_status()
     return response.json()

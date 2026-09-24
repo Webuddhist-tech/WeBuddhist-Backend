@@ -8,10 +8,18 @@ from ..plans_enums import ContentType
 
 logger = logging.getLogger(__name__)
 
+# A task fans out one request per segment per subtask, and content and refs are
+# resolved in parallel on top of that. Without a cap a single task can fire
+# hundreds of simultaneous requests at openpecha, which the upstream answers by
+# dropping connections.
+_MAX_CONCURRENT_SEGMENT_REQUESTS = 10
+_segment_request_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SEGMENT_REQUESTS)
+
 
 async def _fetch_segment_content_safe(segment_id: str) -> Optional[str]:
     try:
-        return await fetch_segment_content(segment_id)
+        async with _segment_request_semaphore:
+            return await fetch_segment_content(segment_id)
     except Exception:
         logger.exception("Failed to fetch segment content '%s' from openpecha", segment_id)
         return None
@@ -19,7 +27,8 @@ async def _fetch_segment_content_safe(segment_id: str) -> Optional[str]:
 
 async def _fetch_segment_reference_safe(segment_id: str) -> Optional[str]:
     try:
-        return await fetch_segment_reference(segment_id)
+        async with _segment_request_semaphore:
+            return await fetch_segment_reference(segment_id)
     except Exception:
         logger.exception("Failed to fetch segment reference '%s' from openpecha", segment_id)
         return None
