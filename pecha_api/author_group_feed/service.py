@@ -124,6 +124,47 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
     return expanded_recurring
 
 
+def _author_group_feed_event_item_dto(
+    event,
+    *,
+    feed_at: datetime,
+    group_info: dict,
+    group_by_id: Dict[UUID, AuthorGroup],
+    joined_group_id_set: Set[UUID],
+    published_plan_ids: Set[UUID],
+    published_series_ids: Set[UUID],
+    language: Optional[str],
+    counts_by_event: Dict[UUID, int],
+    joined_event_ids: Set[UUID],
+    participation_types: Dict[UUID, str],
+    occurrence_date: Optional[datetime] = None,
+) -> AuthorGroupFeedItemDTO:
+    event_dto_kwargs = {
+        "language": language,
+        "participant_count": counts_by_event.get(event.id, 0),
+        "is_joined": event.id in joined_event_ids,
+        "my_participation_type": participation_types.get(event.id),
+    }
+    if occurrence_date is not None:
+        event_dto_kwargs["occurrence_date"] = occurrence_date
+    return AuthorGroupFeedItemDTO(
+        type=AuthorGroupFeedItemType.EVENT,
+        feed_at=_isoformat(feed_at),
+        is_joined=event.group_id in joined_group_id_set,
+        can_view_linked_content=can_view_event_linked_content_without_group_join(
+            event,
+            group=group_by_id.get(event.group_id),
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        ),
+        group_id=event.group_id,
+        group_name=group_info.get("group_name"),
+        group_slug=group_info.get("group_slug"),
+        group_avatar_url=group_info.get("group_avatar_url"),
+        event=_event_to_dto(event, **event_dto_kwargs),
+    )
+
+
 def _get_author_group_feed(
     db: Session,
     token: Optional[str],
@@ -287,27 +328,18 @@ def _get_author_group_feed(
         cards.append(
             (
                 feed_at,
-                AuthorGroupFeedItemDTO(
-                    type=AuthorGroupFeedItemType.EVENT,
-                    feed_at=_isoformat(feed_at),
-                    is_joined=event.group_id in joined_group_id_set,
-                    can_view_linked_content=can_view_event_linked_content_without_group_join(
-                        event,
-                        group=group_by_id.get(event.group_id),
-                        published_plan_ids=published_plan_ids,
-                        published_series_ids=published_series_ids,
-                    ),
-                    group_id=event.group_id,
-                    group_name=group_info.get("group_name"),
-                    group_slug=group_info.get("group_slug"),
-                    group_avatar_url=group_info.get("group_avatar_url"),
-                    event=_event_to_dto(
-                        event,
-                        language=language,
-                        participant_count=counts_by_event.get(event.id, 0),
-                        is_joined=event.id in joined_event_ids,
-                        my_participation_type=participation_types.get(event.id),
-                    ),
+                _author_group_feed_event_item_dto(
+                    event,
+                    feed_at=feed_at,
+                    group_info=group_info,
+                    group_by_id=group_by_id,
+                    joined_group_id_set=joined_group_id_set,
+                    published_plan_ids=published_plan_ids,
+                    published_series_ids=published_series_ids,
+                    language=language,
+                    counts_by_event=counts_by_event,
+                    joined_event_ids=joined_event_ids,
+                    participation_types=participation_types,
                 ),
             )
         )
@@ -339,28 +371,19 @@ def _get_author_group_feed(
         cards.append(
             (
                 feed_at,
-                AuthorGroupFeedItemDTO(
-                    type=AuthorGroupFeedItemType.EVENT,
-                    feed_at=_isoformat(feed_at),
-                    is_joined=event.group_id in joined_group_id_set,
-                    can_view_linked_content=can_view_event_linked_content_without_group_join(
-                        event,
-                        group=group_by_id.get(event.group_id),
-                        published_plan_ids=published_plan_ids,
-                        published_series_ids=published_series_ids,
-                    ),
-                    group_id=event.group_id,
-                    group_name=group_info.get("group_name"),
-                    group_slug=group_info.get("group_slug"),
-                    group_avatar_url=group_info.get("group_avatar_url"),
-                    event=_event_to_dto(
-                        event,
-                        language=language,
-                        participant_count=counts_by_event.get(event.id, 0),
-                        is_joined=event.id in joined_event_ids,
-                        my_participation_type=participation_types.get(event.id),
-                        occurrence_date=item['start_date'],
-                    ),
+                _author_group_feed_event_item_dto(
+                    event,
+                    feed_at=feed_at,
+                    group_info=group_info,
+                    group_by_id=group_by_id,
+                    joined_group_id_set=joined_group_id_set,
+                    published_plan_ids=published_plan_ids,
+                    published_series_ids=published_series_ids,
+                    language=language,
+                    counts_by_event=counts_by_event,
+                    joined_event_ids=joined_event_ids,
+                    participation_types=participation_types,
+                    occurrence_date=item["start_date"],
                 ),
             )
         )
