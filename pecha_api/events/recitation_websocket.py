@@ -14,7 +14,7 @@ POSITION_TTL_SECONDS = 12 * 60 * 60
 
 # Per-event publish ceiling. An operator clicks a handful of times a minute, so
 # anything near this is a stuck key or a rogue client, not a fast reader.
-MAX_SETS_PER_SECOND = 10
+MAX_SETS_PER_SECOND = 50
 
 
 def position_channel(event_id: UUID) -> str:
