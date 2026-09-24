@@ -8,7 +8,7 @@ import logging
 
 from starlette import status
 
-from ..config import get
+from ..config import get, get_int
 
 s3_client = boto3.client(
     "s3",
@@ -62,6 +62,21 @@ def upload_bytes(bucket_name: str, s3_key: str, file: BytesIO, content_type: str
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="An unexpected error occurred.")
 
 
+# AWS refuses a SigV4 signature asked to live longer than a week.
+MAX_PRESIGNED_EXPIRY_SECONDS = 7 * 24 * 60 * 60
+
+
+def presigned_url_expiry_seconds() -> int:
+    """Lifetime to sign read URLs with, clamped to what AWS will accept.
+
+    These URLs are handed out inside responses the API caches, so the
+    signature has to outlive the cache entry carrying it - see
+    `pecha_api.cache.presigned_expiry`, which holds the other half of that
+    bargain by refusing to keep an entry longer than its signatures last.
+    """
+    return min(get_int("PRESIGNED_URL_EXPIRY_SECONDS"), MAX_PRESIGNED_EXPIRY_SECONDS)
+
+
 def generate_presigned_access_url(bucket_name: str, s3_key: str):
     if isinstance(s3_key, str) and s3_key.strip():
         # Generate a presigned URL for uploading an object
@@ -71,7 +86,7 @@ def generate_presigned_access_url(bucket_name: str, s3_key: str):
                 "Bucket": bucket_name,
                 "Key": s3_key
             },
-            ExpiresIn=3600
+            ExpiresIn=presigned_url_expiry_seconds()
         )
         return presigned_url
     return ""

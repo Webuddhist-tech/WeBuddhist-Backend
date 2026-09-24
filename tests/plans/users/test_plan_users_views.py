@@ -147,7 +147,7 @@ def test_get_user_plans_success(authenticated_client):
         total=1
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -194,7 +194,7 @@ def test_get_user_plans_with_status_filter(authenticated_client):
         total=0,
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans?status_filter=active",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -234,7 +234,7 @@ def test_get_user_plans_with_pagination(authenticated_client):
         total=50
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans?skip=10&limit=10",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -264,7 +264,7 @@ def test_get_user_plans_with_all_filters(authenticated_client):
         total=0
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans?status_filter=completed&skip=5&limit=15",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -290,7 +290,7 @@ def test_get_user_plans_empty_result(authenticated_client):
         total=0
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -307,7 +307,7 @@ def test_get_user_plans_empty_result(authenticated_client):
 
 def test_get_user_plans_invalid_token(authenticated_client):
     """Test retrieval with invalid authentication token"""
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock) as mock_get_plans:
         mock_get_plans.side_effect = HTTPException(
             status_code=401,
             detail={"error": "Unauthorized", "message": "Invalid token"}
@@ -361,7 +361,7 @@ def test_get_user_plans_unauthenticated(unauthenticated_client):
 
 def test_get_user_plans_database_error(authenticated_client):
     """Test retrieval when database error occurs"""
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock) as mock_get_plans:
         mock_get_plans.side_effect = HTTPException(
             status_code=500,
             detail={"error": "Internal Server Error", "message": "Database connection failed"}
@@ -432,7 +432,7 @@ def test_get_user_plans_multiple_plans(authenticated_client):
         total=3
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=mock_response) as mock_get_plans:
         response = authenticated_client.get(
             "/users/me/plans",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -452,7 +452,7 @@ def test_get_user_plans_multiple_plans(authenticated_client):
 def test_get_user_plans_success_default_pagination(authenticated_client):
     response_payload = {"plans": [], "skip": 0, "limit": 20, "total": 0}
 
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=response_payload) as mock_get:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=response_payload) as mock_get:
         response = authenticated_client.get(
             "/users/me/plans", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         )
@@ -470,7 +470,7 @@ def test_get_user_plans_success_default_pagination(authenticated_client):
 def test_get_user_plans_with_filters_and_pagination(authenticated_client):
     response_payload = {"plans": [], "skip": 10, "limit": 5, "total": 0}
 
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=response_payload) as mock_get:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=response_payload) as mock_get:
         response = authenticated_client.get(
             "/users/me/plans?status_filter=active&skip=10&limit=5",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
@@ -488,7 +488,7 @@ def test_get_user_plans_with_filters_and_pagination(authenticated_client):
 def test_get_user_plans_with_language_filter(authenticated_client):
     response_payload = {"plans": [], "skip": 0, "limit": 20, "total": 0}
 
-    with patch("pecha_api.plans.users.plan_users_views.get_user_enrolled_plans", new_callable=AsyncMock, return_value=response_payload) as mock_get:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plans_cached", new_callable=AsyncMock, return_value=response_payload) as mock_get:
         response = authenticated_client.get(
             "/users/me/plans?language=bo",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
@@ -516,7 +516,7 @@ def test_get_user_plan_progress_details_success(authenticated_client):
         "completed_at": None,
     }
 
-    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_progress", return_value=payload) as mock_get:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_progress_cached", new_callable=AsyncMock, return_value=payload) as mock_get:
         response = authenticated_client.get(
             f"/users/me/plans/{plan_id}", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         )
@@ -633,7 +633,8 @@ def test_get_user_plan_day_details_success(authenticated_client):
     }
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_service",
+        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_cached",
+        new_callable=AsyncMock,
         return_value=payload,
     ) as mock_service:
         response = authenticated_client.get(
@@ -658,7 +659,7 @@ def test_get_user_plan_day_details_error_propagates(authenticated_client):
     day_number = 2
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_service"
+        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_cached"
     ) as mock_service:
         mock_service.side_effect = HTTPException(
             status_code=404,
@@ -785,7 +786,7 @@ def test_get_user_plan_days_completion_status_success(authenticated_client):
         start_date=start_date
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_days_completion_status_service", new_callable=AsyncMock, return_value=mock_response) as mock_service:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_days_completion_status_cached", new_callable=AsyncMock, return_value=mock_response) as mock_service:
         response = authenticated_client.get(
             f"/users/me/plans/{plan_id}/days/completion_status",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -832,7 +833,7 @@ def test_get_user_plan_days_completion_status_all_completed(authenticated_client
         start_date=None
     )
     
-    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_days_completion_status_service", new_callable=AsyncMock, return_value=mock_response) as mock_service:
+    with patch("pecha_api.plans.users.plan_users_views.get_user_plan_days_completion_status_cached", new_callable=AsyncMock, return_value=mock_response) as mock_service:
         response = authenticated_client.get(
             f"/users/me/plans/{plan_id}/days/completion_status",
             headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -935,7 +936,8 @@ def test_get_user_series_enrollments_success(authenticated_client):
     )
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_series_enrollments",
+        "pecha_api.plans.users.plan_users_views.get_user_series_enrollments_cached",
+        new_callable=AsyncMock,
         return_value=mock_response,
     ) as mock_get:
         response = authenticated_client.get(
@@ -960,7 +962,8 @@ def test_get_user_series_enrollments_with_filters(authenticated_client):
     )
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_series_enrollments",
+        "pecha_api.plans.users.plan_users_views.get_user_series_enrollments_cached",
+        new_callable=AsyncMock,
         return_value=mock_response,
     ) as mock_get:
         response = authenticated_client.get(
@@ -1015,7 +1018,8 @@ def test_get_user_series_progress_success(authenticated_client):
     )
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_series_progress",
+        "pecha_api.plans.users.plan_users_views.get_user_series_progress_cached",
+        new_callable=AsyncMock,
         return_value=mock_response,
     ) as mock_get:
         response = authenticated_client.get(
@@ -1095,7 +1099,8 @@ def test_get_user_series_days_completed_endpoint_success(authenticated_client):
     )
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_series_days_completed",
+        "pecha_api.plans.users.plan_users_views.get_user_series_days_completed_cached",
+        new_callable=AsyncMock,
         return_value=mock_response,
     ) as mock_get:
         response = authenticated_client.get(
@@ -1125,7 +1130,8 @@ def test_get_user_series_days_completed_endpoint_with_filters(authenticated_clie
     )
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_series_days_completed",
+        "pecha_api.plans.users.plan_users_views.get_user_series_days_completed_cached",
+        new_callable=AsyncMock,
         return_value=mock_response,
     ) as mock_get:
         response = authenticated_client.get(

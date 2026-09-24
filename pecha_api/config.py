@@ -29,7 +29,11 @@ DEFAULTS = dict(
     # against the server's max_connections.
     DB_POOL_SIZE=10,
     DB_MAX_OVERFLOW=20,
-    DB_POOL_TIMEOUT=30,
+    # Seconds a request waits for a connection before giving up. Short on
+    # purpose: waiting 30s does not make a connection appear, it just holds a
+    # worker thread while the queue behind it grows. Exhaustion is returned as
+    # a 503 with Retry-After (see db/overload_handler.py), not a 500.
+    DB_POOL_TIMEOUT=5,
     DB_POOL_RECYCLE=1800,
     DEFAULT_LANGUAGE="en",
     DEFAULT_PAGE_SIZE=10,
@@ -58,6 +62,12 @@ DEFAULTS = dict(
     CACHE_PREFIX="pecha:",
     CACHE_DEFAULT_TIMEOUT=3000000, # 30 seconds in seconds
     CACHE_CONNECTION_STRING="redis://localhost:6379",
+    # Bounds on every cache call. A cache that stops answering must fail
+    # fast and let the request fall through to the database.
+    CACHE_CONNECT_TIMEOUT=1.0,
+    CACHE_SOCKET_TIMEOUT=2.0,
+    # How long the cache is treated as absent after a failure.
+    CACHE_CIRCUIT_BREAK_SECONDS=10.0,
     REDIS_URL="redis://localhost:6379/0",
 
     # Cache timeout configurations for different types (in seconds)
@@ -66,7 +76,34 @@ DEFAULTS = dict(
     CACHE_USER_TIMEOUT=900,         # 15 minutes for users (not frequently changed)
     CACHE_SHEET_TIMEOUT=60,         # 1 minute for sheets (frequently edited by users)
     CACHE_USER_STATS_TIMEOUT=300,   # 5 minutes for user stats
+    # Plan day content. Read by everyone on a plan, written only by an author
+    # through the CMS - and every write already invalidates the day it touched,
+    # so the timeout is just a backstop.
+    CACHE_PLAN_TIMEOUT=900,         # 15 minutes for plan day content
+    # Author-published content: series, plans, plan days, tags, presets. Only
+    # a CMS write changes any of it, and every one of those writes invalidates
+    # the namespaces it touches, so the timeout is a backstop for an
+    # invalidation that was missed rather than the thing keeping it correct.
+    CACHE_CONTENT_TIMEOUT=12600,    # 3.5 hours
+    # Anything carrying live or per-user state: event joins, user progress,
+    # posts, likes, accumulator totals. These have many write paths, several
+    # outside the CMS, so they lean on a short timeout instead of on having
+    # caught every one. At a busy moment a 60s entry is still read hundreds of
+    # times before it expires, which is where the load relief comes from.
+    CACHE_SOCIAL_TIMEOUT=60,        # 1 minute
     CACHE_CALENDAR_TIMEOUT=2592000, # 30 days; source calendar files are immutable
+
+    # How long a presigned S3 URL stays valid. Responses carrying these URLs
+    # are cached with the URL already inside them, so the signature has to
+    # outlive the cache entry that holds it - at one hour it did not, and
+    # every image served from a warm cache entry older than that was dead on
+    # arrival. AWS SigV4 allows at most 7 days.
+    PRESIGNED_URL_EXPIRY_SECONDS=86400,   # 24 hours
+    # Usable life a response must still have left when it is served. A cache
+    # entry is kept only while its shortest-lived signature has at least this
+    # long to run, so nobody is handed a URL that dies while the page using
+    # it is still open.
+    PRESIGNED_URL_SAFETY_MARGIN=1800,     # 30 minutes
 
     SHORT_URL_GENERATION_ENDPOINT="https://pech.as/api/v1",
 

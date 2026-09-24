@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from starlette import status
 
-from pecha_api.chat.enums import ChatRoomKind
+from pecha_api.chat.enums import ChatMessageType, ChatRoomKind
 from pecha_api.chat.notification_repository import (
     deactivate_push_device_token_by_id,
     filter_users_by_notification_preference,
@@ -27,7 +27,11 @@ from pecha_api.chat.repository import (
     get_message_by_id_any_room,
     get_prayer_by_id,
 )
-from pecha_api.chat.service import room_kind
+from pecha_api.chat.service import (
+    _generate_presigned_url,
+    _message_type_value,
+    room_kind,
+)
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.config import get_int
 from pecha_api.db.database import SessionLocal
@@ -58,11 +62,21 @@ def _build_notification_copy(
     room_name: str,
     sender_name: str,
     message_body: str,
+    message_type: str = ChatMessageType.TEXT.value,
+    has_image: bool = False,
 ) -> tuple[str, str]:
     preview = _preview_body(
         message_body,
         max(get_int("CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH"), 1),
     )
+    if message_type == ChatMessageType.PRAYER.value:
+        # A prayer request leads with the person asking and what they asked
+        # for. The room name buys nothing beside that - as long as the room's
+        # image is there to say which sangha this came from. Rooms without an
+        # image, and images that could not be signed, keep the name instead:
+        # a prayer from an unidentified group is a stranger's prayer.
+        title = f"{sender_name} is requesting a prayer 🙏"
+        return title, preview if has_image else f"{room_name}: {preview}"
     if chat_kind == "PRIVATE":
         return sender_name, preview
     return room_name, f"{sender_name}: {preview}"
@@ -88,12 +102,25 @@ def get_chat_notification_targets(
 
         room = message.room
         chat_kind = room_kind(room)
+        message_type = _message_type_value(message)
         sender_name = get_sender_display_name(db=db, sender_id=message.sender_id)
+        # Only a prayer request carries the room's image: it replaces the room
+        # name the copy drops. Ordinary chat keeps its unchanged look. Resolved
+        # before the copy is built, because whether the image is actually there
+        # decides whether the copy can afford to drop the name.
+        image_url = (
+            _generate_presigned_url(room.img_url)
+            if message_type == ChatMessageType.PRAYER.value
+            else None
+        )
         title, body = _build_notification_copy(
             chat_kind=chat_kind,
             room_name=room.name,
             sender_name=sender_name,
             message_body=message.body,
+            message_type=message_type,
+            # Empty string too: the signer returns one for an unusable key.
+            has_image=bool(image_url),
         )
 
         if chat_kind == ChatRoomKind.PRIVATE.value:
@@ -157,6 +184,8 @@ def get_chat_notification_targets(
             sender_id=message.sender_id,
             chat_kind=chat_kind,
             group_id=room.group_id,
+            message_type=message_type,
+            image_url=image_url,
             title=title,
             body=body,
             recipients=recipients,

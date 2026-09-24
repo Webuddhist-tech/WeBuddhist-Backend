@@ -45,12 +45,13 @@ class MockMember:
 
 
 class MockMessage:
-    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", room=None):
+    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", room=None, message_type="TEXT"):
         self.id = uuid4()
         self.room_id = room_id or uuid4()
         self.sender_id = sender_id or uuid4()
         self.sender = sender or MockUser(user_id=self.sender_id)
         self.body = body
+        self.message_type = message_type
         self.created_at = datetime.now(timezone.utc)
         self.deleted_at = None
         self.room = room
@@ -59,12 +60,13 @@ class MockMessage:
 
 
 class MockRoom:
-    def __init__(self, group_id=None, sender_id=None, receiver_id=None, name="Room"):
+    def __init__(self, group_id=None, sender_id=None, receiver_id=None, name="Room", img_url=None):
         self.id = uuid4()
         self.group_id = group_id
         self.sender_id = sender_id
         self.receiver_id = receiver_id
         self.name = name
+        self.img_url = img_url
 
 
 class MockDevice:
@@ -101,6 +103,65 @@ class TestPreviewAndCopy:
         )
         assert title == "Sangha"
         assert body == "Alice Doe: Hello group"
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_prayer_copy_names_the_requester_and_drops_the_room(self, _get_int):
+        """With the room's image attached, the name is redundant."""
+        title, body = _build_notification_copy(
+            chat_kind="EVENT",
+            room_name="Dzongsar Drolma Bumtshok",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah, that her treatment is swift.",
+            message_type="PRAYER",
+            has_image=True,
+        )
+        assert title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert body == "For my niece Sarah, that her treatment is swift."
+        assert "Dzongsar" not in title and "Dzongsar" not in body
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_prayer_without_an_image_keeps_the_room_name(self, _get_int):
+        """Nothing else would say which sangha the prayer came from."""
+        title, body = _build_notification_copy(
+            chat_kind="EVENT",
+            room_name="Dzongsar Drolma Bumtshok",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah, that her treatment is swift.",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert body == (
+            "Dzongsar Drolma Bumtshok: For my niece Sarah, that her treatment is swift."
+        )
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_prayer_body_still_truncates(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=True,
+        )
+        assert len(body) == 20
+        assert body.endswith("…")
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_prayer_preview_truncates_around_the_room_name(self, _get_int):
+        """The limit governs the excerpt; the room prefix sits outside it, the
+        way the group-chat sender prefix already does."""
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert body.startswith("Sangha: ")
+        assert len(body.removeprefix("Sangha: ")) == 20
 
 
 class TestBuildEventBody:
@@ -297,6 +358,85 @@ class TestGetChatNotificationTargets:
         assert result.recipients[0].user_id == joiner_with_device
         assert result.total == 2
         assert result.has_more is False
+
+    @patch(
+        "pecha_api.chat.notification_service._generate_presigned_url",
+        return_value="https://example.com/event.png",
+    )
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Tenzin Youdon")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_prayer_request_targets_carry_prayer_copy_and_room_image(
+        self,
+        mock_session,
+        mock_get_message,
+        mock_sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        mock_presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        sender_id = uuid4()
+        joiner = uuid4()
+        group_id = uuid4()
+        room = MockRoom(
+            group_id=group_id,
+            name="Dzongsar Drolma Bumtshok",
+            img_url="groups/avatar.png",
+        )
+        message = MockMessage(
+            sender_id=sender_id,
+            room=room,
+            body="For my niece Sarah.",
+            message_type="PRAYER",
+        )
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.message_type == "PRAYER"
+        assert result.title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert result.body == "For my niece Sarah."
+        assert result.image_url == "https://example.com/event.png"
+        mock_presign.assert_called_once_with("groups/avatar.png")
+
+    @patch("pecha_api.chat.notification_service._generate_presigned_url")
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Alice Doe")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_ordinary_message_carries_no_image(
+        self,
+        mock_session,
+        mock_get_message,
+        mock_sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        mock_presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        joiner = uuid4()
+        room = MockRoom(group_id=uuid4(), name="Sangha", img_url="groups/avatar.png")
+        message = MockMessage(sender_id=uuid4(), room=room, body="Hello group")
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.message_type == "TEXT"
+        assert result.image_url is None
+        assert result.title == "Sangha"
+        mock_presign.assert_not_called()
 
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room", return_value=None)
     @patch("pecha_api.chat.notification_service.SessionLocal")

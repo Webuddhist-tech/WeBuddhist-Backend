@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_on_write
 from typing import Annotated, Optional
 from uuid import UUID
 
@@ -20,6 +22,13 @@ oauth2_scheme = HTTPBearer()
 cms_tags_router = APIRouter(
     prefix="/cms/tags",
     tags=["CMS Tags"],
+    # Every write on this router clears the namespaces it can affect.
+    dependencies=[Depends(invalidate_on_write(
+        CacheType.PLAN_TAGS,
+        CacheType.PLAN_TAG_DETAIL,
+        CacheType.PLAN_LIST,
+        CacheType.PLAN_DETAIL,
+    ))],
 )
 
 

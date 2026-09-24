@@ -1466,7 +1466,7 @@ def list_public_groups(
         user_id = None
         if token:
             try:
-                user = validate_and_extract_user_details(token=token)
+                user = validate_and_extract_user_details(token=token, db=db)
                 user_id = user.id
                 joined_ids = get_joined_group_ids_by_user(db=db, user_id=user.id)
                 if joined_ids:

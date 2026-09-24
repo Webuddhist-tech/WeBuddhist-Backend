@@ -88,7 +88,13 @@ def test_list_with_token_sets_is_joined(
     by_id = {event.id: event for event in result.events}
     assert by_id[joined.id].is_joined is True
     assert by_id[not_joined.id].is_joined is False
-    mock_validate.assert_called_once_with(token="user-token")
+    # The session the service already holds is lent to the auth lookup rather
+    # than it opening a second one: two connections per request is what
+    # exhausts the pool under load.
+    mock_validate.assert_called_once_with(
+        token="user-token",
+        db=mock_session.return_value.__enter__.return_value,
+    )
     mock_joined_ids.assert_called_once()
     assert mock_joined_ids.call_args.kwargs["user_id"] == user.id
     assert set(mock_joined_ids.call_args.kwargs["event_ids"]) == {
