@@ -2,7 +2,12 @@ from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from pecha_api.events.event_response_models import EventDTO, EventsResponse
+from pecha_api.events.event_response_models import (
+    EventDTO,
+    EventMetadataResponse,
+    EventsResponse,
+    LinkedResourceDTO,
+)
 from pecha_api.events.event_service import (
     EventContentFilter,
     _expand_earliest_occurrences,
@@ -10,6 +15,7 @@ from pecha_api.events.event_service import (
     event_has_publishable_linked_content,
     get_events_service,
     get_events_today_service,
+    redact_public_linked_plan_and_series_from_event_dto,
 )
 
 
@@ -324,6 +330,33 @@ def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
         )
         is False
     )
+
+
+def test_redact_public_linked_plan_and_series_from_event_dto() -> None:
+    now = datetime.now(timezone.utc)
+    plan_id = uuid4()
+    series_id = uuid4()
+    dto = EventDTO(
+        id=uuid4(),
+        group_id=uuid4(),
+        plan_id=plan_id,
+        plan=LinkedResourceDTO(id=plan_id, name="Hidden plan", image_url="x"),
+        series_id=series_id,
+        series=LinkedResourceDTO(id=series_id, name="Hidden series", image_url="y"),
+        start_date=now,
+        end_date=now,
+        is_one_day=True,
+        featured=False,
+        is_recurring=False,
+        metadata=EventMetadataResponse(entries=[]),
+        created_at=now,
+        created_by="author@example.com",
+    )
+    redacted = redact_public_linked_plan_and_series_from_event_dto(dto)
+    assert redacted.plan_id is None
+    assert redacted.plan is None
+    assert redacted.series_id is None
+    assert redacted.series is None
 
 
 def test_can_view_linked_content_false_when_plan_hidden_for_timezone() -> None:

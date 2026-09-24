@@ -18,6 +18,7 @@ from pecha_api.events.event_service import (
     can_view_event_linked_content_without_group_join,
     collect_published_linked_resource_ids,
     event_has_publishable_linked_content,
+    redact_public_linked_plan_and_series_from_event_dto,
 )
 from pecha_api.users.users_models import Users
 from pecha_api.events.recurrence_service import (
@@ -209,22 +210,28 @@ def _author_group_feed_event_item_dto(
     }
     if occurrence_date is not None:
         event_dto_kwargs["occurrence_date"] = occurrence_date
+    can_view_linked_content = can_view_event_linked_content_without_group_join(
+        event,
+        group=group_by_id.get(event.group_id),
+        published_plan_ids=published_plan_ids,
+        published_series_ids=published_series_ids,
+        timezone_name=timezone_name,
+    )
+    event_dto = _event_to_dto(event, **event_dto_kwargs)
+    if not can_view_linked_content and (
+        event.plan_id or getattr(event, "series_id", None)
+    ):
+        event_dto = redact_public_linked_plan_and_series_from_event_dto(event_dto)
     return AuthorGroupFeedItemDTO(
         type=AuthorGroupFeedItemType.EVENT,
         feed_at=_isoformat(feed_at),
         is_joined=event.group_id in joined_group_id_set,
-        can_view_linked_content=can_view_event_linked_content_without_group_join(
-            event,
-            group=group_by_id.get(event.group_id),
-            published_plan_ids=published_plan_ids,
-            published_series_ids=published_series_ids,
-            timezone_name=timezone_name,
-        ),
+        can_view_linked_content=can_view_linked_content,
         group_id=event.group_id,
         group_name=group_info.get("group_name"),
         group_slug=group_info.get("group_slug"),
         group_avatar_url=group_info.get("group_avatar_url"),
-        event=_event_to_dto(event, **event_dto_kwargs),
+        event=event_dto,
     )
 
 

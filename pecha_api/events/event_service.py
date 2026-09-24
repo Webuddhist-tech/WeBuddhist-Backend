@@ -584,6 +584,18 @@ def event_has_publishable_linked_content(
     return series_id in published_series_ids
 
 
+def redact_public_linked_plan_and_series_from_event_dto(dto: EventDTO) -> EventDTO:
+    """Strip plan/series linkage from feed cards when public browse is not allowed."""
+    return dto.model_copy(
+        update={
+            "plan_id": None,
+            "plan": None,
+            "series_id": None,
+            "series": None,
+        }
+    )
+
+
 def can_view_event_linked_content_without_group_join(
     event: Event,
     *,
