@@ -13,9 +13,10 @@ from pecha_api.events.event_participant_repository import (
 )
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
+    count_publishable_recurring_feed_events,
     get_events_by_ids,
     get_one_shot_event_feed_keys,
-    get_recurring_events,
+    get_recurring_events_for_feed,
 )
 from pecha_api.events.event_service import (
     _event_to_dto,
@@ -307,9 +308,10 @@ def _get_author_group_feed(
         limit=fetch_limit,
     )
 
-    recurring_templates = get_recurring_events(
+    recurring_templates = get_recurring_events_for_feed(
         db=db,
         restrict_group_ids=event_group_ids,
+        limit=fetch_limit,
     )
 
     expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
@@ -338,7 +340,11 @@ def _get_author_group_feed(
             )
         ]
 
-    events_total = one_shot_publishable_total + len(expanded_recurring)
+    recurring_publishable_total = count_publishable_recurring_feed_events(
+        db=db,
+        restrict_group_ids=event_group_ids,
+    )
+    events_total = one_shot_publishable_total + recurring_publishable_total
 
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     for post in posts:

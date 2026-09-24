@@ -387,6 +387,54 @@ def get_one_shot_event_feed_keys(
     return rows, total
 
 
+def count_publishable_recurring_feed_events(
+    db: Session,
+    restrict_group_ids: List[UUID],
+) -> int:
+    """Count in-scope recurring templates with publishable linked content."""
+    if not restrict_group_ids:
+        return 0
+    total = (
+        _apply_event_filters(
+            db.query(func.count(Event.id)).filter(Event.is_recurring.is_(True)),
+            restrict_group_ids=restrict_group_ids,
+        )
+        .filter(_publishable_linked_content_filter())
+        .scalar()
+    )
+    return int(total or 0)
+
+
+def get_recurring_events_for_feed(
+    db: Session,
+    restrict_group_ids: List[UUID],
+    limit: int,
+) -> List[Event]:
+    """Newest recurring templates in scope, bounded for feed ranking.
+
+    Full rows are loaded because occurrence expansion needs template fields.
+    """
+    if not restrict_group_ids or limit <= 0:
+        return []
+    return (
+        _apply_event_filters(
+            db.query(Event)
+            .options(
+                selectinload(Event.metadata_entries),
+                selectinload(Event.links),
+                selectinload(Event.location),
+                *_linked_resource_options(),
+            )
+            .filter(Event.is_recurring.is_(True)),
+            restrict_group_ids=restrict_group_ids,
+        )
+        .filter(_publishable_linked_content_filter())
+        .order_by(Event.created_at.desc(), Event.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 def get_events_by_ids(
     db: Session,
     event_ids: List[UUID],
