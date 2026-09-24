@@ -23,6 +23,7 @@ from pecha_api.plans.groups.groups_models import (
     author_group_joins,
     author_group_tags,
 )
+from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_model import Series
@@ -436,6 +437,26 @@ def get_member_roles_map(
         .all()
     )
     return {row.group_id: row.role for row in rows}
+
+
+def get_group_member_roles_by_user_ids(
+    db: Session,
+    group_id: UUID,
+    user_ids: Sequence[UUID],
+) -> Dict[UUID, str]:
+    """Map user id to their staff role in the group, via the linked Author (Author.user_id)."""
+    if not user_ids:
+        return {}
+    rows = (
+        db.query(Author.user_id, AuthorGroupMember.role)
+        .join(AuthorGroupMember, AuthorGroupMember.author_id == Author.id)
+        .filter(
+            AuthorGroupMember.group_id == group_id,
+            Author.user_id.in_(list(user_ids)),
+        )
+        .all()
+    )
+    return {row.user_id: row.role.value for row in rows}
 
 
 def list_group_member_ids_by_roles(
