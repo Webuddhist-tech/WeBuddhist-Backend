@@ -573,17 +573,12 @@ def event_has_publishable_linked_content(
     *,
     published_plan_ids: Set[UUID],
     published_series_ids: Set[UUID],
-    timezone_name: Optional[str] = None,
 ) -> bool:
     """False when an event points at a draft or missing plan/series."""
     plan_id = event.plan_id
     series_id = getattr(event, "series_id", None)
     if not plan_id and not series_id:
         return True
-    if linked_content_hidden_for_viewer_timezone(
-        event, timezone_name=timezone_name
-    ):
-        return False
     if plan_id:
         return plan_id in published_plan_ids
     return series_id in published_series_ids
@@ -604,7 +599,10 @@ def can_view_event_linked_content_without_group_join(
         event,
         published_plan_ids=published_plan_ids,
         published_series_ids=published_series_ids,
-        timezone_name=timezone_name,
+    ):
+        return False
+    if linked_content_hidden_for_viewer_timezone(
+        event, timezone_name=timezone_name
     ):
         return False
     if not group or not group.is_public or not is_group_published(group):

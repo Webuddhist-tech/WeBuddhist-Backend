@@ -132,7 +132,6 @@ def _fetch_publishable_one_shot_events_for_feed(
     group_ids: List[UUID],
     now: datetime,
     pool_limit: int,
-    timezone_name: Optional[str],
 ) -> Tuple[List[Event], int]:
     """Load publishable one-shot events until the merge pool is full or DB is exhausted."""
     pool: List[Event] = []
@@ -173,7 +172,6 @@ def _fetch_publishable_one_shot_events_for_feed(
                 event,
                 published_plan_ids=published_plan_ids,
                 published_series_ids=published_series_ids,
-                timezone_name=timezone_name,
             ):
                 continue
             publishable_total += 1
@@ -285,7 +283,6 @@ def _get_author_group_feed(
         group_ids=group_ids,
         now=now,
         pool_limit=fetch_limit,
-        timezone_name=timezone_name,
     )
 
     recurring_templates = get_recurring_events(
@@ -320,7 +317,6 @@ def _get_author_group_feed(
             item["event"],
             published_plan_ids=published_plan_ids,
             published_series_ids=published_series_ids,
-            timezone_name=timezone_name,
         )
     ]
 
