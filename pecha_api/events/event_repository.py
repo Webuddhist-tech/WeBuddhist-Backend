@@ -387,36 +387,23 @@ def get_one_shot_event_feed_keys(
     return rows, total
 
 
-def count_publishable_recurring_feed_events(
+def iter_recurring_publishable_template_batches(
     db: Session,
     restrict_group_ids: List[UUID],
-) -> int:
-    """Count in-scope recurring templates with publishable linked content."""
-    if not restrict_group_ids:
-        return 0
-    total = (
-        _apply_event_filters(
-            db.query(func.count(Event.id)).filter(Event.is_recurring.is_(True)),
-            restrict_group_ids=restrict_group_ids,
-        )
-        .filter(_publishable_linked_content_filter())
-        .scalar()
-    )
-    return int(total or 0)
+    *,
+    batch_size: int = 200,
+    after_id: Optional[UUID] = None,
+) -> Tuple[List[Event], Optional[UUID]]:
+    """Keyset page of in-scope publishable recurring templates (id ascending).
 
-
-def get_recurring_events_for_feed(
-    db: Session,
-    restrict_group_ids: List[UUID],
-    limit: int,
-) -> List[Event]:
-    """Newest recurring templates in scope, bounded for feed ranking.
-
-    Full rows are loaded because occurrence expansion needs template fields.
+    Returns the batch and the last id for the next page, or ``( [], None )``
+    when there are no more rows. Callers walk the full scope in bounded chunks
+    so occurrence-based feed ranking is not skewed by ``created_at``.
     """
-    if not restrict_group_ids or limit <= 0:
-        return []
-    return (
+    if not restrict_group_ids or batch_size <= 0:
+        return [], None
+
+    query = (
         _apply_event_filters(
             db.query(Event)
             .options(
@@ -429,10 +416,14 @@ def get_recurring_events_for_feed(
             restrict_group_ids=restrict_group_ids,
         )
         .filter(_publishable_linked_content_filter())
-        .order_by(Event.created_at.desc(), Event.id.desc())
-        .limit(limit)
-        .all()
+        .order_by(Event.id.asc())
     )
+    if after_id is not None:
+        query = query.filter(Event.id > after_id)
+    batch = query.limit(batch_size).all()
+    if not batch:
+        return [], None
+    return batch, batch[-1].id
 
 
 def get_events_by_ids(

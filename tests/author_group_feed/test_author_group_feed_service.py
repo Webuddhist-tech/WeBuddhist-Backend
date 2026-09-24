@@ -8,7 +8,10 @@ import pytest
 from pecha_api.author_group_feed.response_models import (
     AuthorGroupFeedItemType,
 )
-from pecha_api.author_group_feed.service import get_author_group_feed_service
+from pecha_api.author_group_feed.service import (
+    _collect_recurring_author_group_feed_items,
+    get_author_group_feed_service,
+)
 from pecha_api.events.event_response_models import EventDTO
 from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.response_models import GroupPostDTO
@@ -65,14 +68,11 @@ def _events_by_ids(
 
 
 @pytest.fixture(autouse=True)
-def _mock_get_recurring_events_default() -> Iterator[MagicMock]:
+def _mock_collect_recurring_feed_default() -> Iterator[MagicMock]:
     with patch(
-        "pecha_api.author_group_feed.service.get_recurring_events_for_feed",
-        return_value=[],
-    ) as mock, patch(
-        "pecha_api.author_group_feed.service.count_publishable_recurring_feed_events",
-        return_value=0,
-    ):
+        "pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items",
+        return_value=([], 0),
+    ) as mock:
         yield mock
 
 
@@ -276,7 +276,13 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
     @patch("pecha_api.author_group_feed.service.resolve_current_or_next_occurrence")
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch(
+        "pecha_api.author_group_feed.service.iter_recurring_publishable_template_batches"
+    )
+    @patch(
+        "pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items",
+        wraps=_collect_recurring_author_group_feed_items,
+    )
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
@@ -289,7 +295,8 @@ class TestGetAuthorGroupFeedService:
         mock_groups_by_ids,
         mock_get_posts,
         mock_get_events,
-        mock_get_recurring,
+        mock_collect_recurring,
+        mock_iter_recurring,
         mock_resolve,
         mock_build_posts,
         mock_event_dto,
@@ -316,7 +323,10 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts.return_value = ([], 0)
         mock_build_posts.return_value = []
         mock_get_events.return_value = ([recent_one_shot, old_one_shot], 2)
-        mock_get_recurring.return_value = [soon_template, active_template]
+        mock_iter_recurring.side_effect = [
+            ([soon_template, active_template], active_template.id),
+            ([], None),
+        ]
         mock_counts.return_value = {}
         mock_joined.return_value = []
 
@@ -406,7 +416,6 @@ class TestGetAuthorGroupFeedService:
             old_one_shot.id,
         ]
         assert "exclude_plan_or_series_linked" not in mock_get_events.call_args.kwargs
-        assert "exclude_plan_or_series_linked" not in mock_get_recurring.call_args.kwargs
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
@@ -414,7 +423,13 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
     @patch("pecha_api.author_group_feed.service.resolve_current_or_next_occurrence")
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch(
+        "pecha_api.author_group_feed.service.iter_recurring_publishable_template_batches"
+    )
+    @patch(
+        "pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items",
+        wraps=_collect_recurring_author_group_feed_items,
+    )
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
@@ -427,7 +442,8 @@ class TestGetAuthorGroupFeedService:
         mock_groups_by_ids,
         mock_get_posts,
         mock_get_events,
-        mock_get_recurring,
+        mock_collect_recurring,
+        mock_iter_recurring,
         mock_resolve,
         mock_build_posts,
         mock_event_dto,
@@ -452,7 +468,10 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts.return_value = ([], 0)
         mock_build_posts.return_value = []
         mock_get_events.return_value = ([], 0)
-        mock_get_recurring.return_value = [template]
+        mock_iter_recurring.side_effect = [
+            ([template], template.id),
+            ([], None),
+        ]
         mock_counts.return_value = {}
         mock_joined.return_value = []
 
@@ -501,7 +520,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch("pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items")
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
@@ -542,7 +561,7 @@ class TestGetAuthorGroupFeedService:
             _post_dto(post) for post in posts
         ]
         mock_get_events.return_value = ([page_event, ended_event], 2)
-        mock_get_recurring.return_value = []
+        mock_get_recurring.return_value = ([], 0)
         mock_counts.return_value = {}
         mock_joined.return_value = []
 
@@ -594,7 +613,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch("pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items")
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
@@ -633,7 +652,7 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts.return_value = ([], 0)
         mock_build_posts.return_value = []
         mock_get_event_keys.return_value = ([first, gone, third], 3)
-        mock_get_recurring.return_value = []
+        mock_get_recurring.return_value = ([], 0)
         mock_counts.return_value = {}
         mock_joined.return_value = []
 
@@ -689,7 +708,7 @@ class TestGetAuthorGroupFeedService:
         mock_groups_by_ids.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("pecha_api.author_group_feed.service.count_publishable_recurring_feed_events")
+    @patch("pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items")
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
@@ -708,8 +727,8 @@ class TestGetAuthorGroupFeedService:
         mock_event_dto,
         mock_counts,
         mock_joined,
-        mock_recurring_total,
-    ):
+        mock_recurring_collect,
+    ) -> None:
         user = MockUser()
         public_id = uuid4()
         mock_db = MagicMock()
@@ -719,7 +738,7 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts.return_value = ([], 0)
         event = MockEvent(public_id)
         mock_get_events.return_value = ([event], 1)
-        mock_recurring_total.return_value = 0
+        mock_recurring_collect.return_value = ([], 0)
         mock_counts.return_value = {event.id: 0}
         mock_joined.return_value = []
         mock_event_dto.return_value = EventDTO(
@@ -753,7 +772,7 @@ class TestGetAuthorGroupFeedService:
         assert result.total == 1
 
     @pytest.mark.asyncio
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch("pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items")
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service.build_post_dtos")
@@ -782,7 +801,7 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts.return_value = ([post], 1)
         mock_build_posts.return_value = [_post_dto(post)]
         mock_get_events.return_value = ([], 0)
-        mock_recurring.return_value = []
+        mock_recurring.return_value = ([], 0)
         mock_counts.return_value = {}
 
         result = await get_author_group_feed_service(
@@ -926,7 +945,7 @@ class TestGetAuthorGroupFeedService:
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
     @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
     @patch("pecha_api.author_group_feed.service._event_to_dto")
-    @patch("pecha_api.author_group_feed.service.get_recurring_events_for_feed")
+    @patch("pecha_api.author_group_feed.service._collect_recurring_author_group_feed_items")
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
     @patch("pecha_api.author_group_feed.service.get_groups_by_ids")
@@ -958,7 +977,7 @@ class TestGetAuthorGroupFeedService:
 
         mock_get_posts.return_value = ([], 0)
         mock_get_event_keys.return_value = ([publishable, draft_linked], 1)
-        mock_get_recurring.return_value = []
+        mock_get_recurring.return_value = ([], 0)
         mock_counts.return_value = {}
         mock_joined.return_value = []
         mock_collect_published.return_value = (set(), set())

@@ -11,10 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
     count_publishable_one_shot_feed_events,
-    count_publishable_recurring_feed_events,
     get_events_by_ids,
     get_one_shot_event_feed_keys,
-    get_recurring_events_for_feed,
+    iter_recurring_publishable_template_batches,
     save_event,
 )
 
@@ -90,9 +89,10 @@ class TestFeedEventLoaders:
         assert get_events_by_ids(db, event_ids=[uuid4()], restrict_group_ids=[]) == []
         db.query.assert_not_called()
 
-    def test_recurring_feed_loaders_skip_query_without_groups(self) -> None:
+    def test_recurring_feed_batch_loader_skips_query_without_groups(self) -> None:
         db = MagicMock()
 
-        assert count_publishable_recurring_feed_events(db, restrict_group_ids=[]) == 0
-        assert get_recurring_events_for_feed(db, restrict_group_ids=[], limit=20) == []
+        assert iter_recurring_publishable_template_batches(
+            db, restrict_group_ids=[], batch_size=20
+        ) == ([], None)
         db.query.assert_not_called()

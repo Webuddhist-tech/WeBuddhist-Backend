@@ -79,7 +79,7 @@ def test_resolve_public_group_scope_logged_in_include_unfollowed_unions_public()
     assert joined_set == {joined_id}
 
 
-def test_resolve_author_group_feed_scope_logged_in_events_include_public():
+def test_resolve_author_group_feed_scope_logged_in_events_include_public() -> None:
     user_id = uuid4()
     joined_id = uuid4()
     public_id = uuid4()

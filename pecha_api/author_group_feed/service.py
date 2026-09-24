@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
@@ -13,10 +13,9 @@ from pecha_api.events.event_participant_repository import (
 )
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
-    count_publishable_recurring_feed_events,
     get_events_by_ids,
     get_one_shot_event_feed_keys,
-    get_recurring_events_for_feed,
+    iter_recurring_publishable_template_batches,
 )
 from pecha_api.events.event_service import (
     _event_to_dto,
@@ -131,6 +130,56 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
             'is_active': is_active,
         })
     return expanded_recurring
+
+
+def _collect_recurring_author_group_feed_items(
+    db: Session,
+    restrict_group_ids: List[UUID],
+    today: date,
+) -> Tuple[List[Dict], int]:
+    """Expand all in-scope publishable recurring templates with an occurrence.
+
+    Templates without a resolvable occurrence are omitted from both the list
+    and the count so feed ``total`` matches returnable items.
+    """
+    templates: List[Event] = []
+    after_id: Optional[UUID] = None
+    while True:
+        batch, after_id = iter_recurring_publishable_template_batches(
+            db,
+            restrict_group_ids,
+            after_id=after_id,
+        )
+        if not batch:
+            break
+        templates.extend(batch)
+
+    expanded_recurring = _expand_recurring_occurrences(templates, today)
+    if not expanded_recurring:
+        return [], 0
+
+    recurring_events = [item["event"] for item in expanded_recurring]
+    plan_ids = [event.plan_id for event in recurring_events if event.plan_id]
+    series_ids = [
+        event.series_id
+        for event in recurring_events
+        if getattr(event, "series_id", None)
+    ]
+    published_plan_ids, published_series_ids = collect_published_linked_resource_ids(
+        db,
+        plan_ids=plan_ids,
+        series_ids=series_ids,
+    )
+    expanded_recurring = [
+        item
+        for item in expanded_recurring
+        if event_has_publishable_linked_content(
+            item["event"],
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        )
+    ]
+    return expanded_recurring, len(expanded_recurring)
 
 
 def _publishable_events_by_id(
@@ -308,43 +357,15 @@ def _get_author_group_feed(
         limit=fetch_limit,
     )
 
-    recurring_templates = get_recurring_events_for_feed(
-        db=db,
-        restrict_group_ids=event_group_ids,
-        limit=fetch_limit,
-    )
-
-    expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
-    if expanded_recurring:
-        recurring_events = [item["event"] for item in expanded_recurring]
-        plan_ids = [event.plan_id for event in recurring_events if event.plan_id]
-        series_ids = [
-            event.series_id
-            for event in recurring_events
-            if getattr(event, "series_id", None)
-        ]
-        published_plan_ids, published_series_ids = (
-            collect_published_linked_resource_ids(
-                db,
-                plan_ids=plan_ids,
-                series_ids=series_ids,
-            )
+    expanded_recurring, recurring_feed_total = (
+        _collect_recurring_author_group_feed_items(
+            db=db,
+            restrict_group_ids=event_group_ids,
+            today=today,
         )
-        expanded_recurring = [
-            item
-            for item in expanded_recurring
-            if event_has_publishable_linked_content(
-                item["event"],
-                published_plan_ids=published_plan_ids,
-                published_series_ids=published_series_ids,
-            )
-        ]
-
-    recurring_publishable_total = count_publishable_recurring_feed_events(
-        db=db,
-        restrict_group_ids=event_group_ids,
     )
-    events_total = one_shot_publishable_total + recurring_publishable_total
+
+    events_total = one_shot_publishable_total + recurring_feed_total
 
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     for post in posts:
