@@ -597,19 +597,25 @@ def redact_public_linked_plan_and_series_from_event_dto(dto: EventDTO) -> EventD
 
 
 def should_redact_linked_plan_series_on_feed_event_card(
+    event: Event,
     *,
     can_view_linked_content: bool,
     group_id: UUID,
     joined_group_id_set: Set[UUID],
-    has_linked_plan_or_series: bool,
+    timezone_name: Optional[str],
 ) -> bool:
-    """Hide linked metadata from guests when public browse is blocked (e.g. timezone).
+    """Hide linked metadata when the viewer cannot use the public linked-resource APIs.
 
-    Group members still receive plan/series fields on the card even for private
-    groups, where ``can_view_linked_content`` is false but membership grants access.
+    Timezone restrictions apply to everyone (including group members). For private
+    groups, members keep linked fields when the resource is not timezone-blocked.
     """
-    if not has_linked_plan_or_series or can_view_linked_content:
+    has_linked = bool(event.plan_id or getattr(event, "series_id", None))
+    if not has_linked or can_view_linked_content:
         return False
+    if linked_content_hidden_for_viewer_timezone(
+        event, timezone_name=timezone_name
+    ):
+        return True
     return group_id not in joined_group_id_set
 
 

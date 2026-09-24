@@ -220,12 +220,11 @@ def _author_group_feed_event_item_dto(
     )
     event_dto = _event_to_dto(event, **event_dto_kwargs)
     if should_redact_linked_plan_series_on_feed_event_card(
+        event,
         can_view_linked_content=can_view_linked_content,
         group_id=event.group_id,
         joined_group_id_set=joined_group_id_set,
-        has_linked_plan_or_series=bool(
-            event.plan_id or getattr(event, "series_id", None)
-        ),
+        timezone_name=timezone_name,
     ):
         event_dto = redact_public_linked_plan_and_series_from_event_dto(event_dto)
     return AuthorGroupFeedItemDTO(

@@ -335,24 +335,44 @@ def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
 
 def test_should_redact_linked_plan_series_on_feed_event_card() -> None:
     group_id = uuid4()
-    assert should_redact_linked_plan_series_on_feed_event_card(
-        can_view_linked_content=False,
-        group_id=group_id,
-        joined_group_id_set=set(),
-        has_linked_plan_or_series=True,
-    )
-    assert not should_redact_linked_plan_series_on_feed_event_card(
-        can_view_linked_content=False,
-        group_id=group_id,
-        joined_group_id_set={group_id},
-        has_linked_plan_or_series=True,
-    )
-    assert not should_redact_linked_plan_series_on_feed_event_card(
-        can_view_linked_content=True,
-        group_id=group_id,
-        joined_group_id_set=set(),
-        has_linked_plan_or_series=True,
-    )
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    with patch(
+        "pecha_api.events.event_service.linked_content_hidden_for_viewer_timezone",
+        return_value=False,
+    ):
+        assert should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set=set(),
+            timezone_name="America/New_York",
+        )
+        assert not should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set={group_id},
+            timezone_name="America/New_York",
+        )
+        assert not should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=True,
+            group_id=group_id,
+            joined_group_id_set=set(),
+            timezone_name="America/New_York",
+        )
+    with patch(
+        "pecha_api.events.event_service.linked_content_hidden_for_viewer_timezone",
+        return_value=True,
+    ):
+        assert should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set={group_id},
+            timezone_name="Asia/Shanghai",
+        )
 
 
 def test_redact_public_linked_plan_and_series_from_event_dto() -> None:

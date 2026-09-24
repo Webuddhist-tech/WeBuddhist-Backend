@@ -54,7 +54,7 @@ async def get_author_group_feed(
             ),
         ),
     ] = None,
-):
+) -> AuthorGroupFeedResponse:
     """Mixed chronological feed of posts and events from author groups.
 
     Optional auth. Guests see published public groups. Logged-in users default
