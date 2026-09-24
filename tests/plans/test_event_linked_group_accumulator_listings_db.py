@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from typing import Iterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
@@ -47,7 +47,9 @@ def _sessionmaker() -> sessionmaker:
     return sessionmaker(bind=engine)
 
 
-def _add_group_accumulator(db: Session, group_id, *, title: str) -> GroupAccumulator:
+def _add_group_accumulator(
+    db: Session, group_id: UUID, *, title: str
+) -> GroupAccumulator:
     row = GroupAccumulator(
         id=uuid4(),
         group_id=group_id,
@@ -62,8 +64,8 @@ def _add_group_accumulator(db: Session, group_id, *, title: str) -> GroupAccumul
 def _add_event(
     db: Session,
     *,
-    group_id,
-    group_accumulator_id,
+    group_id: UUID,
+    group_accumulator_id: UUID,
 ) -> Event:
     now = datetime.now(timezone.utc)
     event = Event(
@@ -181,3 +183,51 @@ def test_accumulator_groups_route_hides_same_group_event_linked(
 
     assert total == 1
     assert rows[0].group_accumulator.id == visible.id
+
+
+def test_joined_only_includes_event_linked_group_accumulator(
+    listing_db: Session,
+) -> None:
+    preset_id = uuid4()
+    group_id = uuid4()
+    user_id = uuid4()
+    linked = GroupAccumulator(
+        id=uuid4(),
+        group_id=group_id,
+        accumulator_id=preset_id,
+        title="Joined event accumulation",
+        created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add(linked)
+    listing_db.commit()
+    _add_event(
+        listing_db,
+        group_id=group_id,
+        group_accumulator_id=linked.id,
+    )
+    listing_db.execute(
+        group_accumulator_joins.insert().values(
+            group_accumulator_id=linked.id,
+            user_id=user_id,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    listing_db.commit()
+
+    discovery_rows, discovery_total = get_groups_by_accumulator_id(
+        db=listing_db,
+        accumulator_id=preset_id,
+        user_id=user_id,
+        joined_only=False,
+    )
+    joined_rows, joined_total = get_groups_by_accumulator_id(
+        db=listing_db,
+        accumulator_id=preset_id,
+        user_id=user_id,
+        joined_only=True,
+    )
+
+    assert discovery_total == 0
+    assert discovery_rows == []
+    assert joined_total == 1
+    assert joined_rows[0].group_accumulator.id == linked.id

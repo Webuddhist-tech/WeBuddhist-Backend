@@ -681,7 +681,9 @@ def _validate_group_recitation_collection(
 
 
 def _validate_group_accumulator(
-    db, group_accumulator_id: Optional[UUID], group_id: UUID
+    db: Session,
+    group_accumulator_id: Optional[UUID],
+    group_id: UUID,
 ) -> None:
     if group_accumulator_id is None:
         return
