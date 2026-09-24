@@ -648,7 +648,7 @@ async def get_public_group_practices(
     status_code=status.HTTP_200_OK,
     response_model=AuthorGroupMembersListResponse,
 )
-def get_public_group_members(
+async def get_public_group_members(
     group_id: UUID,
     authentication_credential: Annotated[
         Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
@@ -663,7 +663,7 @@ def get_public_group_members(
     optional token only decides whether staff roles are revealed for a
     private group (joiners only).
     """
-    return list_group_members(
+    return await list_group_members(
         group_id=group_id,
         skip=skip,
         limit=limit,

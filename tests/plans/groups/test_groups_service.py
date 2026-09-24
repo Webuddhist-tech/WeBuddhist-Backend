@@ -75,6 +75,7 @@ from pecha_api.plans.groups.groups_service import (
     get_cms_group_detail,
     list_cms_groups,
     list_group_members,
+    _list_group_members_sync,
     list_followed_groups,
     list_joined_groups,
     update_group_status,
@@ -367,7 +368,7 @@ def test_list_group_members_not_found():
     ):
         _session_local_context(mock_session)
         with pytest.raises(HTTPException) as exc:
-            list_group_members(group_id=uuid4(), skip=0, limit=20)
+            _list_group_members_sync(group_id=uuid4(), skip=0, limit=20)
     assert exc.value.detail == GROUP_NOT_FOUND
 
 
@@ -399,7 +400,7 @@ def test_list_group_members_returns_paginated_profiles():
         return_value="https://example.com/avatar.webp",
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
 
     assert result.total_members == 1
     assert result.skip == 0
@@ -430,13 +431,33 @@ def test_list_group_members_returns_staff_role_for_linked_author():
         return_value=None,
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
 
     assert mock_roles.call_args.kwargs["user_ids"] == [admin_user.id, plain_user.id]
     assert [(m.user_id, m.role) for m in result.list] == [
         (admin_user.id, "ADMIN"),
         (plain_user.id, "MEMBER"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_group_members_runs_sync_body_in_threadpool():
+    expected = MagicMock()
+    group_id = uuid4()
+    with patch(
+        "pecha_api.plans.groups.groups_service.run_in_threadpool",
+        new=AsyncMock(return_value=expected),
+    ) as mock_threadpool:
+        result = await list_group_members(group_id=group_id, skip=0, limit=20, token="token")
+
+    assert result is expected
+    mock_threadpool.assert_awaited_once_with(
+        _list_group_members_sync,
+        group_id=group_id,
+        skip=0,
+        limit=20,
+        token="token",
+    )
 
 
 def _list_private_group_members(viewer_joined, token):
@@ -464,7 +485,7 @@ def _list_private_group_members(viewer_joined, token):
         return_value=None,
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20, token=token)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20, token=token)
     return result, mock_roles
 
 
@@ -5092,7 +5113,7 @@ def test_list_group_members_private_group_returns_members_without_token():
         return_value=None,
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
 
     assert result.total_members == 1
     assert result.list[0].username == "bob"
@@ -6086,7 +6107,7 @@ def test_list_group_members_hides_unpublished_group():
     ):
         _session_local_context(mock_session)
         with pytest.raises(HTTPException) as exc:
-            list_group_members(group_id=group.id, skip=0, limit=10)
+            _list_group_members_sync(group_id=group.id, skip=0, limit=10)
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 

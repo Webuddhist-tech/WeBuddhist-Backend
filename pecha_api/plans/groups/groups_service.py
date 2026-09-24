@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.config import get, get_int
 from pecha_api.db.database import SessionLocal
@@ -1342,7 +1343,24 @@ def get_group_practices_feed(
     )
 
 
-def list_group_members(
+async def list_group_members(
+    group_id: UUID,
+    skip: int,
+    limit: int,
+    token: Optional[str] = None,
+) -> AuthorGroupMembersListResponse:
+    # Token validation and the member/role queries are synchronous SQLAlchemy,
+    # so they run in one worker thread rather than on the event loop.
+    return await run_in_threadpool(
+        _list_group_members_sync,
+        group_id=group_id,
+        skip=skip,
+        limit=limit,
+        token=token,
+    )
+
+
+def _list_group_members_sync(
     group_id: UUID,
     skip: int,
     limit: int,

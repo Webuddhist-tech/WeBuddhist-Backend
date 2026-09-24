@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 from starlette import status
@@ -472,11 +472,11 @@ def test_get_public_group_members():
     )
     with patch(
         "pecha_api.plans.groups.groups_views.list_group_members",
-        return_value=response_model,
+        new=AsyncMock(return_value=response_model),
     ) as mock_service:
         response = client.get(f"/author/groups/{group_id}/members?skip=0&limit=20")
     assert response.status_code == status.HTTP_200_OK
-    mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20, token=None)
+    mock_service.assert_awaited_once_with(group_id=group_id, skip=0, limit=20, token=None)
     body = response.json()
     assert body["total_members"] == 1
     assert body["list"][0]["user_id"] == str(user_id)
