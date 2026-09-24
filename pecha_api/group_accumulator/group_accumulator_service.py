@@ -475,9 +475,7 @@ def get_group_accumulators_service(
     language: Optional[str] = None,
 ) -> GroupAccumulatorsResponse:
     with SessionLocal() as db:
-        accumulators, total = get_group_accumulators(
-            db, group_id, skip, limit, exclude_event_linked=True
-        )
+        accumulators, total = get_group_accumulators(db, group_id, skip, limit)
         accumulators = filter_items_for_timezone(
             accumulators,
             timezone_name=timezone_name,
