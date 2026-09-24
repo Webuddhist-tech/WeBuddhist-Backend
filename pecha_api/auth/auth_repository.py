@@ -85,6 +85,14 @@ def decode_backend_token(token: str):
 # authenticated request, which is both a latency tax on every call and enough
 # traffic for Auth0 to start rate limiting the tenant under a login wave.
 JWKS_CACHE_TTL_SECONDS = 600
+# How long a key set may go on being served once refreshes start failing.
+# Auth0 being briefly unreachable must not fail every login, so a stale set is
+# better than none - but the reason a key gets withdrawn is usually that it
+# should no longer be trusted, and an unbounded fallback means the one tenant
+# we can no longer reach is the one whose withdrawal we never hear about.
+# Past this, verification fails and tokens signed with those keys stop being
+# accepted.
+JWKS_STALE_GRACE_SECONDS = 3600
 # Without a timeout a hung connection holds its worker thread forever. The
 # threadpool is small (40 by default), so a handful of those stall every other
 # request on the instance.
@@ -122,13 +130,24 @@ def get_auth0_public_key(force_refresh: bool = False) -> Dict[str, Any]:
         except Exception as fetch_error:
             # A stale key set still verifies every token signed before the last
             # rotation, so serving it beats failing every login while Auth0 is
-            # slow or unreachable.
-            if cached is not None:
+            # slow or unreachable - but only for as long as the outage can
+            # plausibly be an outage rather than a key we should have stopped
+            # trusting hours ago.
+            age = time.monotonic() - _jwks_cache["fetched_at"]
+            if cached is not None and age <= JWKS_CACHE_TTL_SECONDS + JWKS_STALE_GRACE_SECONDS:
                 logging.warning(
-                    "Falling back to cached Auth0 JWKS after fetch failure: %s",
+                    "Falling back to cached Auth0 JWKS (%ds old) after fetch failure: %s",
+                    int(age),
                     fetch_error,
                 )
                 return cached
+            if cached is not None:
+                logging.error(
+                    "Cached Auth0 JWKS is %ds old and refreshes keep failing; "
+                    "refusing to keep trusting it: %s",
+                    int(age),
+                    fetch_error,
+                )
             raise
 
         _jwks_cache["keys"] = keys

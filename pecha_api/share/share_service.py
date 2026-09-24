@@ -35,6 +35,8 @@ from pecha_api.short_url.short_url_service import get_short_url
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
+# (title, description, language) as the share card needs it.
+EventShareMetadata = tuple[str, Optional[str], Optional[str]]
 DEFAULT_OG_TITLE = get("SITE_NAME")
 DEFAULT_OG_DESCRIPTION = get("SITE_NAME")
 PECHA_FRONTEND_ENDPOINT = "https://webuddhist.com/chapter"
@@ -82,8 +84,9 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
     _apply_inferred_ids(share_request)
     og_title = DEFAULT_OG_TITLE
     og_description = DEFAULT_OG_DESCRIPTION
+    event_metadata: Optional[EventShareMetadata] = None
     if _normalized_id(share_request.event_id) is not None:
-        title, description, _language = await to_thread.run_sync(
+        event_metadata = await to_thread.run_sync(
             partial(
                 _load_event_share_metadata,
                 _normalized_id(share_request.event_id),
@@ -91,13 +94,20 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
                 get("SITE_NAME"),
             )
         )
+        title, description, _language = event_metadata
         og_title = title
         if description:
             og_description = description
     if share_request.logo:
         await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
-    await _generate_segment_content_image_(share_request=share_request)
+    # The card image needs the same event this just loaded. Handing it over
+    # saves a second session and a second eager-loaded event query on a path
+    # that runs for every share.
+    await _generate_segment_content_image_(
+        share_request=share_request,
+        event_metadata=event_metadata,
+    )
 
     payload = _generate_short_url_payload_(
         share_request=share_request,
@@ -120,10 +130,11 @@ def _generate_logo_image_(share_request: ShareRequest):
 async def _generate_segment_content_image_(
     share_request: ShareRequest,
     output_path: Optional[ImageDestination] = None,
+    event_metadata: Optional["EventShareMetadata"] = None,
 ):
     _, content_key = _primary_content_id(share_request)
     if content_key == "event_id":
-        await _generate_event_content_image_(share_request, output_path)
+        await _generate_event_content_image_(share_request, output_path, event_metadata)
         return
 
     main_content_text, reference_text, language = await _resolve_share_image_text(
@@ -201,12 +212,17 @@ def _resolve_poem_share_text(poem_id: str, site_name: str) -> tuple[str, str, Op
 async def _generate_event_content_image_(
     share_request: ShareRequest,
     output_path: Optional[ImageDestination] = None,
+    event_metadata: Optional["EventShareMetadata"] = None,
 ) -> None:
     site_name = get("SITE_NAME")
     event_id = _normalized_id(share_request.event_id)
-    title, _description, language = await to_thread.run_sync(
-        partial(_load_event_share_metadata, event_id, share_request.language, site_name)
-    )
+    # Already loaded when this render is part of building a short URL; loaded
+    # here when the image endpoint is called on its own.
+    if event_metadata is None:
+        event_metadata = await to_thread.run_sync(
+            partial(_load_event_share_metadata, event_id, share_request.language, site_name)
+        )
+    title, _description, language = event_metadata
     image_kwargs = {
         "title": title,
         "lang": language,
@@ -221,7 +237,7 @@ def _load_event_share_metadata(
     event_id: Optional[str],
     language: Optional[str],
     site_name: str,
-) -> tuple[str, Optional[str], Optional[str]]:
+) -> EventShareMetadata:
     """The event name and description used on the short URL card.
 
     The image is the WeBuddhist logo plus this name - the event photo is not

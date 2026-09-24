@@ -106,16 +106,34 @@ class TestPreviewAndCopy:
 
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_prayer_copy_names_the_requester_and_drops_the_room(self, _get_int):
+        """With the room's image attached, the name is redundant."""
         title, body = _build_notification_copy(
             chat_kind="EVENT",
             room_name="Dzongsar Drolma Bumtshok",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah, that her treatment is swift.",
             message_type="PRAYER",
+            has_image=True,
         )
         assert title == "Tenzin Youdon is requesting a prayer 🙏"
         assert body == "For my niece Sarah, that her treatment is swift."
         assert "Dzongsar" not in title and "Dzongsar" not in body
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_prayer_without_an_image_keeps_the_room_name(self, _get_int):
+        """Nothing else would say which sangha the prayer came from."""
+        title, body = _build_notification_copy(
+            chat_kind="EVENT",
+            room_name="Dzongsar Drolma Bumtshok",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah, that her treatment is swift.",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert body == (
+            "Dzongsar Drolma Bumtshok: For my niece Sarah, that her treatment is swift."
+        )
 
     @patch("pecha_api.chat.notification_service.get_int", return_value=20)
     def test_prayer_body_still_truncates(self, _get_int):
@@ -125,9 +143,25 @@ class TestPreviewAndCopy:
             sender_name="Alice Doe",
             message_body="A prayer request far longer than the preview allows",
             message_type="PRAYER",
+            has_image=True,
         )
         assert len(body) == 20
         assert body.endswith("…")
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_prayer_preview_truncates_around_the_room_name(self, _get_int):
+        """The limit governs the excerpt; the room prefix sits outside it, the
+        way the group-chat sender prefix already does."""
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert body.startswith("Sangha: ")
+        assert len(body.removeprefix("Sangha: ")) == 20
 
 
 class TestBuildEventBody:
