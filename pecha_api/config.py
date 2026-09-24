@@ -93,6 +93,18 @@ DEFAULTS = dict(
     CACHE_SOCIAL_TIMEOUT=60,        # 1 minute
     CACHE_CALENDAR_TIMEOUT=2592000, # 30 days; source calendar files are immutable
 
+    # How long a presigned S3 URL stays valid. Responses carrying these URLs
+    # are cached with the URL already inside them, so the signature has to
+    # outlive the cache entry that holds it - at one hour it did not, and
+    # every image served from a warm cache entry older than that was dead on
+    # arrival. AWS SigV4 allows at most 7 days.
+    PRESIGNED_URL_EXPIRY_SECONDS=86400,   # 24 hours
+    # Usable life a response must still have left when it is served. A cache
+    # entry is kept only while its shortest-lived signature has at least this
+    # long to run, so nobody is handed a URL that dies while the page using
+    # it is still open.
+    PRESIGNED_URL_SAFETY_MARGIN=1800,     # 30 minutes
+
     SHORT_URL_GENERATION_ENDPOINT="https://pech.as/api/v1",
 
     # External Multilingual Search API Configuration

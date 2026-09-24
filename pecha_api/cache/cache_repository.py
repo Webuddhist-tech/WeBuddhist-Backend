@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.presigned_expiry import seconds_until_first_expiry
 import logging
 from pydantic.json import pydantic_encoder
 
@@ -74,6 +75,35 @@ def _build_key(key: str) -> str:
 
 
 
+def _timeout_for(value: str, requested: int) -> int:
+    """Shorten a timeout that would outlive the payload's presigned URLs.
+
+    Every caller picks its timeout from how fast its content changes, which
+    is the right question but not the only one: a body carrying signed image
+    URLs also stops being servable when those signatures lapse. Held to the
+    shorter of the two, an entry is dropped while its links still work
+    instead of spending its last hours handing out dead ones.
+
+    The margin is what the response still has left when it is served at the
+    very end of the window - a page opened then has that long to load its
+    images.
+    """
+    remaining = seconds_until_first_expiry(value)
+    if remaining is None:
+        return requested
+
+    usable = remaining - config.get_int("PRESIGNED_URL_SAFETY_MARGIN")
+    if usable <= 0:
+        # Signed so close to its deadline that no cached copy of it is worth
+        # keeping. Rare enough to be worth hearing about: it means the signer
+        # is handing out URLs shorter-lived than the margin.
+        logging.warning(
+            "Not caching a response whose presigned URLs expire in %ds", remaining
+        )
+        return 0
+    return min(requested, usable)
+
+
 async def set_cache(hash_key: str, value: Any, cache_time_out: int) -> bool:
     #Set value in cache with type-specific timeout
     if _circuit_is_open():
@@ -83,6 +113,12 @@ async def set_cache(hash_key: str, value: Any, cache_time_out: int) -> bool:
         full_key = _build_key(hash_key)
         if not isinstance(value, (str, bytes)):
             value = json.dumps(value, default=pydantic_encoder)
+        if isinstance(value, bytes):
+            cache_time_out = _timeout_for(value.decode("utf-8", "ignore"), cache_time_out)
+        else:
+            cache_time_out = _timeout_for(value, cache_time_out)
+        if cache_time_out <= 0:
+            return False
         return bool(await client.setex(full_key, cache_time_out, value))
     except Exception:
         _trip_circuit()
