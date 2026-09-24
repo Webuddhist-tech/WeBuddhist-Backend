@@ -17,11 +17,25 @@ RUN apt-get update && apt-get install -y \
 # Copy the pyproject.toml and poetry.lock files to the container
 COPY pyproject.toml poetry.lock /app/
 
-# Install Poetry and Python dependencies
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install poetry && \
+# Install Poetry and Python dependencies (retries tolerate transient PyPI errors).
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    POETRY_HTTP_TIMEOUT=120 \
+    POETRY_REQUESTS_TIMEOUT=120 \
+    POETRY_INSTALLER_MAX_WORKERS=1
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/pypoetry \
+    pip install --upgrade pip setuptools wheel && \
+    pip install "poetry>=2.0,<3" && \
     poetry config virtualenvs.create false && \
-    poetry install --no-root
+    poetry config installer.max-workers 1 && \
+    for attempt in 1 2 3 4 5 6; do \
+        poetry install --no-root --no-interaction && exit 0; \
+        echo "poetry install failed (attempt ${attempt}/6), clearing PyPI cache and retrying..."; \
+        poetry cache clear PyPI --all --no-interaction || true; \
+        sleep $((attempt * 15)); \
+    done; \
+    exit 1
 
 # Copy the rest of the application code to the container
 COPY . /app
