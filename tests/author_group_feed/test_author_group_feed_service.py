@@ -197,12 +197,8 @@ class TestGetAuthorGroupFeedService:
 
         _, event_kwargs = mock_get_events.call_args
         assert event_kwargs["restrict_group_ids"] == [joined_id]
-        assert event_kwargs["should_sort_newest_first"] is True
-        assert event_kwargs["not_ended_before"] is not None
+        assert event_kwargs["limit"] == 20
         assert "exclude_plan_or_series_linked" not in event_kwargs
-        # Ended events stay in the feed.
-        assert "not_ended_before" not in event_kwargs
-        assert event_kwargs["exclude_plan_or_series_linked"] is True
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
@@ -573,7 +569,6 @@ class TestGetAuthorGroupFeedService:
             db=mock_db,
             event_ids=[page_event.id],
             restrict_group_ids=[joined_id],
-            exclude_plan_or_series_linked=True,
         )
 
     @pytest.mark.asyncio
