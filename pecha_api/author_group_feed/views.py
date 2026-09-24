@@ -1,6 +1,6 @@
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 from starlette import status
@@ -44,6 +44,16 @@ async def get_author_group_feed(
         Optional[str],
         Query(description="Preferred language for event metadata"),
     ] = None,
+    x_timezone: Annotated[
+        Optional[str],
+        Header(
+            alias="X-Timezone",
+            description=(
+                "IANA timezone (e.g. Asia/Shanghai). "
+                "Restricted plans are hidden for Chinese timezones."
+            ),
+        ),
+    ] = None,
 ):
     """Mixed chronological feed of posts and events from author groups.
 
@@ -58,4 +68,5 @@ async def get_author_group_feed(
         skip=skip,
         limit=limit,
         language=language,
+        timezone_name=x_timezone,
     )

@@ -11,6 +11,7 @@ from pecha_api.events.event_participant_repository import (
     get_joined_event_ids_by_user,
     get_participation_types_by_user,
 )
+from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import get_events, get_recurring_events
 from pecha_api.events.event_service import (
     _event_to_dto,
@@ -18,6 +19,7 @@ from pecha_api.events.event_service import (
     collect_published_linked_resource_ids,
     event_has_publishable_linked_content,
 )
+from pecha_api.users.users_models import Users
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
     combine_occurrence_window,
@@ -124,8 +126,69 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
     return expanded_recurring
 
 
+def _fetch_publishable_one_shot_events_for_feed(
+    db: Session,
+    *,
+    group_ids: List[UUID],
+    now: datetime,
+    pool_limit: int,
+    timezone_name: Optional[str],
+) -> Tuple[List[Event], int]:
+    """Load publishable one-shot events until the merge pool is full or DB is exhausted."""
+    pool: List[Event] = []
+    publishable_total = 0
+    db_skip = 0
+    db_total: Optional[int] = None
+    batch_size = max(pool_limit, 20)
+
+    while len(pool) < pool_limit:
+        batch, batch_total = get_events(
+            db=db,
+            restrict_group_ids=group_ids,
+            skip=db_skip,
+            limit=batch_size,
+            should_sort_newest_first=True,
+            not_ended_before=now,
+        )
+        if db_total is None:
+            db_total = batch_total
+        if not batch:
+            break
+
+        plan_ids = [event.plan_id for event in batch if event.plan_id]
+        series_ids = [
+            event.series_id
+            for event in batch
+            if getattr(event, "series_id", None)
+        ]
+        published_plan_ids, published_series_ids = (
+            collect_published_linked_resource_ids(
+                db,
+                plan_ids=plan_ids,
+                series_ids=series_ids,
+            )
+        )
+        for event in batch:
+            if not event_has_publishable_linked_content(
+                event,
+                published_plan_ids=published_plan_ids,
+                published_series_ids=published_series_ids,
+                timezone_name=timezone_name,
+            ):
+                continue
+            publishable_total += 1
+            if len(pool) < pool_limit:
+                pool.append(event)
+
+        db_skip += len(batch)
+        if db_total is not None and db_skip >= db_total:
+            break
+
+    return pool, publishable_total
+
+
 def _author_group_feed_event_item_dto(
-    event,
+    event: Event,
     *,
     feed_at: datetime,
     group_info: dict,
@@ -137,6 +200,7 @@ def _author_group_feed_event_item_dto(
     counts_by_event: Dict[UUID, int],
     joined_event_ids: Set[UUID],
     participation_types: Dict[UUID, str],
+    timezone_name: Optional[str],
     occurrence_date: Optional[datetime] = None,
 ) -> AuthorGroupFeedItemDTO:
     event_dto_kwargs = {
@@ -156,6 +220,7 @@ def _author_group_feed_event_item_dto(
             group=group_by_id.get(event.group_id),
             published_plan_ids=published_plan_ids,
             published_series_ids=published_series_ids,
+            timezone_name=timezone_name,
         ),
         group_id=event.group_id,
         group_name=group_info.get("group_name"),
@@ -172,6 +237,7 @@ def _get_author_group_feed(
     skip: int = 0,
     limit: int = 20,
     language: Optional[str] = None,
+    timezone_name: Optional[str] = None,
 ) -> AuthorGroupFeedResponse:
     """Mixed feed of posts and events from author groups.
 
@@ -179,7 +245,7 @@ def _get_author_group_feed(
     Logged-in default: groups the user joined.
     With should_include_unfollowed=True: mix in other public groups.
     """
-    current_user = None
+    current_user: Optional[Users] = None
     if token:
         current_user = validate_and_extract_user_details(token=token)
 
@@ -214,14 +280,12 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    # Get one-shot events that have not already ended (including plan/series-linked).
-    one_shot_events, _one_shot_total = get_events(
-        db=db,
-        restrict_group_ids=group_ids,
-        skip=0,
-        limit=fetch_limit,
-        should_sort_newest_first=True,
-        not_ended_before=now,
+    one_shot_events, one_shot_total = _fetch_publishable_one_shot_events_for_feed(
+        db,
+        group_ids=group_ids,
+        now=now,
+        pool_limit=fetch_limit,
+        timezone_name=timezone_name,
     )
 
     recurring_templates = get_recurring_events(
@@ -249,15 +313,6 @@ def _get_author_group_feed(
         plan_ids=plan_ids,
         series_ids=series_ids,
     )
-    one_shot_events = [
-        event
-        for event in one_shot_events
-        if event_has_publishable_linked_content(
-            event,
-            published_plan_ids=published_plan_ids,
-            published_series_ids=published_series_ids,
-        )
-    ]
     expanded_recurring = [
         item
         for item in expanded_recurring
@@ -265,11 +320,12 @@ def _get_author_group_feed(
             item["event"],
             published_plan_ids=published_plan_ids,
             published_series_ids=published_series_ids,
+            timezone_name=timezone_name,
         )
     ]
 
     events = one_shot_events
-    events_total = len(one_shot_events) + len(expanded_recurring)
+    events_total = one_shot_total + len(expanded_recurring)
     event_ids = [event.id for event in events] + [item['event'].id for item in expanded_recurring]
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     joined_event_ids: Set[UUID] = set()
@@ -340,6 +396,7 @@ def _get_author_group_feed(
                     counts_by_event=counts_by_event,
                     joined_event_ids=joined_event_ids,
                     participation_types=participation_types,
+                    timezone_name=timezone_name,
                 ),
             )
         )
@@ -383,6 +440,7 @@ def _get_author_group_feed(
                     counts_by_event=counts_by_event,
                     joined_event_ids=joined_event_ids,
                     participation_types=participation_types,
+                    timezone_name=timezone_name,
                     occurrence_date=item["start_date"],
                 ),
             )
@@ -410,6 +468,7 @@ async def get_author_group_feed_service(
     skip: int = 0,
     limit: int = 20,
     language: Optional[str] = None,
+    timezone_name: Optional[str] = None,
 ) -> AuthorGroupFeedResponse:
     """Build the feed without blocking the application's event loop."""
     return await run_in_threadpool(
@@ -420,4 +479,5 @@ async def get_author_group_feed_service(
         skip=skip,
         limit=limit,
         language=language,
+        timezone_name=timezone_name,
     )

@@ -26,6 +26,11 @@ from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.public.plan_repository import _series_published_or_standalone
 from pecha_api.plans.series.series_model import Series
+from pecha_api.region_restrictions.region_restriction_enums import RestrictedItemType
+from pecha_api.region_restrictions.region_restriction_service import (
+    should_hide_for_timezone,
+)
+from pecha_api.users.users_models import Users
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
@@ -545,17 +550,40 @@ def collect_published_linked_resource_ids(
     return published_plan_ids, published_series_ids
 
 
+def linked_content_hidden_for_viewer_timezone(
+    event: Event,
+    *,
+    timezone_name: Optional[str],
+) -> bool:
+    plan_id = event.plan_id
+    if plan_id and should_hide_for_timezone(
+        timezone_name, RestrictedItemType.PLAN, plan_id
+    ):
+        return True
+    series_id = getattr(event, "series_id", None)
+    if series_id and should_hide_for_timezone(
+        timezone_name, RestrictedItemType.SERIES, series_id
+    ):
+        return True
+    return False
+
+
 def event_has_publishable_linked_content(
     event: Event,
     *,
     published_plan_ids: Set[UUID],
     published_series_ids: Set[UUID],
+    timezone_name: Optional[str] = None,
 ) -> bool:
     """False when an event points at a draft or missing plan/series."""
     plan_id = event.plan_id
     series_id = getattr(event, "series_id", None)
     if not plan_id and not series_id:
         return True
+    if linked_content_hidden_for_viewer_timezone(
+        event, timezone_name=timezone_name
+    ):
+        return False
     if plan_id:
         return plan_id in published_plan_ids
     return series_id in published_series_ids
@@ -567,6 +595,7 @@ def can_view_event_linked_content_without_group_join(
     group: Optional[AuthorGroup],
     published_plan_ids: Set[UUID],
     published_series_ids: Set[UUID],
+    timezone_name: Optional[str] = None,
 ) -> bool:
     """Public browse of event-linked plan/series (distinct from group membership)."""
     if not event.plan_id and not getattr(event, "series_id", None):
@@ -575,6 +604,7 @@ def can_view_event_linked_content_without_group_join(
         event,
         published_plan_ids=published_plan_ids,
         published_series_ids=published_series_ids,
+        timezone_name=timezone_name,
     ):
         return False
     if not group or not group.is_public or not is_group_published(group):
@@ -776,7 +806,7 @@ def _resolve_event_listing_window(
 
 def _listing_join_state(
     db: Session,
-    current_user,
+    current_user: Optional[Users],
     event_ids: List[UUID],
 ) -> Tuple[Set[UUID], Dict[UUID, str]]:
     joined_ids: Set[UUID] = set()
@@ -805,7 +835,7 @@ def _build_listing_event_dtos(
     *,
     language: Optional[str],
     fallback: bool,
-    current_user,
+    current_user: Optional[Users],
     joined_ids: Set[UUID],
     participation_types: Dict[UUID, str],
 ) -> List[EventDTO]:

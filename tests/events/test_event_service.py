@@ -326,6 +326,28 @@ def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
     )
 
 
+def test_can_view_linked_content_false_when_plan_hidden_for_timezone() -> None:
+    group_id = uuid4()
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    group = MagicMock(is_public=True, status="PUBLISHED")
+
+    with patch(
+        "pecha_api.events.event_service.is_group_published",
+        return_value=True,
+    ), patch(
+        "pecha_api.events.event_service.should_hide_for_timezone",
+        return_value=True,
+    ):
+        assert not can_view_event_linked_content_without_group_join(
+            event,
+            group=group,
+            published_plan_ids={plan_id},
+            published_series_ids=set(),
+            timezone_name="Asia/Shanghai",
+        )
+
+
 def test_can_view_linked_content_without_group_join_is_separate_from_membership() -> None:
     group_id = uuid4()
     plan_id = uuid4()
