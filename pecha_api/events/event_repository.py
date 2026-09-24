@@ -3,7 +3,7 @@ from typing import Callable, List, Tuple, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Query, Session, selectinload
@@ -17,6 +17,8 @@ from .event_filters import EventContentFilter
 from ..accumulator.accumulator_models import Accumulator
 from ..mantra.mantra_model import Mantra
 from ..plans.plans_models import Plan
+from ..plans.plans_enums import PlanStatus
+from ..plans.series.series_model import Series
 from ..timers.timer_model import Timer
 from ..group_recitation_collection.models import GroupRecitationCollection
 
@@ -244,6 +246,63 @@ def _apply_event_filters(
     return query
 
 
+def _plan_series_published_or_standalone():
+    return or_(
+        Plan.series_id.is_(None),
+        exists(
+            select(1).where(
+                and_(
+                    Series.id == Plan.series_id,
+                    Series.status == PlanStatus.PUBLISHED,
+                )
+            )
+        ),
+    )
+
+
+def _publishable_linked_content_filter():
+    """SQL equivalent of event_has_publishable_linked_content for feed totals."""
+    published_plan = and_(
+        Plan.status == PlanStatus.PUBLISHED,
+        Plan.deleted_at.is_(None),
+        _plan_series_published_or_standalone(),
+    )
+    published_series = and_(
+        Series.status == PlanStatus.PUBLISHED,
+        Series.deleted_at.is_(None),
+    )
+    return or_(
+        and_(Event.plan_id.is_(None), Event.series_id.is_(None)),
+        and_(
+            Event.plan_id.isnot(None),
+            exists(select(1).where(Plan.id == Event.plan_id, published_plan)),
+        ),
+        and_(
+            Event.plan_id.is_(None),
+            Event.series_id.isnot(None),
+            exists(select(1).where(Series.id == Event.series_id, published_series)),
+        ),
+    )
+
+
+def count_publishable_one_shot_feed_events(
+    db: Session,
+    restrict_group_ids: List[UUID],
+) -> int:
+    """Count in-scope one-shot events whose linked plan/series is publishable."""
+    if not restrict_group_ids:
+        return 0
+    total = (
+        _apply_event_filters(
+            db.query(func.count(Event.id)).filter(Event.is_recurring == False),
+            restrict_group_ids=restrict_group_ids,
+        )
+        .filter(_publishable_linked_content_filter())
+        .scalar()
+    )
+    return int(total or 0)
+
+
 def get_events(
     db: Session,
     content_filter: Optional[EventContentFilter] = None,
@@ -302,20 +361,19 @@ def get_one_shot_event_feed_keys(
     limit: int,
     exclude_plan_or_series_linked: bool = False,
 ) -> Tuple[List[Row], int]:
-    """Newest-first (id, created_at) rows for one-shot events, plus the total.
+    """Newest-first (id, created_at) rows for one-shot events, plus publishable total.
 
-    Only the two ranking columns are selected, with no eager loads, so the
-    feed can rank a deep window cheaply and load full events for the page
-    alone via get_events_by_ids.
+    The total excludes one-shots whose linked plan/series is not publishable.
+    Only ranking columns are selected (no eager loads) so the feed can rank a
+    deep window cheaply and load full events for the page via get_events_by_ids.
     """
     if not restrict_group_ids:
         return [], 0
 
-    total = _apply_event_filters(
-        db.query(func.count(Event.id)).filter(Event.is_recurring == False),
+    total = count_publishable_one_shot_feed_events(
+        db,
         restrict_group_ids=restrict_group_ids,
-        exclude_plan_or_series_linked=exclude_plan_or_series_linked,
-    ).scalar()
+    )
 
     rows = (
         _apply_event_filters(

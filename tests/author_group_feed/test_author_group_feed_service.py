@@ -64,29 +64,11 @@ def _events_by_ids(
     ]
 
 
-def _get_events_for_publishable_count(
-    db: object,
-    restrict_group_ids: List[UUID],
-    skip: int = 0,
-    limit: int = 20,
-    should_sort_newest_first: bool = True,
-    **kwargs: object,
-) -> tuple[List["MockEvent"], int]:
-    events = [
-        event
-        for event in _MOCK_EVENTS_BY_ID.values()
-        if event.group_id in restrict_group_ids
-    ]
-    events.sort(key=lambda event: event.created_at, reverse=True)
-    total = len(events)
-    return events[skip : skip + limit], total
-
-
 @pytest.fixture(autouse=True)
-def _mock_get_events_for_publishable_count() -> Iterator[MagicMock]:
+def _mock_get_recurring_events_default() -> Iterator[MagicMock]:
     with patch(
-        "pecha_api.author_group_feed.service.get_events",
-        side_effect=_get_events_for_publishable_count,
+        "pecha_api.author_group_feed.service.get_recurring_events",
+        return_value=[],
     ) as mock:
         yield mock
 
@@ -122,6 +104,8 @@ class MockEvent:
         self.metadata_entries = []
         self.links = []
         self.location = None
+        self.is_recurring = False
+        self.event_format = "hybrid"
 
 
 def _post_dto(post: MockPost) -> GroupPostDTO:
@@ -868,6 +852,9 @@ class TestGetAuthorGroupFeedService:
 
     @pytest.mark.asyncio
     @patch("pecha_api.author_group_feed.service.collect_published_linked_resource_ids")
+    @patch("pecha_api.author_group_feed.service.get_joined_event_ids_by_user")
+    @patch("pecha_api.author_group_feed.service.get_event_participant_counts")
+    @patch("pecha_api.author_group_feed.service._event_to_dto")
     @patch("pecha_api.author_group_feed.service.get_recurring_events")
     @patch("pecha_api.author_group_feed.service.get_one_shot_event_feed_keys")
     @patch("pecha_api.author_group_feed.service.get_posts_for_group_ids")
@@ -882,6 +869,9 @@ class TestGetAuthorGroupFeedService:
         mock_get_posts,
         mock_get_event_keys,
         mock_get_recurring,
+        mock_event_dto,
+        mock_counts,
+        mock_joined,
         mock_collect_published,
     ):
         user = MockUser()
@@ -896,9 +886,23 @@ class TestGetAuthorGroupFeedService:
         draft_linked.plan_id = draft_plan_id
 
         mock_get_posts.return_value = ([], 0)
-        mock_get_event_keys.return_value = ([publishable, draft_linked], 2)
+        mock_get_event_keys.return_value = ([publishable, draft_linked], 1)
         mock_get_recurring.return_value = []
+        mock_counts.return_value = {}
+        mock_joined.return_value = []
         mock_collect_published.return_value = (set(), set())
+        mock_event_dto.return_value = EventDTO(
+            id=publishable.id,
+            group_id=publishable.group_id,
+            start_date=publishable.start_date,
+            end_date=publishable.end_date,
+            is_one_day=True,
+            featured=False,
+            metadata=None,
+            links=[],
+            created_at=publishable.created_at,
+            created_by=publishable.created_by,
+        )
 
         result = await get_author_group_feed_service(
             db=mock_db,

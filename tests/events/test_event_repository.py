@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
+    count_publishable_one_shot_feed_events,
     get_events_by_ids,
     get_one_shot_event_feed_keys,
     save_event,
@@ -67,6 +68,12 @@ class TestFeedEventLoaders:
         db = MagicMock()
 
         assert get_one_shot_event_feed_keys(db, restrict_group_ids=[], limit=20) == ([], 0)
+        db.query.assert_not_called()
+
+    def test_publishable_one_shot_count_skips_query_without_groups(self) -> None:
+        db = MagicMock()
+
+        assert count_publishable_one_shot_feed_events(db, restrict_group_ids=[]) == 0
         db.query.assert_not_called()
 
     def test_events_by_ids_skip_query_without_ids(self) -> None:
