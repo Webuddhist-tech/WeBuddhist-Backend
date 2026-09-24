@@ -33,7 +33,6 @@ from pecha_api.share.share_response_models import (
 from pecha_api.short_url.short_url_service import get_short_url
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
-WEBUDDHIST_LOGO_PATH = "pecha_api/share/static/img/webuddhist-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
 DEFAULT_OG_TITLE = get("SITE_NAME")
@@ -211,7 +210,7 @@ async def _generate_event_content_image_(
     image_kwargs = {
         "title": title,
         "lang": language,
-        "logo_path": WEBUDDHIST_LOGO_PATH,
+        "logo_path": LOGO_PATH,
     }
     if output_path is not None:
         image_kwargs["output_path"] = output_path

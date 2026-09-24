@@ -5,7 +5,7 @@ from PIL import Image
 from pecha_api.share.pecha_text_image_generator import generate_event_share_image
 from pecha_api.share.pecha_text_image_generator_config import CONFIG
 
-LOGO_PATH = "pecha_api/share/static/img/webuddhist-logo.png"
+LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 
 
 def test_event_share_image_uses_logo_and_name_only():

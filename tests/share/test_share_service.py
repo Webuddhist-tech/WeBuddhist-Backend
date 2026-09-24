@@ -424,7 +424,7 @@ async def test_generate_segment_content_image_with_event():
         mock_generate_image.assert_called_once_with(
             title="Losar",
             lang="en",
-            logo_path="pecha_api/share/static/img/webuddhist-logo.png",
+            logo_path="pecha_api/share/static/img/pecha-logo.png",
         )
         mock_text_image.assert_not_called()
 
