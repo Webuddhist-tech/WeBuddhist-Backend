@@ -369,9 +369,14 @@ def get_groups_by_accumulator_id(
 
     When joined_only is True, return only group accumulators the user has joined.
     """
+    from pecha_api.plans.shared.event_linkage import (
+        group_accumulator_not_linked_to_event,
+    )
+
     query = db.query(GroupAccumulator).filter(
         GroupAccumulator.accumulator_id == accumulator_id,
-        GroupAccumulator.deleted_at.is_(None)
+        GroupAccumulator.deleted_at.is_(None),
+        group_accumulator_not_linked_to_event(),
     )
 
     if joined_only:

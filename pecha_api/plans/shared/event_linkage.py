@@ -22,6 +22,7 @@ _events = table(
     column("plan_id"),
     column("series_id"),
     column("group_accumulator_id"),
+    column("group_id"),
 )
 
 def plan_not_linked_to_event() -> ColumnElement[bool]:
@@ -49,13 +50,16 @@ def series_not_linked_to_event() -> ColumnElement[bool]:
 
 
 def group_accumulator_not_linked_to_event() -> ColumnElement[bool]:
-    """SQL filter: no event points at this group accumulation."""
+    """SQL filter: no event in the same group points at this group accumulation."""
     # Import here: ``pecha_api.accumulator`` package ``__init__`` is heavy and
     # would close an import cycle if loaded at module import time.
     from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 
     return ~exists(
         select(1)
-        .where(_events.c.group_accumulator_id == GroupAccumulator.id)
+        .where(
+            _events.c.group_accumulator_id == GroupAccumulator.id,
+            _events.c.group_id == GroupAccumulator.group_id,
+        )
         .correlate(GroupAccumulator)
     )
