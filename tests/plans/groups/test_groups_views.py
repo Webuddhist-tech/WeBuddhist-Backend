@@ -476,7 +476,7 @@ def test_get_public_group_members():
     ) as mock_service:
         response = client.get(f"/author/groups/{group_id}/members?skip=0&limit=20")
     assert response.status_code == status.HTTP_200_OK
-    mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+    mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20, token=None)
     body = response.json()
     assert body["total_members"] == 1
     assert body["list"][0]["user_id"] == str(user_id)

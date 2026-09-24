@@ -439,24 +439,24 @@ def get_member_roles_map(
     return {row.group_id: row.role for row in rows}
 
 
-def get_group_member_roles_by_emails(
+def get_group_member_roles_by_user_ids(
     db: Session,
     group_id: UUID,
-    emails: Sequence[str],
-) -> Dict[str, str]:
-    """Map author email to their role in the group (only emails with a membership)."""
-    if not emails:
+    user_ids: Sequence[UUID],
+) -> Dict[UUID, str]:
+    """Map user id to their staff role in the group, via the linked Author (Author.user_id)."""
+    if not user_ids:
         return {}
     rows = (
-        db.query(Author.email, AuthorGroupMember.role)
+        db.query(Author.user_id, AuthorGroupMember.role)
         .join(AuthorGroupMember, AuthorGroupMember.author_id == Author.id)
         .filter(
             AuthorGroupMember.group_id == group_id,
-            Author.email.in_(list(emails)),
+            Author.user_id.in_(list(user_ids)),
         )
         .all()
     )
-    return {row.email: row.role.value for row in rows}
+    return {row.user_id: row.role.value for row in rows}
 
 
 def list_group_member_ids_by_roles(

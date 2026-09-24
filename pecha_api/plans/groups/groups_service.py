@@ -90,7 +90,7 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_member,
     get_groups_paginated,
     get_member_roles_map,
-    get_group_member_roles_by_emails,
+    get_group_member_roles_by_user_ids,
     get_invite_by_id,
     get_join_request_by_id,
     get_join_request_status_map,
@@ -1346,7 +1346,14 @@ def list_group_members(
     group_id: UUID,
     skip: int,
     limit: int,
+    token: Optional[str] = None,
 ) -> AuthorGroupMembersListResponse:
+    viewer_id = None
+    if token:
+        try:
+            viewer_id = validate_and_extract_user_details(token=token).id
+        except Exception:
+            pass
     with SessionLocal() as db:
         group = get_group_by_id(db=db, group_id=group_id)
         # Intended behaviour, not an oversight: this endpoint is unauthenticated
@@ -1365,19 +1372,33 @@ def list_group_members(
             skip=skip,
             limit=limit,
         )
-        # Joiners who are also group staff (matched by email) carry their staff
+        # Staff roles follow the same rule as the group detail teaser: a private
+        # group's staff are only revealed to callers who have joined it.
+        roles_visible = group.is_public or (
+            viewer_id is not None
+            and is_user_joined_group(db=db, group_id=group_id, user_id=viewer_id)
+        )
+        # Joiners linked to a staff Author (Author.user_id) carry their staff
         # role; everyone else is a plain MEMBER.
-        roles_by_email = get_group_member_roles_by_emails(
-            db=db,
-            group_id=group_id,
-            emails=[user.email for user in users if user.email],
+        roles_by_user_id = (
+            get_group_member_roles_by_user_ids(
+                db=db,
+                group_id=group_id,
+                user_ids=[user.id for user in users],
+            )
+            if roles_visible
+            else {}
         )
         return AuthorGroupMembersListResponse(
             total_members=total,
             list=[
                 AuthorGroupMemberProfileDTO(
                     user_id=user.id,
-                    role=roles_by_email.get(user.email, GROUP_MEMBER_DEFAULT_ROLE),
+                    role=(
+                        roles_by_user_id.get(user.id, GROUP_MEMBER_DEFAULT_ROLE)
+                        if roles_visible
+                        else None
+                    ),
                     username=user.username,
                     fullname=_user_fullname(user),
                     avatar_url=_user_avatar_url(user),
