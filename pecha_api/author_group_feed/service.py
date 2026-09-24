@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -11,12 +11,21 @@ from pecha_api.events.event_participant_repository import (
     get_joined_event_ids_by_user,
     get_participation_types_by_user,
 )
+from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import (
     get_events_by_ids,
     get_one_shot_event_feed_keys,
     get_recurring_events,
 )
-from pecha_api.events.event_service import _event_to_dto
+from pecha_api.events.event_service import (
+    _event_to_dto,
+    can_view_event_linked_content_without_group_join,
+    collect_published_linked_resource_ids,
+    event_has_publishable_linked_content,
+    redact_public_linked_plan_and_series_from_event_dto,
+    should_redact_linked_plan_series_on_feed_event_card,
+)
+from pecha_api.users.users_models import Users
 from pecha_api.events.recurrence_service import (
     resolve_current_or_next_occurrence,
     combine_occurrence_window,
@@ -83,11 +92,9 @@ def _group_display_name(group: AuthorGroup, language: Optional[str] = None) -> s
 
 
 def _build_group_card_map(
-    db: Session,
-    group_ids: List[UUID],
+    groups: Sequence[AuthorGroup],
     language: Optional[str],
 ) -> Dict[UUID, dict]:
-    groups = get_groups_by_ids(db=db, group_ids=group_ids)
     return {
         group.id: {
             "group_id": group.id,
@@ -125,6 +132,32 @@ def _expand_recurring_occurrences(recurring_templates, today) -> List[Dict]:
     return expanded_recurring
 
 
+def _publishable_events_by_id(
+    db: Session,
+    events: List[Event],
+) -> Dict[UUID, Event]:
+    plan_ids = [event.plan_id for event in events if event.plan_id]
+    series_ids = [
+        event.series_id
+        for event in events
+        if getattr(event, "series_id", None)
+    ]
+    published_plan_ids, published_series_ids = collect_published_linked_resource_ids(
+        db,
+        plan_ids=plan_ids,
+        series_ids=series_ids,
+    )
+    return {
+        event.id: event
+        for event in events
+        if event_has_publishable_linked_content(
+            event,
+            published_plan_ids=published_plan_ids,
+            published_series_ids=published_series_ids,
+        )
+    }
+
+
 def _load_page_entries(
     db: Session,
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]],
@@ -132,39 +165,91 @@ def _load_page_entries(
     limit: int,
     group_ids: List[UUID],
 ) -> List[Tuple[datetime, AuthorGroupFeedItemType, object]]:
-    """Slice the ranked candidates into a page, loading full one-shot events
-    for that page only.
-
-    A one-shot event that was deleted or moved out of scope after ranking is
-    dropped, and the page is topped up from the next candidates so it still
-    holds `limit` items while more remain.
-    """
+    """Slice ranked candidates into a page, loading full one-shot events only
+    for that page and dropping non-publishable or out-of-scope events."""
     page: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     position = skip
     while len(page) < limit and position < len(ranked):
-        window = ranked[position:position + limit - len(page)]
+        window = ranked[position : position + limit - len(page)]
         position += len(window)
         window_ids = [
-            source['event_id'] for _, item_type, source in window
-            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source
+            source["event_id"]
+            for _, item_type, source in window
+            if item_type == AuthorGroupFeedItemType.EVENT and "event_id" in source
         ]
-        events_by_id = {
-            event.id: event
-            for event in get_events_by_ids(
-                db=db,
-                event_ids=window_ids,
-                restrict_group_ids=group_ids,
-                exclude_plan_or_series_linked=True,
+        events_by_id = (
+            _publishable_events_by_id(
+                db,
+                get_events_by_ids(
+                    db=db,
+                    event_ids=window_ids,
+                    restrict_group_ids=group_ids,
+                ),
             )
-        } if window_ids else {}
+            if window_ids
+            else {}
+        )
         for feed_at, item_type, source in window:
-            if item_type == AuthorGroupFeedItemType.EVENT and 'event_id' in source:
-                event = events_by_id.get(source['event_id'])
+            if item_type == AuthorGroupFeedItemType.EVENT and "event_id" in source:
+                event = events_by_id.get(source["event_id"])
                 if event is None:
                     continue
-                source = {'event': event, 'occurrence_date': None}
+                source = {"event": event, "occurrence_date": None}
             page.append((feed_at, item_type, source))
     return page
+
+
+def _author_group_feed_event_item_dto(
+    event: Event,
+    *,
+    feed_at: datetime,
+    group_info: dict,
+    group_by_id: Dict[UUID, AuthorGroup],
+    joined_group_id_set: Set[UUID],
+    published_plan_ids: Set[UUID],
+    published_series_ids: Set[UUID],
+    language: Optional[str],
+    counts_by_event: Dict[UUID, int],
+    joined_event_ids: Set[UUID],
+    participation_types: Dict[UUID, str],
+    timezone_name: Optional[str],
+    occurrence_date: Optional[datetime] = None,
+) -> AuthorGroupFeedItemDTO:
+    event_dto_kwargs = {
+        "language": language,
+        "participant_count": counts_by_event.get(event.id, 0),
+        "is_joined": event.id in joined_event_ids,
+        "my_participation_type": participation_types.get(event.id),
+    }
+    if occurrence_date is not None:
+        event_dto_kwargs["occurrence_date"] = occurrence_date
+    can_view_linked_content = can_view_event_linked_content_without_group_join(
+        event,
+        group=group_by_id.get(event.group_id),
+        published_plan_ids=published_plan_ids,
+        published_series_ids=published_series_ids,
+        timezone_name=timezone_name,
+    )
+    event_dto = _event_to_dto(event, **event_dto_kwargs)
+    if should_redact_linked_plan_series_on_feed_event_card(
+        event,
+        can_view_linked_content=can_view_linked_content,
+        group_id=event.group_id,
+        joined_group_id_set=joined_group_id_set,
+        timezone_name=timezone_name,
+    ):
+        event_dto = redact_public_linked_plan_and_series_from_event_dto(event_dto)
+    return AuthorGroupFeedItemDTO(
+        type=AuthorGroupFeedItemType.EVENT,
+        feed_at=_isoformat(feed_at),
+        is_joined=event.group_id in joined_group_id_set,
+        can_view_linked_content=can_view_linked_content,
+        group_id=event.group_id,
+        group_name=group_info.get("group_name"),
+        group_slug=group_info.get("group_slug"),
+        group_avatar_url=group_info.get("group_avatar_url"),
+        event=event_dto,
+    )
 
 
 def _get_author_group_feed(
@@ -174,6 +259,7 @@ def _get_author_group_feed(
     skip: int = 0,
     limit: int = 20,
     language: Optional[str] = None,
+    timezone_name: Optional[str] = None,
 ) -> AuthorGroupFeedResponse:
     """Mixed feed of posts and events from author groups.
 
@@ -181,7 +267,7 @@ def _get_author_group_feed(
     Logged-in default: groups the user joined.
     With should_include_unfollowed=True: mix in other public groups.
     """
-    current_user = None
+    current_user: Optional[Users] = None
     if token:
         current_user = validate_and_extract_user_details(token=token)
 
@@ -213,33 +299,45 @@ def _get_author_group_feed(
     now = datetime.now(timezone.utc)
     today = now.date()
 
-    # Rank one-shot events, including ones that have already ended, from
-    # their (id, created_at) alone; full events are loaded for the page only.
-    # Events merged with a plan or series are left out of the feed.
-    one_shot_keys, one_shot_total = get_one_shot_event_feed_keys(
+    one_shot_keys, one_shot_publishable_total = get_one_shot_event_feed_keys(
         db=db,
         restrict_group_ids=group_ids,
         limit=fetch_limit,
-        exclude_plan_or_series_linked=True,
     )
 
-    # Get recurring events and find next occurrence for each template
     recurring_templates = get_recurring_events(
         db=db,
         restrict_group_ids=group_ids,
-        exclude_plan_or_series_linked=True,
     )
-    
-    # For feed context, show the current (active) or next upcoming occurrence per template.
-    # Use resolve_current_or_next_occurrence (5-year horizon) to handle sparse yearly
-    # recurrences like Feb 29 and include active multi-day occurrences.
-    
-    expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
-    events_total = one_shot_total + len(expanded_recurring)
 
-    # Rank lightweight (feed_at, type, source) entries first and slice the
-    # page, so DTOs, counts and presigned URLs are only built for the items
-    # actually returned rather than for all skip + limit candidates.
+    expanded_recurring = _expand_recurring_occurrences(recurring_templates, today)
+    if expanded_recurring:
+        recurring_events = [item["event"] for item in expanded_recurring]
+        plan_ids = [event.plan_id for event in recurring_events if event.plan_id]
+        series_ids = [
+            event.series_id
+            for event in recurring_events
+            if getattr(event, "series_id", None)
+        ]
+        published_plan_ids, published_series_ids = (
+            collect_published_linked_resource_ids(
+                db,
+                plan_ids=plan_ids,
+                series_ids=series_ids,
+            )
+        )
+        expanded_recurring = [
+            item
+            for item in expanded_recurring
+            if event_has_publishable_linked_content(
+                item["event"],
+                published_plan_ids=published_plan_ids,
+                published_series_ids=published_series_ids,
+            )
+        ]
+
+    events_total = one_shot_publishable_total + len(expanded_recurring)
+
     ranked: List[Tuple[datetime, AuthorGroupFeedItemType, object]] = []
     for post in posts:
         ranked.append(
@@ -247,44 +345,42 @@ def _get_author_group_feed(
         )
     for key in one_shot_keys:
         ranked.append(
-            (_as_aware_utc(key.created_at), AuthorGroupFeedItemType.EVENT, {
-                'event_id': key.id,
-                'occurrence_date': None,
-            })
+            (
+                _as_aware_utc(key.created_at),
+                AuthorGroupFeedItemType.EVENT,
+                {"event_id": key.id, "occurrence_date": None},
+            )
         )
-
-    # Non-active (not yet started) recurring occurrences are ranked by
-    # proximity to "now" rather than by the template's created_at: for a
-    # future occurrence, occurrence_date > now > created_at always holds,
-    # which made min(created_at, occurrence_date) collapse to created_at and
-    # let a freshly-created template with a far-future occurrence outrank
-    # genuinely recent content. Mirroring the occurrence date around "now"
-    # (now - (occurrence_date - now)) keeps imminent occurrences competitive
-    # with recent content while distant ones sink below it. Active events rank
-    # by their start_date (not now) so multiple active events don't all tie at
-    # the top.
     for item in expanded_recurring:
-        if item.get('is_active'):
-            feed_at = item['start_date']  # Active events rank by when they started
+        if item.get("is_active"):
+            feed_at = item["start_date"]
         else:
-            occurrence_at = item['start_date']
+            occurrence_at = item["start_date"]
             feed_at = now - (occurrence_at - now)
-        ranked.append((feed_at, AuthorGroupFeedItemType.EVENT, {
-            'event': item['event'],
-            'start_date': item['start_date'],
-            'end_date': item['end_date'],
-            'occurrence_date': item['start_date'],
-        }))
+        ranked.append(
+            (
+                feed_at,
+                AuthorGroupFeedItemType.EVENT,
+                {
+                    "event": item["event"],
+                    "start_date": item["start_date"],
+                    "end_date": item["end_date"],
+                    "occurrence_date": item["start_date"],
+                },
+            )
+        )
 
     ranked.sort(key=lambda entry: (entry[0], entry[1].value), reverse=True)
     page_entries = _load_page_entries(db, ranked, skip, limit, group_ids)
 
     page_posts = [
-        source for _, item_type, source in page_entries
+        source
+        for _, item_type, source in page_entries
         if item_type == AuthorGroupFeedItemType.POST
     ]
     page_event_items = [
-        source for _, item_type, source in page_entries
+        source
+        for _, item_type, source in page_entries
         if item_type == AuthorGroupFeedItemType.EVENT
     ]
 
@@ -293,7 +389,7 @@ def _get_author_group_feed(
     )
     post_dto_by_id = {post.id: dto for post, dto in zip(page_posts, post_dtos)}
 
-    event_ids = list({item['event'].id for item in page_event_items})
+    event_ids = list({item["event"].id for item in page_event_items})
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     joined_event_ids: Set[UUID] = set()
     participation_types: Dict[UUID, str] = {}
@@ -312,56 +408,77 @@ def _get_author_group_feed(
                 event_ids=list(joined_event_ids),
             )
 
-    page_group_ids = list({
-        *[post.group_id for post in page_posts],
-        *[item['event'].group_id for item in page_event_items],
-    })
-    group_cards = _build_group_card_map(db, page_group_ids, language)
+    page_group_ids = list(
+        {
+            *[post.group_id for post in page_posts],
+            *[item["event"].group_id for item in page_event_items],
+        }
+    )
+    page_groups = (
+        get_groups_by_ids(db=db, group_ids=page_group_ids) if page_group_ids else []
+    )
+    group_by_id = {group.id: group for group in page_groups}
+    group_cards = _build_group_card_map(page_groups, language)
+
+    linked_candidates = [item["event"] for item in page_event_items]
+    plan_ids = [event.plan_id for event in linked_candidates if event.plan_id]
+    series_ids = [
+        event.series_id
+        for event in linked_candidates
+        if getattr(event, "series_id", None)
+    ]
+    published_plan_ids, published_series_ids = collect_published_linked_resource_ids(
+        db,
+        plan_ids=plan_ids,
+        series_ids=series_ids,
+    )
 
     page: List[AuthorGroupFeedItemDTO] = []
     for feed_at, item_type, source in page_entries:
         if item_type == AuthorGroupFeedItemType.POST:
             group_id = source.group_id
-            payload = {'post': post_dto_by_id[source.id]}
+            group_info = group_cards.get(group_id, {})
+            page.append(
+                AuthorGroupFeedItemDTO(
+                    type=AuthorGroupFeedItemType.POST,
+                    feed_at=_isoformat(feed_at),
+                    is_joined=group_id in joined_group_id_set,
+                    group_id=group_id,
+                    group_name=group_info.get("group_name"),
+                    group_slug=group_info.get("group_slug"),
+                    group_avatar_url=group_info.get("group_avatar_url"),
+                    post=post_dto_by_id[source.id],
+                )
+            )
         else:
-            event = source['event']
-            group_id = event.group_id
-            # Temporarily override dates so recurring occurrences render
-            # their occurrence window instead of the template's dates.
+            event = source["event"]
+            group_info = group_cards.get(event.group_id, {})
             original_start = event.start_date
             original_end = event.end_date
-            if 'start_date' in source:
-                event.start_date = source['start_date']
-                event.end_date = source['end_date']
+            if "start_date" in source:
+                event.start_date = source["start_date"]
+                event.end_date = source["end_date"]
             try:
-                payload = {'event': _event_to_dto(
-                    event,
-                    language=language,
-                    participant_count=counts_by_event.get(event.id, 0),
-                    is_joined=event.id in joined_event_ids,
-                    my_participation_type=participation_types.get(event.id),
-                    **(
-                        {'occurrence_date': source['occurrence_date']}
-                        if source['occurrence_date'] is not None
-                        else {}
-                    ),
-                )}
+                page.append(
+                    _author_group_feed_event_item_dto(
+                        event,
+                        feed_at=feed_at,
+                        group_info=group_info,
+                        group_by_id=group_by_id,
+                        joined_group_id_set=joined_group_id_set,
+                        published_plan_ids=published_plan_ids,
+                        published_series_ids=published_series_ids,
+                        language=language,
+                        counts_by_event=counts_by_event,
+                        joined_event_ids=joined_event_ids,
+                        participation_types=participation_types,
+                        timezone_name=timezone_name,
+                        occurrence_date=source.get("occurrence_date"),
+                    )
+                )
             finally:
                 event.start_date = original_start
                 event.end_date = original_end
-        group_info = group_cards.get(group_id, {})
-        page.append(
-            AuthorGroupFeedItemDTO(
-                type=item_type,
-                feed_at=_isoformat(feed_at),
-                is_joined=group_id in joined_group_id_set,
-                group_id=group_id,
-                group_name=group_info.get("group_name"),
-                group_slug=group_info.get("group_slug"),
-                group_avatar_url=group_info.get("group_avatar_url"),
-                **payload,
-            )
-        )
 
     total = posts_total + events_total
 
@@ -381,6 +498,7 @@ async def get_author_group_feed_service(
     skip: int = 0,
     limit: int = 20,
     language: Optional[str] = None,
+    timezone_name: Optional[str] = None,
 ) -> AuthorGroupFeedResponse:
     """Build the feed without blocking the application's event loop."""
     return await run_in_threadpool(
@@ -391,4 +509,5 @@ async def get_author_group_feed_service(
         skip=skip,
         limit=limit,
         language=language,
+        timezone_name=timezone_name,
     )

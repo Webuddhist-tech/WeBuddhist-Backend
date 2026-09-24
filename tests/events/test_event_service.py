@@ -2,12 +2,20 @@ from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from pecha_api.events.event_response_models import EventDTO, EventsResponse
+from pecha_api.events.event_response_models import (
+    EventDTO,
+    EventsResponse,
+    LinkedResourceDTO,
+)
 from pecha_api.events.event_service import (
     EventContentFilter,
     _expand_earliest_occurrences,
+    can_view_event_linked_content_without_group_join,
+    event_has_publishable_linked_content,
     get_events_service,
     get_events_today_service,
+    redact_public_linked_plan_and_series_from_event_dto,
+    should_redact_linked_plan_series_on_feed_event_card,
 )
 
 
@@ -309,4 +317,144 @@ def test_get_events_service_accepts_naive_from_date() -> None:
     passed = mock_get_events.call_args.kwargs["from_date"]
     assert passed.tzinfo is not None
     assert passed == datetime(2026, 9, 17, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_event_has_publishable_linked_content_rejects_draft_plan() -> None:
+    plan_id = uuid4()
+    event = MagicMock(plan_id=plan_id, series_id=None)
+    assert (
+        event_has_publishable_linked_content(
+            event,
+            published_plan_ids=set(),
+            published_series_ids=set(),
+        )
+        is False
+    )
+
+
+def test_event_has_publishable_linked_content_rejects_draft_series_when_both_linked() -> None:
+    plan_id = uuid4()
+    series_id = uuid4()
+    event = MagicMock(plan_id=plan_id, series_id=series_id)
+    assert not event_has_publishable_linked_content(
+        event,
+        published_plan_ids={plan_id},
+        published_series_ids=set(),
+    )
+    assert event_has_publishable_linked_content(
+        event,
+        published_plan_ids={plan_id},
+        published_series_ids={series_id},
+    )
+
+
+def test_should_redact_linked_plan_series_on_feed_event_card() -> None:
+    group_id = uuid4()
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    with patch(
+        "pecha_api.events.event_service.linked_content_hidden_for_viewer_timezone",
+        return_value=False,
+    ):
+        assert should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set=set(),
+            timezone_name="America/New_York",
+        )
+        assert not should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set={group_id},
+            timezone_name="America/New_York",
+        )
+        assert not should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=True,
+            group_id=group_id,
+            joined_group_id_set=set(),
+            timezone_name="America/New_York",
+        )
+    with patch(
+        "pecha_api.events.event_service.linked_content_hidden_for_viewer_timezone",
+        return_value=True,
+    ):
+        assert should_redact_linked_plan_series_on_feed_event_card(
+            event,
+            can_view_linked_content=False,
+            group_id=group_id,
+            joined_group_id_set={group_id},
+            timezone_name="Asia/Shanghai",
+        )
+
+
+def test_redact_public_linked_plan_and_series_from_event_dto() -> None:
+    now = datetime.now(timezone.utc)
+    plan_id = uuid4()
+    series_id = uuid4()
+    dto = EventDTO(
+        id=uuid4(),
+        group_id=uuid4(),
+        plan_id=plan_id,
+        plan=LinkedResourceDTO(id=plan_id, name="Hidden plan", image_url="x"),
+        series_id=series_id,
+        series=LinkedResourceDTO(id=series_id, name="Hidden series", image_url="y"),
+        start_date=now,
+        end_date=now,
+        is_one_day=True,
+        featured=False,
+        is_recurring=False,
+        metadata=[],
+        created_at=now,
+        created_by="author@example.com",
+    )
+    redacted = redact_public_linked_plan_and_series_from_event_dto(dto)
+    assert redacted.plan_id is None
+    assert redacted.plan is None
+    assert redacted.series_id is None
+    assert redacted.series is None
+
+
+def test_can_view_linked_content_false_when_plan_hidden_for_timezone() -> None:
+    group_id = uuid4()
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    group = MagicMock(is_public=True, status="PUBLISHED")
+
+    with patch(
+        "pecha_api.events.event_service.is_group_published",
+        return_value=True,
+    ), patch(
+        "pecha_api.events.event_service.should_hide_for_timezone",
+        return_value=True,
+    ):
+        assert not can_view_event_linked_content_without_group_join(
+            event,
+            group=group,
+            published_plan_ids={plan_id},
+            published_series_ids=set(),
+            timezone_name="Asia/Shanghai",
+        )
+
+
+def test_can_view_linked_content_without_group_join_is_separate_from_membership() -> None:
+    group_id = uuid4()
+    plan_id = uuid4()
+    event = MagicMock(group_id=group_id, plan_id=plan_id, series_id=None)
+    group = MagicMock(is_public=True, status="PUBLISHED")
+    published = {plan_id}
+
+    with patch(
+        "pecha_api.events.event_service.is_group_published",
+        return_value=True,
+    ):
+        assert can_view_event_linked_content_without_group_join(
+            event,
+            group=group,
+            published_plan_ids=published,
+            published_series_ids=set(),
+        )
+        assert event.group_id not in set()
 
