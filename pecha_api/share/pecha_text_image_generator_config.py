@@ -65,9 +65,8 @@ CONFIG = {
     "EVENT_CARD_HEIGHT": 630,
     "EVENT_MARGIN": 36,
     "EVENT_LOGO_HEIGHT_RATIO": 0.15,
-    "EVENT_LOGO_GAP": 24,
     "EVENT_TITLE_MAX_LINES": 2,
-    "EVENT_FALLBACK_BG": (28, 20, 16, 255),
+    "EVENT_FALLBACK_BG": (255, 0, 0, 255),
     # Default font size
     "DEFAULT_FONT_SIZE": 24,
     # Default language code

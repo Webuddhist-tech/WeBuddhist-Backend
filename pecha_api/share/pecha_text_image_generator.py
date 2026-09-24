@@ -202,12 +202,13 @@ def generate_event_share_image(
     logo_path: str = None,
     output_path: ImageDestination = None,
 ) -> None:
-    """Share card for an event: the WeBuddhist logo and the event name."""
+    """Share card for an event: red background, name in the middle, logo
+    at the bottom right - the same red as the other share cards."""
     width = CONFIG["EVENT_CARD_WIDTH"]
     height = CONFIG["EVENT_CARD_HEIGHT"]
     canvas = Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
     logo = _load_bottom_right_logo(logo_path, height) if logo_path else None
-    _draw_event_title(canvas, title or "", lang, _logo_reserved_width(logo))
+    _draw_event_title(canvas, title or "", lang)
     if logo is not None:
         canvas = _paste_logo_bottom_right(canvas, logo)
     destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
@@ -225,11 +226,6 @@ def _load_bottom_right_logo(logo_path: str, image_height: int) -> Optional[Image
     logo_width = int(logo_height * (logo.size[0] / logo.size[1]))
     return logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
 
-def _logo_reserved_width(logo: Optional[Image.Image]) -> int:
-    if logo is None:
-        return 0
-    return logo.width + CONFIG["EVENT_LOGO_GAP"]
-
 def _paste_logo_bottom_right(canvas: Image.Image, logo: Image.Image) -> Image.Image:
     margin = CONFIG["EVENT_MARGIN"]
     x = canvas.width - logo.width - margin
@@ -241,35 +237,35 @@ def _draw_event_title(
     canvas: Image.Image,
     title: str,
     lang: Optional[str],
-    reserved_right: int,
 ) -> None:
     cleaned = " ".join(title.split())
     if not cleaned:
         return
     margin = CONFIG["EVENT_MARGIN"]
-    max_width = canvas.width - margin - reserved_right - margin
+    max_width = canvas.width - (margin * 2)
     if max_width <= 0:
         return
     font, wrapped = _fit_event_title(cleaned, lang, max_width)
     draw = ImageDraw.Draw(canvas)
     spacing = int(font.size * 0.25)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing)
-    text_height = bbox[3] - bbox[1]
-    x = margin
-    y = canvas.height - margin - text_height
+    center = (canvas.width / 2, canvas.height / 2)
     draw.multiline_text(
-        (x + 2, y + 2),
+        (center[0] + 2, center[1] + 2),
         wrapped,
         font=font,
         fill=(0, 0, 0, 170),
         spacing=spacing,
+        anchor=CONFIG["ANCHOR_MIDDLE"],
+        align=CONFIG["ALIGN_CENTER"],
     )
     draw.multiline_text(
-        (x, y),
+        center,
         wrapped,
         font=font,
         fill=CONFIG["COLOR_WHITE"],
         spacing=spacing,
+        anchor=CONFIG["ANCHOR_MIDDLE"],
+        align=CONFIG["ALIGN_CENTER"],
     )
 
 def _fit_event_title(
