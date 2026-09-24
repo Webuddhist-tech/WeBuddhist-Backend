@@ -12,6 +12,7 @@ from pecha_api.accumulator import (
     group_accumulator_joins,
 )
 from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
+from pecha_api.plans.shared.event_linkage import group_accumulator_not_linked_to_event
 from pecha_api.users.users_models import Users
 
 
@@ -62,6 +63,7 @@ def get_group_accumulators(
     skip: int = 0,
     limit: int = 20,
     search: Optional[str] = None,
+    exclude_event_linked: bool = False,
 ) -> Tuple[List[GroupAccumulator], int]:
     query = (
         db.query(GroupAccumulator)
@@ -71,6 +73,8 @@ def get_group_accumulators(
             GroupAccumulator.deleted_at.is_(None),
         )
     )
+    if exclude_event_linked:
+        query = query.filter(group_accumulator_not_linked_to_event())
     if search:
         # Match the default title or any of its translations.
         pattern = f"%{search}%"
@@ -102,6 +106,7 @@ def get_group_accumulators_for_group_ids(
         .filter(
             GroupAccumulator.group_id.in_(group_ids),
             GroupAccumulator.deleted_at.is_(None),
+            group_accumulator_not_linked_to_event(),
         )
     )
     if exclude_ids:

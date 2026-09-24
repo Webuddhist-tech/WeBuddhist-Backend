@@ -34,6 +34,9 @@ from pecha_api.users.users_models import Users
 from pecha_api.plans.groups.follow_scope import resolve_event_listing_group_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
+from pecha_api.group_accumulator.group_accumulator_repository import (
+    get_group_accumulator_by_id,
+)
 from pecha_api.plans.shared.metadata_utils import (
     filter_by_language_with_fallback,
     format_metadata_response,
@@ -677,6 +680,33 @@ def _validate_group_recitation_collection(
         )
 
 
+def _validate_group_accumulator(
+    db: Session,
+    group_accumulator_id: Optional[UUID],
+    group_id: UUID,
+) -> None:
+    if group_accumulator_id is None:
+        return
+    group_accumulator = get_group_accumulator_by_id(
+        db=db, group_accumulator_id=group_accumulator_id
+    )
+    if group_accumulator is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Group accumulator '{group_accumulator_id}' not found"
+            ),
+        )
+    if group_accumulator.group_id != group_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Group accumulator '{group_accumulator_id}' does not belong "
+                f"to group '{group_id}'"
+            ),
+        )
+
+
 def _validate_location(db, location_id: Optional[UUID], group_id: UUID) -> None:
     if location_id is None:
         return
@@ -1221,6 +1251,11 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         _validate_location(
             db=db, location_id=request.location_id, group_id=request.group_id
         )
+        _validate_group_accumulator(
+            db=db,
+            group_accumulator_id=request.group_accumulator_id,
+            group_id=request.group_id,
+        )
         def _schedule_reminders_after_flush(flushed_event: Event) -> None:
             # Runs after the event is flushed (so its id/FK target exists)
             # but before save_event's commit, so a reminder failure rolls
@@ -1423,6 +1458,12 @@ def _apply_relational_field_updates(db, event: Event, request: UpdateEventReques
             db=db, location_id=request.location_id, group_id=event.group_id
         )
         event.location_id = request.location_id
+    if "group_accumulator_id" in request.model_fields_set:
+        _validate_group_accumulator(
+            db=db,
+            group_accumulator_id=event.group_accumulator_id,
+            group_id=event.group_id,
+        )
 
 
 def _sync_event_reminders(db: Session, event: Event, should_rebuild: bool) -> None:

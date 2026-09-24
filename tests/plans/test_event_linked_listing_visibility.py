@@ -1,9 +1,11 @@
-"""Plans merged into an event must not surface in the public listing APIs.
+"""Event-linked content must not surface in the public listing APIs.
 
 - ``GET /series`` and ``GET /series/featured`` drop a series when an event
   links it directly or links any of its plans.
-- ``GET /author/groups/practices`` drops those series and event-linked
-  standalone plans.
+- ``GET /author/groups/practices`` drops those series, event-linked standalone
+  plans, and event-linked group accumulations.
+- ``GET /group-accumulators/{group_id}/accumulators`` drops event-linked group
+  accumulations.
 - ``GET /author/groups/feeds`` drops events that link a plan or a series.
 
 The queries are compiled rather than executed: the gates are a SQL concern, and
@@ -19,6 +21,10 @@ from sqlalchemy.orm import Query, Session
 
 import pecha_api.app  # noqa: F401  -- registers every mapper
 from pecha_api.events.event_repository import get_events, get_recurring_events
+from pecha_api.group_accumulator.group_accumulator_repository import (
+    get_group_accumulators,
+    get_group_accumulators_for_group_ids,
+)
 from pecha_api.plans.groups.groups_repository import (
     get_series_for_group_ids,
     get_standalone_plans_for_group_ids,
@@ -30,6 +36,8 @@ from pecha_api.plans.series.series_repository import (
 
 PLAN_EVENT_GATE = "events.plan_id = plans.id"
 SERIES_EVENT_GATE = "events.series_id = series.id"
+GROUP_ACCUMULATOR_EVENT_GATE = "events.group_accumulator_id = group_accumulators.id"
+GROUP_ACCUMULATOR_SAME_GROUP_GATE = "events.group_id = group_accumulators.group_id"
 EVENT_PLAN_GATE = "events.plan_id IS NULL"
 EVENT_SERIES_GATE = "events.series_id IS NULL"
 
@@ -101,6 +109,24 @@ def _sql(db: Session) -> str:
             ),
             (PLAN_EVENT_GATE,),
         ),
+        (
+            "GET /group-accumulators/{group_id}/accumulators",
+            lambda db: get_group_accumulators(
+                db=db,
+                group_id=uuid.uuid4(),
+                skip=0,
+                limit=20,
+                exclude_event_linked=True,
+            ),
+            (GROUP_ACCUMULATOR_EVENT_GATE, GROUP_ACCUMULATOR_SAME_GROUP_GATE),
+        ),
+        (
+            "GET /author/groups/practices accumulators",
+            lambda db: get_group_accumulators_for_group_ids(
+                db=db, group_ids=[uuid.uuid4()], limit=20
+            ),
+            (GROUP_ACCUMULATOR_EVENT_GATE, GROUP_ACCUMULATOR_SAME_GROUP_GATE),
+        ),
     ],
 )
 def test_public_series_and_practice_listings_exclude_event_linked_content(
@@ -122,6 +148,13 @@ def test_cms_series_listing_keeps_event_linked_series(db: Session) -> None:
     sql = _sql(db)
     assert "events.plan_id" not in sql
     assert "events.series_id" not in sql
+
+
+def test_cms_group_accumulator_listing_keeps_event_linked(db: Session) -> None:
+    get_group_accumulators(db=db, group_id=uuid.uuid4(), skip=0, limit=10)
+
+    sql = _sql(db)
+    assert GROUP_ACCUMULATOR_EVENT_GATE not in sql
 
 
 def test_feed_events_exclude_plan_or_series_linked_events(db: Session) -> None:
