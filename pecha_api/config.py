@@ -171,6 +171,26 @@ DEFAULTS = dict(
     EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE=50,
+    # Per-day reminders for multi-day events, and reminders for recurring
+    # events at all. Separate flags so the recurring blast radius - an
+    # indefinite series, with no per-occurrence way to decline - can be
+    # turned on well after the one-time case has settled.
+    EVENT_REMINDER_DAILY_ENABLED="false",
+    EVENT_REMINDER_RECURRING_ENABLED="false",
+    # How far ahead a recurring series' reminders are materialized. Rows are
+    # topped up on this schedule, so losing more than HORIZON_DAYS of
+    # materializer runs is what starts dropping reminders.
+    EVENT_REMINDER_HORIZON_DAYS=14,
+    EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS=3600,
+    EVENT_REMINDER_MATERIALIZE_BATCH_SIZE=200,
+    # A recurring series never ends, so its rows need sweeping.
+    EVENT_REMINDER_RETENTION_DAYS=30,
+    EVENT_REMINDER_PURGE_INTERVAL_SECONDS=86400,
+    # Sanity bound on how long one event may run. Set high enough that a
+    # real retreat never hits it, so what it actually catches is a
+    # mistyped end_date - which would otherwise materialize reminders for
+    # every day between here and the typo.
+    EVENT_MAX_SPAN_DAYS=366,
     DEFAULT_EVENT_TIMEZONE="Asia/Kolkata",
 
     # Sentry error tracking (disabled unless SENTRY_DSN is set)

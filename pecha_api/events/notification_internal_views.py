@@ -8,9 +8,12 @@ from starlette import status
 from pecha_api.config import get_int
 from pecha_api.events.event_reminder_service import REMINDER_TYPE_T_MINUS_10, REMINDER_TYPE_T_ZERO
 from pecha_api.events.notification_response_models import (
+    EventAnnouncementAudience,
+    EventAnnouncementTargetsResponse,
     EventNotificationTargetsResponse,
     EventReminderTargetsResponse,
 )
+from pecha_api.events.event_announcement_service import get_event_announcement_targets
 from pecha_api.events.notification_service import get_event_notification_targets
 from pecha_api.events.reminder_notification_service import get_event_reminder_targets
 from pecha_api.routines.routine_notifications.dependencies import verify_dispatch_token
@@ -65,4 +68,28 @@ def event_reminder_targets(
         skip=skip,
         limit=limit,
         fire_at=fire_at,
+    )
+
+
+@internal_event_notifications_router.get(
+    "/event-announcement-targets/{event_id}",
+    status_code=status.HTTP_200_OK,
+)
+def event_announcement_targets(
+    event_id: UUID,
+    audience: EventAnnouncementAudience = Query(...),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    _: None = Depends(verify_dispatch_token),
+) -> EventAnnouncementTargetsResponse:
+    """Devices for one organizer-written notification.
+
+    No copy here: the organizer's own title and body travel in the queue
+    message, so this only answers who should receive it.
+    """
+    return get_event_announcement_targets(
+        event_id=event_id,
+        audience=audience,
+        skip=skip,
+        limit=limit,
     )

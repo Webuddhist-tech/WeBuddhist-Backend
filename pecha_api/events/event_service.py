@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.config import get
@@ -64,7 +65,6 @@ from .recurrence_service import (
 )
 from .notification_dispatch_service import enqueue_event_notification
 from .event_reminder_service import (
-    cancel_event_reminders,
     reschedule_event_reminders,
     schedule_event_reminders,
 )
@@ -477,6 +477,7 @@ def _event_to_dto(
         occurrence_date=occurrence_date,
         event_format=event.event_format,
         chat_enabled=bool(getattr(event, "chat_enabled", True)),
+        notifications_enabled=bool(getattr(event, "notifications_enabled", True)),
         chat_room_id=chat_room_id,
         metadata=_metadata_response(
             event.metadata_entries, language=language, fallback=fallback
@@ -962,6 +963,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         image_url=request.image_url,
         event_format=request.event_format,
         chat_enabled=request.chat_enabled,
+        notifications_enabled=request.notifications_enabled,
         is_recurring=is_recurring,
         recurrence_frequency=recurrence_frequency,
         recurrence_date_system=recurrence_date_system,
@@ -992,15 +994,19 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             # but before save_event's commit, so a reminder failure rolls
             # back the event too instead of leaving it persisted without
             # reminders.
-            if not is_recurring:
-                schedule_event_reminders(db, flushed_event.id, flushed_event.start_date)
+            #
+            # Recurring events are no longer excluded here: which days they
+            # are owed is decided in event_reminder_service, which also holds
+            # the flag that keeps them off until the rollout says otherwise.
+            schedule_event_reminders(db, flushed_event)
 
         saved = save_event(
             db, event, request.metadata, request.links,
             youtube_entries=request.youtube,
             after_flush=_schedule_reminders_after_flush,
         )
-        enqueue_event_notification(saved.id)
+        if bool(getattr(saved, "notifications_enabled", True)):
+            enqueue_event_notification(saved.id)
         return _event_to_dto(saved)
 
 
@@ -1043,7 +1049,7 @@ def _resolve_recurrence_time_window(
     return start_date, end_date
 
 
-def _apply_recurrence_update(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
+def _apply_recurrence_update(event: Event, request: UpdateEventRequest) -> bool:
     start_date, end_date = compute_initial_dates(request.recurrence)
     event.start_date, event.end_date = _resolve_recurrence_time_window(
         event, request, start_date, end_date
@@ -1056,15 +1062,24 @@ def _apply_recurrence_update(event: Event, request: UpdateEventRequest) -> tuple
     event.recurrence_day = request.recurrence.day
     event.recurrence_day_of_week = request.recurrence.day_of_week
     event.duration_days = request.recurrence.duration_days
-    # Reminders are out of scope for recurring events.
-    return True, False
+    # A new rule means new occurrence dates, so whatever was materialized
+    # for the old one has to go.
+    return True
 
 
-def _apply_date_only_update(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
+def _apply_date_only_update(event: Event, request: UpdateEventRequest) -> bool:
     start_date = request.start_date if request.start_date is not None else event.start_date
     end_date = request.end_date if request.end_date is not None else event.end_date
+    # end_date counts as much as start_date now that it decides how many
+    # days an event is owed reminders for: shortening a five-day event to
+    # two has to drop days three through five, which a start-only check
+    # cannot see. On a recurring template both dates carry the time of day
+    # every occurrence inherits, so either one moves every occurrence.
     start_date_changed = (
         request.start_date is not None and request.start_date != event.start_date
+    )
+    end_date_changed = (
+        request.end_date is not None and request.end_date != event.end_date
     )
     if request.start_date is not None or request.end_date is not None:
         _validate_date_range(start_date, end_date)
@@ -1073,8 +1088,7 @@ def _apply_date_only_update(event: Event, request: UpdateEventRequest) -> tuple[
         if request.end_date is not None:
             event.end_date = request.end_date
 
-    should_reschedule_reminders = start_date_changed and not event.is_recurring
-    return False, should_reschedule_reminders
+    return start_date_changed or end_date_changed
 
 
 def _clear_recurrence_fields(event: Event) -> None:
@@ -1088,7 +1102,7 @@ def _clear_recurrence_fields(event: Event) -> None:
     event.duration_days = 1
 
 
-def _apply_clear_recurrence(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
+def _apply_clear_recurrence(event: Event, request: UpdateEventRequest) -> bool:
     """Handle an explicit `recurrence: null`.
 
     For a recurring template this is a conversion to a one-time event, and
@@ -1114,13 +1128,15 @@ def _apply_clear_recurrence(event: Event, request: UpdateEventRequest) -> tuple[
     _clear_recurrence_fields(event)
     # Leaving a recurring series always invalidates the reminders it spawned,
     # whether or not the caller also moved the date.
-    return False, True
+    return True
 
 
-def _apply_recurrence_or_dates(event: Event, request: UpdateEventRequest) -> tuple[bool, bool]:
+def _apply_recurrence_or_dates(event: Event, request: UpdateEventRequest) -> bool:
     """Applies recurrence/date changes to `event`.
 
-    Returns (should_cancel_reminders, should_reschedule_reminders).
+    Returns whether the event's reminders have to be rebuilt. There is no
+    longer a separate "cancel" answer: a recurring event is owed reminders
+    like any other, so every schedule change is a rebuild.
     An explicit `recurrence: null` clears the rule and keeps the event one-time.
     Omitting `recurrence` leaves the existing rule (or lack of one) untouched.
     """
@@ -1135,6 +1151,8 @@ def _apply_simple_field_updates(event: Event, request: UpdateEventRequest) -> No
     fields_set = request.model_fields_set
     if request.timezone is not None:
         event.timezone = request.timezone
+    if "notifications_enabled" in fields_set and request.notifications_enabled is not None:
+        event.notifications_enabled = request.notifications_enabled
     if request.group_id is not None:
         event.group_id = request.group_id
     # plan_id/series_id/accumulator_id/group_accumulator_id/mantra_id/timer_id use
@@ -1175,11 +1193,9 @@ def _apply_relational_field_updates(db, event: Event, request: UpdateEventReques
         event.location_id = request.location_id
 
 
-def _sync_event_reminders(db, event: Event, should_cancel: bool, should_reschedule: bool) -> None:
-    if should_cancel:
-        cancel_event_reminders(db, event.id)
-    elif should_reschedule:
-        reschedule_event_reminders(db, event.id, event.start_date)
+def _sync_event_reminders(db: Session, event: Event, should_rebuild: bool) -> None:
+    if should_rebuild:
+        reschedule_event_reminders(db, event)
 
 
 def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest) -> EventDTO:
@@ -1197,10 +1213,22 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
 
         chat_was_enabled = bool(getattr(event, "chat_enabled", True))
 
-        should_cancel_reminders, should_reschedule_reminders = _apply_recurrence_or_dates(
-            event, request
-        )
+        should_rebuild_reminders = _apply_recurrence_or_dates(event, request)
+        timezone_before = event.timezone
+        notifications_enabled_before = bool(getattr(event, "notifications_enabled", True))
         _apply_simple_field_updates(event, request)
+        # The zone decides what local time each day of a multi-day event is
+        # owed its reminder at, and _apply_simple_field_updates is where it
+        # lands - so the rebuild signal has to be picked up here rather than
+        # from the date/recurrence pass above, which never sees it.
+        should_rebuild_reminders = (
+            should_rebuild_reminders
+            or event.timezone != timezone_before
+            # Switching notifications off has to reach reminders already
+            # written: the rebuild clears them and writes nothing back.
+            # Switching it back on re-materializes what is still to come.
+            or bool(getattr(event, "notifications_enabled", True)) != notifications_enabled_before
+        )
         _apply_relational_field_updates(db, event, request)
 
         event.updated_at = datetime.now(timezone.utc)
@@ -1209,7 +1237,7 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         # here) so a later validation or persistence failure rolls back the
         # reminder change along with the event, instead of leaving reminders
         # stale/canceled against an unchanged event.
-        _sync_event_reminders(db, event, should_cancel_reminders, should_reschedule_reminders)
+        _sync_event_reminders(db, event, should_rebuild_reminders)
 
         saved = update_event(
             db, event,

@@ -191,6 +191,9 @@ def list_undispatched_event_notifications(
         .filter(
             Event.notification_sqs_message_id.is_(None),
             Event.created_at <= older_than,
+            # Never re-enqueue for an event whose organizer has since
+            # switched notifications off.
+            Event.notifications_enabled.is_(True),
         )
         .order_by(Event.created_at.asc())
         .limit(limit)
@@ -333,6 +336,25 @@ def get_featured_recurring_events(
         .filter(Event.is_recurring == True)
         .all()
     )
+
+
+def list_recurring_events_for_materialization(
+    db: Session,
+    *,
+    after_id: Optional[UUID] = None,
+    limit: int = 200,
+) -> List[Event]:
+    """Recurring templates in id order, for the reminder materializer.
+
+    Deliberately not get_recurring_events: that one eager-loads metadata,
+    links, location and every linked resource for rendering, none of which
+    the materializer reads, and returns the whole table at once. This walks
+    it in keyset pages so a scheduled job can cross a large table without
+    holding one enormous result set."""
+    query = db.query(Event).filter(Event.is_recurring.is_(True))
+    if after_id is not None:
+        query = query.filter(Event.id > after_id)
+    return query.order_by(Event.id.asc()).limit(limit).all()
 
 
 def get_recurring_events(

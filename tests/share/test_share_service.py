@@ -405,6 +405,7 @@ async def test_generate_segment_content_image_with_event():
         bg_color=BgColor.DEFAULT,
     )
     event = SimpleNamespace(
+        image_url="images/events/losar/original/banner.webp",
         metadata_entries=[
             SimpleNamespace(
                 name="Losar",
@@ -416,18 +417,25 @@ async def test_generate_segment_content_image_with_event():
 
     with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
          patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
-         patch("pecha_api.share.share_service.generate_segment_image") as mock_generate_image:
+         patch("pecha_api.share.share_service.get", return_value="bucket") as mock_get, \
+         patch("pecha_api.share.share_service.download_bytes", return_value=b"event-photo") as mock_download, \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_generate_image, \
+         patch("pecha_api.share.share_service.generate_segment_image") as mock_text_image:
         mock_session.return_value.__enter__.return_value = object()
         await _generate_segment_content_image_(share_request)
 
-        mock_generate_image.assert_called_once_with(
-            text="Tibetan new year celebration",
-            ref_str="Losar",
-            lang="en",
-            text_color=TextColor.DEFAULT,
-            bg_color=BgColor.DEFAULT,
-            logo_path=None,
+        mock_download.assert_called_once_with(
+            bucket_name="bucket",
+            s3_key="images/events/losar/medium/banner.webp",
         )
+        mock_generate_image.assert_called_once_with(
+            title="Losar",
+            lang="en",
+            background=b"event-photo",
+            logo_path="pecha_api/share/static/img/webuddhist-logo.png",
+        )
+        mock_text_image.assert_not_called()
+        mock_get.assert_called()
 
 
 @pytest.mark.asyncio

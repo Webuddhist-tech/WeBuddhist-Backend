@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 import io
+import logging
 import re
 from functools import partial
 from typing import Optional
@@ -8,7 +9,12 @@ from uuid import UUID
 
 from pecha_api.error_contants import ErrorConstants
 from starlette.responses import StreamingResponse
-from .pecha_text_image_generator import ImageDestination, generate_segment_image
+from .pecha_text_image_generator import (
+    ImageDestination,
+    generate_event_share_image,
+    generate_segment_image,
+)
+from pecha_api.uploads.S3_utils import download_bytes
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
 from pecha_api.config import get
@@ -29,6 +35,7 @@ from pecha_api.share.share_response_models import (
 from pecha_api.short_url.short_url_service import get_short_url
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
+WEBUDDHIST_LOGO_PATH = "pecha_api/share/static/img/webuddhist-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
 DEFAULT_OG_TITLE = get("SITE_NAME")
@@ -100,6 +107,11 @@ async def _generate_segment_content_image_(
     share_request: ShareRequest,
     output_path: Optional[ImageDestination] = None,
 ):
+    _, content_key = _primary_content_id(share_request)
+    if content_key == "event_id":
+        await _generate_event_content_image_(share_request, output_path)
+        return
+
     main_content_text, reference_text, language = await _resolve_share_image_text(
         share_request
     )
@@ -127,20 +139,15 @@ async def _resolve_share_image_text(
     language = share_request.language
 
     poem_id = _normalized_id(share_request.poem_id)
-    event_id = _normalized_id(share_request.event_id)
     post_id = _normalized_id(share_request.post_id)
     segment_id = _normalized_id(share_request.segment_id)
     text_id = _normalized_id(share_request.text_id)
 
-    # The poem/event/post lookups use a synchronous session, so they run in a
+    # The poem/post lookups use a synchronous session, so they run in a
     # worker thread rather than blocking the event loop for every OG request.
     if poem_id is not None:
         return await to_thread.run_sync(
             partial(_resolve_poem_share_text, poem_id, site_name)
-        )
-    if event_id is not None:
-        return await to_thread.run_sync(
-            partial(_resolve_event_share_text, event_id, share_request.language, site_name)
         )
     if post_id is not None:
         return await to_thread.run_sync(
@@ -177,29 +184,90 @@ def _resolve_poem_share_text(poem_id: str, site_name: str) -> tuple[str, str, Op
     return main_text, reference_text, _language_code(poem.language)
 
 
-def _resolve_event_share_text(
-    event_id: str,
+async def _generate_event_content_image_(
+    share_request: ShareRequest,
+    output_path: Optional[ImageDestination] = None,
+) -> None:
+    site_name = get("SITE_NAME")
+    event_id = _normalized_id(share_request.event_id)
+    title, language, background = await to_thread.run_sync(
+        partial(_load_event_share_card, event_id, share_request.language, site_name)
+    )
+    image_kwargs = {
+        "title": title,
+        "lang": language,
+        "background": background,
+        "logo_path": WEBUDDHIST_LOGO_PATH,
+    }
+    if output_path is not None:
+        image_kwargs["output_path"] = output_path
+    await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
+
+
+def _load_event_share_card(
+    event_id: Optional[str],
     language: Optional[str],
     site_name: str,
-) -> tuple[str, str, Optional[str]]:
-    event_uuid = _parse_uuid(event_id)
+) -> tuple[str, Optional[str], Optional[bytes]]:
+    event_uuid = _parse_uuid(event_id) if event_id else None
     if event_uuid is None:
-        return site_name, site_name, language
+        return site_name, language, None
 
     with SessionLocal() as db:
         event = get_event_by_id(db=db, event_id=event_uuid)
-    if event is None:
-        return site_name, site_name, language
+        if event is None:
+            return site_name, language, None
+        metadata = _first_metadata(event.metadata_entries, language)
+        title = (metadata.name if metadata is not None and metadata.name else None) or site_name
+        resolved_language = (
+            _language_code(metadata.language) if metadata is not None else None
+        ) or language
+        image_url = event.image_url
 
-    metadata = _first_metadata(event.metadata_entries, language)
-    if metadata is None:
-        return site_name, site_name, language
+    background = _download_event_image(image_url)
+    return title, resolved_language, background
 
-    event_name = metadata.name or site_name
-    event_description = metadata.description or ""
-    main_text = event_description.strip() or event_name
-    reference_text = event_name if event_description.strip() else site_name
-    return main_text, reference_text, _language_code(metadata.language) or language
+
+def _download_event_image(image_url: Optional[str]) -> Optional[bytes]:
+    keys = _event_image_keys(image_url)
+    if not keys:
+        return None
+    try:
+        bucket_name = get("AWS_BUCKET_NAME")
+    except Exception:
+        logging.warning("Event share image skipped; storage bucket is not configured")
+        return None
+    for key in keys:
+        try:
+            image_bytes = download_bytes(bucket_name=bucket_name, s3_key=key)
+        except Exception:
+            logging.warning("Failed to download event image %s", key)
+            continue
+        if image_bytes:
+            return image_bytes
+    return None
+
+
+def _event_image_keys(image_url: Optional[str]) -> list[str]:
+    key = _event_image_s3_key(image_url)
+    if not key:
+        return []
+    if "original" not in key:
+        return [key]
+    medium_key = key.replace("original", "medium")
+    if medium_key == key:
+        return [key]
+    return [medium_key, key]
+
+
+def _event_image_s3_key(image_url: Optional[str]) -> Optional[str]:
+    cleaned = (image_url or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.lower().startswith(("http://", "https://")):
+        key = urlparse(cleaned).path.lstrip("/")
+        return key or None
+    return cleaned
 
 
 def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Optional[str]]:

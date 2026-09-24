@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import and_, delete, exists, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, delete, exists, func, or_, select, true
+from sqlalchemy.orm import Session, aliased
 
 from pecha_api.notification.notification_preference_enums import (
     NotificationChannel,
@@ -80,6 +80,61 @@ def global_preference_blocks(
     )
 
 
+def scoped_preference_filter(
+    user_id_column,
+    *,
+    notification_type: NotificationType,
+    channel: NotificationChannel,
+    scope_type: NotificationScope,
+    scope_id: UUID,
+):
+    """Join targets and conditions resolving one scope against the global row.
+
+    Returns (join_targets, conditions): each join target is an (alias,
+    onclause) pair the caller outer-joins onto a query already selecting a
+    user id column, and the conditions implement the resolution rule -
+    `enabled` is most-specific-wins (a scoped row beats the global one, absent
+    means allowed), while an unexpired `muted_until` on *either* row
+    suppresses, so a global snooze still silences a scope the user explicitly
+    enabled.
+
+    A correlated EXISTS cannot express this: "scoped row says yes" has to
+    override "global row says no", which needs both rows in hand at once.
+    """
+    scoped = aliased(UserNotificationPreference)
+    global_row = aliased(UserNotificationPreference)
+
+    join_targets = [
+        (
+            scoped,
+            and_(
+                scoped.user_id == user_id_column,
+                scoped.notification_type == notification_type,
+                scoped.channel == channel,
+                scoped.scope_type == scope_type,
+                scoped.scope_id == scope_id,
+            ),
+        ),
+        (
+            global_row,
+            and_(
+                global_row.user_id == user_id_column,
+                global_row.notification_type == notification_type,
+                global_row.channel == channel,
+                global_row.scope_id.is_(None),
+            ),
+        ),
+    ]
+
+    # An IS NULL check covers both the un-matched LEFT JOIN and the un-muted row.
+    conditions = [
+        func.coalesce(scoped.enabled, global_row.enabled, true()).is_(True),
+        or_(scoped.muted_until.is_(None), scoped.muted_until <= func.now()),
+        or_(global_row.muted_until.is_(None), global_row.muted_until <= func.now()),
+    ]
+    return join_targets, conditions
+
+
 def get_preference(
     db: Session,
     *,
@@ -110,6 +165,7 @@ def upsert_preference(
     notification_type: NotificationType,
     channel: NotificationChannel,
     scope_id: Optional[UUID],
+    scope_type: Optional[NotificationScope] = None,
     enabled: Optional[bool] = None,
     muted_until: Optional[datetime] = None,
     set_enabled: bool = False,
@@ -143,7 +199,9 @@ def upsert_preference(
         notification_type=notification_type,
         channel=channel,
         scope_type=(
-            NotificationScope.GLOBAL if scope_id is None else NotificationScope.GROUP
+            NotificationScope.GLOBAL
+            if scope_id is None
+            else (scope_type or NotificationScope.GROUP)
         ),
         scope_id=scope_id,
         enabled=bool(enabled) if set_enabled else True,
@@ -153,18 +211,18 @@ def upsert_preference(
     return preference
 
 
-def delete_group_preferences(
+def delete_scoped_preferences(
     db: Session,
     *,
     user_id: UUID,
-    group_id: UUID,
+    scope_id: UUID,
     channel: NotificationChannel,
     notification_type: Optional[NotificationType] = None,
 ) -> int:
     conditions = [
         UserNotificationPreference.user_id == user_id,
         UserNotificationPreference.channel == channel,
-        UserNotificationPreference.scope_id == group_id,
+        UserNotificationPreference.scope_id == scope_id,
     ]
     if notification_type is not None:
         conditions.append(UserNotificationPreference.notification_type == notification_type)

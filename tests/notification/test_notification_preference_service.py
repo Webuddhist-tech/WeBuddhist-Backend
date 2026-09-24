@@ -118,14 +118,14 @@ class TestResolve:
 class TestExpand:
     def test_all_expands_to_group_scoped_types_only(self):
         entry = NotificationPreferenceUpdateDTO(notification_type="ALL", enabled=False)
-        assert tuple(_expand(entry, group_scoped=True)) == V1_GROUP_TOGGLEABLE_TYPES
+        assert tuple(_expand(entry, scope_type=NotificationScope.GROUP)) == V1_GROUP_TOGGLEABLE_TYPES
 
     def test_non_group_scoped_type_rejected_on_group_scope(self):
         entry = NotificationPreferenceUpdateDTO(
             notification_type="VERSE_OF_DAY", enabled=False
         )
         with pytest.raises(HTTPException) as exception:
-            _expand(entry, group_scoped=True)
+            _expand(entry, scope_type=NotificationScope.GROUP)
         assert exception.value.status_code == 422
 
     def test_transactional_type_rejected_everywhere(self):
@@ -133,7 +133,7 @@ class TestExpand:
             notification_type="GROUP_JOIN_REQUEST", enabled=False
         )
         with pytest.raises(HTTPException) as exception:
-            _expand(entry, group_scoped=False)
+            _expand(entry, scope_type=None)
         assert exception.value.status_code == 422
 
     def test_unknown_type_rejected_by_the_request_model(self):
@@ -360,7 +360,7 @@ class TestGroupEndpoints:
             )
         assert exception.value.status_code == 404
 
-    @patch(f"{SERVICE}.delete_group_preferences", return_value=0)
+    @patch(f"{SERVICE}.delete_scoped_preferences", return_value=0)
     @patch(f"{SERVICE}.is_user_joined_group", return_value=True)
     @patch(f"{SERVICE}.SessionLocal")
     @patch(f"{SERVICE}.validate_and_extract_user_details")

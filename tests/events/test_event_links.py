@@ -379,6 +379,8 @@ def _saved_event_stub() -> SimpleNamespace:
         location=None,
         start_date=now,
         end_date=now,
+        timezone=None,
+        notifications_enabled=True,
         image_url=None,
         featured=False,
         event_format="hybrid",

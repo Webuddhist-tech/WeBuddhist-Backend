@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID
 
-from pecha_api.config import get
+from pecha_api.config import get, get_int
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.timezone_utils import normalize_timezone_name
@@ -113,6 +113,15 @@ def _validate_unique_languages(metadata: List[EventMetadataInput]) -> List[Event
 def _validate_date_range(start_date: datetime, end_date: datetime) -> None:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date")
+    # An event is owed reminders for every day it runs, so a mistyped year in
+    # end_date would quietly schedule thousands of them. The bound is
+    # deliberately generous - a genuinely long retreat still saves, and only
+    # a span no real event has trips it.
+    max_span_days = max(get_int("EVENT_MAX_SPAN_DAYS"), 1)
+    if (end_date - start_date).days > max_span_days:
+        raise ValueError(
+            f"Event cannot span more than {max_span_days} days"
+        )
 
 
 class RecurrenceInput(BaseModel):
@@ -211,6 +220,8 @@ class EventDTO(BaseModel):
     )
     event_format: EventFormat = "hybrid"
     chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
     chat_room_id: Optional[UUID] = Field(
         None,
         description="The event's chat room, when one has been created (null until first use)",
@@ -297,6 +308,8 @@ class CreateEventRequest(BaseModel):
     recurrence: Optional[RecurrenceInput] = None
     event_format: EventFormat = "hybrid"
     chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
 
     @field_validator("metadata")
     @classmethod
@@ -344,6 +357,7 @@ class UpdateEventRequest(BaseModel):
     recurrence: Optional[RecurrenceInput] = None
     event_format: Optional[EventFormat] = None
     chat_enabled: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
     @field_validator("event_format")
     @classmethod

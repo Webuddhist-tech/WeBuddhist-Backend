@@ -8,10 +8,11 @@ from sqlalchemy.orm import Session
 
 from pecha_api.notification.notification_preference_enums import (
     NotificationChannel,
+    NotificationScope,
     NotificationType,
 )
 from pecha_api.notification.notification_preference_repository import (
-    global_preference_blocks,
+    scoped_preference_filter,
 )
 from pecha_api.users.users_models import Users
 
@@ -172,9 +173,11 @@ def get_event_participants_paginated(
 
     With `notification_type` set, drops participants who have turned that
     notification off or snoozed it - the reminder path passes it, the
-    participant list screen does not. The filter sits ahead of OFFSET/LIMIT
-    and inside the count so `total` describes the same set the page is drawn
-    from; the worker pages off that total.
+    participant list screen does not. Resolution is most-specific-wins: a
+    mute on this one event beats the global setting, so someone can silence a
+    talkative event without silencing every event they attend. The filter
+    sits ahead of OFFSET/LIMIT and inside the count so `total` describes the
+    same set the page is drawn from; the worker pages off that total.
     """
     query = (
         db.query(
@@ -186,13 +189,16 @@ def get_event_participants_paginated(
         .filter(GroupEventParticipant.event_id == event_id)
     )
     if notification_type is not None:
-        query = query.filter(
-            ~global_preference_blocks(
-                Users.id,
-                notification_type=notification_type,
-                channel=channel,
-            )
+        join_targets, preference_conditions = scoped_preference_filter(
+            Users.id,
+            notification_type=notification_type,
+            channel=channel,
+            scope_type=NotificationScope.EVENT,
+            scope_id=event_id,
         )
+        for alias, onclause in join_targets:
+            query = query.outerjoin(alias, onclause)
+        query = query.filter(*preference_conditions)
     total = query.count()
     rows = (
         query.order_by(GroupEventParticipant.created_at.desc())

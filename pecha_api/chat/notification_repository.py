@@ -44,14 +44,21 @@ def _preference_filtered_join(
     group_id: UUID,
     notification_type: NotificationType,
     channel: NotificationChannel,
+    event_id: Optional[UUID] = None,
 ):
     """Join `author_group_joins` to the user's preferences for one notification.
 
     Returns the join source plus the conditions that implement the resolution
     rule: `enabled` is most-specific-wins (a GROUP row beats a GLOBAL one,
-    absent means allowed), while an unexpired `muted_until` on *either* row
+    absent means allowed), while an unexpired `muted_until` on *any* row
     suppresses — a global snooze silences a group the user explicitly enabled.
+
+    With `event_id`, an EVENT row joins the chain ahead of the group one, so a
+    notification sent about a single event respects a mute on that event. The
+    audience is still the whole group; this only decides who inside it has
+    asked to stop hearing about this one event.
     """
+    event_pref = aliased(UserNotificationPreference)
     group_pref = aliased(UserNotificationPreference)
     global_pref = aliased(UserNotificationPreference)
 
@@ -75,10 +82,31 @@ def _preference_filtered_join(
     )
 
     # An IS NULL check covers both the un-matched LEFT JOIN and the un-muted row.
-    conditions = [
-        func.coalesce(group_pref.enabled, global_pref.enabled, true()).is_(True),
+    enabled_chain = [group_pref.enabled, global_pref.enabled]
+    mute_conditions = [
         or_(group_pref.muted_until.is_(None), group_pref.muted_until <= func.now()),
         or_(global_pref.muted_until.is_(None), global_pref.muted_until <= func.now()),
+    ]
+
+    if event_id is not None:
+        source = source.outerjoin(
+            event_pref,
+            and_(
+                event_pref.user_id == author_group_joins.c.user_id,
+                event_pref.notification_type == notification_type,
+                event_pref.channel == channel,
+                event_pref.scope_type == NotificationScope.EVENT,
+                event_pref.scope_id == event_id,
+            ),
+        )
+        enabled_chain.insert(0, event_pref.enabled)
+        mute_conditions.append(
+            or_(event_pref.muted_until.is_(None), event_pref.muted_until <= func.now())
+        )
+
+    conditions = [
+        func.coalesce(*enabled_chain, true()).is_(True),
+        *mute_conditions,
     ]
     return source, conditions
 
@@ -92,6 +120,7 @@ def list_group_chat_recipient_user_ids(
     limit: int,
     notification_type: Optional[NotificationType] = None,
     channel: NotificationChannel = NotificationChannel.PUSH,
+    event_id: Optional[UUID] = None,
 ) -> Tuple[List[UUID], int]:
     """Members of a group who should receive one notification, paginated.
 
@@ -111,6 +140,7 @@ def list_group_chat_recipient_user_ids(
             group_id=group_id,
             notification_type=notification_type,
             channel=channel,
+            event_id=event_id,
         )
         conditions.extend(preference_conditions)
 
