@@ -425,8 +425,68 @@ async def test_generate_segment_content_image_with_event():
             title="Losar",
             lang="en",
             logo_path="pecha_api/share/static/img/pecha-logo.png",
+            photo_bytes=None,
         )
         mock_text_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_segment_content_image_sends_the_event_photo():
+    """An event with a photo shares that photo, not a rendered title card."""
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        event_id=event_id,
+        language="en",
+        text_color=TextColor.DEFAULT,
+        bg_color=BgColor.DEFAULT,
+    )
+    event = SimpleNamespace(
+        image_url="events/original/losar.jpg",
+        metadata_entries=[
+            SimpleNamespace(
+                name="Losar",
+                description="Tibetan new year celebration",
+                language="EN",
+            )
+        ],
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
+         patch("pecha_api.share.share_service.download_bytes", return_value=b"photo") as mock_download, \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_generate_image:
+        mock_session.return_value.__enter__.return_value = object()
+        await _generate_segment_content_image_(share_request)
+
+        assert mock_download.call_args.kwargs["s3_key"] == "events/original/losar.jpg"
+        assert mock_generate_image.call_args.kwargs["photo_bytes"] == b"photo"
+
+
+@pytest.mark.asyncio
+async def test_event_photo_download_failure_falls_back_to_the_title_card():
+    """A blank preview is worse than a plain one."""
+    share_request = ShareRequest(
+        event_id=str(uuid4()),
+        language="en",
+        text_color=TextColor.DEFAULT,
+        bg_color=BgColor.DEFAULT,
+    )
+    event = SimpleNamespace(
+        image_url="events/original/gone.jpg",
+        metadata_entries=[
+            SimpleNamespace(name="Losar", description=None, language="EN")
+        ],
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
+         patch("pecha_api.share.share_service.download_bytes", side_effect=RuntimeError("gone")), \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_generate_image:
+        mock_session.return_value.__enter__.return_value = object()
+        await _generate_segment_content_image_(share_request)
+
+        assert mock_generate_image.call_args.kwargs["photo_bytes"] is None
+        assert mock_generate_image.call_args.kwargs["title"] == "Losar"
 
 
 @pytest.mark.asyncio

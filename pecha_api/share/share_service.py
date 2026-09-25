@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 import io
+import logging
 import re
 from functools import partial
 from typing import Optional
@@ -31,12 +32,14 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
+from pecha_api.uploads.S3_utils import download_bytes
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
-# (title, description, language) as the share card needs it.
-EventShareMetadata = tuple[str, Optional[str], Optional[str]]
+# (title, description, language, image_key) as the share card needs it. The
+# image key is the event photo's S3 key, or None when the event has no photo.
+EventShareMetadata = tuple[str, Optional[str], Optional[str], Optional[str]]
 DEFAULT_OG_TITLE = get("SITE_NAME")
 DEFAULT_OG_DESCRIPTION = get("SITE_NAME")
 PECHA_FRONTEND_ENDPOINT = "https://webuddhist.com/chapter"
@@ -94,7 +97,7 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
                 get("SITE_NAME"),
             )
         )
-        title, description, _language = event_metadata
+        title, description, _language, _image_key = event_metadata
         og_title = title
         if description:
             og_description = description
@@ -222,15 +225,37 @@ async def _generate_event_content_image_(
         event_metadata = await to_thread.run_sync(
             partial(_load_event_share_metadata, event_id, share_request.language, site_name)
         )
-    title, _description, language = event_metadata
+    title, _description, language, image_key = event_metadata
+    photo_bytes = await to_thread.run_sync(partial(_load_event_photo_bytes, image_key))
     image_kwargs = {
         "title": title,
         "lang": language,
         "logo_path": LOGO_PATH,
+        "photo_bytes": photo_bytes,
     }
     if output_path is not None:
         image_kwargs["output_path"] = output_path
     await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
+
+
+def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
+    """The event photo straight from S3, as bytes.
+
+    Downloaded rather than linked, because an og:image has to stay fetchable
+    long after the link was shared: crawlers re-fetch it, and a presigned URL
+    would have expired by then. The bytes are re-served from /share/image,
+    whose URL never expires.
+
+    Returns None for an event with no photo, or when S3 will not give it up -
+    the card falls back to the old title render rather than the share failing.
+    """
+    if not image_key:
+        return None
+    try:
+        return download_bytes(bucket_name=get("AWS_BUCKET_NAME"), s3_key=image_key)
+    except Exception:
+        logging.exception("Could not download event share photo for key %s", image_key)
+        return None
 
 
 def _load_event_share_metadata(
@@ -238,19 +263,20 @@ def _load_event_share_metadata(
     language: Optional[str],
     site_name: str,
 ) -> EventShareMetadata:
-    """The event name and description used on the short URL card.
+    """The event name, description and photo key used on the short URL card.
 
-    The image is the WeBuddhist logo plus this name - the event photo is not
-    part of the share card.
+    The photo is the card when the event has one; the name and description go
+    on the OG tags either way, where a preview renders them as text.
     """
     event_uuid = _parse_uuid(event_id) if event_id else None
     if event_uuid is None:
-        return site_name, None, language
+        return site_name, None, language, None
 
     with SessionLocal() as db:
         event = get_event_by_id(db=db, event_id=event_uuid)
         if event is None:
-            return site_name, None, language
+            return site_name, None, language, None
+        image_key = getattr(event, "image_url", None) or None
         metadata = _first_metadata(event.metadata_entries, language)
         title = (metadata.name if metadata is not None and metadata.name else None) or site_name
         description = (
@@ -261,7 +287,7 @@ def _load_event_share_metadata(
         resolved_language = (
             _language_code(metadata.language) if metadata is not None else None
         ) or language
-    return title, description, resolved_language
+    return title, description, resolved_language, image_key
 
 
 def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Optional[str]]:

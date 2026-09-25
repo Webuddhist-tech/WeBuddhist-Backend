@@ -1,3 +1,4 @@
+import io
 import logging
 import textwrap
 from typing import BinaryIO, Optional, Union
@@ -201,18 +202,66 @@ def generate_event_share_image(
     lang: str = None,
     logo_path: str = None,
     output_path: ImageDestination = None,
+    photo_bytes: Optional[bytes] = None,
 ) -> None:
-    """Share card for an event: red background, name in the middle, logo
-    at the bottom right - the same red as the other share cards."""
+    """Share card for an event.
+
+    With the event's own photo, that photo *is* the card: cropped to the
+    link-preview aspect and written out with nothing drawn over it. A title
+    burned into the image only competes with the title the preview already
+    renders underneath it as text.
+
+    Without a usable photo the old card stands in - red background, name in
+    the middle, logo bottom right - because a blank preview is worse than a
+    plain one.
+    """
     width = CONFIG["EVENT_CARD_WIDTH"]
     height = CONFIG["EVENT_CARD_HEIGHT"]
+    destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
+
+    photo = _load_event_photo(photo_bytes, width, height) if photo_bytes else None
+    if photo is not None:
+        photo.save(destination, format=IMAGE_FORMAT)
+        return
+
     canvas = Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
     logo = _load_bottom_right_logo(logo_path, height) if logo_path else None
     _draw_event_title(canvas, title or "", lang)
     if logo is not None:
         canvas = _paste_logo_bottom_right(canvas, logo)
-    destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
     canvas.save(destination, format=IMAGE_FORMAT)
+
+
+def _load_event_photo(
+    photo_bytes: bytes,
+    width: int,
+    height: int,
+) -> Optional[Image.Image]:
+    """The event photo, cropped to fill the card exactly.
+
+    Cover rather than fit: letterbox bars around a photo read as a broken
+    image in a link preview. Returns None for anything Pillow cannot open, so
+    the caller falls back to the card it drew before.
+    """
+    try:
+        photo = Image.open(io.BytesIO(photo_bytes))
+        photo.load()
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        logging.warning("Could not open event share photo: %s", error)
+        return None
+
+    photo = photo.convert("RGBA")
+    if photo.width <= 0 or photo.height <= 0:
+        return None
+
+    scale = max(width / photo.width, height / photo.height)
+    scaled = photo.resize(
+        (max(int(photo.width * scale), width), max(int(photo.height * scale), height)),
+        Image.Resampling.LANCZOS,
+    )
+    left = (scaled.width - width) // 2
+    top = (scaled.height - height) // 2
+    return scaled.crop((left, top, left + width, top + height))
 
 def _load_bottom_right_logo(logo_path: str, image_height: int) -> Optional[Image.Image]:
     try:
