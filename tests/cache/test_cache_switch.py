@@ -202,3 +202,124 @@ class TestLegacyPlanDayNamespace:
             await get_plan_day_detail_cache(plan_id=uuid4(), day_number=1)
 
         mock_get.assert_awaited()
+
+
+class TestDisabledNamespaceOwesAnEviction:
+    """A namespace switched off on its own still holds whatever was written
+    before the switch, for as long as its timeout lasts. Skipping the sweep
+    without recording it would serve those entries again on re-enable."""
+
+    @pytest.mark.asyncio
+    async def test_a_write_to_a_listed_namespace_records_the_debt(self, clean_pending):
+        with _env(CACHE_DISABLED_TYPES="plan_detail"), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock) as mock_delete:
+            removed = await invalidate_namespaces([CacheType.PLAN_DETAIL])
+
+        assert removed == 0
+        # Still no SCAN against the Redis the switch keeps out of the path.
+        mock_delete.assert_not_awaited()
+        assert CacheType.PLAN_DETAIL in cached_response_module._pending_invalidations
+
+    @pytest.mark.asyncio
+    async def test_the_debt_is_paid_before_anything_is_read_back(self, clean_pending):
+        """Order is the whole protection: if the first read after re-enable
+        reached Redis before the sweep, it would serve exactly the entry the
+        write was supposed to evict."""
+        with _env(CACHE_DISABLED_TYPES="plan_detail"),              patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock):
+            await invalidate_namespaces([CacheType.PLAN_DETAIL])
+
+        calls = []
+
+        async def _swept(_pattern):
+            calls.append("sweep")
+            return 3
+
+        async def _read(**_kwargs):
+            calls.append("read")
+            return None
+
+        with patch("pecha_api.cache.cached_response.get_cache_data", side_effect=_read),              patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock),              patch("pecha_api.cache.cached_response.delete_by_pattern", side_effect=_swept):
+            await cached_response(
+                cache_type=CacheType.PLAN_DETAIL, parts=["a"], model=Sample,
+                loader=lambda: Sample(value="fresh"), timeout=60,
+            )
+
+        assert calls == ["sweep", "read"]
+
+    @pytest.mark.asyncio
+    async def test_the_debt_is_swept_once_the_namespace_is_back_on(self, clean_pending):
+        with _env(CACHE_DISABLED_TYPES="plan_detail"), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock):
+            await invalidate_namespaces([CacheType.PLAN_DETAIL])
+
+        # Switch back on: the next read drains what the sweep never reached.
+        with patch("pecha_api.cache.cached_response.get_cache_data",
+                   new_callable=AsyncMock, return_value=None), \
+             patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock, return_value=3) as mock_delete:
+            await cached_response(
+                cache_type=CacheType.PLAN_DETAIL, parts=["a"], model=Sample,
+                loader=lambda: Sample(value="fresh"), timeout=60,
+            )
+
+        mock_delete.assert_awaited()
+        assert cached_response_module._pending_invalidations == {}
+
+
+class TestRecitationNamespaceSwitch:
+    """The recitation caches call the raw accessors, which take a hash key and
+    cannot tell which namespace they are serving, so the per-type switch has to
+    be checked in the cache service itself."""
+
+    @pytest.mark.asyncio
+    async def test_details_read_bypasses_when_listed_off(self):
+        from pecha_api.recitations.recication_cache_services import (
+            get_recitation_by_text_id_cache,
+        )
+
+        with _env(CACHE_DISABLED_TYPES="recitation_details"), \
+             patch("pecha_api.recitations.recication_cache_services.get_cache_data",
+                   new_callable=AsyncMock) as mock_get:
+            result = await get_recitation_by_text_id_cache(
+                text_id="t1", recitation_details_request=None,
+                cache_type=CacheType.RECITATION_DETAILS,
+            )
+
+        assert result is None
+        mock_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_details_write_bypasses_when_listed_off(self):
+        from pecha_api.recitations.recication_cache_services import (
+            set_recitation_by_text_id_cache,
+        )
+
+        with _env(CACHE_DISABLED_TYPES="recitation_details"), \
+             patch("pecha_api.recitations.recication_cache_services.set_cache",
+                   new_callable=AsyncMock) as mock_set:
+            await set_recitation_by_text_id_cache(
+                text_id="t1", recitation_details_request=None,
+                cache_type=CacheType.RECITATION_DETAILS, data=MagicMock(),
+            )
+
+        mock_set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_still_caches_when_another_namespace_is_off(self):
+        from pecha_api.recitations.recication_cache_services import (
+            get_recitation_by_text_id_cache,
+        )
+
+        with _env(CACHE_DISABLED_TYPES="plan_list"), \
+             patch("pecha_api.recitations.recication_cache_services.get_cache_data",
+                   new_callable=AsyncMock, return_value=None) as mock_get:
+            await get_recitation_by_text_id_cache(
+                text_id="t1", recitation_details_request=None,
+                cache_type=CacheType.RECITATION_DETAILS,
+            )
+
+        mock_get.assert_awaited()

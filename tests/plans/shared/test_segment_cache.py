@@ -181,3 +181,44 @@ async def test_content_and_reference_are_separate_entries_for_one_segment():
 
     assert len(keys) == 2
     assert keys[0] != keys[1]
+
+
+def test_a_second_loop_does_not_join_the_first_loops_fetch():
+    """This module is imported once per process, but the process runs more than
+    one loop - several services call asyncio.run() from worker threads. A task
+    belongs to the loop that created it, so a second loop that picked up the
+    first loop's entry would raise on await instead of saving a round trip."""
+    stranded = []
+
+    async def _leave_one_in_flight():
+        # A task that never settles, so its entry stays in the map for the
+        # second loop to trip over.
+        async def _never():
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_never())
+        stranded.append(task)
+        key = (id(asyncio.get_running_loop()), CONTENT, "seg-shared")
+        segment_cache._in_flight[key] = task
+
+    async def _fetch_on_a_fresh_loop():
+        with patch.object(segment_cache, "get_cache_data", new_callable=AsyncMock,
+                          return_value=None), \
+             patch.object(segment_cache, "set_cache", new_callable=AsyncMock):
+            return await cached_segment_value(
+                cache_type=CONTENT, segment_id="seg-shared", fetch=_fetcher()
+            )
+
+    first = asyncio.new_event_loop()
+    try:
+        first.run_until_complete(_leave_one_in_flight())
+        assert len(segment_cache._in_flight) == 1
+
+        # A different loop entirely: it must run its own fetch, not await the
+        # task parked above.
+        result = asyncio.run(_fetch_on_a_fresh_loop())
+        assert result == "upstream"
+    finally:
+        for task in stranded:
+            task.cancel()
+        first.close()
