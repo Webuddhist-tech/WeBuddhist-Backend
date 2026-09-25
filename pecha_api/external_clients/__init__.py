@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, Dict, Optional
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -55,16 +56,24 @@ class OpenPechaQueueTimeout(Exception):
 # Built on first use rather than at import so its size comes from config, and
 # kept afterwards: resizing it while requests hold permits would hand out more
 # than the new size allows.
-_request_semaphore: Optional[asyncio.Semaphore] = None
+#
+# Held per event loop. An asyncio.Semaphore binds to the loop the first time a
+# caller actually waits on it and refuses every other loop from then on, so a
+# single shared instance is only correct while exactly one loop ever exists -
+# true of the server, not of anything that calls asyncio.run more than once.
+# The map is weak so a finished loop takes its gate with it.
+_semaphores: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    WeakKeyDictionary()
+)
 
 
 def _get_semaphore() -> asyncio.Semaphore:
-    global _request_semaphore
-    if _request_semaphore is None:
-        _request_semaphore = asyncio.Semaphore(
-            config.get_int("OPENPECHA_MAX_CONCURRENCY")
-        )
-    return _request_semaphore
+    loop = asyncio.get_running_loop()
+    semaphore = _semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(config.get_int("OPENPECHA_MAX_CONCURRENCY"))
+        _semaphores[loop] = semaphore
+    return semaphore
 
 
 def _resolve_pecha_base_url() -> str:

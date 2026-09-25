@@ -1,4 +1,3 @@
-import asyncio
 from typing import NamedTuple, Optional
 from uuid import UUID
 from datetime import datetime, timezone
@@ -10,7 +9,6 @@ from typing import List
 from typing import Set
 from typing import Dict
 from pecha_api.config import get
-from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content
 
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_models import PlanSubTask
 
@@ -787,23 +785,32 @@ def _load_user_plan_day(token: str, plan_id: UUID, day_number: int) -> _DayReadS
 
 
 async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    """A reader's own view of one plan day.
+
+    One hop to a worker thread and nothing else. Every value in the response
+    now comes from our database - see `_get_user_sub_tasks_dto_bulk` for why
+    the segment text does too - so there is no remote call left to overlap and
+    nothing to gain from doing any of it on the event loop.
+    """
+    return await run_in_threadpool(_build_user_plan_day, token, plan_id, day_number)
+
+
+def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
     from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
 
-    state = await run_in_threadpool(_load_user_plan_day, token, plan_id, day_number)
+    state = _load_user_plan_day(token, plan_id, day_number)
     plan_item = state.plan_item
     completed_task_ids = state.completed_task_ids
     references_by_id = state.references_by_id
 
-    tasks_sub_tasks = await asyncio.gather(
-        *[
-            _get_user_sub_tasks_dto_bulk(
-                sub_tasks=task.sub_tasks,
-                completed_subtask_ids=state.completed_subtask_ids,
-                references_by_id=references_by_id,
-            )
-            for task in plan_item.tasks
-        ]
-    )
+    tasks_sub_tasks = [
+        _get_user_sub_tasks_dto_bulk(
+            sub_tasks=task.sub_tasks,
+            completed_subtask_ids=state.completed_subtask_ids,
+            references_by_id=references_by_id,
+        )
+        for task in plan_item.tasks
+    ]
 
     return UserPlanDayDetailsResponse(
         id=plan_item.id,
@@ -839,23 +846,31 @@ def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(
+def _get_user_sub_tasks_dto_bulk(
     sub_tasks: List[PlanSubTask],
     completed_subtask_ids: Set[UUID],
     references_by_id: Dict[UUID, Optional["SubTaskReferenceDTO"]],
 ) -> List[UserSubTaskDTO]:
     """Build a task's subtask DTOs. References arrive already resolved.
 
-    Everything here that touches the database has to happen before the caller
-    reaches this point: this runs inside a gather, around an await on a remote
-    service, which is no place to be holding a connection.
+    A SOURCE_REFERENCE subtask's text is taken from the `content` column rather
+    than resolved from openpecha. openpecha has no bulk segment endpoint, so
+    resolving live costs one HTTP round trip per segment id, and a day carries
+    as many of those as its subtasks list between them - which is what made
+    this endpoint slow no matter how the work was scheduled or cached.
+
+    The column is always populated: `_validate_subtasks` rejects a write whose
+    content is None for any non-reference type, and SOURCE_REFERENCE is one of
+    those, so there is nothing to fall back to openpecha for.
+
+    The cost is that an edit made in openpecha does not reach a reader here
+    until the subtask is written again. The endpoints that do resolve live -
+    the public day, the CMS - are unchanged.
     """
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
-    resolved_contents = await resolve_subtasks_content(sub_tasks)
-
     result = []
-    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+    for sub_task in sub_tasks:
         reference = references_by_id.get(sub_task.id)
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
@@ -866,7 +881,7 @@ async def _get_user_sub_tasks_dto_bulk(
             UserSubTaskDTO(
                 id=sub_task.id,
                 content_type=sub_task.content_type,
-                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else resolved_content,
+                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else sub_task.content,
                 duration=sub_task.duration,
                 display_order=sub_task.display_order,
                 is_completed=(sub_task.id in completed_subtask_ids),
