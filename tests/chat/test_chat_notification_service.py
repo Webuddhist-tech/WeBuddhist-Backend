@@ -171,40 +171,53 @@ class TestCountHeldPrayerRequests:
     SENT = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
     NOW = datetime(2026, 9, 25, 10, 20, tzinfo=timezone.utc)
 
+    @staticmethod
+    def _record(at):
+        return SimpleNamespace(dispatched_at=at, created_at=at - timedelta(seconds=2))
+
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=2)
     @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request")
-    def test_counts_from_the_request_that_raised_the_previous_push(
-        self, mock_last_sent, mock_count
-    ):
-        mock_last_sent.return_value = SimpleNamespace(
-            dispatched_at=self.SENT + timedelta(seconds=2), created_at=self.SENT
-        )
+    def test_counts_from_the_previous_push(self, mock_last_sent, mock_count):
+        mock_last_sent.return_value = self._record(self.SENT)
 
         assert _count_held_prayer_requests(
-            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
         ) == 2
-        # The creation clock, not the dispatch clock: the count windows on
-        # created_at at both ends so nothing lands in two windows.
+        # The suppression clock at both ends, so each held request lands in
+        # exactly one window.
         assert mock_count.call_args.kwargs["since"] == self.SENT
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=1)
     @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
     def test_a_room_that_never_pushed_counts_everything_held(self, _last_sent, mock_count):
         assert _count_held_prayer_requests(
-            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
         ) == 1
         assert mock_count.call_args.kwargs["since"] is None
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
     @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
-    def test_the_window_closes_at_this_request(self, _last_sent, mock_count):
+    def test_the_window_closes_at_this_push(self, _last_sent, mock_count):
         """A request suppressed while the worker is building this push belongs
         to the next one, not to this one and then the next one again."""
         _count_held_prayer_requests(
-            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
         )
 
         assert mock_count.call_args.kwargs["until"] == self.NOW
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_an_unstamped_push_bounds_at_now(self, _last_sent, mock_count):
+        """The worker beat the backend's mark. now() is the same instant either
+        way, and the window still has to close somewhere."""
+        before = datetime.now(timezone.utc)
+
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=None
+        )
+
+        assert mock_count.call_args.kwargs["until"] >= before
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
     @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
@@ -215,7 +228,7 @@ class TestCountHeldPrayerRequests:
         message_id = uuid4()
 
         _count_held_prayer_requests(
-            db=MagicMock(), room_id=uuid4(), message_id=message_id, created_at=self.NOW
+            db=MagicMock(), room_id=uuid4(), message_id=message_id, dispatched_at=self.NOW
         )
 
         assert mock_last_sent.call_args.kwargs["exclude_message_id"] == message_id

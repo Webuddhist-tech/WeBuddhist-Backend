@@ -323,3 +323,31 @@ class TestRecitationNamespaceSwitch:
             )
 
         mock_get.assert_awaited()
+
+
+class TestDisabledDebtStaysOffOtherReads:
+    """Switching a namespace off is how its Redis scans are kept out of the
+    request path. Draining its debt on a read of some *other* namespace would
+    move those scans onto unrelated reads instead of removing them."""
+
+    @pytest.mark.asyncio
+    async def test_a_read_of_another_namespace_does_not_pay_the_debt(self, clean_pending):
+        with _env(CACHE_DISABLED_TYPES="plan_detail"), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock):
+            await invalidate_namespaces([CacheType.PLAN_DETAIL])
+
+        with _env(CACHE_DISABLED_TYPES="plan_detail"), \
+             patch("pecha_api.cache.cached_response.get_cache_data",
+                   new_callable=AsyncMock, return_value=None), \
+             patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock) as mock_delete:
+            await cached_response(
+                cache_type=CacheType.PLAN_LIST, parts=["a"], model=Sample,
+                loader=lambda: Sample(value="fresh"), timeout=60,
+            )
+
+        mock_delete.assert_not_awaited()
+        # Still owed, for the namespace itself to pay once it is back on.
+        assert CacheType.PLAN_DETAIL in cached_response_module._pending_invalidations

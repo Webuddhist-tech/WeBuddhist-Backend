@@ -589,10 +589,11 @@ class TestCountSuppressedPrayerRequests:
             exclude_message_id=uuid4(),
         ) == 0
 
-    def test_windows_on_created_at_and_closes_at_this_request(self):
-        """Both bounds read the same clock. Windowing on the dispatch time
-        would let a request suppressed while the worker builds this push fall
-        inside this window and the next one, and be counted twice."""
+    def test_windows_on_the_suppression_clock_at_both_ends(self):
+        """Bounding on created_at instead would lose a request held out of
+        order - one whose first enqueue failed and which reconcile suppresses
+        after a newer request has already pushed. No push would count it, and
+        its SUPPRESSED marker stops it ever being delivered."""
         db = MagicMock()
         query = _query_chain(db, total=0)
 
@@ -605,9 +606,11 @@ class TestCountSuppressedPrayerRequests:
         )
 
         conditions = [str(arg) for arg in query.filter.call_args.args]
-        assert any("chat_messages.created_at <" in condition for condition in conditions)
+        assert any(
+            "notification_dispatched_at <=" in condition for condition in conditions
+        )
         assert not any(
-            "notification_dispatched_at" in condition for condition in conditions
+            "chat_messages.created_at" in condition for condition in conditions
         )
 
     def test_excludes_deleted_rows_and_the_one_being_sent(self):
@@ -643,7 +646,7 @@ class TestCountSuppressedPrayerRequests:
 
         assert query.filter.call_count == 2
 
-    def test_no_since_counts_every_suppressed_row_up_to_this_one(self):
+    def test_no_since_counts_every_suppressed_row_up_to_this_push(self):
         # A room that has never raised a push has nothing to measure from, so
         # every request it held still belongs in the count.
         db = MagicMock()

@@ -1,9 +1,10 @@
 from fastapi import HTTPException
 import io
 import logging
+from collections import OrderedDict
 import re
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -16,7 +17,7 @@ from .pecha_text_image_generator import (
 )
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
-from pecha_api.config import get
+from pecha_api.config import get, get_int
 from pecha_api.db.database import SessionLocal
 from pecha_api.poems.enums import PoemStatus
 from pecha_api.poems.repository import get_poem_by_id
@@ -32,11 +33,15 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
-from pecha_api.uploads.S3_utils import generate_presigned_access_url
+from pecha_api.uploads.S3_utils import download_bytes
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
+JPEG_MEDIA_TYPE = "image/jpeg"
+# Event photos, keyed by S3 key, most-recently-used last. A share card is
+# the same for every viewer, so this holds nothing per-user.
+_event_photo_cache: "OrderedDict[str, bytes]" = OrderedDict()
 # (title, description, language, image_key) as the share card needs it. The
 # image key is the event photo's S3 key, or None when the event has no photo.
 EventShareMetadata = tuple[str, Optional[str], Optional[str], Optional[str]]
@@ -62,12 +67,25 @@ _TYPE_TO_ID_FIELD = {
 _CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
 
 
+def _share_image_headers() -> dict:
+    """Let crawlers and any CDN in front of us reuse a rendered card.
+
+    The card only changes when the event does, and this endpoint is public and
+    re-renders per hit, so the cheapest request is the one that never arrives.
+    """
+    return {"Cache-Control": f"public, max-age={max(get_int('SHARE_IMAGE_CACHE_SECONDS'), 0)}"}
+
+
 async def get_generated_image(share_request: Optional[ShareRequest] = None):
     if share_request is not None:
         _apply_inferred_ids(share_request)
         if _has_resolvable_content(share_request):
-            image_bytes = await _render_share_image_bytes(share_request)
-            return StreamingResponse(io.BytesIO(image_bytes), media_type=MEDIA_TYPE)
+            image_bytes, media_type = await _render_share_image_bytes(share_request)
+            return StreamingResponse(
+                io.BytesIO(image_bytes),
+                media_type=media_type,
+                headers=_share_image_headers(),
+            )
 
     try:
         image_path = IMAGE_PATH
@@ -104,22 +122,22 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
         # than repeating the name in both slots.
         og_title = get("SITE_NAME")
         og_description = title
-        # The event's own image, straight from the row. No card is rendered for
-        # an event that has a photo.
-        og_image = _event_image_url(image_key)
+        # og_image stays the /share/image endpoint rather than the row's S3
+        # URL. Two reasons, either of which is enough: the stored file is WebP,
+        # which link-preview crawlers do not render, and a signed S3 URL
+        # expires while the short link does not. The endpoint serves the same
+        # photo as JPEG from a URL with no deadline on it.
+        _ = image_key
     if share_request.logo:
         await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
-    # Only when there is a card to draw. An event sharing its own photo needs
-    # no render; an event without one falls back to the card, which does.
-    if og_image is None:
-        # The card image needs the same event this just loaded. Handing it over
-        # saves a second session and a second eager-loaded event query on a path
-        # that runs for every share.
-        await _generate_segment_content_image_(
-            share_request=share_request,
-            event_metadata=event_metadata,
-        )
+    # The card image needs the same event this just loaded. Handing it over
+    # saves a second session and a second eager-loaded event query on a path
+    # that runs for every share.
+    await _generate_segment_content_image_(
+        share_request=share_request,
+        event_metadata=event_metadata,
+    )
 
     payload = _generate_short_url_payload_(
         share_request=share_request,
@@ -235,20 +253,62 @@ async def _generate_event_content_image_(
         event_metadata = await to_thread.run_sync(
             partial(_load_event_share_metadata, event_id, share_request.language, site_name)
         )
-    title, _description, language, _image_key = event_metadata
-    # Only ever the title card. An event with a photo shares that photo by URL
-    # and never reaches this path, so there is nothing here worth the S3
-    # download and Pillow re-render that serving the photo through the endpoint
-    # would cost on every crawler hit - an unbounded, uncached fetch of a
-    # full-size original that anyone could trigger by calling /share/image.
+    title, _description, language, image_key = event_metadata
+    photo_bytes = await to_thread.run_sync(partial(_load_event_photo_bytes, image_key))
     image_kwargs = {
         "title": title,
         "lang": language,
         "logo_path": LOGO_PATH,
+        "photo_bytes": photo_bytes,
     }
     if output_path is not None:
         image_kwargs["output_path"] = output_path
     await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
+
+
+def _event_photo_cache_limit() -> int:
+    return max(get_int("SHARE_EVENT_PHOTO_CACHE_SIZE"), 0)
+
+
+def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
+    """The event photo from S3, as bytes, memoised per key.
+
+    This endpoint is public and every crawler hit re-renders, so an unbounded
+    fetch of a full-size original would be a free way to make the API do real
+    work. Two bounds keep that in proportion: the download refuses anything
+    over SHARE_EVENT_PHOTO_MAX_BYTES, and the bytes are held in a small
+    per-process cache so repeated previews of the same event do not repeat the
+    S3 round trip. A share card is the same for everyone, so nothing here is
+    per-viewer.
+
+    Returns None for an event with no photo, or when S3 will not give it up -
+    the card falls back to the title render rather than the share failing.
+    """
+    if not image_key:
+        return None
+
+    cached = _event_photo_cache.get(image_key)
+    if cached is not None:
+        # Refreshed to most-recently-used.
+        _event_photo_cache.move_to_end(image_key)
+        return cached
+
+    try:
+        photo_bytes = download_bytes(
+            bucket_name=get("AWS_BUCKET_NAME"),
+            s3_key=image_key,
+            max_bytes=max(get_int("SHARE_EVENT_PHOTO_MAX_BYTES"), 1),
+        )
+    except Exception:
+        logging.exception("Could not download event share photo for key %s", image_key)
+        return None
+
+    limit = _event_photo_cache_limit()
+    if limit:
+        _event_photo_cache[image_key] = photo_bytes
+        while len(_event_photo_cache) > limit:
+            _event_photo_cache.popitem(last=False)
+    return photo_bytes
 
 
 def _load_event_share_metadata(
@@ -329,30 +389,6 @@ def _generate_short_url_payload_(
     return payload
 
 
-def _event_image_url(image_key: Optional[str]) -> Optional[str]:
-    """The event's image as a URL a link preview can fetch.
-
-    The row stores an S3 key, and the bucket is not public, so the key is
-    signed here. Note the signature expires after
-    `PRESIGNED_URL_EXPIRY_SECONDS` - a crawler that re-fetches the preview
-    after that gets nothing back.
-
-    Returns None when the event has no image, which sends the share back to the
-    rendered card.
-    """
-    if not image_key:
-        return None
-    try:
-        url = generate_presigned_access_url(
-            bucket_name=get("AWS_BUCKET_NAME"),
-            s3_key=image_key,
-        )
-    except Exception:
-        logging.exception("Could not sign event share image for key %s", image_key)
-        return None
-    return url or None
-
-
 def _share_image_url(share_request: ShareRequest) -> str:
     pecha_backend_endpoint = get("PECHA_BACKEND_ENDPOINT")
     content_id, content_key = _primary_content_id(share_request)
@@ -377,7 +413,13 @@ def _generate_url_(
     return f"{PECHA_FRONTEND_ENDPOINT}?segment_id={segment_id}&contentId={content_id}&text_id={text_id}&contentIndex={content_index}"
 
 
-async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
+async def _render_share_image_bytes(share_request: ShareRequest) -> Tuple[bytes, str]:
+    """The rendered image and the media type it actually came out as.
+
+    An event photo is written as JPEG and every card as PNG, so the type is
+    read off the bytes rather than assumed - serving a JPEG labelled image/png
+    is exactly the kind of thing a strict crawler rejects.
+    """
     # Rendered straight into memory: a temp file would put open/read/unlink
     # syscalls on the async request path and leak the file if the render
     # failed. The buffer is filled inside the render worker thread.
@@ -386,7 +428,15 @@ async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
         share_request=share_request,
         output_path=buffer,
     )
-    return buffer.getvalue()
+    image_bytes = buffer.getvalue()
+    return image_bytes, _media_type_for(image_bytes)
+
+
+def _media_type_for(image_bytes: bytes) -> str:
+    """JPEG starts with FF D8 FF; everything else here is the PNG the cards use."""
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return JPEG_MEDIA_TYPE
+    return MEDIA_TYPE
 
 
 def _apply_inferred_ids(share_request: ShareRequest) -> None:

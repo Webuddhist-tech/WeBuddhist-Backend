@@ -73,10 +73,19 @@ def _settle_pending(cache_type: CacheType, mark: Optional[int]) -> None:
 
 
 async def _drain_pending_invalidations() -> None:
-    """Retry invalidations that could not be carried out earlier."""
+    """Retry invalidations that could not be carried out earlier.
+
+    A namespace that is currently switched off is left owed. Its debt is not
+    urgent - nothing reads it while it is off - and sweeping it here would
+    charge its SCAN to a read of some unrelated namespace, which is the exact
+    cost switching it off was meant to avoid. It is paid on the first read
+    after it is switched back on, before anything is read back.
+    """
     if not _pending_invalidations or not cache_is_available():
         return
     for cache_type in list(_pending_invalidations):
+        if not cache_type_enabled(cache_type):
+            continue
         mark = _pending_invalidations.get(cache_type)
         try:
             deleted = await delete_by_pattern(namespace_scan_pattern(cache_type))

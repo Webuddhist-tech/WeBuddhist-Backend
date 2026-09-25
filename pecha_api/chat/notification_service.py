@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -65,7 +66,7 @@ def _count_held_prayer_requests(
     db: Session,
     room_id: UUID,
     message_id: UUID,
-    created_at: datetime,
+    dispatched_at: Optional[datetime],
 ) -> int:
     """How many prayer requests the interval held since the last push that went out.
 
@@ -74,9 +75,11 @@ def _count_held_prayer_requests(
     SQS id, so without the exclusion the "last sent push" would be this very
     message, `since` would be roughly now, and the count would always be zero.
 
-    The window closes at this request's own `created_at`, so a request
-    suppressed while the worker is building this push belongs to the next one
-    rather than being counted here and again there.
+    The window closes at this push's own dispatch time, so a request suppressed
+    while the worker is building this push belongs to the next one rather than
+    being counted here and again there. `dispatched_at` is normally already set
+    - the backend stamps it before the worker asks for targets - and now() is
+    the fallback for the moment where the worker got there first.
     """
     last_sent = last_dispatched_prayer_request(
         db=db,
@@ -86,8 +89,8 @@ def _count_held_prayer_requests(
     return count_suppressed_prayer_requests(
         db=db,
         room_id=room_id,
-        since=last_sent.created_at if last_sent else None,
-        until=created_at,
+        since=last_sent.dispatched_at if last_sent else None,
+        until=dispatched_at or datetime.now(timezone.utc),
         exclude_message_id=message_id,
     )
 
@@ -173,7 +176,7 @@ def get_chat_notification_targets(
                 db=db,
                 room_id=room.id,
                 message_id=message.id,
-                created_at=message.created_at,
+                dispatched_at=message.notification_dispatched_at,
             )
             if message_type == ChatMessageType.PRAYER.value
             else 0

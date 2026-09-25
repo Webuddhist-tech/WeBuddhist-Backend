@@ -823,11 +823,17 @@ def count_suppressed_prayer_requests(
 ) -> int:
     """Prayer requests in this room the interval held between two pushes.
 
-    The window is half-open on `created_at`: after the request that raised the
-    previous push, up to the one being announced now. Both bounds read the same
-    clock on purpose. Windowing on `notification_dispatched_at` instead would
-    let a request that is suppressed while the worker is building this push
-    fall inside this window *and* the next one, and be counted twice.
+    The window is half-open on `notification_dispatched_at` - when the hold was
+    *recorded*, not when the request was written. Bounding on `created_at`
+    instead loses a request that was held out of order: one whose first enqueue
+    failed and which reconcile suppresses later, after a newer request has
+    already pushed. Its creation time sits before this window's lower bound, so
+    it would be counted by no push at all while its SUPPRESSED marker stops it
+    ever being delivered - a request nobody is told about. Suppression order is
+    the order these were decided in, so it is the order to count them in.
+
+    Both bounds read that one clock, so each held request falls in exactly one
+    window and is counted exactly once.
 
     `since` is None when this room has never raised a push, in which case every
     held request up to `until` counts. Deleted requests are left out: unlike
@@ -840,10 +846,11 @@ def count_suppressed_prayer_requests(
         ChatMessage.deleted_at.is_(None),
         ChatMessage.id != exclude_message_id,
         ChatMessage.notification_sqs_message_id == SUPPRESSED_SQS_MESSAGE_ID,
-        ChatMessage.created_at < until,
+        ChatMessage.notification_dispatched_at.isnot(None),
+        ChatMessage.notification_dispatched_at <= until,
     )
     if since is not None:
-        query = query.filter(ChatMessage.created_at > since)
+        query = query.filter(ChatMessage.notification_dispatched_at > since)
     return int(query.scalar() or 0)
 
 

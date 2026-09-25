@@ -198,6 +198,13 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
+    # /share/image serves an event's own photo, re-encoded as JPEG because the
+    # stored WebP is not a format link-preview crawlers render. The endpoint is
+    # public, so the fetch is bounded and the bytes are held per process.
+    SHARE_EVENT_PHOTO_MAX_BYTES=10485760,  # 10 MB
+    SHARE_EVENT_PHOTO_CACHE_SIZE=32,
+    # How long a crawler may reuse a rendered share image.
+    SHARE_IMAGE_CACHE_SECONDS=86400,
     # Prayers for the same request inside this window raise one push, not one each
     PRAYER_NOTIFICATION_COALESCE_SECONDS=900,
     # At most one prayer-request push per room per this many seconds. Prayer
