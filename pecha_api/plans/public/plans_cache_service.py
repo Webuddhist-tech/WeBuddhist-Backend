@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
-from pecha_api.cache.cache_repository import delete_cache, get_cache_data, set_cache
+from pecha_api.cache.cache_repository import cache_type_enabled, delete_cache, get_cache_data, set_cache
 from pecha_api.plans.items.plan_items_repository import get_days_by_plan_id, get_plan_item_by_id
 from pecha_api.plans.public.plan_response_models import PlanDayDTO
 from pecha_api.plans.tasks.plan_tasks_repository import get_task_by_id
@@ -28,6 +28,10 @@ def _plan_day_detail_cache_keys(plan_id: UUID, day_number: int) -> list[str]:
 
 
 async def get_plan_day_detail_cache(plan_id: UUID, day_number: int) -> Optional[PlanDayDTO]:
+    # This namespace predates `cached_response`, which is where the per-type
+    # switch is normally applied, so it has to honour it itself.
+    if not cache_type_enabled(CacheType.PLAN_DAY_DETAIL):
+        return None
     for hashed_key in _plan_day_detail_cache_keys(plan_id=plan_id, day_number=day_number):
         data = await get_cache_data(hash_key=hashed_key)
         if data and isinstance(data, dict):
@@ -36,6 +40,8 @@ async def get_plan_day_detail_cache(plan_id: UUID, day_number: int) -> Optional[
 
 
 async def set_plan_day_detail_cache(plan_id: UUID, day_number: int, data: PlanDayDTO) -> None:
+    if not cache_type_enabled(CacheType.PLAN_DAY_DETAIL):
+        return
     hashed_key = _plan_day_detail_cache_keys(plan_id=plan_id, day_number=day_number)[0]
     await set_cache(hash_key=hashed_key, value=data, cache_time_out=_plan_timeout())
 

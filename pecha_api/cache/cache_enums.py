@@ -55,7 +55,12 @@ class CacheType(Enum):
 
     # Per-user plan progress
     USER_PLAN_PROGRESS = "user_plan_progress"
-    USER_PLAN_DAY = "user_plan_day"
+
+    # openpecha segment lookups. Upstream content, identical for every reader,
+    # so these are keyed by segment id alone and shared across every endpoint
+    # that resolves segments.
+    OPENPECHA_SEGMENT_CONTENT = "openpecha_segment_content"
+    OPENPECHA_SEGMENT_REFERENCE = "openpecha_segment_reference"
 
     # Group social content. Short-lived for the same reason as events.
     GROUP_POSTS_LIST = "group_posts_list"

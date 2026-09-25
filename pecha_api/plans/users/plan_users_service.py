@@ -1,10 +1,11 @@
 import asyncio
-from typing import Optional
+from typing import NamedTuple, Optional
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from typing import List
 from typing import Set
 from typing import Dict
@@ -686,27 +687,51 @@ async def get_user_plan_days_completion_status_service(token: str, plan_id: UUID
             start_date=plan.start_date
         )
     
-async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+class _DayReadState(NamedTuple):
+    """What one worker thread reads for a day, handed back to the loop."""
+
+    plan_item: object
+    completed_task_ids: List[UUID]
+    completed_subtask_ids: Set[UUID]
+    audio_url: Optional[str]
+    audio_duration_ms: Optional[int]
+    thumbnail_url: Optional[str]
+    shareable_image_url: Optional[str]
+    references_by_id: Dict[UUID, object]
+    day_is_completed: bool
+
+
+def _load_user_plan_day(token: str, plan_id: UUID, day_number: int) -> _DayReadState:
+    """Every read this response needs, in one worker thread.
+
+    This is all blocking: a token check, then a handful of queries. On the
+    event loop it stalls every other request on the instance for as long as it
+    runs, which is why it is out here rather than inline in the coroutine - the
+    public day endpoint loads itself the same way, for the same reason.
+
+    The token is checked before the session is opened, not inside it. Verifying
+    it can mean an outbound fetch of a key set, and a connection held across
+    that is a connection pinned on an external service.
+
+    The connection goes back before the openpecha fan-out runs. Holding it
+    across that await pinned a connection per in-flight reader for however long
+    an external service took to answer - which is what emptied the pool and
+    left unrelated endpoints timing out on checkout.
+
+    The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
+    eager-loads audio, shareable_images, videos, tasks, sub_tasks and
+    timestamps, and nothing is committed here, so no attribute is expired and
+    nothing lazy-loads once these objects detach. Adding a lazy relationship to
+    this response means loading it in here too.
+    """
     from pecha_api.plans.audio.dto_helpers import (
         build_plan_day_audio_fields,
         build_plan_day_shareable_image_fields,
     )
-    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
     from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 
     current_user = validate_and_extract_user_details(token=token)
 
-    # Every read this response needs happens in the block below, and the
-    # connection goes back before the openpecha fan-out runs. Holding it across
-    # that await pinned a connection per in-flight reader for however long an
-    # external service took to answer - which is what emptied the pool and left
-    # unrelated endpoints timing out on checkout.
-    #
-    # The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
-    # eager-loads audio, shareable_images, videos, tasks, sub_tasks and
-    # timestamps, and nothing is committed here, so no attribute is expired and
-    # nothing lazy-loads once these objects detach. Adding a lazy relationship
-    # to this response means loading it inside the block too.
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
         plan = get_plan_by_id(db=db, plan_id=plan_id)
@@ -748,11 +773,32 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
             db=db, user_id=current_user.id, day_id=plan_item.id
         )
 
+    return _DayReadState(
+        plan_item=plan_item,
+        completed_task_ids=completed_task_ids,
+        completed_subtask_ids=completed_subtask_ids,
+        audio_url=audio_url,
+        audio_duration_ms=audio_duration_ms,
+        thumbnail_url=thumbnail_url,
+        shareable_image_url=shareable_image_url,
+        references_by_id=references_by_id,
+        day_is_completed=day_is_completed,
+    )
+
+
+async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
+
+    state = await run_in_threadpool(_load_user_plan_day, token, plan_id, day_number)
+    plan_item = state.plan_item
+    completed_task_ids = state.completed_task_ids
+    references_by_id = state.references_by_id
+
     tasks_sub_tasks = await asyncio.gather(
         *[
             _get_user_sub_tasks_dto_bulk(
                 sub_tasks=task.sub_tasks,
-                completed_subtask_ids=completed_subtask_ids,
+                completed_subtask_ids=state.completed_subtask_ids,
                 references_by_id=references_by_id,
             )
             for task in plan_item.tasks
@@ -762,11 +808,11 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
     return UserPlanDayDetailsResponse(
         id=plan_item.id,
         day_number=plan_item.day_number,
-        is_completed=day_is_completed,
-        audio_url=audio_url,
-        audio_duration_ms=audio_duration_ms,
-        thumbnail_url=thumbnail_url,
-        shareable_image_url=shareable_image_url,
+        is_completed=state.day_is_completed,
+        audio_url=state.audio_url,
+        audio_duration_ms=state.audio_duration_ms,
+        thumbnail_url=state.thumbnail_url,
+        shareable_image_url=state.shareable_image_url,
         tasks=[
             UserTaskDTO(
                 id=task.id,

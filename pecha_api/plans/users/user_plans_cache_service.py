@@ -7,9 +7,13 @@ that caller's entries and the short timeout covers what the invalidation
 cannot see - a day completed through a different route, an author republishing
 the day underneath them.
 
-`get_user_plan_day_details` is the endpoint that ran the connection pool dry
-in the incident this cache is partly a response to, so it is the one that
-benefits most from not reaching the database on every open.
+`get_user_plan_day_details` is deliberately absent. It was cached here once,
+which did nothing for it: the key carried the reader's identity, so the
+expensive part of that response - resolving every segment on the day through
+openpecha - was rebuilt once per reader rather than once per day. That work is
+cached by segment id in `plans/shared/segment_cache.py` instead, where one
+reader's fetch serves all of them, and the endpoint now reads the caller's
+progress live.
 """
 
 from functools import partial
@@ -22,7 +26,6 @@ from pecha_api.cache.cache_identity import cache_identity_from_token
 from pecha_api.cache.cached_response import cached_response
 from pecha_api.plans.users.plan_users_response_models import (
     UserPlanDayCompletionStatusResponse,
-    UserPlanDayDetailsResponse,
     UserPlanProgressResponse,
     UserPlansResponse,
     UserSeriesDaysCompletedResponse,
@@ -30,7 +33,6 @@ from pecha_api.plans.users.plan_users_response_models import (
     UserSeriesProgressResponse,
 )
 from pecha_api.plans.users.plan_users_service import (
-    get_user_plan_day_details_service,
     get_user_plan_days_completion_status_service,
     get_user_plan_progress,
     get_user_enrolled_plans,
@@ -39,10 +41,7 @@ from pecha_api.plans.users.plan_users_service import (
     get_user_series_progress,
 )
 
-USER_PLAN_CACHE_TYPES = (
-    CacheType.USER_PLAN_PROGRESS,
-    CacheType.USER_PLAN_DAY,
-)
+USER_PLAN_CACHE_TYPES = (CacheType.USER_PLAN_PROGRESS,)
 
 
 def _timeout() -> int:
@@ -95,24 +94,6 @@ async def get_user_plan_days_completion_status_cached(
         model=UserPlanDayCompletionStatusResponse,
         loader=partial(
             get_user_plan_days_completion_status_service, token=token, plan_id=plan_id
-        ),
-        timeout=_timeout(),
-        user_identity=await cache_identity_from_token(token),
-    )
-
-
-async def get_user_plan_day_details_cached(
-    token: str, plan_id: UUID, day_number: int
-) -> UserPlanDayDetailsResponse:
-    return await cached_response(
-        cache_type=CacheType.USER_PLAN_DAY,
-        parts=[plan_id, day_number],
-        model=UserPlanDayDetailsResponse,
-        loader=partial(
-            get_user_plan_day_details_service,
-            token=token,
-            plan_id=plan_id,
-            day_number=day_number,
         ),
         timeout=_timeout(),
         user_identity=await cache_identity_from_token(token),

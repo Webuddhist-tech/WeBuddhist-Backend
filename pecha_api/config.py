@@ -102,6 +102,13 @@ DEFAULTS = dict(
     # times before it expires, which is where the load relief comes from.
     CACHE_SOCIAL_TIMEOUT=60,        # 1 minute
     CACHE_CALENDAR_TIMEOUT=2592000, # 30 days; source calendar files are immutable
+    # openpecha segment bodies and references. Resolved one HTTP round trip at
+    # a time, by every endpoint that renders a plan day, and the same segments
+    # come back for every reader - so this is the timeout that decides how much
+    # of that traffic is made at all. Long because the content behind it only
+    # changes when an editor changes it upstream, which nothing here is told
+    # about; shorten it if openpecha edits need to surface faster.
+    CACHE_SEGMENT_TIMEOUT=12600,    # 3.5 hours
 
     # How long a presigned S3 URL stays valid. Responses carrying these URLs
     # are cached with the URL already inside them, so the signature has to

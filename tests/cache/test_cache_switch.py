@@ -4,7 +4,8 @@ Switched off, the cache must be entirely absent from the request path: the
 loader runs, Redis is never contacted, and a write sweeps nothing.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -162,3 +163,42 @@ class TestPerTypeSwitch:
 
         assert bypassed.value == "fresh"
         assert served.value == "cached"
+
+
+class TestLegacyPlanDayNamespace:
+    """plan_day_detail caches through cache_repository directly, not
+    cached_response, so it needs its own coverage of the per-type switch."""
+
+    @pytest.mark.asyncio
+    async def test_reads_bypass_when_listed_off(self):
+        from pecha_api.plans.public.plans_cache_service import get_plan_day_detail_cache
+
+        with _env(CACHE_DISABLED_TYPES="plan_day_detail"), \
+             patch("pecha_api.plans.public.plans_cache_service.get_cache_data",
+                   new_callable=AsyncMock) as mock_get:
+            result = await get_plan_day_detail_cache(plan_id=uuid4(), day_number=1)
+
+        assert result is None
+        mock_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_writes_bypass_when_listed_off(self):
+        from pecha_api.plans.public.plans_cache_service import set_plan_day_detail_cache
+
+        with _env(CACHE_DISABLED_TYPES="plan_day_detail"), \
+             patch("pecha_api.plans.public.plans_cache_service.set_cache",
+                   new_callable=AsyncMock) as mock_set:
+            await set_plan_day_detail_cache(plan_id=uuid4(), day_number=1, data=MagicMock())
+
+        mock_set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_still_reads_when_another_namespace_is_off(self):
+        from pecha_api.plans.public.plans_cache_service import get_plan_day_detail_cache
+
+        with _env(CACHE_DISABLED_TYPES="plan_list"), \
+             patch("pecha_api.plans.public.plans_cache_service.get_cache_data",
+                   new_callable=AsyncMock, return_value=None) as mock_get:
+            await get_plan_day_detail_cache(plan_id=uuid4(), day_number=1)
+
+        mock_get.assert_awaited()

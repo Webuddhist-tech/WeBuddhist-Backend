@@ -44,7 +44,6 @@ oauth2_scheme = HTTPBearer()
 from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
 from pecha_api.plans.users.user_plans_cache_service import (
     USER_PLAN_CACHE_TYPES,
-    get_user_plan_day_details_cached,
     get_user_plan_days_completion_status_cached,
     get_user_plan_progress_cached,
     get_user_plans_cached,
@@ -162,7 +161,14 @@ async def get_user_plan_day_details(
     day_number: int,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)]
 ):
-    return await get_user_plan_day_details_cached(
+    # Deliberately uncached. Everything here is the caller's own progress, and
+    # a day reopened right after finishing a subtask has to show that subtask
+    # finished - not a copy of the response taken before it was. What made this
+    # endpoint slow was never the read of that progress, it was re-resolving
+    # every openpecha segment on the day; those are cached by segment id in
+    # `plans/shared/segment_cache.py`, where the entry is shared by every
+    # reader instead of being rebuilt per user.
+    return await get_user_plan_day_details_service(
         token=authentication_credential.credentials,
         plan_id=plan_id,
         day_number=day_number
