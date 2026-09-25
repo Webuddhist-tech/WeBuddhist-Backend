@@ -32,7 +32,7 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
-from pecha_api.uploads.S3_utils import download_bytes
+from pecha_api.uploads.S3_utils import download_bytes, generate_presigned_access_url
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
@@ -87,6 +87,7 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
     _apply_inferred_ids(share_request)
     og_title = DEFAULT_OG_TITLE
     og_description = DEFAULT_OG_DESCRIPTION
+    og_image: Optional[str] = None
     event_metadata: Optional[EventShareMetadata] = None
     if _normalized_id(share_request.event_id) is not None:
         event_metadata = await to_thread.run_sync(
@@ -97,25 +98,34 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
                 get("SITE_NAME"),
             )
         )
-        title, description, _language, _image_key = event_metadata
-        og_title = title
-        if description:
-            og_description = description
+        title, _description, _language, image_key = event_metadata
+        # The site name is the title and the event's name is the description:
+        # a preview then reads "WeBuddhist" over the name of the event, rather
+        # than repeating the name in both slots.
+        og_title = get("SITE_NAME")
+        og_description = title
+        # The event's own image, straight from the row. No card is rendered for
+        # an event that has a photo.
+        og_image = _event_image_url(image_key)
     if share_request.logo:
         await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
-    # The card image needs the same event this just loaded. Handing it over
-    # saves a second session and a second eager-loaded event query on a path
-    # that runs for every share.
-    await _generate_segment_content_image_(
-        share_request=share_request,
-        event_metadata=event_metadata,
-    )
+    # Only when there is a card to draw. An event sharing its own photo needs
+    # no render; an event without one falls back to the card, which does.
+    if og_image is None:
+        # The card image needs the same event this just loaded. Handing it over
+        # saves a second session and a second eager-loaded event query on a path
+        # that runs for every share.
+        await _generate_segment_content_image_(
+            share_request=share_request,
+            event_metadata=event_metadata,
+        )
 
     payload = _generate_short_url_payload_(
         share_request=share_request,
         og_title=og_title,
         og_description=og_description,
+        og_image=og_image,
     )
     short_url: ShortUrlResponse = await get_short_url(payload=payload)
 
@@ -312,6 +322,7 @@ def _generate_short_url_payload_(
     share_request: ShareRequest,
     og_description: str,
     og_title: Optional[str] = None,
+    og_image: Optional[str] = None,
 ) -> dict:
     _apply_inferred_ids(share_request)
 
@@ -327,10 +338,36 @@ def _generate_short_url_payload_(
         "url": share_request.url,
         "og_title": og_title or DEFAULT_OG_TITLE,
         "og_description": og_description,
-        "og_image": _share_image_url(share_request),
+        # A caller that already has a real image URL - an event's own photo -
+        # passes it. Everything else points at the rendered card.
+        "og_image": og_image or _share_image_url(share_request),
         "tags": share_request.tags
     }
     return payload
+
+
+def _event_image_url(image_key: Optional[str]) -> Optional[str]:
+    """The event's image as a URL a link preview can fetch.
+
+    The row stores an S3 key, and the bucket is not public, so the key is
+    signed here. Note the signature expires after
+    `PRESIGNED_URL_EXPIRY_SECONDS` - a crawler that re-fetches the preview
+    after that gets nothing back.
+
+    Returns None when the event has no image, which sends the share back to the
+    rendered card.
+    """
+    if not image_key:
+        return None
+    try:
+        url = generate_presigned_access_url(
+            bucket_name=get("AWS_BUCKET_NAME"),
+            s3_key=image_key,
+        )
+    except Exception:
+        logging.exception("Could not sign event share image for key %s", image_key)
+        return None
+    return url or None
 
 
 def _share_image_url(share_request: ShareRequest) -> str:
