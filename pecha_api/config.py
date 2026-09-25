@@ -200,6 +200,11 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
     # Prayers for the same request inside this window raise one push, not one each
     PRAYER_NOTIFICATION_COALESCE_SECONDS=900,
+    # At most one prayer-request push per room per this many seconds. Prayer
+    # requests posted inside it are held: the room shows them at once, and the
+    # next push that goes out carries them as "+N other prayer requests".
+    # 0 sends a push for every prayer request. TEXT messages are unaffected.
+    PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",

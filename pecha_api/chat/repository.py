@@ -10,7 +10,7 @@ from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
 from pecha_api.events.event_model import Event
 
-from pecha_api.chat.enums import ChatMessageReportSource, ChatRoomMemberRole
+from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatRoomMemberRole
 from pecha_api.chat.models import (
     ChatMessage,
     ChatMessagePrayer,
@@ -740,11 +740,84 @@ def list_message_prayers(
     return prayers, total
 
 
-# Written to notification_sqs_message_id for a prayer that deliberately did not
-# raise a push (self-pray, or one already covered by a recent notification for
-# the same request). Excluded from has_dispatched_prayer_since below so a
-# suppressed prayer never counts as an actual dispatch for coalescing.
+# Written to notification_sqs_message_id for a notification that deliberately
+# did not go out: a prayer that raised none (self-pray, or one already covered
+# by a recent notification for the same request), or a prayer request held by
+# the room's notification interval. Excluded from the "was one actually sent"
+# queries below, so a suppressed row never extends a window it did not notify
+# anybody about. Non-null, so reconcile - which only retries rows that never
+# recorded an SQS id at all - leaves these alone.
 SUPPRESSED_SQS_MESSAGE_ID = "SUPPRESSED"
+
+
+def last_dispatched_prayer_request_at(
+    db: Session,
+    *,
+    room_id: UUID,
+    exclude_message_id: UUID,
+) -> Optional[datetime]:
+    """When this room last actually raised a prayer-request push.
+
+    Suppressed rows do not count: a request held by the interval must not
+    extend it, or one busy minute would silence the room indefinitely.
+
+    `exclude_message_id` is required, not a convenience. The gate calls this
+    before the message is marked, where it changes nothing; the copy calls it
+    after the backend has already stamped this message with its real SQS id,
+    where without it the answer would be this very message and the held count
+    would always come out zero.
+    """
+    row = (
+        db.query(ChatMessage.notification_dispatched_at)
+        .filter(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+            ChatMessage.id != exclude_message_id,
+            ChatMessage.notification_dispatched_at.isnot(None),
+            ChatMessage.notification_sqs_message_id.isnot(None),
+            ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+        )
+        .order_by(ChatMessage.notification_dispatched_at.desc())
+        .first()
+    )
+    if not row or row[0] is None:
+        return None
+    dispatched_at = row[0]
+    # Postgres hands back an aware value for a timestamptz column; SQLite, which
+    # the tests run on, does not. Normalise here so callers can compare against
+    # an aware now() without each of them repeating this.
+    if dispatched_at.tzinfo is None:
+        dispatched_at = dispatched_at.replace(tzinfo=timezone.utc)
+    return dispatched_at
+
+
+def count_suppressed_prayer_requests(
+    db: Session,
+    *,
+    room_id: UUID,
+    since: Optional[datetime],
+    exclude_message_id: UUID,
+) -> int:
+    """Prayer requests in this room the interval held since `since`.
+
+    `since` is the previous sent push, or None when this room has never raised
+    one, in which case every suppressed request still counts. The request being
+    sent now is excluded - it is the body, not part of the count.
+    """
+    query = db.query(func.count(ChatMessage.id)).filter(
+        ChatMessage.room_id == room_id,
+        ChatMessage.message_type == ChatMessageType.PRAYER.value,
+        ChatMessage.deleted_at.is_(None),
+        ChatMessage.id != exclude_message_id,
+        ChatMessage.notification_sqs_message_id == SUPPRESSED_SQS_MESSAGE_ID,
+    )
+    if since is not None:
+        # Strictly after: the push at `since` already went out and its own row
+        # is not suppressed anyway, but an earlier interval's held requests
+        # must not be counted a second time.
+        query = query.filter(ChatMessage.notification_dispatched_at > since)
+    return int(query.scalar() or 0)
 
 
 def has_dispatched_prayer_since(

@@ -24,8 +24,10 @@ from pecha_api.chat.notification_response_models import (
 )
 from pecha_api.chat.repository import (
     count_message_prayers,
+    count_suppressed_prayer_requests,
     get_message_by_id_any_room,
     get_prayer_by_id,
+    last_dispatched_prayer_request_at,
 )
 from pecha_api.chat.service import (
     _generate_presigned_url,
@@ -56,6 +58,40 @@ def _preview_body(body: str, max_length: int) -> str:
     return text[: max(max_length - 1, 1)].rstrip() + "…"
 
 
+def _count_held_prayer_requests(*, db, room_id: UUID, message_id: UUID) -> int:
+    """How many prayer requests the interval held since the last push that went out.
+
+    `exclude_message_id` matters on both calls. By the time the worker asks for
+    targets the backend has usually already stamped this message with its real
+    SQS id, so without the exclusion the "last sent push" would be this very
+    message, `since` would be roughly now, and the count would always be zero.
+    """
+    last_sent_at = last_dispatched_prayer_request_at(
+        db=db,
+        room_id=room_id,
+        exclude_message_id=message_id,
+    )
+    return count_suppressed_prayer_requests(
+        db=db,
+        room_id=room_id,
+        since=last_sent_at,
+        exclude_message_id=message_id,
+    )
+
+
+def _held_prayer_request_suffix(held_count: int) -> str:
+    """What the interval skipped, as words on the end of the body.
+
+    The held requests are not listed and their senders are not named: the room
+    shows each one in full. This is only how many notifications did not fire.
+    """
+    if held_count < 1:
+        return ""
+    if held_count == 1:
+        return " · +1 other prayer request"
+    return f" · +{held_count} other prayer requests"
+
+
 def _build_notification_copy(
     *,
     chat_kind: str,
@@ -64,6 +100,7 @@ def _build_notification_copy(
     message_body: str,
     message_type: str = ChatMessageType.TEXT.value,
     has_image: bool = False,
+    held_count: int = 0,
 ) -> tuple[str, str]:
     preview = _preview_body(
         message_body,
@@ -76,7 +113,10 @@ def _build_notification_copy(
         # image, and images that could not be signed, keep the name instead:
         # a prayer from an unidentified group is a stranger's prayer.
         title = f"{sender_name} is requesting a prayer 🙏"
-        return title, preview if has_image else f"{room_name}: {preview}"
+        body = preview if has_image else f"{room_name}: {preview}"
+        # After the preview was truncated, so the cap applies to the request
+        # text and never to the count. A long request is what gets the ellipsis.
+        return title, f"{body}{_held_prayer_request_suffix(held_count)}"
     if chat_kind == "PRIVATE":
         return sender_name, preview
     return room_name, f"{sender_name}: {preview}"
@@ -113,12 +153,20 @@ def get_chat_notification_targets(
             if message_type == ChatMessageType.PRAYER.value
             else None
         )
+        # Counted at read time, so the number matches the rows that exist when
+        # the worker asks for targets rather than when the event was enqueued.
+        held_count = (
+            _count_held_prayer_requests(db=db, room_id=room.id, message_id=message.id)
+            if message_type == ChatMessageType.PRAYER.value
+            else 0
+        )
         title, body = _build_notification_copy(
             chat_kind=chat_kind,
             room_name=room.name,
             sender_name=sender_name,
             message_body=message.body,
             message_type=message_type,
+            held_count=held_count,
             # Empty string too: the signer returns one for an unusable key.
             has_image=bool(image_url),
         )

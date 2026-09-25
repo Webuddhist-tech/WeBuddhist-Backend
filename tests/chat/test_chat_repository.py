@@ -7,6 +7,8 @@ import pecha_api.app  # noqa: F401
 from pecha_api.chat.repository import (
     SUPPRESSED_SQS_MESSAGE_ID,
     add_member,
+    count_suppressed_prayer_requests,
+    last_dispatched_prayer_request_at,
     count_active_members,
     count_unread_messages,
     create_message,
@@ -471,3 +473,140 @@ class TestHasDispatchedPrayerSince:
         )
 
         assert reexported == SUPPRESSED_SQS_MESSAGE_ID == "SUPPRESSED"
+
+
+class TestLastDispatchedPrayerRequestAt:
+    """The room's last prayer-request push that actually went out. A request the
+    interval held must not extend the interval, or one busy minute would
+    silence the room indefinitely."""
+
+    def test_returns_the_dispatch_time(self):
+        db = MagicMock()
+        sent_at = datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc)
+        _query_chain(db, first=(sent_at,))
+
+        assert last_dispatched_prayer_request_at(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        ) == sent_at
+
+    def test_returns_none_when_the_room_never_raised_one(self):
+        db = MagicMock()
+        _query_chain(db, first=None)
+
+        assert last_dispatched_prayer_request_at(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        ) is None
+
+    def test_naive_timestamps_come_back_utc_aware(self):
+        # Postgres hands back an aware value; SQLite, which these tests run on,
+        # does not. The gate compares against an aware now().
+        db = MagicMock()
+        _query_chain(db, first=(datetime(2026, 9, 25, 10, 0),))
+
+        result = last_dispatched_prayer_request_at(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        assert result.tzinfo is not None
+        assert result == datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc)
+
+    def test_filters_out_suppressed_deleted_and_non_prayer_rows(self):
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request_at(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any("message_type =" in condition for condition in conditions)
+        assert any("deleted_at IS NULL" in condition for condition in conditions)
+        assert any(
+            "notification_sqs_message_id !=" in condition for condition in conditions
+        )
+
+    def test_excludes_the_message_being_dispatched(self):
+        # Without this the copy would resolve "last sent push" to the message
+        # being sent, and the held count would always come out zero.
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request_at(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any("chat_messages.id !=" in condition for condition in conditions)
+
+
+class TestCountSuppressedPrayerRequests:
+    """How many prayer requests the interval held, for the "+N other prayer
+    requests" the next push carries."""
+
+    def test_counts_suppressed_rows(self):
+        db = MagicMock()
+        _query_chain(db, total=3)
+
+        assert count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        ) == 3
+
+    def test_returns_zero_when_nothing_was_held(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = None
+
+        assert count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            exclude_message_id=uuid4(),
+        ) == 0
+
+    def test_selects_only_suppressed_rows_and_skips_the_one_being_sent(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            exclude_message_id=uuid4(),
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any(
+            "notification_sqs_message_id =" in condition for condition in conditions
+        )
+        assert any("chat_messages.id !=" in condition for condition in conditions)
+
+    def test_since_adds_the_window_filter(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        )
+
+        assert query.filter.call_count == 2
+
+    def test_no_since_counts_every_suppressed_row(self):
+        # A room that has never raised a push has nothing to measure from, so
+        # every request it held still belongs in the count.
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            exclude_message_id=uuid4(),
+        )
+
+        assert query.filter.call_count == 1
