@@ -26,7 +26,12 @@ from pecha_api.cache.cache_keys import (
     namespace_scan_pattern,
     user_scan_pattern,
 )
-from pecha_api.cache.cache_repository import cache_is_available, get_cache_data, set_cache
+from pecha_api.cache.cache_repository import (
+    cache_is_available,
+    cache_type_enabled,
+    get_cache_data,
+    set_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +102,13 @@ async def cached_response(
     in a worker thread, so a cache miss does not block the event loop; an
     async one is awaited as it already manages that itself.
     """
+    # Switched off: no key, no Redis round trip, no pending-invalidation
+    # bookkeeping. The endpoint behaves exactly as it did before it was cached.
+    if not cache_type_enabled(cache_type):
+        if asyncio.iscoroutinefunction(loader):
+            return await loader()
+        return await run_in_threadpool(loader)
+
     hash_key = build_cache_key(
         cache_type=cache_type, parts=parts, user_identity=user_identity
     )
@@ -136,6 +148,13 @@ async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:
     """Sweep one namespace. Returns the number removed and whether it worked."""
     # The mark this sweep settles, read before the first await: anything
     # marked after this point is a debt the sweep cannot have paid.
+    # Nothing is being written to this namespace while it is switched off, so
+    # there is nothing to sweep and no debt to record. Sweeping anyway would
+    # cost a SCAN loop per write against the Redis the switch exists to take
+    # out of the request path.
+    if not cache_type_enabled(cache_type):
+        return 0, True
+
     mark = _pending_invalidations.get(cache_type)
     # Attempted even when the breaker is open. The breaker exists to stop
     # reads paying a timeout each; an invalidation that is skipped is not
@@ -211,6 +230,8 @@ async def invalidate_user_namespaces(
         return 0
     total = 0
     for cache_type in cache_types:
+        if not cache_type_enabled(cache_type):
+            continue
         try:
             total += await delete_by_pattern(user_scan_pattern(cache_type, user_identity))
         except Exception as cache_error:

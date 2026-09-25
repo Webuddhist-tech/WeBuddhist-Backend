@@ -62,6 +62,16 @@ DEFAULTS = dict(
     CACHE_PREFIX="pecha:",
     CACHE_DEFAULT_TIMEOUT=3000000, # 30 seconds in seconds
     CACHE_CONNECTION_STRING="redis://localhost:6379",
+    # Master switch for the response cache. False means every read goes to
+    # the database and nothing is written to, read from, or swept out of
+    # Redis - the app runs as though Redis were not configured at all.
+    # Turning it back on can serve entries written before it went off, so
+    # pair a re-enable with a flush via /cms/admin/cache.
+    CACHE_ENABLED="true",
+    # Comma-separated CacheType values to bypass while the cache is on, for
+    # taking one namespace out of service without losing the rest:
+    # CACHE_DISABLED_TYPES="plan_detail,plan_list". Unknown names are ignored.
+    CACHE_DISABLED_TYPES="",
     # Bounds on every cache call. A cache that stops answering must fail
     # fast and let the request fall through to the database.
     CACHE_CONNECT_TIMEOUT=1.0,
@@ -253,6 +263,21 @@ def get(key: str) -> str:
         return os.environ[key]
     else:
         return str(DEFAULTS[key])
+
+
+TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+FALSY_VALUES = frozenset({"0", "false", "no", "off", ""})
+
+
+def get_bool(key: str) -> bool:
+    value = get(key).strip().lower()
+    if value in TRUTHY_VALUES:
+        return True
+    if value in FALSY_VALUES:
+        return False
+    raise ValueError(
+        f"Could not convert the value for key '{key}' to bool: {get(key)!r}"
+    )
 
 
 def get_float(key: str) -> float:
