@@ -110,6 +110,20 @@ DEFAULTS = dict(
     # about; shorten it if openpecha edits need to surface faster.
     CACHE_SEGMENT_TIMEOUT=12600,    # 3.5 hours
 
+    # openpecha has no bulk segment endpoint, so a plan day costs one round
+    # trip per segment and the only lever on a cold day is how many of them
+    # run at once. The gate is process-wide and shared by every openpecha
+    # caller, so it is held below OPENPECHA_MAX_CONNECTIONS - otherwise the
+    # httpx pool becomes the real limit and waits show up as PoolTimeout
+    # instead of as a queue. Raise these together, and only as far as
+    # openpecha itself can take.
+    OPENPECHA_MAX_CONCURRENCY=32,
+    OPENPECHA_MAX_CONNECTIONS=40,
+    # How long a request waits for a slot before giving up. A segment that
+    # gives up resolves to None, which the day falls back to stored content
+    # for - a degraded day now beats a request that hangs for minutes.
+    OPENPECHA_QUEUE_TIMEOUT=20.0,
+
     # How long a presigned S3 URL stays valid. Responses carrying these URLs
     # are cached with the URL already inside them, so the signature has to
     # outlive the cache entry that holds it - at one hour it did not, and

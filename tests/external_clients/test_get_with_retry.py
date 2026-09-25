@@ -5,11 +5,16 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pecha_api import config
 from pecha_api.external_clients import (
-    _MAX_CONCURRENT_REQUESTS,
     _RETRYABLE_ERRORS,
+    _get_semaphore,
     get_with_retry,
 )
+
+
+def _cap() -> int:
+    return config.get_int("OPENPECHA_MAX_CONCURRENCY")
 
 
 def _http_client(*side_effects: Any) -> AsyncMock:
@@ -156,7 +161,7 @@ async def test_concurrency_never_exceeds_the_cap_across_callers():
 
     assert client.get.await_count == 60
     # Exactly the cap: proves the gate both throttles and is not over-restrictive.
-    assert peak == _MAX_CONCURRENT_REQUESTS
+    assert peak == _cap()
 
 
 @pytest.mark.asyncio
@@ -167,11 +172,10 @@ async def test_slot_is_released_while_backing_off():
 
     async def check_slot(_delay):
         nonlocal held_during_sleep
-        held_during_sleep = _MAX_CONCURRENT_REQUESTS - _semaphore_value()
+        held_during_sleep = _cap() - _semaphore_value()
 
     def _semaphore_value():
-        from pecha_api.external_clients import _request_semaphore
-        return _request_semaphore._value
+        return _get_semaphore()._value
 
     client = _http_client(httpx.ReadTimeout("slow"), _response())
 
@@ -179,3 +183,38 @@ async def test_slot_is_released_while_backing_off():
         await get_with_retry(client, "/v2/texts")
 
     assert held_during_sleep == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_too_long_for_a_slot_gives_up_instead_of_queueing():
+    """Without this the acquire is unbounded: the per-request timeouts only
+    start once a slot is held, so a wide fan-out had no timeout at all."""
+    from pecha_api.external_clients import OpenPechaQueueTimeout
+
+    client = AsyncMock()
+    client.get.side_effect = lambda *a, **k: asyncio.sleep(3600)
+
+    semaphore = _get_semaphore()
+    hogs = [
+        asyncio.create_task(get_with_retry(client, f"/v2/segments/{i}/content"))
+        for i in range(_cap())
+    ]
+    while semaphore._value > 0:
+        await asyncio.sleep(0)
+
+    with patch.object(config, "get_float", return_value=0.01):
+        with pytest.raises(OpenPechaQueueTimeout):
+            await get_with_retry(client, "/v2/segments/blocked/content")
+
+    for hog in hogs:
+        hog.cancel()
+    await asyncio.gather(*hogs, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_queue_timeout_is_not_retried():
+    """It never reached the network, and retrying rejoins the same queue."""
+    from pecha_api.external_clients import OpenPechaQueueTimeout
+
+    assert OpenPechaQueueTimeout not in _RETRYABLE_ERRORS
+    assert not issubclass(OpenPechaQueueTimeout, _RETRYABLE_ERRORS)
