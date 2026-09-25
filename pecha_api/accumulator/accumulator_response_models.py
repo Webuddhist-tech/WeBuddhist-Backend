@@ -17,7 +17,10 @@ class AccumulatorMetadataDTO(BaseModel):
 class CreatePresetAccumulatorRequest(BaseModel):
     """CMS request to create a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[UUID] = None
+    text_id: Optional[str] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     metadata: List[AccumulatorMetadataDTO] = Field(..., min_length=1)
@@ -35,7 +38,10 @@ class CreatePresetAccumulatorRequest(BaseModel):
 class UpdatePresetAccumulatorRequest(BaseModel):
     """CMS request to update a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[UUID] = None
+    text_id: Optional[str] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     metadata: Optional[List[AccumulatorMetadataDTO]] = Field(None, min_length=1)
@@ -144,7 +150,10 @@ class CreateAccumulatorRequest(BaseModel):
 class UpdateAccumulatorRequest(BaseModel):
     target_count: Optional[int] = None
     current_count: Optional[int] = Field(None, ge=0, description="New absolute current count")
-    text_id: Optional[UUID] = None
+    text_id: Optional[str] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
 
 

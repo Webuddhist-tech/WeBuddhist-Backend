@@ -10,7 +10,6 @@ from ..config import get
 from ..uploads.S3_utils import generate_presigned_access_url
 from ..users.users_service import validate_and_extract_user_details
 from pecha_api.daily_log.daily_log_cache_service import invalidate_user_stats_cache
-from ..texts.texts_utils import TextUtils
 from ..plans.authors.plan_authors_service import get_image_url
 from ..plans.shared.metadata_utils import filter_by_language_with_fallback
 from .accumulator_repository import (
@@ -434,9 +433,6 @@ def create_accumulator_service(token: str, request: CreateAccumulatorRequest) ->
 async def update_accumulator_service(token: str, accumulator_id: UUID, request: UpdateAccumulatorRequest) -> AccumulatorDTO:
     current_user = validate_and_extract_user_details(token=token)
 
-    if request.text_id is not None:
-        await TextUtils.validate_text_exists(text_id=str(request.text_id))
-
     with SessionLocal() as db:
         accumulator = get_accumulator_by_id(db, accumulator_id)
 
@@ -461,7 +457,7 @@ async def update_accumulator_service(token: str, accumulator_id: UUID, request: 
         if request.target_count is not None:
             accumulator.target_count = request.target_count
         if request.text_id is not None:
-            accumulator.text_id = str(request.text_id)
+            accumulator.text_id = request.text_id
         if request.mantra_id is not None:
             validate_mantra_exists(db, request.mantra_id)
             accumulator.mantra_id = request.mantra_id
