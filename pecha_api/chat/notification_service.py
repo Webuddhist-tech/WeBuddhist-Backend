@@ -1,6 +1,8 @@
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.chat.enums import ChatMessageType, ChatRoomKind
@@ -27,7 +29,7 @@ from pecha_api.chat.repository import (
     count_suppressed_prayer_requests,
     get_message_by_id_any_room,
     get_prayer_by_id,
-    last_dispatched_prayer_request_at,
+    last_dispatched_prayer_request,
 )
 from pecha_api.chat.service import (
     _generate_presigned_url,
@@ -58,15 +60,25 @@ def _preview_body(body: str, max_length: int) -> str:
     return text[: max(max_length - 1, 1)].rstrip() + "…"
 
 
-def _count_held_prayer_requests(*, db, room_id: UUID, message_id: UUID) -> int:
+def _count_held_prayer_requests(
+    *,
+    db: Session,
+    room_id: UUID,
+    message_id: UUID,
+    created_at: datetime,
+) -> int:
     """How many prayer requests the interval held since the last push that went out.
 
     `exclude_message_id` matters on both calls. By the time the worker asks for
     targets the backend has usually already stamped this message with its real
     SQS id, so without the exclusion the "last sent push" would be this very
     message, `since` would be roughly now, and the count would always be zero.
+
+    The window closes at this request's own `created_at`, so a request
+    suppressed while the worker is building this push belongs to the next one
+    rather than being counted here and again there.
     """
-    last_sent_at = last_dispatched_prayer_request_at(
+    last_sent = last_dispatched_prayer_request(
         db=db,
         room_id=room_id,
         exclude_message_id=message_id,
@@ -74,7 +86,8 @@ def _count_held_prayer_requests(*, db, room_id: UUID, message_id: UUID) -> int:
     return count_suppressed_prayer_requests(
         db=db,
         room_id=room_id,
-        since=last_sent_at,
+        since=last_sent.created_at if last_sent else None,
+        until=created_at,
         exclude_message_id=message_id,
     )
 
@@ -156,7 +169,12 @@ def get_chat_notification_targets(
         # Counted at read time, so the number matches the rows that exist when
         # the worker asks for targets rather than when the event was enqueued.
         held_count = (
-            _count_held_prayer_requests(db=db, room_id=room.id, message_id=message.id)
+            _count_held_prayer_requests(
+                db=db,
+                room_id=room.id,
+                message_id=message.id,
+                created_at=message.created_at,
+            )
             if message_type == ChatMessageType.PRAYER.value
             else 0
         )

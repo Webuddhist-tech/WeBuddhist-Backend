@@ -148,11 +148,15 @@ async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:
     """Sweep one namespace. Returns the number removed and whether it worked."""
     # The mark this sweep settles, read before the first await: anything
     # marked after this point is a debt the sweep cannot have paid.
-    # Nothing is being written to this namespace while it is switched off, so
-    # there is nothing to sweep and no debt to record. Sweeping anyway would
-    # cost a SCAN loop per write against the Redis the switch exists to take
-    # out of the request path.
+    # Nothing new is written to this namespace while it is switched off, but
+    # whatever was written before it was switched off is still there, still
+    # inside its timeout. Sweeping now would cost a SCAN loop per write against
+    # the Redis the switch exists to keep out of the request path, so the debt
+    # is recorded instead: the next read that finds the cache available drains
+    # it, and until then `_pending_invalidations` makes reads of this namespace
+    # skip the cache rather than serve what the sweep has not reached yet.
     if not cache_type_enabled(cache_type):
+        _mark_pending(cache_type)
         return 0, True
 
     mark = _pending_invalidations.get(cache_type)

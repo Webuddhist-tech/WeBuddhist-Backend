@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
 from sqlalchemy import exists, func, or_, select
@@ -750,16 +750,41 @@ def list_message_prayers(
 SUPPRESSED_SQS_MESSAGE_ID = "SUPPRESSED"
 
 
-def last_dispatched_prayer_request_at(
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Postgres hands back an aware value for a timestamptz column; SQLite,
+    which the tests run on, does not. Normalised here so callers can compare
+    against an aware now() without each of them repeating it."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+class DispatchedPrayerRequest(NamedTuple):
+    """The room's last prayer-request push, by both clocks.
+
+    `dispatched_at` is when the push went out, which is what the interval is
+    measured from. `created_at` is what the held count windows on - see
+    `count_suppressed_prayer_requests` for why the two cannot be mixed.
+    """
+
+    dispatched_at: datetime
+    created_at: datetime
+
+
+def last_dispatched_prayer_request(
     db: Session,
     *,
     room_id: UUID,
     exclude_message_id: UUID,
-) -> Optional[datetime]:
-    """When this room last actually raised a prayer-request push.
+) -> Optional[DispatchedPrayerRequest]:
+    """The last prayer request in this room whose push actually went out.
 
     Suppressed rows do not count: a request held by the interval must not
     extend it, or one busy minute would silence the room indefinitely.
+
+    Deleted rows *do* count. Deleting a request does not un-send the push its
+    members already received, so dropping it here would let the sender clear
+    the interval by deleting their own request and post again straight away.
 
     `exclude_message_id` is required, not a convenience. The gate calls this
     before the message is marked, where it changes nothing; the copy calls it
@@ -768,11 +793,10 @@ def last_dispatched_prayer_request_at(
     would always come out zero.
     """
     row = (
-        db.query(ChatMessage.notification_dispatched_at)
+        db.query(ChatMessage.notification_dispatched_at, ChatMessage.created_at)
         .filter(
             ChatMessage.room_id == room_id,
             ChatMessage.message_type == ChatMessageType.PRAYER.value,
-            ChatMessage.deleted_at.is_(None),
             ChatMessage.id != exclude_message_id,
             ChatMessage.notification_dispatched_at.isnot(None),
             ChatMessage.notification_sqs_message_id.isnot(None),
@@ -781,15 +805,12 @@ def last_dispatched_prayer_request_at(
         .order_by(ChatMessage.notification_dispatched_at.desc())
         .first()
     )
-    if not row or row[0] is None:
+    if not row or row[0] is None or row[1] is None:
         return None
-    dispatched_at = row[0]
-    # Postgres hands back an aware value for a timestamptz column; SQLite, which
-    # the tests run on, does not. Normalise here so callers can compare against
-    # an aware now() without each of them repeating this.
-    if dispatched_at.tzinfo is None:
-        dispatched_at = dispatched_at.replace(tzinfo=timezone.utc)
-    return dispatched_at
+    return DispatchedPrayerRequest(
+        dispatched_at=_as_utc(row[0]),
+        created_at=_as_utc(row[1]),
+    )
 
 
 def count_suppressed_prayer_requests(
@@ -797,13 +818,21 @@ def count_suppressed_prayer_requests(
     *,
     room_id: UUID,
     since: Optional[datetime],
+    until: datetime,
     exclude_message_id: UUID,
 ) -> int:
-    """Prayer requests in this room the interval held since `since`.
+    """Prayer requests in this room the interval held between two pushes.
 
-    `since` is the previous sent push, or None when this room has never raised
-    one, in which case every suppressed request still counts. The request being
-    sent now is excluded - it is the body, not part of the count.
+    The window is half-open on `created_at`: after the request that raised the
+    previous push, up to the one being announced now. Both bounds read the same
+    clock on purpose. Windowing on `notification_dispatched_at` instead would
+    let a request that is suppressed while the worker is building this push
+    fall inside this window *and* the next one, and be counted twice.
+
+    `since` is None when this room has never raised a push, in which case every
+    held request up to `until` counts. Deleted requests are left out: unlike
+    the dispatch lookup, this number is shown to people, and it should not
+    advertise requests that are no longer in the room.
     """
     query = db.query(func.count(ChatMessage.id)).filter(
         ChatMessage.room_id == room_id,
@@ -811,12 +840,10 @@ def count_suppressed_prayer_requests(
         ChatMessage.deleted_at.is_(None),
         ChatMessage.id != exclude_message_id,
         ChatMessage.notification_sqs_message_id == SUPPRESSED_SQS_MESSAGE_ID,
+        ChatMessage.created_at < until,
     )
     if since is not None:
-        # Strictly after: the push at `since` already went out and its own row
-        # is not suppressed anyway, but an earlier interval's held requests
-        # must not be counted a second time.
-        query = query.filter(ChatMessage.notification_dispatched_at > since)
+        query = query.filter(ChatMessage.created_at > since)
     return int(query.scalar() or 0)
 
 

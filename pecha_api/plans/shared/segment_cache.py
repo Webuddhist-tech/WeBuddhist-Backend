@@ -40,9 +40,18 @@ logger = logging.getLogger(__name__)
 
 FetchSegment = Callable[[], Awaitable[Optional[str]]]
 
-# Fetches currently in flight, keyed by namespace and segment id. Each entry is
-# removed by the task that owns it once it settles, so nothing accumulates.
-_in_flight: Dict[Tuple[CacheType, str], "asyncio.Task[Optional[str]]"] = {}
+# Fetches currently in flight, keyed by the loop that owns the task as well as
+# by namespace and segment id. Each entry is removed by the task that owns it
+# once it settles, so nothing accumulates.
+#
+# The loop is part of the key because this module is imported once per process
+# but the process runs more than one loop: several services call asyncio.run()
+# from worker threads. A task belongs to the loop that created it, and awaiting
+# it from another raises rather than joining the fetch - so without the loop in
+# the key, one loop's in-flight entry would break the second loop's lookup
+# instead of saving it a round trip.
+_FlightKey = Tuple[int, CacheType, str]
+_in_flight: Dict[_FlightKey, "asyncio.Task[Optional[str]]"] = {}
 
 
 def _timeout() -> int:
@@ -83,8 +92,8 @@ async def _fetch_once(
     hash_key: str,
     fetch: FetchSegment,
 ) -> Optional[str]:
-    """Run `fetch` for this id, or join the run already under way."""
-    flight_key = (cache_type, segment_id)
+    """Run `fetch` for this id, or join the run already under way on this loop."""
+    flight_key = (id(asyncio.get_running_loop()), cache_type, segment_id)
     task = _in_flight.get(flight_key)
     if task is None:
         task = asyncio.create_task(_fetch_and_store(hash_key, fetch))
@@ -98,7 +107,7 @@ async def _fetch_once(
 
 
 def _release(
-    flight_key: Tuple[CacheType, str], task: "asyncio.Task[Optional[str]]"
+    flight_key: _FlightKey, task: "asyncio.Task[Optional[str]]"
 ) -> None:
     _in_flight.pop(flight_key, None)
     # Retrieving the exception marks it seen. Without this, a fetch whose

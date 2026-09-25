@@ -2,13 +2,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.repository import (
     SUPPRESSED_SQS_MESSAGE_ID,
     get_message_by_id_any_room,
     get_prayer_by_id,
     has_dispatched_prayer_since,
-    last_dispatched_prayer_request_at,
+    last_dispatched_prayer_request,
     list_undispatched_chat_notification_messages,
     list_undispatched_prayer_notifications,
     mark_message_notification_dispatched,
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _prayer_request_interval_allows_push(
-    db,
+    db: Session,
     *,
     room_id: UUID,
     message_id: UUID,
@@ -44,14 +46,15 @@ def _prayer_request_interval_allows_push(
     if interval_seconds == 0:
         return True
 
-    last_sent_at = last_dispatched_prayer_request_at(
+    last_sent = last_dispatched_prayer_request(
         db=db,
         room_id=room_id,
         exclude_message_id=message_id,
     )
-    if last_sent_at is None:
+    if last_sent is None:
         return True
-    return last_sent_at < datetime.now(timezone.utc) - timedelta(seconds=interval_seconds)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=interval_seconds)
+    return last_sent.dispatched_at < cutoff
 
 
 def _should_notify_prayer_request(message_id: UUID, room_id: UUID | None) -> bool:

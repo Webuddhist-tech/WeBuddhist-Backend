@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -167,35 +168,55 @@ class TestPreviewAndCopy:
 
 
 class TestCountHeldPrayerRequests:
+    SENT = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
+    NOW = datetime(2026, 9, 25, 10, 20, tzinfo=timezone.utc)
+
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=2)
-    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request_at")
-    def test_counts_from_the_previous_sent_push(self, mock_last_sent, mock_count):
-        sent_at = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
-        mock_last_sent.return_value = sent_at
-        room_id, message_id = uuid4(), uuid4()
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request")
+    def test_counts_from_the_request_that_raised_the_previous_push(
+        self, mock_last_sent, mock_count
+    ):
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=self.SENT + timedelta(seconds=2), created_at=self.SENT
+        )
 
         assert _count_held_prayer_requests(
-            db=MagicMock(), room_id=room_id, message_id=message_id
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
         ) == 2
-        assert mock_count.call_args.kwargs["since"] == sent_at
+        # The creation clock, not the dispatch clock: the count windows on
+        # created_at at both ends so nothing lands in two windows.
+        assert mock_count.call_args.kwargs["since"] == self.SENT
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=1)
-    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request_at", return_value=None)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
     def test_a_room_that_never_pushed_counts_everything_held(self, _last_sent, mock_count):
         assert _count_held_prayer_requests(
-            db=MagicMock(), room_id=uuid4(), message_id=uuid4()
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
         ) == 1
         assert mock_count.call_args.kwargs["since"] is None
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
-    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request_at", return_value=None)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_the_window_closes_at_this_request(self, _last_sent, mock_count):
+        """A request suppressed while the worker is building this push belongs
+        to the next one, not to this one and then the next one again."""
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), created_at=self.NOW
+        )
+
+        assert mock_count.call_args.kwargs["until"] == self.NOW
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
     def test_both_queries_exclude_the_message_being_sent(self, mock_last_sent, mock_count):
         """Without this the "last sent push" would be this very message, since
         the backend stamps it before the worker asks for targets, and the count
         would always come out zero."""
         message_id = uuid4()
 
-        _count_held_prayer_requests(db=MagicMock(), room_id=uuid4(), message_id=message_id)
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=message_id, created_at=self.NOW
+        )
 
         assert mock_last_sent.call_args.kwargs["exclude_message_id"] == message_id
         assert mock_count.call_args.kwargs["exclude_message_id"] == message_id
@@ -335,7 +356,7 @@ class TestPrayerRequestNotificationInterval:
 
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-1")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at", return_value=None)
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
@@ -354,7 +375,7 @@ class TestPrayerRequestNotificationInterval:
 
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
@@ -362,7 +383,10 @@ class TestPrayerRequestNotificationInterval:
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, mock_mark
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_last_sent.return_value = datetime.now(timezone.utc) - timedelta(minutes=4)
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+        )
 
         result = enqueue_chat_message_notification(
             uuid4(), message_type="PRAYER", room_id=uuid4()
@@ -376,7 +400,7 @@ class TestPrayerRequestNotificationInterval:
 
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-2")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
@@ -384,7 +408,10 @@ class TestPrayerRequestNotificationInterval:
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_last_sent.return_value = datetime.now(timezone.utc) - timedelta(minutes=20)
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+        )
 
         result = enqueue_chat_message_notification(
             uuid4(), message_type="PRAYER", room_id=uuid4()
@@ -395,7 +422,7 @@ class TestPrayerRequestNotificationInterval:
 
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-3")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=0)
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
@@ -403,7 +430,10 @@ class TestPrayerRequestNotificationInterval:
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_last_sent.return_value = datetime.now(timezone.utc)
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc),
+            created_at=datetime.now(timezone.utc),
+        )
 
         result = enqueue_chat_message_notification(
             uuid4(), message_type="PRAYER", room_id=uuid4()
@@ -415,7 +445,7 @@ class TestPrayerRequestNotificationInterval:
 
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-4")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_ordinary_chat_is_never_gated(
@@ -432,7 +462,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-5")
     @patch(
-        "pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at",
+        "pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request",
         side_effect=RuntimeError("boom"),
     )
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
@@ -454,7 +484,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.get_message_by_id_any_room")
     @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
     @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-6")
-    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request_at", return_value=None)
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
     @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")

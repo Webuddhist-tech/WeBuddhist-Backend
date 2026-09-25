@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -117,7 +117,7 @@ async def get_with_retry(
 
 
 @asynccontextmanager
-async def _gate():
+async def _gate() -> AsyncIterator[None]:
     """Hold a slot on the concurrency gate, or give up waiting for one.
 
     Acquiring is what a caller actually queues on: the per-request timeouts

@@ -32,7 +32,7 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
-from pecha_api.uploads.S3_utils import download_bytes, generate_presigned_access_url
+from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
@@ -235,37 +235,20 @@ async def _generate_event_content_image_(
         event_metadata = await to_thread.run_sync(
             partial(_load_event_share_metadata, event_id, share_request.language, site_name)
         )
-    title, _description, language, image_key = event_metadata
-    photo_bytes = await to_thread.run_sync(partial(_load_event_photo_bytes, image_key))
+    title, _description, language, _image_key = event_metadata
+    # Only ever the title card. An event with a photo shares that photo by URL
+    # and never reaches this path, so there is nothing here worth the S3
+    # download and Pillow re-render that serving the photo through the endpoint
+    # would cost on every crawler hit - an unbounded, uncached fetch of a
+    # full-size original that anyone could trigger by calling /share/image.
     image_kwargs = {
         "title": title,
         "lang": language,
         "logo_path": LOGO_PATH,
-        "photo_bytes": photo_bytes,
     }
     if output_path is not None:
         image_kwargs["output_path"] = output_path
     await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
-
-
-def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
-    """The event photo straight from S3, as bytes.
-
-    Downloaded rather than linked, because an og:image has to stay fetchable
-    long after the link was shared: crawlers re-fetch it, and a presigned URL
-    would have expired by then. The bytes are re-served from /share/image,
-    whose URL never expires.
-
-    Returns None for an event with no photo, or when S3 will not give it up -
-    the card falls back to the old title render rather than the share failing.
-    """
-    if not image_key:
-        return None
-    try:
-        return download_bytes(bucket_name=get("AWS_BUCKET_NAME"), s3_key=image_key)
-    except Exception:
-        logging.exception("Could not download event share photo for key %s", image_key)
-        return None
 
 
 def _load_event_share_metadata(
