@@ -346,10 +346,29 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
+# users.username is VARCHAR(255). The fixed wrapper is
+# "webuddhist_" + "_" + "_" + 6 digits + "." + 4 digits = 24 characters,
+# which leaves 231 characters for the two sanitized names.
+_USERNAME_MAX_LENGTH = 255
+
+
 def _name_part(name: str | None) -> str:
     if not name:
         return ""
     return "".join(char for char in name.strip().lower() if char.isalnum())
+
+
+def _fit_name_parts(first: str, last: str, max_combined: int) -> tuple[str, str]:
+    """Shorten names so both still appear and their combined length fits."""
+    if len(first) + len(last) <= max_combined:
+        return first, last
+
+    first_budget = min(len(first), max(1, max_combined // 2))
+    last_budget = max_combined - first_budget
+    if len(last) < last_budget:
+        last_budget = len(last)
+        first_budget = max_combined - last_budget
+    return first[:first_budget], last[:last_budget]
 
 
 def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
@@ -359,15 +378,20 @@ def generate_username(first_name: str | None = None, last_name: str | None = Non
     Both names present: webuddhist_{firstname}_{lastname}_{random}.{suffix}
     Either or both names missing: webuddhist_user_{random}.{suffix}
 
-    The phone number is never included. It stays on users.phone_number.
+    Names are shortened so the result always fits users.username. The phone
+    number is never included. It stays on users.phone_number.
     """
     random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
     random_num = str(secrets.randbelow(900000) + 100000)
     first = _name_part(first_name)
     last = _name_part(last_name)
-    if first and last:
-        return f"webuddhist_{first}_{last}_{random_num}.{random_suffix}"
-    return f"webuddhist_user_{random_num}.{random_suffix}"
+    if not first or not last:
+        return f"webuddhist_user_{random_num}.{random_suffix}"
+
+    tail = f"_{random_num}.{random_suffix}"
+    name_budget = _USERNAME_MAX_LENGTH - len("webuddhist_") - len("_") - len(tail)
+    first, last = _fit_name_parts(first, last, name_budget)
+    return f"webuddhist_{first}_{last}{tail}"
 
 
 def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:

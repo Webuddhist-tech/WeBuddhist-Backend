@@ -786,6 +786,32 @@ def test_generate_username_uses_both_names():
     _assert_random_suffix(username.removeprefix("webuddhist_john_doe_"))
 
 
+def test_generate_username_truncates_long_names_to_column_limit():
+    username = generate_username(first_name="A" * 255, last_name="B" * 255)
+
+    assert len(username) == 255
+    body, random_suffix = username.split(".")
+    first, last, random_num = body.removeprefix("webuddhist_").rsplit("_", 2)
+    assert first == "a" * len(first)
+    assert last == "b" * len(last)
+    assert len(first) >= 1
+    assert len(last) >= 1
+    assert len(random_num) == 6
+    assert random_num.isdigit()
+    assert len(random_suffix) == 4
+    assert random_suffix.isdigit()
+
+
+def test_generate_username_keeps_names_that_fit():
+    first_name = "a" * 100
+    last_name = "b" * 100
+
+    username = generate_username(first_name=first_name, last_name=last_name)
+
+    assert len(username) < 255
+    assert username.startswith(f"webuddhist_{first_name}_{last_name}_")
+
+
 def test_generate_username_falls_back_when_names_are_missing():
     for first_name, last_name in (
         (None, None),
