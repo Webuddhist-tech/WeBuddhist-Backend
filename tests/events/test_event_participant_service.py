@@ -1,8 +1,9 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any, Iterator, Optional, Tuple
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -21,7 +22,7 @@ from pecha_api.events.event_participant_service import (
 _SVC = "pecha_api.events.event_participant_service"
 
 
-def _user(**kw):
+def _user(**kw: Any) -> SimpleNamespace:
     base = dict(
         id=uuid4(),
         firstname="Lena",
@@ -177,7 +178,9 @@ def test_cms_list_denied_propagates():
 
 # --- participation type ---
 
-def _event_obj(event_format="hybrid", event_id=None):
+def _event_obj(
+    event_format: str = "hybrid", event_id: Optional[UUID] = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=event_id or uuid4(), group_id=uuid4(), event_format=event_format
     )
@@ -238,14 +241,22 @@ def test_join_rejects_participation_type_the_event_does_not_offer():
     mock_upsert.assert_not_called()
 
 
-def _group_obj(group_type="COMMUNITY", is_public=True):
+def _group_obj(
+    group_type: str = "COMMUNITY", is_public: bool = True
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(), group_type=group_type, is_public=is_public, status="PUBLISHED"
     )
 
 
 @contextmanager
-def _update_patches(event, user, group=None, joined=False, ban_expiry=None):
+def _update_patches(
+    event: SimpleNamespace,
+    user: SimpleNamespace,
+    group: Optional[SimpleNamespace] = None,
+    joined: bool = False,
+    ban_expiry: Optional[datetime] = None,
+) -> Iterator[Tuple[MagicMock, MagicMock]]:
     """The surface update_participation_type_service touches, so each test
     only spells out the part it is actually about."""
     with patch(f"{_SVC}.validate_and_extract_user_details", return_value=user), \
@@ -400,3 +411,28 @@ def test_update_participation_type_rejects_format_mismatch():
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     mock_upsert.assert_not_called()
     mock_join.assert_not_called()
+
+
+def test_join_event_joins_the_parent_group():
+    event = _event_obj()
+    user = _user()
+    with _update_patches(event, user, group=_group_obj()) as (_, mock_join):
+        join_event_service(token="tok", event_id=event.id)
+
+    mock_join.assert_called_once()
+
+
+def test_group_join_failure_does_not_fail_the_rsvp_or_skip_chat():
+    event = _event_obj()
+    user = _user()
+    with _update_patches(event, user, group=_group_obj()) as (mock_upsert, _), \
+         patch(f"{_SVC}.get_group_by_id", side_effect=RuntimeError("lookup failed")), \
+         patch(f"{_SVC}._join_event_chat_room") as mock_chat:
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    mock_upsert.assert_called_once()
+    mock_chat.assert_called_once()

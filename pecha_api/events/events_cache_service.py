@@ -15,17 +15,19 @@ throw away the cache everyone else is reading. Participant counts catch up
 when the timeout expires.
 """
 
+from datetime import datetime
 from functools import partial
 from typing import List, Optional
 from uuid import UUID
-from datetime import datetime
 
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_identity import cache_identity_from_token
 from pecha_api.cache.cached_response import cached_response, invalidate_user_namespaces
+from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_filters import EventContentFilter
 from pecha_api.events.event_response_models import EventDTO, EventsResponse
 from pecha_api.events.event_service import (
@@ -34,6 +36,9 @@ from pecha_api.events.event_service import (
     get_featured_events_service,
 )
 from pecha_api.events.event_service import get_day_bounds_in_timezone
+from pecha_api.plans.groups.follow_scope import resolve_event_listing_group_ids
+from pecha_api.users.users_service import validate_and_extract_user_details
+from pecha_api.utils import Utils
 
 EVENT_CACHE_TYPES = (
     CacheType.EVENT_LIST,
@@ -74,6 +79,31 @@ def _filter_parts(content_filter: Optional[EventContentFilter]) -> list:
     ]
 
 
+def _event_access_fingerprint(
+    token: Optional[str],
+    should_include_unfollowed: bool,
+    restrict_group_ids: Optional[List[UUID]],
+) -> Optional[str]:
+    """Digest of the groups this caller may currently see events from.
+
+    The loader recomputes permitted groups from membership. The cache key has
+    to carry the same set: a token does not change when someone is removed
+    from a private group, and a hit would otherwise keep returning that
+    group's events until the entry expired. An explicit `restrict_group_ids`
+    is already part of the key, so it needs no second digest.
+    """
+    if restrict_group_ids is not None or not token:
+        return None
+    user_id = validate_and_extract_user_details(token=token).id
+    with SessionLocal() as db:
+        group_ids, _ = resolve_event_listing_group_ids(
+            db=db,
+            user_id=user_id,
+            should_include_unfollowed=should_include_unfollowed,
+        )
+    return Utils.generate_hash_key(payload=sorted(str(group_id) for group_id in group_ids))
+
+
 async def get_events_service_cached(
     content_filter: Optional[EventContentFilter] = None,
     from_date: Optional[datetime] = None,
@@ -97,6 +127,9 @@ async def get_events_service_cached(
         should_include_past,
         skip,
         limit,
+        await run_in_threadpool(
+            _event_access_fingerprint, token, should_include_unfollowed, restrict_group_ids
+        ),
     ]
     return await cached_response(
         cache_type=CacheType.EVENT_LIST,

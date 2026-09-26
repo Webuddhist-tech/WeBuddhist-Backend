@@ -23,6 +23,7 @@ request unlucky enough to arrive after a key rotation.
 
 import logging
 from typing import Any, Dict, Optional
+from uuid import UUID
 
 from starlette.concurrency import run_in_threadpool
 
@@ -32,12 +33,32 @@ logger = logging.getLogger(__name__)
 
 
 def _identity_from_payload(payload: Dict[str, Any]) -> Optional[str]:
-    """The identity a verified payload denotes, or None if it names nobody."""
-    subject = payload.get("sub") or payload.get("email") or payload.get("phone_number")
-    if not subject:
-        return None
+    """The identity a verified payload denotes, or None if it names nobody.
+
+    This has to follow `resolve_user_from_payload`. A UUID `sub` is the user
+    id. Anything else is an issuer subject (Auth0), and the database user is
+    whoever the verified phone or email currently belongs to. Keying those
+    tokens on `sub` would keep serving the previous user's cached progress
+    after the phone or email moved to someone else.
+    """
     issuer = payload.get("iss") or ""
-    return f"{issuer}|{subject}"
+    subject = payload.get("sub")
+    if subject is not None:
+        try:
+            UUID(str(subject))
+        except (TypeError, ValueError):
+            pass
+        else:
+            return f"{issuer}|{subject}"
+
+    phone_number = payload.get("phone_number")
+    if isinstance(phone_number, str) and phone_number:
+        return f"{issuer}|phone:{phone_number}"
+
+    email = payload.get("email")
+    if isinstance(email, str) and email:
+        return f"{issuer}|email:{email}"
+    return None
 
 
 async def cache_identity_from_token(token: Optional[str]) -> Optional[str]:

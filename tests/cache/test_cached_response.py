@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,8 +21,12 @@ class Sample(BaseModel):
 @pytest.fixture
 def clean_pending():
     cached_response_module._pending_invalidations.clear()
+    cached_response_module._pending_user_invalidations.clear()
+    cached_response_module._namespace_epochs.clear()
     yield
     cached_response_module._pending_invalidations.clear()
+    cached_response_module._pending_user_invalidations.clear()
+    cached_response_module._namespace_epochs.clear()
 
 
 def _loader(value="fresh", calls=None):
@@ -253,3 +258,88 @@ async def test_a_write_failing_mid_sweep_is_not_cleared_by_that_sweep(clean_pend
         assert await invalidate_namespace(CacheType.PLAN_LIST) == 5
 
     assert CacheType.PLAN_LIST in cached_response_module._pending_invalidations
+
+
+@pytest.mark.asyncio
+async def test_a_load_that_started_before_a_sweep_is_not_stored(clean_pending):
+    """The sweep deletes the old entry. Storing the value this load already
+    read would put it back with nothing left queued to remove it."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def load():
+        started.set()
+        await release.wait()
+        return Sample(value="old")
+
+    with patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value=None), \
+         patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock) as mock_set, \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=1):
+        task = asyncio.create_task(cached_response(
+            cache_type=CacheType.PLAN_LIST, parts=["a"], model=Sample,
+            loader=load, timeout=60,
+        ))
+        await started.wait()
+        await invalidate_namespace(CacheType.PLAN_LIST)
+        release.set()
+        result = await task
+
+    assert result.value == "old"
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_user_deletion_skipped_while_the_breaker_is_open_is_retried(clean_pending):
+    with patch("pecha_api.cache.cached_response.cache_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=False), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock) as mock_delete:
+        assert await invalidate_user_namespaces(
+            [CacheType.USER_PLAN_PROGRESS], "iss|alice"
+        ) == 0
+    mock_delete.assert_not_awaited()
+    assert (CacheType.USER_PLAN_PROGRESS, "iss|alice") in (
+        cached_response_module._pending_user_invalidations
+    )
+
+    order = []
+
+    async def delete(pattern):
+        order.append("delete")
+        return 1
+
+    async def get(hash_key):
+        order.append("get")
+        return {"value": "cached", "count": 1}
+
+    with patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", side_effect=delete), \
+         patch("pecha_api.cache.cached_response.get_cache_data", side_effect=get), \
+         patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
+        result = await cached_response(
+            cache_type=CacheType.USER_PLAN_PROGRESS, parts=["plan"], model=Sample,
+            loader=_loader("fresh"), timeout=60, user_identity="iss|alice",
+        )
+
+    assert order == ["delete", "get"]
+    assert result.value == "cached"
+    assert cached_response_module._pending_user_invalidations == {}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_user_deletion_is_queued(clean_pending):
+    with patch("pecha_api.cache.cached_response.cache_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               side_effect=ConnectionError("redis down")):
+        assert await invalidate_user_namespaces(
+            [CacheType.USER_PLAN_PROGRESS], "iss|alice"
+        ) == 0
+    assert (CacheType.USER_PLAN_PROGRESS, "iss|alice") in (
+        cached_response_module._pending_user_invalidations
+    )

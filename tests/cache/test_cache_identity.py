@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from jose import JWTError
@@ -14,11 +15,12 @@ async def test_no_token_is_anonymous():
 
 @pytest.mark.asyncio
 async def test_identity_comes_from_the_verified_payload():
+    user_id = uuid4()
     with patch(
         "pecha_api.cache.cache_identity.validate_token",
-        return_value={"sub": "user-123", "iss": "https://issuer/"},
+        return_value={"sub": str(user_id), "iss": "https://issuer/"},
     ):
-        assert await cache_identity_from_token("token") == "https://issuer/|user-123"
+        assert await cache_identity_from_token("token") == f"https://issuer/|{user_id}"
 
 
 @pytest.mark.asyncio
@@ -50,16 +52,22 @@ async def test_two_users_get_different_identities():
     def _payload(token):
         return {"sub": token, "iss": "https://issuer/"}
 
+    alice, bob = str(uuid4()), str(uuid4())
     with patch("pecha_api.cache.cache_identity.validate_token", side_effect=_payload):
-        assert await cache_identity_from_token("alice") != await cache_identity_from_token("bob")
+        assert await cache_identity_from_token(alice) != await cache_identity_from_token(bob)
 
 
 @pytest.mark.parametrize(
     "payload,expected",
     [
-        ({"sub": "s", "iss": "i"}, "i|s"),
-        ({"email": "a@b.c", "iss": "i"}, "i|a@b.c"),
-        ({"phone_number": "+100", "iss": "i"}, "i|+100"),
+        ({"sub": "auth0|same", "phone_number": "+100", "email": "a@b.c", "iss": "i"}, "i|phone:+100"),
+        ({"sub": "11111111-1111-1111-1111-111111111111", "phone_number": "+100", "iss": "i"},
+         "i|11111111-1111-1111-1111-111111111111"),
+        ({"sub": "auth0|same", "phone_number": "+200", "iss": "i"}, "i|phone:+200"),
+        ({"sub": "auth0|same", "email": "a@b.c", "iss": "i"}, "i|email:a@b.c"),
+        ({"email": "a@b.c", "iss": "i"}, "i|email:a@b.c"),
+        ({"phone_number": "+100", "iss": "i"}, "i|phone:+100"),
+        ({"sub": "auth0|same", "iss": "i"}, None),
         ({"iss": "i"}, None),
     ],
 )
@@ -76,7 +84,7 @@ async def test_verification_runs_in_a_worker_thread():
     with patch(
         "pecha_api.cache.cache_identity.run_in_threadpool",
         new_callable=AsyncMock,
-        return_value={"sub": "s", "iss": "i"},
+        return_value={"sub": "11111111-1111-1111-1111-111111111111", "iss": "i"},
     ) as mock_threadpool:
-        assert await cache_identity_from_token("token") == "i|s"
+        assert await cache_identity_from_token("token") == "i|11111111-1111-1111-1111-111111111111"
     mock_threadpool.assert_awaited_once()

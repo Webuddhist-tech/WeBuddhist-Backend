@@ -58,6 +58,35 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 # than the failure deserves.
 _pending_invalidations: Dict[CacheType, int] = {}
 _invalidation_marks = itertools.count()
+# Bumped when a namespace is invalidated, before the sweep. A reader that
+# loaded before the bump must not store afterwards: the sweep has already
+# deleted the old entry, and writing it back would outlive every pending
+# invalidation. Per-process, like the debt above.
+_namespace_epochs: Dict[CacheType, int] = {}
+# User-scoped deletions that could not run (breaker open, or Redis error).
+# Keyed by (namespace, identity); "" is the anonymous segment. Drained before
+# the next read of that user's entry, which is skipped until the deletion lands.
+_pending_user_invalidations: Dict[Tuple[CacheType, str], int] = {}
+
+
+def _user_debt_key(
+    cache_type: CacheType, user_identity: Optional[str]
+) -> Tuple[CacheType, str]:
+    return cache_type, user_identity if user_identity is not None else ""
+
+
+def _note_namespace_changed(cache_type: CacheType) -> None:
+    _namespace_epochs[cache_type] = _namespace_epochs.get(cache_type, 0) + 1
+
+
+def _namespace_epoch(cache_type: CacheType) -> int:
+    return _namespace_epochs.get(cache_type, 0)
+
+
+def _mark_user_pending(cache_type: CacheType, user_identity: Optional[str]) -> None:
+    _pending_user_invalidations[_user_debt_key(cache_type, user_identity)] = next(
+        _invalidation_marks
+    )
 
 
 def _mark_pending(cache_type: CacheType) -> None:
@@ -98,6 +127,36 @@ async def _drain_pending_invalidations() -> None:
         )
 
 
+async def _drain_pending_user_invalidations() -> None:
+    """Retry user-scoped deletions that were skipped or failed earlier."""
+    if not _pending_user_invalidations or not cache_is_available():
+        return
+    for key in list(_pending_user_invalidations):
+        cache_type, identity = key
+        if not cache_type_enabled(cache_type):
+            continue
+        mark = _pending_user_invalidations.get(key)
+        try:
+            await delete_by_pattern(user_scan_pattern(cache_type, identity or None))
+        except Exception as cache_error:
+            logger.error(
+                "Retry of user invalidation for %s failed: %s",
+                cache_type.value,
+                cache_error,
+            )
+            return
+        if _pending_user_invalidations.get(key) != mark:
+            continue
+        _pending_user_invalidations.pop(key, None)
+        logger.info("Retried user invalidation for %s", cache_type.value)
+
+
+def _read_is_blocked(cache_type: CacheType, user_identity: Optional[str]) -> bool:
+    if cache_type in _pending_invalidations:
+        return True
+    return _user_debt_key(cache_type, user_identity) in _pending_user_invalidations
+
+
 async def cached_response(
     cache_type: CacheType,
     parts: Sequence[KeyPart],
@@ -124,9 +183,13 @@ async def cached_response(
     )
 
     await _drain_pending_invalidations()
-    # A namespace we still owe an eviction for is not safe to read: the entry
-    # sitting there may be the one a write already replaced.
-    cached = None if cache_type in _pending_invalidations else await get_cache_data(
+    await _drain_pending_user_invalidations()
+    # A namespace or user we still owe an eviction for is not safe to read:
+    # the entry sitting there may be the one a write already replaced.
+    # The epoch is taken after the drains and before the load, so a sweep
+    # that lands while we are loading makes the store below a no-op.
+    epoch = _namespace_epoch(cache_type)
+    cached = None if _read_is_blocked(cache_type, user_identity) else await get_cache_data(
         hash_key=hash_key
     )
     if isinstance(cached, dict):
@@ -145,7 +208,11 @@ async def cached_response(
     else:
         response = await run_in_threadpool(loader)
 
-    if response is not None:
+    if (
+        response is not None
+        and _namespace_epoch(cache_type) == epoch
+        and not _read_is_blocked(cache_type, user_identity)
+    ):
         await set_cache(
             hash_key=hash_key,
             value=response.model_dump(mode="json"),
@@ -156,6 +223,9 @@ async def cached_response(
 
 async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:
     """Sweep one namespace. Returns the number removed and whether it worked."""
+    # Before the first await, so a load already in flight sees the bump and
+    # refuses to write its (now superseded) value back after this sweep.
+    _note_namespace_changed(cache_type)
     # The mark this sweep settles, read before the first await: anything
     # marked after this point is a debt the sweep cannot have paid.
     if not cache_type_enabled(cache_type):
@@ -226,6 +296,7 @@ async def invalidate_namespaces(cache_types: Sequence[CacheType]) -> int:
         total += deleted
         if not succeeded:
             for queued in remaining:
+                _note_namespace_changed(queued)
                 _mark_pending(queued)
             logger.error(
                 "Cache unreachable; queued %d further namespaces for retry", len(remaining)
@@ -246,16 +317,35 @@ async def invalidate_user_namespaces(
     full sweep per write, which under a join storm would evict the cache
     faster than it could be filled.
     """
-    if not cache_is_available():
+    if not cache_enabled():
         return 0
     total = 0
     for cache_type in cache_types:
         if not cache_type_enabled(cache_type):
             continue
+        # The breaker exists so reads do not each pay a timeout. Skipping the
+        # deletion without a debt would leave the old progress in place until
+        # the entry expired, which is the failure the deletion was meant to
+        # prevent. Record it and retry on the next read.
+        if not cache_is_available():
+            _mark_user_pending(cache_type, user_identity)
+            logger.error(
+                "Cache unreachable; queued %s invalidation for one user",
+                cache_type.value,
+            )
+            continue
+        key = _user_debt_key(cache_type, user_identity)
+        mark = _pending_user_invalidations.get(key)
         try:
             total += await delete_by_pattern(user_scan_pattern(cache_type, user_identity))
         except Exception as cache_error:
+            _mark_user_pending(cache_type, user_identity)
             logger.error(
-                "Could not invalidate %s for one user: %s", cache_type.value, cache_error
+                "Could not invalidate %s for one user (queued for retry): %s",
+                cache_type.value,
+                cache_error,
             )
+            continue
+        if _pending_user_invalidations.get(key) == mark:
+            _pending_user_invalidations.pop(key, None)
     return total

@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.config import get
@@ -23,6 +24,7 @@ from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 from .event_enums import ParticipationType
+from .event_model import Event
 from .event_repository import get_event_by_id
 from .event_response_models import EventParticipantDTO, EventParticipantsResponse
 from .event_participant_repository import (
@@ -63,7 +65,7 @@ def _participant_to_dto(
     )
 
 
-def _get_event_or_404(db, event_id: UUID):
+def _get_event_or_404(db: Session, event_id: UUID) -> Event:
     event = get_event_by_id(db, event_id)
     if not event:
         raise HTTPException(
@@ -116,13 +118,13 @@ def _resolve_participation_type(
     return event_format
 
 
-def _to_group_type(value) -> AuthorGroupType:
+def _to_group_type(value: AuthorGroupType | str) -> AuthorGroupType:
     if hasattr(value, "value"):
         return AuthorGroupType(value.value)
     return AuthorGroupType(value)
 
 
-def _join_parent_group(db, event, user_id: UUID) -> None:
+def _join_parent_group(db: Session, event: Event, user_id: UUID) -> None:
     """Attending an event also makes the user a joiner of the event's group,
     the way joining one of its accumulators does.
 
@@ -131,23 +133,33 @@ def _join_parent_group(db, event, user_id: UUID) -> None:
     followed rather than joined; a private group, which goes through the
     join-request flow; a user serving a ban from the group - are skipped
     rather than turned into an error that would also stop them saying how
-    they attend."""
-    group = get_group_by_id(db=db, group_id=event.group_id)
-    if not group or not is_group_published(group):
-        return
-    if _to_group_type(group.group_type) != AuthorGroupType.COMMUNITY:
-        return
-    # Locked before the ban is read, for the reason lock_group_membership_changes
-    # documents: a removal that is mid-flight holds this lock until its ban has
-    # committed, so the check below cannot miss it.
-    lock_group_membership_changes(db=db, group_id=event.group_id)
-    if is_user_joined_group(db=db, group_id=event.group_id, user_id=user_id):
-        return
-    if not group.is_public:
-        return
-    if get_group_ban_expiry(db=db, group_id=event.group_id, user_id=user_id) is not None:
-        return
-    upsert_group_join(db=db, group_id=event.group_id, user_id=user_id)
+    they attend. A lookup, lock or write that fails is the same: the RSVP is
+    already stored, and the failure must not turn the request into an error
+    or skip the chat-room join that follows."""
+    try:
+        group = get_group_by_id(db=db, group_id=event.group_id)
+        if not group or not is_group_published(group):
+            return
+        if _to_group_type(group.group_type) != AuthorGroupType.COMMUNITY:
+            return
+        # Locked before the ban is read, for the reason lock_group_membership_changes
+        # documents: a removal that is mid-flight holds this lock until its ban has
+        # committed, so the check below cannot miss it.
+        lock_group_membership_changes(db=db, group_id=event.group_id)
+        if is_user_joined_group(db=db, group_id=event.group_id, user_id=user_id):
+            return
+        if not group.is_public:
+            return
+        if get_group_ban_expiry(db=db, group_id=event.group_id, user_id=user_id) is not None:
+            return
+        upsert_group_join(db=db, group_id=event.group_id, user_id=user_id)
+    except Exception:
+        logging.exception(
+            "Failed to add user %s to group %s for event %s",
+            user_id,
+            event.group_id,
+            event.id,
+        )
 
 
 def _join_event_chat_room(db, event_id: UUID, user: Users) -> None:
@@ -177,8 +189,10 @@ def join_event_service(
     Passing `participation_type` on a re-join switches how the user attends,
     so the client can treat join as an upsert instead of joining twice.
 
-    Also puts the user into the event's chat room when one exists, so the room
-    shows up in their inbox before they ever type in it."""
+    Also joins the event's group, when that membership is ours to grant, and
+    puts the user into the event's chat room when one exists, so the room
+    shows up in their inbox before they ever type in it. Same side effects as
+    `update_participation_type_service`."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
@@ -190,6 +204,7 @@ def join_event_service(
             user_id=current_user.id,
             participation_type=resolved,
         )
+        _join_parent_group(db=db, event=event, user_id=current_user.id)
         _join_event_chat_room(db=db, event_id=event_id, user=current_user)
 
 
