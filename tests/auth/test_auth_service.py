@@ -771,35 +771,33 @@ def test_validate_username_user_does_not_exist():
         assert result is True
 
 
-def _assert_random_suffix(handle: str) -> None:
-    random_num, random_suffix = handle.split(".")
-    assert len(random_num) == 6
-    assert random_num.isdigit()
-    assert len(random_suffix) == 4
-    assert random_suffix.isdigit()
+def _assert_random_tail(tail: str) -> None:
+    token, marked_suffix = tail.split("_")
+    assert len(token) == 5
+    assert token == token.lower()
+    assert all(char in "0123456789abcdefghijklmnopqrstuvwxyz" for char in token)
+    assert marked_suffix.startswith("a")
+    assert len(marked_suffix) == 5
+    assert marked_suffix[1:].isdigit()
 
 
 def test_generate_username_uses_both_names():
     username = generate_username(first_name="John", last_name="Doe")
 
     assert username.startswith("webuddhist_john_doe_")
-    _assert_random_suffix(username.removeprefix("webuddhist_john_doe_"))
+    _assert_random_tail(username.removeprefix("webuddhist_john_doe_"))
 
 
 def test_generate_username_truncates_long_names_to_column_limit():
     username = generate_username(first_name="A" * 255, last_name="B" * 255)
 
     assert len(username) == 255
-    body, random_suffix = username.split(".")
-    first, last, random_num = body.removeprefix("webuddhist_").rsplit("_", 2)
+    body, marked_suffix = username.rsplit("_", 1)
+    first, last, token = body.removeprefix("webuddhist_").rsplit("_", 2)
     assert first == "a" * len(first)
     assert last == "b" * len(last)
-    assert len(first) >= 1
-    assert len(last) >= 1
-    assert len(random_num) == 6
-    assert random_num.isdigit()
-    assert len(random_suffix) == 4
-    assert random_suffix.isdigit()
+    assert len(first) + len(last) == 231
+    _assert_random_tail(f"{token}_{marked_suffix}")
 
 
 def test_generate_username_keeps_names_that_fit():
@@ -824,7 +822,7 @@ def test_generate_username_falls_back_when_names_are_missing():
     ):
         username = generate_username(first_name=first_name, last_name=last_name)
         assert username.startswith("webuddhist_user_")
-        _assert_random_suffix(username.removeprefix("webuddhist_user_"))
+        _assert_random_tail(username.removeprefix("webuddhist_user_"))
 
 
 def test_generate_and_validate_username_success():

@@ -346,10 +346,12 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
-# users.username is VARCHAR(255). The fixed wrapper is
-# "webuddhist_" + "_" + "_" + 6 digits + "." + 4 digits = 24 characters,
-# which leaves 231 characters for the two sanitized names.
+# users.username is VARCHAR(255). A name-based handle is
+# "webuddhist_" + first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
+# The fixed wrapper is 24 characters, leaving 231 for the two names.
 _USERNAME_MAX_LENGTH = 255
+_BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 5
 
 
 def _name_part(name: str | None) -> str:
@@ -371,24 +373,37 @@ def _fit_name_parts(first: str, last: str, max_combined: int) -> tuple[str, str]
     return first[:first_budget], last[:last_budget]
 
 
+def _random_base36(width: int = _BASE36_WIDTH) -> str:
+    value = secrets.randbelow(36 ** width)
+    chars = []
+    for _ in range(width):
+        value, remainder = divmod(value, 36)
+        chars.append(_BASE36_ALPHABET[remainder])
+    return "".join(reversed(chars))
+
+
+def _random_marked_suffix() -> str:
+    return "a" + str(secrets.randbelow(10000)).zfill(4)
+
+
 def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate a public username.
 
-    Both names present: webuddhist_{firstname}_{lastname}_{random}.{suffix}
-    Either or both names missing: webuddhist_user_{random}.{suffix}
+    Both names present: webuddhist_{firstname}_{lastname}_{base36}_a{dddd}
+    Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
 
     Names are shortened so the result always fits users.username. The phone
     number is never included. It stays on users.phone_number.
     """
-    random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
-    random_num = str(secrets.randbelow(900000) + 100000)
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
     first = _name_part(first_name)
     last = _name_part(last_name)
     if not first or not last:
-        return f"webuddhist_user_{random_num}.{random_suffix}"
+        return f"webuddhist_user_{token}_{marked_suffix}"
 
-    tail = f"_{random_num}.{random_suffix}"
+    tail = f"_{token}_{marked_suffix}"
     name_budget = _USERNAME_MAX_LENGTH - len("webuddhist_") - len("_") - len(tail)
     first, last = _fit_name_parts(first, last, name_budget)
     return f"webuddhist_{first}_{last}{tail}"
