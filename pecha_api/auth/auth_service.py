@@ -347,8 +347,8 @@ def validate_username(username: str) -> bool:
 
 
 # users.username is VARCHAR(255). A name-based handle is
-# "webuddhist_" + first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
-# The fixed wrapper is 24 characters, leaving 231 for the two names.
+# first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
+# The fixed wrapper is 13 characters, leaving 242 for the two names.
 _USERNAME_MAX_LENGTH = 255
 _BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _BASE36_WIDTH = 5
@@ -390,7 +390,7 @@ def generate_username(first_name: str | None = None, last_name: str | None = Non
     """
     Generate a public username.
 
-    Both names present: webuddhist_{firstname}_{lastname}_{base36}_a{dddd}
+    Both names present: {firstname}_{lastname}_{base36}_a{dddd}
     Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
 
     Names are shortened so the result always fits users.username. The phone
@@ -404,9 +404,9 @@ def generate_username(first_name: str | None = None, last_name: str | None = Non
         return f"webuddhist_user_{token}_{marked_suffix}"
 
     tail = f"_{token}_{marked_suffix}"
-    name_budget = _USERNAME_MAX_LENGTH - len("webuddhist_") - len("_") - len(tail)
+    name_budget = _USERNAME_MAX_LENGTH - len("_") - len(tail)
     first, last = _fit_name_parts(first, last, name_budget)
-    return f"webuddhist_{first}_{last}{tail}"
+    return f"{first}_{last}{tail}"
 
 
 def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:

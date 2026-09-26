@@ -784,8 +784,9 @@ def _assert_random_tail(tail: str) -> None:
 def test_generate_username_uses_both_names():
     username = generate_username(first_name="John", last_name="Doe")
 
-    assert username.startswith("webuddhist_john_doe_")
-    _assert_random_tail(username.removeprefix("webuddhist_john_doe_"))
+    assert username.startswith("john_doe_")
+    assert not username.startswith("webuddhist_")
+    _assert_random_tail(username.removeprefix("john_doe_"))
 
 
 def test_generate_username_truncates_long_names_to_column_limit():
@@ -793,10 +794,10 @@ def test_generate_username_truncates_long_names_to_column_limit():
 
     assert len(username) == 255
     body, marked_suffix = username.rsplit("_", 1)
-    first, last, token = body.removeprefix("webuddhist_").rsplit("_", 2)
+    first, last, token = body.rsplit("_", 2)
     assert first == "a" * len(first)
     assert last == "b" * len(last)
-    assert len(first) + len(last) == 231
+    assert len(first) + len(last) == 242
     _assert_random_tail(f"{token}_{marked_suffix}")
 
 
@@ -807,7 +808,7 @@ def test_generate_username_keeps_names_that_fit():
     username = generate_username(first_name=first_name, last_name=last_name)
 
     assert len(username) < 255
-    assert username.startswith(f"webuddhist_{first_name}_{last_name}_")
+    assert username.startswith(f"{first_name}_{last_name}_")
 
 
 def test_generate_username_falls_back_when_names_are_missing():
@@ -832,7 +833,7 @@ def test_generate_and_validate_username_success():
         username = generate_and_validate_username(first_name="John", last_name="Doe")
 
         mock_validate_username.assert_called()
-        assert username.startswith("webuddhist_john_doe_")
+        assert username.startswith("john_doe_")
 
 
 def test_generate_and_validate_username_falls_back_without_both_names():
@@ -852,7 +853,7 @@ def test_generate_and_validate_username_retry():
         username = generate_and_validate_username(first_name="John", last_name="Doe")
 
         assert mock_validate_username.call_count == 2
-        assert username.startswith("webuddhist_john_doe_")
+        assert username.startswith("john_doe_")
 
 
 def test_validate_username_returns_true_on_404():
