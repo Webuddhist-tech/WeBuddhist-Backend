@@ -12,6 +12,7 @@ from pecha_api.accumulator.accumulator_enums import AccumulatorType
 from pecha_api.accumulator.accumulator_response_models import (
     AccumulatorMetadataDTO,
     CreatePresetAccumulatorRequest,
+    UpdateAccumulatorRequest,
     UpdatePresetAccumulatorRequest,
     PublicAccumulatorDTO,
     PublicAccumulatorsResponse,
@@ -542,6 +543,38 @@ class TestCmsPresetService:
                     AccumulatorMetadataDTO(language=LanguageCode.EN, name="   "),
                 ]
             )
+
+    def test_requests_reject_a_blank_text_id(self):
+        """A non-null text_id is what marks a preset a recitation and drops it
+        from the default public catalogue, so a blank one would hide a preset
+        behind a text id nothing can resolve."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        for blank in ("", "   "):
+            with pytest.raises(ValidationError):
+                CreatePresetAccumulatorRequest(text_id=blank, metadata=metadata)
+            with pytest.raises(ValidationError):
+                UpdatePresetAccumulatorRequest(text_id=blank)
+            with pytest.raises(ValidationError):
+                UpdateAccumulatorRequest(text_id=blank)
+
+    def test_requests_reject_a_text_id_past_the_column_width(self):
+        """text_id lands in a String(255), so an overlong value has to be a 422
+        rather than a database error on save."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        too_long = "t" * 256
+        with pytest.raises(ValidationError):
+            CreatePresetAccumulatorRequest(text_id=too_long, metadata=metadata)
+        with pytest.raises(ValidationError):
+            UpdatePresetAccumulatorRequest(text_id=too_long)
+        with pytest.raises(ValidationError):
+            UpdateAccumulatorRequest(text_id=too_long)
+
+        at_the_limit = "t" * 255
+        assert UpdatePresetAccumulatorRequest(text_id=at_the_limit).text_id == at_the_limit
+
+    def test_text_id_is_stripped_and_stays_optional(self):
+        assert UpdatePresetAccumulatorRequest(text_id="  abc  ").text_id == "abc"
+        assert UpdatePresetAccumulatorRequest().text_id is None
 
     def test_update_request_allows_none_metadata(self):
         request = UpdatePresetAccumulatorRequest(target_count=108)

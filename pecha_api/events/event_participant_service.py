@@ -160,6 +160,16 @@ def _join_parent_group(db: Session, event: Event, user_id: UUID) -> None:
             event.group_id,
             event.id,
         )
+        # The session is shared with the chat-room join that follows, and a
+        # failed database call leaves the transaction unusable: without this,
+        # swallowing the error here would make that join raise
+        # PendingRollbackError and silently drop the user's chat room while the
+        # endpoint still reported success. The RSVP is already committed, so
+        # there is nothing of the user's intent left to lose here.
+        try:
+            db.rollback()
+        except Exception:
+            logging.exception("Failed to roll back after group join error")
 
 
 def _join_event_chat_room(db, event_id: UUID, user: Users) -> None:

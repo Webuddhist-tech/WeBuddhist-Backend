@@ -436,3 +436,41 @@ def test_group_join_failure_does_not_fail_the_rsvp_or_skip_chat():
 
     mock_upsert.assert_called_once()
     mock_chat.assert_called_once()
+
+
+# --- a failed parent-group join must not poison the session ---
+
+def test_group_join_failure_rolls_back_so_the_chat_join_still_runs():
+    """The group join is best effort, but it shares the session with the chat
+    join that follows it. A failed database call leaves the transaction
+    unusable, so swallowing the error without a rollback would make the chat
+    join raise PendingRollbackError while the endpoint still reported success.
+    """
+    event = _event_obj("hybrid")
+    user = _user()
+    session = MagicMock()
+
+    with patch(f"{_SVC}.validate_and_extract_user_details", return_value=user),          patch(f"{_SVC}.SessionLocal") as mock_session_local,          patch(f"{_SVC}.get_event_by_id", return_value=event),          patch(f"{_SVC}.upsert_event_participant"),          patch(f"{_SVC}.get_group_by_id", return_value=_group_obj()),          patch(f"{_SVC}.is_group_published", return_value=True),          patch(f"{_SVC}.lock_group_membership_changes"),          patch(f"{_SVC}.is_user_joined_group", return_value=False),          patch(f"{_SVC}.get_group_ban_expiry", return_value=None),          patch(f"{_SVC}.upsert_group_join", side_effect=RuntimeError("deadlock")),          patch(f"{_SVC}._join_event_chat_room") as mock_chat_join:
+        mock_session_local.return_value.__enter__.return_value = session
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    session.rollback.assert_called_once()
+    mock_chat_join.assert_called_once()
+
+
+def test_group_join_failure_does_not_fail_the_request():
+    """The RSVP is already committed, so the caller gets a success."""
+    event = _event_obj("hybrid")
+    with patch(f"{_SVC}.validate_and_extract_user_details", return_value=_user()),          patch(f"{_SVC}.SessionLocal"),          patch(f"{_SVC}.get_event_by_id", return_value=event),          patch(f"{_SVC}.upsert_event_participant") as mock_upsert,          patch(f"{_SVC}.get_group_by_id", side_effect=RuntimeError("gone")),          patch(f"{_SVC}._join_event_chat_room"):
+        update_participation_type_service(
+            token="tok",
+            event_id=event.id,
+            participation_type=ParticipationType.ONLINE,
+        )
+
+    mock_upsert.assert_called_once()
+

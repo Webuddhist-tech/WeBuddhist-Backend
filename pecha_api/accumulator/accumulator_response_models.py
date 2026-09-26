@@ -1,10 +1,22 @@
-from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+from typing import Annotated, Optional, List
 from datetime import datetime
 from uuid import UUID
 from .accumulator_enums import AccumulatorType
 from ..plans.plans_enums import LanguageCode
 from ..plans.media.media_response_models import ImageUrlModel
+
+# An external (OpenPecha edition) text id as a request may supply it.
+#
+# Bounded rather than free-form for two reasons. It lands in a String(255)
+# column, so an overlong value has to be a 422 rather than a database error on
+# save. And a non-null `text_id` is what marks a preset a recitation - it is
+# excluded from the default public catalogue - so a blank string would hide a
+# preset behind a text id nothing can resolve. Whitespace is stripped before
+# the length check, the way metadata names are treated below.
+TextId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+]
 
 
 class AccumulatorMetadataDTO(BaseModel):
@@ -17,7 +29,7 @@ class AccumulatorMetadataDTO(BaseModel):
 class CreatePresetAccumulatorRequest(BaseModel):
     """CMS request to create a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[str] = Field(
+    text_id: Optional[TextId] = Field(
         None,
         description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
     )
@@ -38,7 +50,7 @@ class CreatePresetAccumulatorRequest(BaseModel):
 class UpdatePresetAccumulatorRequest(BaseModel):
     """CMS request to update a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[str] = Field(
+    text_id: Optional[TextId] = Field(
         None,
         description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
     )
@@ -150,7 +162,7 @@ class CreateAccumulatorRequest(BaseModel):
 class UpdateAccumulatorRequest(BaseModel):
     target_count: Optional[int] = None
     current_count: Optional[int] = Field(None, ge=0, description="New absolute current count")
-    text_id: Optional[str] = Field(
+    text_id: Optional[TextId] = Field(
         None,
         description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
     )

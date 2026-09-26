@@ -1,3 +1,4 @@
+from contextlib import closing
 from http import HTTPMethod
 from io import BytesIO
 
@@ -95,26 +96,32 @@ def generate_presigned_access_url(bucket_name: str, s3_key: str):
 def download_bytes(bucket_name: str, s3_key: str, max_bytes: int | None = None) -> bytes:
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=s3_key, ExpectedBucketOwner=get("AWS_BUCKET_OWNER"))
-        if max_bytes is not None:
-            # Checked before the read, so an object larger than the caller can
-            # afford costs a HEAD-sized response rather than being pulled into
-            # memory in full and then rejected.
-            length = response.get("ContentLength")
-            if length is not None and length > max_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Object is larger than the caller allows.",
-                )
-            # One byte past the limit, so a missing or lying ContentLength is
-            # still caught rather than trusted.
-            body = response["Body"].read(max_bytes + 1)
-            if len(body) > max_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail="Object is larger than the caller allows.",
-                )
-            return body
-        return response["Body"].read()
+        # `Body` is a streaming socket, not bytes: both size rejections below
+        # leave it unread, and a partial read leaves it half-consumed, so
+        # neither returns its connection to the pool on its own. Closing is the
+        # only thing that does, and the rejected paths are the ones a public
+        # preview endpoint can be made to take over and over.
+        with closing(response["Body"]) as body_stream:
+            if max_bytes is not None:
+                # Checked before the read, so an object larger than the caller
+                # can afford costs a HEAD-sized response rather than being
+                # pulled into memory in full and then rejected.
+                length = response.get("ContentLength")
+                if length is not None and length > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Object is larger than the caller allows.",
+                    )
+                # One byte past the limit, so a missing or lying ContentLength
+                # is still caught rather than trusted.
+                body = body_stream.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Object is larger than the caller allows.",
+                    )
+                return body
+            return body_stream.read()
     except ClientError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to download file from S3.")
 

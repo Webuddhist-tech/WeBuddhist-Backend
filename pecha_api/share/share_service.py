@@ -3,6 +3,7 @@ import io
 import logging
 from collections import OrderedDict
 import re
+from threading import Lock
 from functools import partial
 from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -42,6 +43,12 @@ JPEG_MEDIA_TYPE = "image/jpeg"
 # Event photos, keyed by S3 key, most-recently-used last. A share card is
 # the same for every viewer, so this holds nothing per-user.
 _event_photo_cache: "OrderedDict[str, bytes]" = OrderedDict()
+# `_load_event_photo_bytes` runs in a worker thread, so two concurrent
+# /share/image requests reach the cache at once. The individual OrderedDict
+# operations are atomic but the sequences below are not: a reader that has just
+# found a key can have it evicted by another thread before it calls
+# move_to_end, which then raises KeyError and turns an image into a 500.
+_event_photo_cache_lock = Lock()
 # (title, description, language, image_key) as the share card needs it. The
 # image key is the event photo's S3 key, or None when the event has no photo.
 EventShareMetadata = tuple[str, Optional[str], Optional[str], Optional[str]]
@@ -287,12 +294,18 @@ def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
     if not image_key:
         return None
 
-    cached = _event_photo_cache.get(image_key)
-    if cached is not None:
-        # Refreshed to most-recently-used.
-        _event_photo_cache.move_to_end(image_key)
-        return cached
+    with _event_photo_cache_lock:
+        cached = _event_photo_cache.get(image_key)
+        if cached is not None:
+            # Refreshed to most-recently-used, under the lock so the key cannot
+            # be evicted between finding it and moving it.
+            _event_photo_cache.move_to_end(image_key)
+            return cached
 
+    # Downloaded outside the lock: it is a network round trip, and holding the
+    # lock across it would serialise every share render behind one S3 fetch.
+    # Two threads missing on the same key both download, which costs one extra
+    # fetch and stores the same bytes twice.
     try:
         photo_bytes = download_bytes(
             bucket_name=get("AWS_BUCKET_NAME"),
@@ -305,9 +318,10 @@ def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
 
     limit = _event_photo_cache_limit()
     if limit:
-        _event_photo_cache[image_key] = photo_bytes
-        while len(_event_photo_cache) > limit:
-            _event_photo_cache.popitem(last=False)
+        with _event_photo_cache_lock:
+            _event_photo_cache[image_key] = photo_bytes
+            while len(_event_photo_cache) > limit:
+                _event_photo_cache.popitem(last=False)
     return photo_bytes
 
 
