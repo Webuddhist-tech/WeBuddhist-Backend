@@ -13,7 +13,18 @@ failed one.
 import asyncio
 import itertools
 import logging
-from typing import Callable, Dict, Optional, Sequence, Tuple, Type, TypeVar
+from contextlib import contextmanager
+from typing import (
+    Callable,
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+)
 
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -72,9 +83,26 @@ _pending_user_invalidations: Dict[Tuple[CacheType, str], int] = {}
 # cannot tell a reader that its in-flight load has been superseded. Without
 # this, a read that missed and went to the database before the user's own
 # write deleted their entries can finish afterwards and store the progress
-# that write just replaced - which is then served until it expires. Keyed like
-# the debts above, and per-process like them.
-_user_epochs: Dict[Tuple[CacheType, str], int] = {}
+# that write just replaced - which is then served until it expires.
+#
+# Held as the in-flight loads themselves rather than as a counter per user.
+# A counter would have to be kept for every user who ever wrote, since any
+# later load might still compare against it, and nothing can say when the last
+# one has been and gone; on a long-lived instance that is a slow leak keyed by
+# user. The only reader of that number is a load that is already running, so
+# the load registers itself and a deletion marks what it finds - bounded by how
+# many loads are in flight, and emptied as they finish. Per-process, like the
+# debts above.
+_inflight_user_loads: Dict[Tuple[CacheType, str], Set["_UserLoad"]] = {}
+
+
+class _UserLoad:
+    """One in-flight load, flagged if a deletion for its user beat it home."""
+
+    __slots__ = ("superseded",)
+
+    def __init__(self) -> None:
+        self.superseded = False
 
 
 def _user_debt_key(
@@ -92,12 +120,33 @@ def _namespace_epoch(cache_type: CacheType) -> int:
 
 
 def _note_user_changed(cache_type: CacheType, user_identity: Optional[str]) -> None:
+    for load in _inflight_user_loads.get(_user_debt_key(cache_type, user_identity), ()):
+        load.superseded = True
+
+
+@contextmanager
+def _track_user_load(
+    cache_type: CacheType, user_identity: Optional[str]
+) -> Iterator[_UserLoad]:
+    """Register this load so a deletion for the same user can supersede it.
+
+    The registration is dropped on the way out, including when the cache hit
+    returns early, so nothing outlives the load it speaks for.
+    """
     key = _user_debt_key(cache_type, user_identity)
-    _user_epochs[key] = _user_epochs.get(key, 0) + 1
-
-
-def _user_epoch(cache_type: CacheType, user_identity: Optional[str]) -> int:
-    return _user_epochs.get(_user_debt_key(cache_type, user_identity), 0)
+    load = _UserLoad()
+    _inflight_user_loads.setdefault(key, set()).add(load)
+    try:
+        yield load
+    finally:
+        loads = _inflight_user_loads.get(key)
+        if loads is not None:
+            loads.discard(load)
+            # No await between the discard and the pop, so a load starting on
+            # this key cannot slip in between and have its registration thrown
+            # away with the empty set.
+            if not loads:
+                _inflight_user_loads.pop(key, None)
 
 
 def _mark_user_pending(cache_type: CacheType, user_identity: Optional[str]) -> None:
@@ -211,42 +260,42 @@ async def cached_response(
     await _drain_pending_user_invalidations()
     # A namespace or user we still owe an eviction for is not safe to read:
     # the entry sitting there may be the one a write already replaced.
-    # The epochs are taken after the drains and before the load, so a sweep -
-    # of the whole namespace or of just this user - that lands while we are
-    # loading makes the store below a no-op.
+    # The namespace epoch is taken, and this load registered, after the drains
+    # and before the load, so a sweep - of the whole namespace or of just this
+    # user - that lands while we are loading makes the store below a no-op.
     epoch = _namespace_epoch(cache_type)
-    user_epoch = _user_epoch(cache_type, user_identity)
-    cached = None if _read_is_blocked(cache_type, user_identity) else await get_cache_data(
-        hash_key=hash_key
-    )
-    if isinstance(cached, dict):
-        try:
-            return model(**cached)
-        except ValidationError:
-            # Stored by an older deploy whose DTO had a different shape. Treat
-            # it as a miss and let the fresh value overwrite it, rather than
-            # failing a request over a stale cache entry.
-            logger.warning(
-                "Discarding unparseable cache entry for %s", cache_type.value
-            )
-
-    if asyncio.iscoroutinefunction(loader):
-        response = await loader()
-    else:
-        response = await run_in_threadpool(loader)
-
-    if (
-        response is not None
-        and _namespace_epoch(cache_type) == epoch
-        and _user_epoch(cache_type, user_identity) == user_epoch
-        and not _read_is_blocked(cache_type, user_identity)
-    ):
-        await set_cache(
-            hash_key=hash_key,
-            value=response.model_dump(mode="json"),
-            cache_time_out=timeout,
+    with _track_user_load(cache_type, user_identity) as user_load:
+        cached = None if _read_is_blocked(cache_type, user_identity) else await get_cache_data(
+            hash_key=hash_key
         )
-    return response
+        if isinstance(cached, dict):
+            try:
+                return model(**cached)
+            except ValidationError:
+                # Stored by an older deploy whose DTO had a different shape.
+                # Treat it as a miss and let the fresh value overwrite it,
+                # rather than failing a request over a stale cache entry.
+                logger.warning(
+                    "Discarding unparseable cache entry for %s", cache_type.value
+                )
+
+        if asyncio.iscoroutinefunction(loader):
+            response = await loader()
+        else:
+            response = await run_in_threadpool(loader)
+
+        if (
+            response is not None
+            and _namespace_epoch(cache_type) == epoch
+            and not user_load.superseded
+            and not _read_is_blocked(cache_type, user_identity)
+        ):
+            await set_cache(
+                hash_key=hash_key,
+                value=response.model_dump(mode="json"),
+                cache_time_out=timeout,
+            )
+        return response
 
 
 async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:

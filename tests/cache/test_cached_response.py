@@ -24,12 +24,12 @@ def clean_pending():
     cached_response_module._pending_invalidations.clear()
     cached_response_module._pending_user_invalidations.clear()
     cached_response_module._namespace_epochs.clear()
-    cached_response_module._user_epochs.clear()
+    cached_response_module._inflight_user_loads.clear()
     yield
     cached_response_module._pending_invalidations.clear()
     cached_response_module._pending_user_invalidations.clear()
     cached_response_module._namespace_epochs.clear()
-    cached_response_module._user_epochs.clear()
+    cached_response_module._inflight_user_loads.clear()
 
 
 def _loader(value="fresh", calls=None):
@@ -381,6 +381,29 @@ async def test_a_load_that_started_before_a_user_deletion_is_not_stored(clean_pe
 
     assert result.value == "day-3"
     mock_set.assert_not_awaited()
+    # The load has finished, so nothing about it is still being remembered.
+    assert cached_response_module._inflight_user_loads == {}
+
+
+@pytest.mark.asyncio
+async def test_a_users_write_leaves_nothing_behind_once_its_readers_are_done(
+    clean_pending,
+):
+    """The per-user bookkeeping lives as long as the loads it speaks for, not as
+    long as the process: an instance that has served a million writers must not
+    still be holding a row for each of them."""
+    with patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value=None),          patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock),          patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True),          patch("pecha_api.cache.cached_response.cache_is_available", return_value=True),          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=1):
+        for index in range(50):
+            identity = f"iss|user-{index}"
+            await invalidate_user_namespaces([CacheType.USER_PLAN_PROGRESS], identity)
+            await cached_response(
+                cache_type=CacheType.USER_PLAN_PROGRESS, parts=["plan"], model=Sample,
+                loader=_loader(f"day-{index}"), timeout=60, user_identity=identity,
+            )
+
+    assert cached_response_module._inflight_user_loads == {}
 
 
 @pytest.mark.asyncio
