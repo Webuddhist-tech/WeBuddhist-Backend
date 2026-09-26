@@ -89,7 +89,10 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
 
     new_user = Users(**create_user_request.model_dump(exclude_unset=True))
     new_user.is_admin = False
-    new_user.username = generate_and_validate_username()
+    new_user.username = generate_and_validate_username(
+        first_name=create_user_request.firstname,
+        last_name=create_user_request.lastname,
+    )
 
     if registration_source == RegistrationSource.PHONE:
         _apply_phone_registration(create_user_request)
@@ -217,7 +220,10 @@ def exchange_phone_token(request: PhoneExchangeRequest) -> PhoneExchangeResponse
         user = Users(
             firstname=first_name,
             lastname=last_name,
-            username=generate_and_validate_username(),
+            username=generate_and_validate_username(
+                first_name=first_name,
+                last_name=last_name,
+            ),
             email=None,
             phone_number=sms_identity.phone_number,
             password=None,
@@ -340,27 +346,37 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
-def generate_username() -> str:
-    """
-    Generate a public username that does not encode private account data.
+def _name_part(name: str | None) -> str:
+    if not name:
+        return ""
+    return "".join(char for char in name.strip().lower() if char.isalnum())
 
-    The phone number stays on users.phone_number. Deriving this handle from the
-    phone would let anyone who knows a number recompute the username and look
-    the account up. Uniqueness comes from a cryptographically random value plus
-    a database check, not from the phone.
+
+def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
+    """
+    Generate a public username.
+
+    Both names present: webuddhist_{firstname}_{lastname}_{random}.{suffix}
+    Either or both names missing: webuddhist_user_{random}.{suffix}
+
+    The phone number is never included. It stays on users.phone_number.
     """
     random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
     random_num = str(secrets.randbelow(900000) + 100000)
+    first = _name_part(first_name)
+    last = _name_part(last_name)
+    if first and last:
+        return f"webuddhist_{first}_{last}_{random_num}.{random_suffix}"
     return f"webuddhist_user_{random_num}.{random_suffix}"
 
 
-def generate_and_validate_username() -> str:
+def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate and validate a unique username.
     Keeps generating new usernames until a unique one is found.
     """
     while True:
-        username = generate_username()
+        username = generate_username(first_name=first_name, last_name=last_name)
         if validate_username(username=username):
             return username
 
