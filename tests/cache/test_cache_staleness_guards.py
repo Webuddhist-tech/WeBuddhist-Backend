@@ -73,6 +73,50 @@ async def test_public_feed_key_changes_when_group_membership_changes():
     assert seen[0] != seen[1]
 
 
+def test_anonymous_public_feed_key_tracks_the_public_group_set():
+    """Making a public group private must change the anonymous feed key.
+    A constant scope would keep serving the group's posts until expiry."""
+    from pecha_api.group_posts import posts_cache_service
+
+    first, second = uuid4(), uuid4()
+    scopes = iter([[first, second], [first]])
+
+    def _public_ids(db):
+        return next(scopes)
+
+    with patch.object(posts_cache_service, "SessionLocal"), \
+         patch.object(posts_cache_service, "_resolve_user_id", return_value=None), \
+         patch.object(posts_cache_service, "get_public_group_ids", side_effect=_public_ids):
+        before = posts_cache_service._group_scope_fingerprint(None, False)
+        after = posts_cache_service._group_scope_fingerprint(None, False)
+
+    assert before != after
+
+
+def test_event_list_key_tracks_group_access():
+    """Removal from a private group changes the listing key, so the old
+    entry — still holding that group's events — is never read again."""
+    from pecha_api.events import events_cache_service
+
+    user_id = uuid4()
+    kept, removed = uuid4(), uuid4()
+    scopes = iter([[kept, removed], [kept]])
+
+    def _listing(**kwargs):
+        return next(scopes), set()
+
+    with patch.object(events_cache_service, "SessionLocal"), \
+         patch.object(events_cache_service, "validate_and_extract_user_details",
+                      return_value=MagicMock(id=user_id)), \
+         patch.object(events_cache_service, "resolve_event_listing_group_ids",
+                      side_effect=_listing):
+        before = events_cache_service._event_access_fingerprint("token", False, None)
+        after = events_cache_service._event_access_fingerprint("token", False, None)
+
+    assert before != after
+    assert events_cache_service._event_access_fingerprint(None, False, None) is None
+
+
 def test_plan_daily_key_rolls_over_at_midnight():
     """An entry built before midnight for an unspecified date must not serve
     yesterday's reading afterwards."""

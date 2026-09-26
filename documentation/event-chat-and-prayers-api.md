@@ -167,6 +167,23 @@ payload, so the tap can deep-link to the request itself.
   `PRAYER_NOTIFICATION_COALESCE_SECONDS` (default 900) raise one notification,
   whose copy reads from the live count — "12 people are praying for your
   request" — rather than one push per prayer.
+
+Posting a prayer request is the other notification, and a separate rule. It is
+an ordinary `CHAT_MESSAGE` with `message_type: "PRAYER"`, so it goes to every
+member of the room.
+
+- **One push per room per interval:**
+  `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140, nineteen
+  minutes). The first request in a quiet room sends immediately; requests
+  posted inside the interval are held, and the next push that does go out ends
+  with "+3 other prayer requests". `0` sends a push for every request.
+- A held request is in the room the instant it is posted, with the usual
+  realtime update — only the push is gated. Its row is marked `SUPPRESSED`, so
+  reconcile leaves it alone.
+- The interval is per room, not per member: a busy sangha is what makes phones
+  buzz, and a member of three sanghas should not have one of them silence the
+  other two.
+- Ordinary `TEXT` chat is not gated.
 - Users can mute it globally or per group, like `CHAT_MESSAGE`
   (`PRAYER_RECEIVED` is a group-scoped notification type) — see
   [notification-preferences-api.md](./notification-preferences-api.md).

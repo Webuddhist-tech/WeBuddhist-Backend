@@ -633,7 +633,7 @@ def test_get_user_plan_day_details_success(authenticated_client):
     }
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_cached",
+        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_service",
         new_callable=AsyncMock,
         return_value=payload,
     ) as mock_service:
@@ -659,7 +659,7 @@ def test_get_user_plan_day_details_error_propagates(authenticated_client):
     day_number = 2
 
     with patch(
-        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_cached"
+        "pecha_api.plans.users.plan_users_views.get_user_plan_day_details_service"
     ) as mock_service:
         mock_service.side_effect = HTTPException(
             status_code=404,

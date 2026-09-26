@@ -35,9 +35,54 @@ def note_cache_failure() -> None:
     _trip_circuit()
 
 
+def cache_enabled() -> bool:
+    """The configured master switch, CACHE_ENABLED.
+
+    Read per call rather than at import so a test - or a future admin toggle -
+    can flip it without a restart. A value that is not recognisably a boolean
+    leaves the cache on and says so in the log: this module's rule is that
+    the cache never fails a request, and refusing to serve one over a typo in
+    a kill switch would break exactly that.
+    """
+    try:
+        return config.get_bool("CACHE_ENABLED")
+    except ValueError as config_error:
+        logging.error("%s - leaving the cache enabled", config_error)
+        return True
+
+
+def disabled_cache_types() -> frozenset:
+    """CacheType values switched off individually, from CACHE_DISABLED_TYPES.
+
+    Unknown names are ignored rather than raising, for the same reason as
+    above; they are logged so a misspelt namespace does not look like a
+    namespace that quietly refused to turn off.
+    """
+    raw = config.get("CACHE_DISABLED_TYPES")
+    if not raw.strip():
+        return frozenset()
+    known = {cache_type.value: cache_type for cache_type in CacheType}
+    disabled = set()
+    for name in raw.split(","):
+        name = name.strip().lower()
+        if not name:
+            continue
+        if name in known:
+            disabled.add(known[name])
+        else:
+            logging.warning("CACHE_DISABLED_TYPES names unknown cache type %r", name)
+    return frozenset(disabled)
+
+
+def cache_type_enabled(cache_type: CacheType) -> bool:
+    """False when the master switch is off or this namespace is listed off."""
+    return cache_enabled() and cache_type not in disabled_cache_types()
+
+
 def cache_is_available() -> bool:
-    """False while the breaker is open; callers skip the cache entirely."""
-    return not _circuit_is_open()
+    """False while the cache is switched off or the breaker is open; callers
+    skip the cache entirely."""
+    return cache_enabled() and not _circuit_is_open()
 
 
 def reset_circuit() -> None:
@@ -106,7 +151,7 @@ def _timeout_for(value: str, requested: int) -> int:
 
 async def set_cache(hash_key: str, value: Any, cache_time_out: int) -> bool:
     #Set value in cache with type-specific timeout
-    if _circuit_is_open():
+    if not cache_is_available():
         return False
     try:
         client = get_client()
@@ -128,7 +173,7 @@ async def set_cache(hash_key: str, value: Any, cache_time_out: int) -> bool:
 
 async def get_cache_data(hash_key: str) -> Optional[Any]:
     """Get value from cache"""
-    if _circuit_is_open():
+    if not cache_is_available():
         return None
     try:
         client = get_client()
@@ -149,7 +194,7 @@ async def get_cache_data(hash_key: str) -> Optional[Any]:
 
 async def delete_cache(hash_key: str) -> bool:
     """Delete key from cache"""
-    if _circuit_is_open():
+    if not cache_is_available():
         return False
     try:
         client = get_client()
@@ -163,6 +208,8 @@ async def delete_cache(hash_key: str) -> bool:
 
 async def exists_in_cache(hash_key: str) -> bool:
     """Check if key exists in cache"""
+    if not cache_enabled():
+        return False
     try:
         client = get_client()
         full_key = _build_key(hash_key)
@@ -172,6 +219,8 @@ async def exists_in_cache(hash_key: str) -> bool:
         return False
 
 async def clear_cache(hash_key: str = None):
+    if not cache_enabled():
+        return False
     try:
         client = get_client()
         full_key = _build_key(hash_key)
@@ -183,6 +232,8 @@ async def clear_cache(hash_key: str = None):
 
 async def update_cache(hash_key: str, value: Any, cache_time_out: int) -> bool:
     """Update existing cache entry with new value, resetting TTL to type-specific timeout"""
+    if not cache_enabled():
+        return False
     try:
         client = get_client()
         full_key = _build_key(hash_key)

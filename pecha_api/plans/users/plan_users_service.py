@@ -1,15 +1,14 @@
-import asyncio
-from typing import Optional
+from typing import NamedTuple, Optional
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from typing import List
 from typing import Set
 from typing import Dict
 from pecha_api.config import get
-from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content
 
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_models import PlanSubTask
 
@@ -686,27 +685,51 @@ async def get_user_plan_days_completion_status_service(token: str, plan_id: UUID
             start_date=plan.start_date
         )
     
-async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+class _DayReadState(NamedTuple):
+    """What one worker thread reads for a day, handed back to the loop."""
+
+    plan_item: object
+    completed_task_ids: List[UUID]
+    completed_subtask_ids: Set[UUID]
+    audio_url: Optional[str]
+    audio_duration_ms: Optional[int]
+    thumbnail_url: Optional[str]
+    shareable_image_url: Optional[str]
+    references_by_id: Dict[UUID, object]
+    day_is_completed: bool
+
+
+def _load_user_plan_day(token: str, plan_id: UUID, day_number: int) -> _DayReadState:
+    """Every read this response needs, in one worker thread.
+
+    This is all blocking: a token check, then a handful of queries. On the
+    event loop it stalls every other request on the instance for as long as it
+    runs, which is why it is out here rather than inline in the coroutine - the
+    public day endpoint loads itself the same way, for the same reason.
+
+    The token is checked before the session is opened, not inside it. Verifying
+    it can mean an outbound fetch of a key set, and a connection held across
+    that is a connection pinned on an external service.
+
+    The connection goes back before the openpecha fan-out runs. Holding it
+    across that await pinned a connection per in-flight reader for however long
+    an external service took to answer - which is what emptied the pool and
+    left unrelated endpoints timing out on checkout.
+
+    The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
+    eager-loads audio, shareable_images, videos, tasks, sub_tasks and
+    timestamps, and nothing is committed here, so no attribute is expired and
+    nothing lazy-loads once these objects detach. Adding a lazy relationship to
+    this response means loading it in here too.
+    """
     from pecha_api.plans.audio.dto_helpers import (
         build_plan_day_audio_fields,
         build_plan_day_shareable_image_fields,
     )
-    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
     from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 
     current_user = validate_and_extract_user_details(token=token)
 
-    # Every read this response needs happens in the block below, and the
-    # connection goes back before the openpecha fan-out runs. Holding it across
-    # that await pinned a connection per in-flight reader for however long an
-    # external service took to answer - which is what emptied the pool and left
-    # unrelated endpoints timing out on checkout.
-    #
-    # The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
-    # eager-loads audio, shareable_images, videos, tasks, sub_tasks and
-    # timestamps, and nothing is committed here, so no attribute is expired and
-    # nothing lazy-loads once these objects detach. Adding a lazy relationship
-    # to this response means loading it inside the block too.
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
         plan = get_plan_by_id(db=db, plan_id=plan_id)
@@ -748,25 +771,55 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
             db=db, user_id=current_user.id, day_id=plan_item.id
         )
 
-    tasks_sub_tasks = await asyncio.gather(
-        *[
-            _get_user_sub_tasks_dto_bulk(
-                sub_tasks=task.sub_tasks,
-                completed_subtask_ids=completed_subtask_ids,
-                references_by_id=references_by_id,
-            )
-            for task in plan_item.tasks
-        ]
-    )
-
-    return UserPlanDayDetailsResponse(
-        id=plan_item.id,
-        day_number=plan_item.day_number,
-        is_completed=day_is_completed,
+    return _DayReadState(
+        plan_item=plan_item,
+        completed_task_ids=completed_task_ids,
+        completed_subtask_ids=completed_subtask_ids,
         audio_url=audio_url,
         audio_duration_ms=audio_duration_ms,
         thumbnail_url=thumbnail_url,
         shareable_image_url=shareable_image_url,
+        references_by_id=references_by_id,
+        day_is_completed=day_is_completed,
+    )
+
+
+async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    """A reader's own view of one plan day.
+
+    One hop to a worker thread and nothing else. Every value in the response
+    now comes from our database - see `_get_user_sub_tasks_dto_bulk` for why
+    the segment text does too - so there is no remote call left to overlap and
+    nothing to gain from doing any of it on the event loop.
+    """
+    return await run_in_threadpool(_build_user_plan_day, token, plan_id, day_number)
+
+
+def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
+
+    state = _load_user_plan_day(token, plan_id, day_number)
+    plan_item = state.plan_item
+    completed_task_ids = state.completed_task_ids
+    references_by_id = state.references_by_id
+
+    tasks_sub_tasks = [
+        _get_user_sub_tasks_dto_bulk(
+            sub_tasks=task.sub_tasks,
+            completed_subtask_ids=state.completed_subtask_ids,
+            references_by_id=references_by_id,
+        )
+        for task in plan_item.tasks
+    ]
+
+    return UserPlanDayDetailsResponse(
+        id=plan_item.id,
+        day_number=plan_item.day_number,
+        is_completed=state.day_is_completed,
+        audio_url=state.audio_url,
+        audio_duration_ms=state.audio_duration_ms,
+        thumbnail_url=state.thumbnail_url,
+        shareable_image_url=state.shareable_image_url,
         tasks=[
             UserTaskDTO(
                 id=task.id,
@@ -793,23 +846,31 @@ def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(
+def _get_user_sub_tasks_dto_bulk(
     sub_tasks: List[PlanSubTask],
     completed_subtask_ids: Set[UUID],
     references_by_id: Dict[UUID, Optional["SubTaskReferenceDTO"]],
 ) -> List[UserSubTaskDTO]:
     """Build a task's subtask DTOs. References arrive already resolved.
 
-    Everything here that touches the database has to happen before the caller
-    reaches this point: this runs inside a gather, around an await on a remote
-    service, which is no place to be holding a connection.
+    A SOURCE_REFERENCE subtask's text is taken from the `content` column rather
+    than resolved from openpecha. openpecha has no bulk segment endpoint, so
+    resolving live costs one HTTP round trip per segment id, and a day carries
+    as many of those as its subtasks list between them - which is what made
+    this endpoint slow no matter how the work was scheduled or cached.
+
+    The column is always populated: `_validate_subtasks` rejects a write whose
+    content is None for any non-reference type, and SOURCE_REFERENCE is one of
+    those, so there is nothing to fall back to openpecha for.
+
+    The cost is that an edit made in openpecha does not reach a reader here
+    until the subtask is written again. The endpoints that do resolve live -
+    the public day, the CMS - are unchanged.
     """
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
-    resolved_contents = await resolve_subtasks_content(sub_tasks)
-
     result = []
-    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+    for sub_task in sub_tasks:
         reference = references_by_id.get(sub_task.id)
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
@@ -820,7 +881,7 @@ async def _get_user_sub_tasks_dto_bulk(
             UserSubTaskDTO(
                 id=sub_task.id,
                 content_type=sub_task.content_type,
-                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else resolved_content,
+                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else sub_task.content,
                 duration=sub_task.duration,
                 display_order=sub_task.display_order,
                 is_completed=(sub_task.id in completed_subtask_ids),

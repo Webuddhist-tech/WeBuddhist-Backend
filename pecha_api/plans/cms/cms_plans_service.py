@@ -955,7 +955,9 @@ async def delete_selected_plan(token:str,plan_id: UUID):
         _soft_delete_plan_by_id(db=db, plan_id=plan.id, author=current_author)
         return
 
-def _get_task_subtasks_dto(subtasks: List[PlanSubTask], db: Session, language=None) -> List[SubTaskDTO]:
+def _get_task_subtasks_dto(
+    subtasks: List[PlanSubTask], db: Session, language: Optional[str] = None
+) -> List[SubTaskDTO]:
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
     from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 

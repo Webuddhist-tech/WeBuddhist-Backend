@@ -12,6 +12,7 @@ from pecha_api.accumulator.accumulator_enums import AccumulatorType
 from pecha_api.accumulator.accumulator_response_models import (
     AccumulatorMetadataDTO,
     CreatePresetAccumulatorRequest,
+    UpdateAccumulatorRequest,
     UpdatePresetAccumulatorRequest,
     PublicAccumulatorDTO,
     PublicAccumulatorsResponse,
@@ -37,7 +38,7 @@ def _sample_public_dto(**overrides: Any) -> PublicAccumulatorDTO:
         "type": AccumulatorType.PRESET,
         "target_count": 100000,
         "current_count": 0,
-        "text_id": str(uuid4()),
+        "text_id": "OPE1A2B3C4",
         "mantra": None,
         "mala_image_id": None,
         "mala_image_url": None,
@@ -62,7 +63,7 @@ class TestCmsPresetViews:
         mock_service.return_value = sample
         payload = {
             "target_count": 100000,
-            "text_id": str(sample.text_id),
+            "text_id": sample.text_id,
             "mantra_id": str(uuid4()),
             "metadata": [
                 {"language": "EN", "name": "Chenrezig Practice", "description": "Compassion practice"}
@@ -160,7 +161,6 @@ class TestCmsPresetService:
     @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
-    @patch("pecha_api.accumulator.accumulator_cms_service.TextUtils.validate_text_exists", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_mantra_exists")
     @patch("pecha_api.accumulator.accumulator_cms_service.save_accumulator")
     @patch("pecha_api.accumulator.accumulator_cms_service._to_public_dto")
@@ -169,7 +169,6 @@ class TestCmsPresetService:
         mock_to_dto,
         mock_save,
         mock_validate_mantra,
-        mock_validate_text,
         mock_session,
         mock_validate_auth,
     ):
@@ -180,7 +179,7 @@ class TestCmsPresetService:
         expected = _sample_public_dto()
         mock_to_dto.return_value = expected
 
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         mantra_id = uuid4()
         request = CreatePresetAccumulatorRequest(
             target_count=108000,
@@ -198,9 +197,10 @@ class TestCmsPresetService:
 
         assert result is expected
         mock_validate_auth.assert_called_once_with(token="token")
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
         mock_validate_mantra.assert_called_once_with(mock_db, mantra_id)
         mock_save.assert_called_once()
+        saved_preset = mock_save.call_args.args[1]
+        assert saved_preset.text_id == text_id
 
     @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
@@ -316,7 +316,6 @@ class TestCmsPresetService:
     @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
-    @patch("pecha_api.accumulator.accumulator_cms_service.TextUtils.validate_text_exists", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_mantra_exists")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mala_image_by_id")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
@@ -329,7 +328,6 @@ class TestCmsPresetService:
         mock_get_preset,
         mock_get_mala,
         mock_validate_mantra,
-        mock_validate_text,
         mock_session,
         mock_validate_auth,
     ):
@@ -345,7 +343,7 @@ class TestCmsPresetService:
         expected = _sample_public_dto(target_count=200000)
         mock_to_dto.return_value = expected
 
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         mantra_id = uuid4()
         mala_image_id = uuid4()
         request = UpdatePresetAccumulatorRequest(
@@ -370,10 +368,9 @@ class TestCmsPresetService:
 
         assert result is expected
         assert preset.target_count == 200000
-        assert preset.text_id == str(text_id)
+        assert preset.text_id == text_id
         assert preset.mantra_id == mantra_id
         assert preset.mala_image == mala_image_id
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
         mock_validate_mantra.assert_called_once_with(mock_db, mantra_id)
         mock_get_mala.assert_called_once_with(mock_db, mala_image_id)
         preset.metadata_entries.clear.assert_called_once()
@@ -546,6 +543,38 @@ class TestCmsPresetService:
                     AccumulatorMetadataDTO(language=LanguageCode.EN, name="   "),
                 ]
             )
+
+    def test_requests_reject_a_blank_text_id(self):
+        """A non-null text_id is what marks a preset a recitation and drops it
+        from the default public catalogue, so a blank one would hide a preset
+        behind a text id nothing can resolve."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        for blank in ("", "   "):
+            with pytest.raises(ValidationError):
+                CreatePresetAccumulatorRequest(text_id=blank, metadata=metadata)
+            with pytest.raises(ValidationError):
+                UpdatePresetAccumulatorRequest(text_id=blank)
+            with pytest.raises(ValidationError):
+                UpdateAccumulatorRequest(text_id=blank)
+
+    def test_requests_reject_a_text_id_past_the_column_width(self):
+        """text_id lands in a String(255), so an overlong value has to be a 422
+        rather than a database error on save."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        too_long = "t" * 256
+        with pytest.raises(ValidationError):
+            CreatePresetAccumulatorRequest(text_id=too_long, metadata=metadata)
+        with pytest.raises(ValidationError):
+            UpdatePresetAccumulatorRequest(text_id=too_long)
+        with pytest.raises(ValidationError):
+            UpdateAccumulatorRequest(text_id=too_long)
+
+        at_the_limit = "t" * 255
+        assert UpdatePresetAccumulatorRequest(text_id=at_the_limit).text_id == at_the_limit
+
+    def test_text_id_is_stripped_and_stays_optional(self):
+        assert UpdatePresetAccumulatorRequest(text_id="  abc  ").text_id == "abc"
+        assert UpdatePresetAccumulatorRequest().text_id is None
 
     def test_update_request_allows_none_metadata(self):
         request = UpdatePresetAccumulatorRequest(target_count=108)

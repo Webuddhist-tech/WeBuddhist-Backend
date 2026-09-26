@@ -1,4 +1,4 @@
-"""Who a cached response belongs to, without touching the database.
+"""Who a cached response belongs to, from the token where that is possible.
 
 Endpoints whose response differs per user need the user in the cache key. The
 obvious way to get it - resolve the token to a user row - costs a query on
@@ -6,7 +6,11 @@ every request including the hits, which is most of what the cache was meant to
 save.
 
 The token already carries a stable per-user subject, so this verifies the
-token's signature and takes the subject from the verified payload. No query.
+token's signature and takes the subject from the verified payload. For almost
+every token that is the whole story and no query is made. The exception is
+spelled out in `_identity_from_payload`: one shape of Auth0 token names its
+user through a claim whose owner only the database knows, and guessing there
+would mean handing one person another person's cached response.
 
 Verifying matters and is not optional. Keying on an unverified subject would
 let anyone mint a token naming someone else and be handed that person's
@@ -23,21 +27,82 @@ request unlucky enough to arrive after a key rotation.
 
 import logging
 from typing import Any, Dict, Optional
+from uuid import UUID
 
 from starlette.concurrency import run_in_threadpool
 
 from pecha_api.auth.auth_repository import validate_token
+from pecha_api.db.database import SessionLocal
+from pecha_api.users.users_repository import get_user_by_phone
 
 logger = logging.getLogger(__name__)
 
 
+def _claim(payload: Dict[str, Any], name: str) -> Optional[str]:
+    value = payload.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def _phone_has_an_owner(phone_number: str) -> bool:
+    """Whether any account currently holds this phone number.
+
+    The one database question this module asks, and only for the token shape
+    that cannot be keyed without it. A failed lookup answers "owned", which is
+    true of every token whose phone has been linked - the overwhelming majority
+    - and so degrades to the behaviour this replaced rather than to the
+    anonymous key, which protected endpoints share between callers.
+    """
+    try:
+        with SessionLocal() as db:
+            return get_user_by_phone(db=db, phone_number=phone_number) is not None
+    except Exception:
+        logger.exception("Could not resolve the owner of a token's phone claim")
+        return True
+
+
 def _identity_from_payload(payload: Dict[str, Any]) -> Optional[str]:
-    """The identity a verified payload denotes, or None if it names nobody."""
-    subject = payload.get("sub") or payload.get("email") or payload.get("phone_number")
-    if not subject:
-        return None
+    """The identity a verified payload denotes, or None if it names nobody.
+
+    This has to follow `resolve_user_from_payload`. A UUID `sub` is the user
+    id. Anything else is an issuer subject (Auth0), and the database user is
+    whoever the verified phone or email currently belongs to. Keying those
+    tokens on `sub` would keep serving the previous user's cached progress
+    after the phone or email moved to someone else.
+
+    Phone and email are each unique and, once set, never moved to another
+    account or cleared, so either one names the same person for as long as any
+    cache entry can live. What is not stable is which of the two the resolver
+    uses: it tries the phone first but falls through an *unlinked* phone to the
+    email. A token carrying both claims with its phone not yet linked therefore
+    resolves by email today and by phone the moment that phone is linked - to
+    whoever linked it. Keying on the phone regardless would leave both users on
+    one key and hand the second the first's plan progress, so that single case
+    asks the database which claim is in force. Every other token is keyed from
+    the payload alone.
+    """
     issuer = payload.get("iss") or ""
-    return f"{issuer}|{subject}"
+    subject = payload.get("sub")
+    if subject is not None:
+        try:
+            UUID(str(subject))
+        except (TypeError, ValueError):
+            pass
+        else:
+            return f"{issuer}|{subject}"
+
+    phone_number = _claim(payload, "phone_number")
+    email = _claim(payload, "email")
+
+    if phone_number is not None:
+        if email is None or _phone_has_an_owner(phone_number):
+            return f"{issuer}|phone:{phone_number}"
+    if email is not None:
+        return f"{issuer}|email:{email}"
+    return None
+
+
+def _identity_from_token(token: str) -> Optional[str]:
+    return _identity_from_payload(validate_token(token))
 
 
 async def cache_identity_from_token(token: Optional[str]) -> Optional[str]:
@@ -51,8 +116,12 @@ async def cache_identity_from_token(token: Optional[str]) -> Optional[str]:
     if not token:
         return None
     try:
-        payload = await run_in_threadpool(validate_token, token)
+        # Verification and the identity together in one hop: both can block -
+        # verification on a JWKS fetch, the identity on the one lookup
+        # `_identity_from_payload` documents - and neither belongs on the event
+        # loop.
+        return await run_in_threadpool(_identity_from_token, token)
     except Exception:
         # Same treatment the services give an unusable token: anonymous.
         return None
-    return _identity_from_payload(payload)
+

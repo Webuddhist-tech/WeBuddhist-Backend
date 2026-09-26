@@ -28,6 +28,7 @@ from pecha_api.group_posts.service import (
 )
 from pecha_api.group_posts.service_utils import validate_group_content_access
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
+from pecha_api.plans.groups.groups_repository import get_public_group_ids
 from pecha_api.utils import Utils
 from pecha_api.db.database import SessionLocal
 from pecha_api.users.users_service import validate_and_extract_user_details
@@ -89,16 +90,21 @@ def _group_scope_fingerprint(token: Optional[str], should_include_unfollowed: bo
     the key instead makes the entry self-invalidating: leave a group or get
     removed from one and the scope changes, so the key changes, and the entry
     built while you were a member is simply never read again.
+
+    Anonymous callers have no membership, but the set of published public
+    groups still changes. A constant key would keep serving a group that has
+    since been made private or unpublished until the entry expired.
     """
     user_id = _resolve_user_id(token)
-    if user_id is None:
-        return "anon"
     with SessionLocal() as db:
-        group_ids, _ = resolve_public_group_scope(
-            db=db,
-            user_id=user_id,
-            should_include_unfollowed=should_include_unfollowed,
-        )
+        if user_id is None:
+            group_ids = get_public_group_ids(db=db)
+        else:
+            group_ids, _ = resolve_public_group_scope(
+                db=db,
+                user_id=user_id,
+                should_include_unfollowed=should_include_unfollowed,
+            )
     return Utils.generate_hash_key(payload=sorted(str(group_id) for group_id in group_ids))
 
 

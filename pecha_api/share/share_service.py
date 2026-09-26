@@ -1,8 +1,11 @@
 from fastapi import HTTPException
 import io
+import logging
+from collections import OrderedDict
 import re
+from threading import Lock
 from functools import partial
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -15,7 +18,7 @@ from .pecha_text_image_generator import (
 )
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
-from pecha_api.config import get
+from pecha_api.config import get, get_int
 from pecha_api.db.database import SessionLocal
 from pecha_api.poems.enums import PoemStatus
 from pecha_api.poems.repository import get_poem_by_id
@@ -31,12 +34,24 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
+from pecha_api.uploads.S3_utils import download_bytes
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
-# (title, description, language) as the share card needs it.
-EventShareMetadata = tuple[str, Optional[str], Optional[str]]
+JPEG_MEDIA_TYPE = "image/jpeg"
+# Event photos, keyed by S3 key, most-recently-used last. A share card is
+# the same for every viewer, so this holds nothing per-user.
+_event_photo_cache: "OrderedDict[str, bytes]" = OrderedDict()
+# `_load_event_photo_bytes` runs in a worker thread, so two concurrent
+# /share/image requests reach the cache at once. The individual OrderedDict
+# operations are atomic but the sequences below are not: a reader that has just
+# found a key can have it evicted by another thread before it calls
+# move_to_end, which then raises KeyError and turns an image into a 500.
+_event_photo_cache_lock = Lock()
+# (title, description, language, image_key) as the share card needs it. The
+# image key is the event photo's S3 key, or None when the event has no photo.
+EventShareMetadata = tuple[str, Optional[str], Optional[str], Optional[str]]
 DEFAULT_OG_TITLE = get("SITE_NAME")
 DEFAULT_OG_DESCRIPTION = get("SITE_NAME")
 PECHA_FRONTEND_ENDPOINT = "https://webuddhist.com/chapter"
@@ -59,12 +74,25 @@ _TYPE_TO_ID_FIELD = {
 _CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
 
 
+def _share_image_headers() -> dict:
+    """Let crawlers and any CDN in front of us reuse a rendered card.
+
+    The card only changes when the event does, and this endpoint is public and
+    re-renders per hit, so the cheapest request is the one that never arrives.
+    """
+    return {"Cache-Control": f"public, max-age={max(get_int('SHARE_IMAGE_CACHE_SECONDS'), 0)}"}
+
+
 async def get_generated_image(share_request: Optional[ShareRequest] = None):
     if share_request is not None:
         _apply_inferred_ids(share_request)
         if _has_resolvable_content(share_request):
-            image_bytes = await _render_share_image_bytes(share_request)
-            return StreamingResponse(io.BytesIO(image_bytes), media_type=MEDIA_TYPE)
+            image_bytes, media_type = await _render_share_image_bytes(share_request)
+            return StreamingResponse(
+                io.BytesIO(image_bytes),
+                media_type=media_type,
+                headers=_share_image_headers(),
+            )
 
     try:
         image_path = IMAGE_PATH
@@ -84,6 +112,7 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
     _apply_inferred_ids(share_request)
     og_title = DEFAULT_OG_TITLE
     og_description = DEFAULT_OG_DESCRIPTION
+    og_image: Optional[str] = None
     event_metadata: Optional[EventShareMetadata] = None
     if _normalized_id(share_request.event_id) is not None:
         event_metadata = await to_thread.run_sync(
@@ -94,10 +123,18 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
                 get("SITE_NAME"),
             )
         )
-        title, description, _language = event_metadata
-        og_title = title
-        if description:
-            og_description = description
+        title, _description, _language, image_key = event_metadata
+        # The site name is the title and the event's name is the description:
+        # a preview then reads "WeBuddhist" over the name of the event, rather
+        # than repeating the name in both slots.
+        og_title = get("SITE_NAME")
+        og_description = title
+        # og_image stays the /share/image endpoint rather than the row's S3
+        # URL. Two reasons, either of which is enough: the stored file is WebP,
+        # which link-preview crawlers do not render, and a signed S3 URL
+        # expires while the short link does not. The endpoint serves the same
+        # photo as JPEG from a URL with no deadline on it.
+        _ = image_key
     if share_request.logo:
         await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
@@ -113,6 +150,7 @@ async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
         share_request=share_request,
         og_title=og_title,
         og_description=og_description,
+        og_image=og_image,
     )
     short_url: ShortUrlResponse = await get_short_url(payload=payload)
 
@@ -222,15 +260,69 @@ async def _generate_event_content_image_(
         event_metadata = await to_thread.run_sync(
             partial(_load_event_share_metadata, event_id, share_request.language, site_name)
         )
-    title, _description, language = event_metadata
+    title, _description, language, image_key = event_metadata
+    photo_bytes = await to_thread.run_sync(partial(_load_event_photo_bytes, image_key))
     image_kwargs = {
         "title": title,
         "lang": language,
         "logo_path": LOGO_PATH,
+        "photo_bytes": photo_bytes,
     }
     if output_path is not None:
         image_kwargs["output_path"] = output_path
     await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
+
+
+def _event_photo_cache_limit() -> int:
+    return max(get_int("SHARE_EVENT_PHOTO_CACHE_SIZE"), 0)
+
+
+def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
+    """The event photo from S3, as bytes, memoised per key.
+
+    This endpoint is public and every crawler hit re-renders, so an unbounded
+    fetch of a full-size original would be a free way to make the API do real
+    work. Two bounds keep that in proportion: the download refuses anything
+    over SHARE_EVENT_PHOTO_MAX_BYTES, and the bytes are held in a small
+    per-process cache so repeated previews of the same event do not repeat the
+    S3 round trip. A share card is the same for everyone, so nothing here is
+    per-viewer.
+
+    Returns None for an event with no photo, or when S3 will not give it up -
+    the card falls back to the title render rather than the share failing.
+    """
+    if not image_key:
+        return None
+
+    with _event_photo_cache_lock:
+        cached = _event_photo_cache.get(image_key)
+        if cached is not None:
+            # Refreshed to most-recently-used, under the lock so the key cannot
+            # be evicted between finding it and moving it.
+            _event_photo_cache.move_to_end(image_key)
+            return cached
+
+    # Downloaded outside the lock: it is a network round trip, and holding the
+    # lock across it would serialise every share render behind one S3 fetch.
+    # Two threads missing on the same key both download, which costs one extra
+    # fetch and stores the same bytes twice.
+    try:
+        photo_bytes = download_bytes(
+            bucket_name=get("AWS_BUCKET_NAME"),
+            s3_key=image_key,
+            max_bytes=max(get_int("SHARE_EVENT_PHOTO_MAX_BYTES"), 1),
+        )
+    except Exception:
+        logging.exception("Could not download event share photo for key %s", image_key)
+        return None
+
+    limit = _event_photo_cache_limit()
+    if limit:
+        with _event_photo_cache_lock:
+            _event_photo_cache[image_key] = photo_bytes
+            while len(_event_photo_cache) > limit:
+                _event_photo_cache.popitem(last=False)
+    return photo_bytes
 
 
 def _load_event_share_metadata(
@@ -238,19 +330,20 @@ def _load_event_share_metadata(
     language: Optional[str],
     site_name: str,
 ) -> EventShareMetadata:
-    """The event name and description used on the short URL card.
+    """The event name, description and photo key used on the short URL card.
 
-    The image is the WeBuddhist logo plus this name - the event photo is not
-    part of the share card.
+    The photo is the card when the event has one; the name and description go
+    on the OG tags either way, where a preview renders them as text.
     """
     event_uuid = _parse_uuid(event_id) if event_id else None
     if event_uuid is None:
-        return site_name, None, language
+        return site_name, None, language, None
 
     with SessionLocal() as db:
         event = get_event_by_id(db=db, event_id=event_uuid)
         if event is None:
-            return site_name, None, language
+            return site_name, None, language, None
+        image_key = getattr(event, "image_url", None) or None
         metadata = _first_metadata(event.metadata_entries, language)
         title = (metadata.name if metadata is not None and metadata.name else None) or site_name
         description = (
@@ -261,7 +354,7 @@ def _load_event_share_metadata(
         resolved_language = (
             _language_code(metadata.language) if metadata is not None else None
         ) or language
-    return title, description, resolved_language
+    return title, description, resolved_language, image_key
 
 
 def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Optional[str]]:
@@ -286,6 +379,7 @@ def _generate_short_url_payload_(
     share_request: ShareRequest,
     og_description: str,
     og_title: Optional[str] = None,
+    og_image: Optional[str] = None,
 ) -> dict:
     _apply_inferred_ids(share_request)
 
@@ -301,7 +395,9 @@ def _generate_short_url_payload_(
         "url": share_request.url,
         "og_title": og_title or DEFAULT_OG_TITLE,
         "og_description": og_description,
-        "og_image": _share_image_url(share_request),
+        # A caller that already has a real image URL - an event's own photo -
+        # passes it. Everything else points at the rendered card.
+        "og_image": og_image or _share_image_url(share_request),
         "tags": share_request.tags
     }
     return payload
@@ -331,7 +427,13 @@ def _generate_url_(
     return f"{PECHA_FRONTEND_ENDPOINT}?segment_id={segment_id}&contentId={content_id}&text_id={text_id}&contentIndex={content_index}"
 
 
-async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
+async def _render_share_image_bytes(share_request: ShareRequest) -> Tuple[bytes, str]:
+    """The rendered image and the media type it actually came out as.
+
+    An event photo is written as JPEG and every card as PNG, so the type is
+    read off the bytes rather than assumed - serving a JPEG labelled image/png
+    is exactly the kind of thing a strict crawler rejects.
+    """
     # Rendered straight into memory: a temp file would put open/read/unlink
     # syscalls on the async request path and leak the file if the render
     # failed. The buffer is filled inside the render worker thread.
@@ -340,7 +442,15 @@ async def _render_share_image_bytes(share_request: ShareRequest) -> bytes:
         share_request=share_request,
         output_path=buffer,
     )
-    return buffer.getvalue()
+    image_bytes = buffer.getvalue()
+    return image_bytes, _media_type_for(image_bytes)
+
+
+def _media_type_for(image_bytes: bytes) -> str:
+    """JPEG starts with FF D8 FF; everything else here is the PNG the cards use."""
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return JPEG_MEDIA_TYPE
+    return MEDIA_TYPE
 
 
 def _apply_inferred_ids(share_request: ShareRequest) -> None:

@@ -24,6 +24,7 @@ cms_series_router = APIRouter(
         CacheType.SERIES_DETAIL,
         CacheType.PLAN_LIST,
         CacheType.PLAN_DETAIL,
+        CacheType.PLAN_DAILY,
     ))],
 )
 

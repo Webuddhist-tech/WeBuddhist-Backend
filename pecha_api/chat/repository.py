@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
 from sqlalchemy import exists, func, or_, select
@@ -10,7 +10,7 @@ from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
 from pecha_api.events.event_model import Event
 
-from pecha_api.chat.enums import ChatMessageReportSource, ChatRoomMemberRole
+from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatRoomMemberRole
 from pecha_api.chat.models import (
     ChatMessage,
     ChatMessagePrayer,
@@ -740,11 +740,118 @@ def list_message_prayers(
     return prayers, total
 
 
-# Written to notification_sqs_message_id for a prayer that deliberately did not
-# raise a push (self-pray, or one already covered by a recent notification for
-# the same request). Excluded from has_dispatched_prayer_since below so a
-# suppressed prayer never counts as an actual dispatch for coalescing.
+# Written to notification_sqs_message_id for a notification that deliberately
+# did not go out: a prayer that raised none (self-pray, or one already covered
+# by a recent notification for the same request), or a prayer request held by
+# the room's notification interval. Excluded from the "was one actually sent"
+# queries below, so a suppressed row never extends a window it did not notify
+# anybody about. Non-null, so reconcile - which only retries rows that never
+# recorded an SQS id at all - leaves these alone.
 SUPPRESSED_SQS_MESSAGE_ID = "SUPPRESSED"
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Postgres hands back an aware value for a timestamptz column; SQLite,
+    which the tests run on, does not. Normalised here so callers can compare
+    against an aware now() without each of them repeating it."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+class DispatchedPrayerRequest(NamedTuple):
+    """The room's last prayer-request push, by both clocks.
+
+    `dispatched_at` is when the push went out, which is what the interval is
+    measured from. `created_at` is what the held count windows on - see
+    `count_suppressed_prayer_requests` for why the two cannot be mixed.
+    """
+
+    dispatched_at: datetime
+    created_at: datetime
+
+
+def last_dispatched_prayer_request(
+    db: Session,
+    *,
+    room_id: UUID,
+    exclude_message_id: UUID,
+) -> Optional[DispatchedPrayerRequest]:
+    """The last prayer request in this room whose push actually went out.
+
+    Suppressed rows do not count: a request held by the interval must not
+    extend it, or one busy minute would silence the room indefinitely.
+
+    Deleted rows *do* count. Deleting a request does not un-send the push its
+    members already received, so dropping it here would let the sender clear
+    the interval by deleting their own request and post again straight away.
+
+    `exclude_message_id` is required, not a convenience. The gate calls this
+    before the message is marked, where it changes nothing; the copy calls it
+    after the backend has already stamped this message with its real SQS id,
+    where without it the answer would be this very message and the held count
+    would always come out zero.
+    """
+    row = (
+        db.query(ChatMessage.notification_dispatched_at, ChatMessage.created_at)
+        .filter(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.id != exclude_message_id,
+            ChatMessage.notification_dispatched_at.isnot(None),
+            ChatMessage.notification_sqs_message_id.isnot(None),
+            ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+        )
+        .order_by(ChatMessage.notification_dispatched_at.desc())
+        .first()
+    )
+    if not row or row[0] is None or row[1] is None:
+        return None
+    return DispatchedPrayerRequest(
+        dispatched_at=_as_utc(row[0]),
+        created_at=_as_utc(row[1]),
+    )
+
+
+def count_suppressed_prayer_requests(
+    db: Session,
+    *,
+    room_id: UUID,
+    since: Optional[datetime],
+    until: datetime,
+    exclude_message_id: UUID,
+) -> int:
+    """Prayer requests in this room the interval held between two pushes.
+
+    The window is half-open on `notification_dispatched_at` - when the hold was
+    *recorded*, not when the request was written. Bounding on `created_at`
+    instead loses a request that was held out of order: one whose first enqueue
+    failed and which reconcile suppresses later, after a newer request has
+    already pushed. Its creation time sits before this window's lower bound, so
+    it would be counted by no push at all while its SUPPRESSED marker stops it
+    ever being delivered - a request nobody is told about. Suppression order is
+    the order these were decided in, so it is the order to count them in.
+
+    Both bounds read that one clock, so each held request falls in exactly one
+    window and is counted exactly once.
+
+    `since` is None when this room has never raised a push, in which case every
+    held request up to `until` counts. Deleted requests are left out: unlike
+    the dispatch lookup, this number is shown to people, and it should not
+    advertise requests that are no longer in the room.
+    """
+    query = db.query(func.count(ChatMessage.id)).filter(
+        ChatMessage.room_id == room_id,
+        ChatMessage.message_type == ChatMessageType.PRAYER.value,
+        ChatMessage.deleted_at.is_(None),
+        ChatMessage.id != exclude_message_id,
+        ChatMessage.notification_sqs_message_id == SUPPRESSED_SQS_MESSAGE_ID,
+        ChatMessage.notification_dispatched_at.isnot(None),
+        ChatMessage.notification_dispatched_at <= until,
+    )
+    if since is not None:
+        query = query.filter(ChatMessage.notification_dispatched_at > since)
+    return int(query.scalar() or 0)
 
 
 def has_dispatched_prayer_since(

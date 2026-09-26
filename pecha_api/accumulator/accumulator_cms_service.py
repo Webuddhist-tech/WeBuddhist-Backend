@@ -8,7 +8,6 @@ from starlette import status
 
 from ..db.database import SessionLocal
 from ..plans.authors.plan_authors_service import validate_cms_author_details
-from ..texts.texts_utils import TextUtils
 from ..mantra.mantra_repository import get_mantras_by_ids
 from .accumulator_enums import AccumulatorType
 from .accumulator_metadata_model import AccumulatorMetadata
@@ -68,11 +67,6 @@ def _to_public_dto(
         language=language,
         include_key=True,
     )
-
-
-async def _validate_optional_text_id(text_id: Optional[UUID]) -> None:
-    if text_id is not None:
-        await TextUtils.validate_text_exists(text_id=str(text_id))
 
 
 def _validate_optional_mala_image(db: Session, mala_image_id: Optional[UUID]) -> None:
@@ -139,7 +133,6 @@ async def create_preset_accumulator_cms_service(
     request: CreatePresetAccumulatorRequest,
 ) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
-    await _validate_optional_text_id(request.text_id)
 
     with SessionLocal() as db:
         if request.mantra_id is not None:
@@ -154,7 +147,7 @@ async def create_preset_accumulator_cms_service(
             type=AccumulatorType.PRESET,
             target_count=request.target_count,
             current_count=0,
-            text_id=str(request.text_id) if request.text_id is not None else None,
+            text_id=request.text_id,
             mantra_id=request.mantra_id,
             mala_image=request.mala_image_id,
         )
@@ -169,7 +162,6 @@ async def update_preset_accumulator_cms_service(
     request: UpdatePresetAccumulatorRequest,
 ) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
-    await _validate_optional_text_id(request.text_id)
 
     with SessionLocal() as db:
         preset = get_preset_by_id(db, preset_id)
@@ -189,7 +181,7 @@ async def update_preset_accumulator_cms_service(
         if request.target_count is not None:
             preset.target_count = request.target_count
         if request.text_id is not None:
-            preset.text_id = str(request.text_id)
+            preset.text_id = request.text_id
         if request.mantra_id is not None:
             validate_mantra_exists(db, request.mantra_id)
             preset.mantra_id = request.mantra_id
