@@ -80,17 +80,26 @@ def _count_held_prayer_requests(
     being counted here and again there. `dispatched_at` is normally already set
     - the backend stamps it before the worker asks for targets - and now() is
     the fallback for the moment where the worker got there first.
+
+    Both bounds come off that one moment. The worker is not guaranteed to
+    reach a message before the next prayer request pushes, so the newest push
+    in the room can be one that went out after this message did; taken as the
+    window's start it would sit past its end, the count would come out zero,
+    and the requests this push promised to carry would be announced by no push
+    at all. `before` keeps the search on this message's side of the timeline.
     """
+    window_end = dispatched_at or datetime.now(timezone.utc)
     last_sent = last_dispatched_prayer_request(
         db=db,
         room_id=room_id,
         exclude_message_id=message_id,
+        before=window_end,
     )
     return count_suppressed_prayer_requests(
         db=db,
         room_id=room_id,
         since=last_sent.dispatched_at if last_sent else None,
-        until=dispatched_at or datetime.now(timezone.utc),
+        until=window_end,
         exclude_message_id=message_id,
     )
 

@@ -221,6 +221,38 @@ class TestCountHeldPrayerRequests:
 
     @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
     @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_the_search_for_the_previous_push_stops_at_this_one(self, mock_last_sent, mock_count):
+        """Both ends of the window come off this message's own moment.
+
+        The worker is not guaranteed to reach a message before the next prayer
+        request pushes, so the room's latest push can be one that went out
+        after this message did. Taken as the window's start it would sit past
+        its end, the count would come out zero, and the requests this push
+        promised to carry would be announced by no push at all.
+        """
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
+        )
+
+        assert mock_last_sent.call_args.kwargs["before"] == self.NOW
+        assert mock_count.call_args.kwargs["until"] == self.NOW
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_an_unstamped_push_bounds_both_ends_at_the_same_now(self, mock_last_sent, mock_count):
+        """One now(), read once: two readings could put the window's start
+        after its end."""
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=None
+        )
+
+        assert (
+            mock_last_sent.call_args.kwargs["before"]
+            == mock_count.call_args.kwargs["until"]
+        )
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
     def test_both_queries_exclude_the_message_being_sent(self, mock_last_sent, mock_count):
         """Without this the "last sent push" would be this very message, since
         the backend stamps it before the worker asks for targets, and the count

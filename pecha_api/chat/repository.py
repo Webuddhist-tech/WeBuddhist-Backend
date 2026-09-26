@@ -776,6 +776,7 @@ def last_dispatched_prayer_request(
     *,
     room_id: UUID,
     exclude_message_id: UUID,
+    before: Optional[datetime] = None,
 ) -> Optional[DispatchedPrayerRequest]:
     """The last prayer request in this room whose push actually went out.
 
@@ -791,20 +792,27 @@ def last_dispatched_prayer_request(
     after the backend has already stamped this message with its real SQS id,
     where without it the answer would be this very message and the held count
     would always come out zero.
+
+    `before` bounds the search to pushes that went out earlier than a moment
+    the caller already has in hand. The copy needs it: the worker can reach a
+    message well after a later prayer request has pushed, and the latest push
+    overall is then one that went out *after* this message's own dispatch
+    time. Used as the start of this message's count it would make the window
+    end before it began and report nothing held, dropping the requests this
+    push had promised to carry. Left None - the gate's case, which is asking
+    about now - the latest push is the right answer.
     """
-    row = (
-        db.query(ChatMessage.notification_dispatched_at, ChatMessage.created_at)
-        .filter(
-            ChatMessage.room_id == room_id,
-            ChatMessage.message_type == ChatMessageType.PRAYER.value,
-            ChatMessage.id != exclude_message_id,
-            ChatMessage.notification_dispatched_at.isnot(None),
-            ChatMessage.notification_sqs_message_id.isnot(None),
-            ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
-        )
-        .order_by(ChatMessage.notification_dispatched_at.desc())
-        .first()
+    query = db.query(ChatMessage.notification_dispatched_at, ChatMessage.created_at).filter(
+        ChatMessage.room_id == room_id,
+        ChatMessage.message_type == ChatMessageType.PRAYER.value,
+        ChatMessage.id != exclude_message_id,
+        ChatMessage.notification_dispatched_at.isnot(None),
+        ChatMessage.notification_sqs_message_id.isnot(None),
+        ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
     )
+    if before is not None:
+        query = query.filter(ChatMessage.notification_dispatched_at < before)
+    row = query.order_by(ChatMessage.notification_dispatched_at.desc()).first()
     if not row or row[0] is None or row[1] is None:
         return None
     return DispatchedPrayerRequest(

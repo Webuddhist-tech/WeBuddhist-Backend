@@ -8,6 +8,7 @@ from pecha_api.cache.cache_identity import (
     _identity_from_token,
     cache_identity_from_token,
 )
+from pecha_api.cache.cache_keys import UNRESOLVED_IDENTITY
 
 
 @pytest.mark.asyncio
@@ -158,13 +159,23 @@ async def test_a_phone_only_token_is_keyed_without_a_query():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_lookup_keys_on_the_phone_rather_than_going_anonymous():
-    """Anonymous is the shared segment on these endpoints, so a database blip
-    must not drop a real user into it."""
+async def test_a_failed_lookup_refuses_to_pick_a_claim():
+    """Neither claim is safe when the lookup that decides between them fails.
+
+    Keying on the phone stores the email owner's response where whoever links
+    that phone will read it; keying on the email does the reverse. Anonymous is
+    the shared segment on these endpoints, so a real user must not land there
+    either. The answer is that there is no answer.
+    """
     with patch(
         "pecha_api.cache.cache_identity.validate_token", return_value=_BOTH_CLAIMS
     ), patch(
         "pecha_api.cache.cache_identity.SessionLocal",
         side_effect=RuntimeError("no database"),
     ):
-        assert await cache_identity_from_token("token") == "i|phone:+100"
+        identity = await cache_identity_from_token("token")
+
+    assert identity == UNRESOLVED_IDENTITY
+    assert identity is not None
+    assert "+100" not in identity
+    assert "a@b" not in identity

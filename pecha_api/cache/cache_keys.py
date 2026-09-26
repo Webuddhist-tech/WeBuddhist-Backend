@@ -30,6 +30,27 @@ SCHEMA_VERSION = "v1"
 
 KeyPart = Union[str, int, float, bool, UUID, None]
 
+# The identity of a token that names somebody, but whose somebody could not be
+# decided - see `cache_identity`. It lives here, next to the keys, so that both
+# the module that produces it and the module that has to refuse to key on it
+# can see it without importing each other.
+#
+# None will not do in its place. None is the anonymous segment, which every
+# anonymous caller shares, so keying a logged-in caller there would serve them
+# a response built for somebody else and store theirs for the next anonymous
+# reader. Nor will either candidate claim, which is the whole difficulty. This
+# is a third answer - "no key is safe" - and the cache answers it by staying
+# out of the request entirely.
+#
+# Every real identity is an issuer followed by "|" and the claim that names
+# its owner, so a value with no "|" in it cannot be one.
+UNRESOLVED_IDENTITY = "unresolved"
+
+
+def identity_is_unresolved(user_identity: Optional[str]) -> bool:
+    """Whether this identity means "could not be decided" rather than a user."""
+    return user_identity == UNRESOLVED_IDENTITY
+
 
 def _namespace(cache_type: CacheType) -> str:
     return cache_type.value if isinstance(cache_type, CacheType) else str(cache_type)

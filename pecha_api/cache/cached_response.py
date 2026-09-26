@@ -23,11 +23,11 @@ from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_keys import (
     KeyPart,
     build_cache_key,
+    identity_is_unresolved,
     namespace_scan_pattern,
     user_scan_pattern,
 )
 from pecha_api.cache.cache_repository import (
-    cache_enabled,
     cache_is_available,
     cache_type_enabled,
     get_cache_data,
@@ -67,6 +67,14 @@ _namespace_epochs: Dict[CacheType, int] = {}
 # Keyed by (namespace, identity); "" is the anonymous segment. Drained before
 # the next read of that user's entry, which is skipped until the deletion lands.
 _pending_user_invalidations: Dict[Tuple[CacheType, str], int] = {}
+# The per-user counterpart of `_namespace_epochs`, and needed for the same
+# reason: a deletion that *succeeds* leaves no debt behind, so the debt set
+# cannot tell a reader that its in-flight load has been superseded. Without
+# this, a read that missed and went to the database before the user's own
+# write deleted their entries can finish afterwards and store the progress
+# that write just replaced - which is then served until it expires. Keyed like
+# the debts above, and per-process like them.
+_user_epochs: Dict[Tuple[CacheType, str], int] = {}
 
 
 def _user_debt_key(
@@ -81,6 +89,15 @@ def _note_namespace_changed(cache_type: CacheType) -> None:
 
 def _namespace_epoch(cache_type: CacheType) -> int:
     return _namespace_epochs.get(cache_type, 0)
+
+
+def _note_user_changed(cache_type: CacheType, user_identity: Optional[str]) -> None:
+    key = _user_debt_key(cache_type, user_identity)
+    _user_epochs[key] = _user_epochs.get(key, 0) + 1
+
+
+def _user_epoch(cache_type: CacheType, user_identity: Optional[str]) -> int:
+    return _user_epochs.get(_user_debt_key(cache_type, user_identity), 0)
 
 
 def _mark_user_pending(cache_type: CacheType, user_identity: Optional[str]) -> None:
@@ -171,9 +188,17 @@ async def cached_response(
     in a worker thread, so a cache miss does not block the event loop; an
     async one is awaited as it already manages that itself.
     """
-    # Switched off: no key, no Redis round trip, no pending-invalidation
-    # bookkeeping. The endpoint behaves exactly as it did before it was cached.
-    if not cache_type_enabled(cache_type):
+    # Switched off, or nobody to key on: no key, no Redis round trip, no
+    # pending-invalidation bookkeeping. The endpoint behaves exactly as it did
+    # before it was cached.
+    #
+    # An unresolved identity gets the same treatment as the switch being off,
+    # and deliberately not the anonymous key: the token names a real person
+    # whose name we could not establish (see `cache_identity`), and every key
+    # available for them is one somebody else can reach. Serving this request
+    # uncached costs one miss; keying it wrongly costs one person another
+    # person's response.
+    if not cache_type_enabled(cache_type) or identity_is_unresolved(user_identity):
         if asyncio.iscoroutinefunction(loader):
             return await loader()
         return await run_in_threadpool(loader)
@@ -186,9 +211,11 @@ async def cached_response(
     await _drain_pending_user_invalidations()
     # A namespace or user we still owe an eviction for is not safe to read:
     # the entry sitting there may be the one a write already replaced.
-    # The epoch is taken after the drains and before the load, so a sweep
-    # that lands while we are loading makes the store below a no-op.
+    # The epochs are taken after the drains and before the load, so a sweep -
+    # of the whole namespace or of just this user - that lands while we are
+    # loading makes the store below a no-op.
     epoch = _namespace_epoch(cache_type)
+    user_epoch = _user_epoch(cache_type, user_identity)
     cached = None if _read_is_blocked(cache_type, user_identity) else await get_cache_data(
         hash_key=hash_key
     )
@@ -211,6 +238,7 @@ async def cached_response(
     if (
         response is not None
         and _namespace_epoch(cache_type) == epoch
+        and _user_epoch(cache_type, user_identity) == user_epoch
         and not _read_is_blocked(cache_type, user_identity)
     ):
         await set_cache(
@@ -238,11 +266,14 @@ async def _invalidate_namespace(cache_type: CacheType) -> Tuple[int, bool]:
         # reads of this namespace skip the cache rather than serve an entry the
         # sweep has not reached.
         #
-        # Only for a namespace switched off on its own. With the master switch
-        # off there is no cache in the request path at all, and turning the
-        # whole thing back on is an operator action that carries its own flush.
-        if cache_enabled():
-            _mark_pending(cache_type)
+        # Recorded whether it is this namespace or the master switch that is
+        # off. The master switch keeps the cache out of the request path; it
+        # does not empty Redis, and the writes that land while it is off
+        # supersede entries that are still sitting there. Assuming the operator
+        # flushes on the way back in makes correctness depend on a manual step
+        # nothing enforces, and the cost of not assuming it is one deferred
+        # SCAN per namespace on the first read after the switch returns.
+        _mark_pending(cache_type)
         return 0, True
 
     mark = _pending_invalidations.get(cache_type)
@@ -317,11 +348,32 @@ async def invalidate_user_namespaces(
     full sweep per write, which under a join storm would evict the cache
     faster than it could be filled.
     """
-    if not cache_enabled():
-        return 0
+    if identity_is_unresolved(user_identity):
+        # No segment to sweep: the write landed, but which user's entries it
+        # supersedes could not be decided. Leaving them would serve the
+        # superseded response for the whole timeout, so this falls back to the
+        # namespace sweep, which is correct at the cost of everyone else's
+        # entries. It needs the one lookup in `cache_identity` to have failed
+        # on a request that just wrote successfully, which is rare enough to
+        # pay for.
+        return await invalidate_namespaces(cache_types)
+
+    # Before the first await, so a load already in flight sees the bump and
+    # refuses to write its (now superseded) value back after these deletions.
+    # A successful deletion leaves no debt behind, so this is the only thing
+    # standing between a racing loader and the progress it is about to undo.
+    for cache_type in cache_types:
+        _note_user_changed(cache_type, user_identity)
+
     total = 0
     for cache_type in cache_types:
         if not cache_type_enabled(cache_type):
+            # Switched off - this namespace or the whole cache. Same reasoning
+            # as the namespace sweep above: nothing new is written while it is
+            # off, but what was written before the switch is still there and
+            # this write has just superseded it, so the deletion is owed rather
+            # than dropped.
+            _mark_user_pending(cache_type, user_identity)
             continue
         # The breaker exists so reads do not each pay a timeout. Skipping the
         # deletion without a debt would leave the old progress in place until

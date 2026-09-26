@@ -559,6 +559,43 @@ class TestLastDispatchedPrayerRequest:
         conditions = [str(arg) for arg in query.filter.call_args.args]
         assert any("chat_messages.id !=" in condition for condition in conditions)
 
+    def test_before_bounds_the_search_to_earlier_pushes(self):
+        """The worker can reach a message after a later request has pushed. The
+        copy asks about this message's own moment, not about the room's latest
+        push, which by then can be one that went out afterwards."""
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db,
+            room_id=uuid4(),
+            exclude_message_id=uuid4(),
+            before=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+        )
+
+        conditions = [
+            str(arg) for call in query.filter.call_args_list for arg in call.args
+        ]
+        assert any(
+            "notification_dispatched_at <" in condition for condition in conditions
+        )
+
+    def test_without_before_the_latest_push_is_the_answer(self):
+        """The gate asks about now, so nothing is out of bounds for it."""
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [
+            str(arg) for call in query.filter.call_args_list for arg in call.args
+        ]
+        assert not any(
+            "notification_dispatched_at <" in condition for condition in conditions
+        )
+
 
 class TestCountSuppressedPrayerRequests:
     """How many prayer requests the interval held, for the "+N other prayer

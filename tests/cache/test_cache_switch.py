@@ -113,15 +113,60 @@ class TestMasterSwitch:
         assert result == Sample(value="async-fresh")
 
     @pytest.mark.asyncio
-    async def test_off_sweeps_nothing_on_a_write(self, clean_pending):
+    async def test_off_defers_the_sweep_instead_of_dropping_it(self, clean_pending):
+        """The switch keeps Redis out of the request path; it does not empty it.
+
+        Entries written before the switch went off are still there, and this
+        write supersedes them, so the eviction is owed rather than skipped -
+        otherwise turning the cache back on serves them again for the rest of
+        their timeout, with nothing but an operator remembering to flush
+        standing in the way.
+        """
         with _env(CACHE_ENABLED="false"), \
              patch("pecha_api.cache.cached_response.delete_by_pattern",
                    new_callable=AsyncMock) as mock_delete:
             removed = await invalidate_namespaces([CacheType.PLAN_DETAIL, CacheType.PLAN_LIST])
 
         assert removed == 0
+        # Nothing is swept now: that would charge a SCAN loop per write to the
+        # Redis this switch exists to stay off.
         mock_delete.assert_not_awaited()
-        # A namespace nothing was written to owes no eviction.
+        assert set(cached_response_module._pending_invalidations) == {
+            CacheType.PLAN_DETAIL,
+            CacheType.PLAN_LIST,
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_deferred_sweep_runs_when_the_switch_comes_back(self, clean_pending):
+        with _env(CACHE_ENABLED="false"), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern",
+                   new_callable=AsyncMock):
+            await invalidate_namespaces([CacheType.PLAN_DETAIL])
+
+        order = []
+
+        async def delete(pattern):
+            order.append("delete")
+            return 2
+
+        async def get(hash_key):
+            order.append("get")
+            return None
+
+        with patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+             patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+             patch("pecha_api.cache.cached_response.delete_by_pattern", side_effect=delete), \
+             patch("pecha_api.cache.cached_response.get_cache_data", side_effect=get), \
+             patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock):
+            result = await cached_response(
+                cache_type=CacheType.PLAN_DETAIL, parts=["a"], model=Sample,
+                loader=lambda: Sample(value="fresh"), timeout=60,
+            )
+
+        # Swept before anything is read back, so the entries the write
+        # superseded are gone by the time this read could have hit them.
+        assert order == ["delete", "get"]
+        assert result == Sample(value="fresh")
         assert cached_response_module._pending_invalidations == {}
 
 

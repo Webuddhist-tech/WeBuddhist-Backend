@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from pecha_api.cache import cached_response as cached_response_module
 from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_keys import UNRESOLVED_IDENTITY
 from pecha_api.cache.cached_response import (
     cached_response,
     invalidate_namespace,
@@ -23,10 +24,12 @@ def clean_pending():
     cached_response_module._pending_invalidations.clear()
     cached_response_module._pending_user_invalidations.clear()
     cached_response_module._namespace_epochs.clear()
+    cached_response_module._user_epochs.clear()
     yield
     cached_response_module._pending_invalidations.clear()
     cached_response_module._pending_user_invalidations.clear()
     cached_response_module._namespace_epochs.clear()
+    cached_response_module._user_epochs.clear()
 
 
 def _loader(value="fresh", calls=None):
@@ -293,8 +296,7 @@ async def test_a_load_that_started_before_a_sweep_is_not_stored(clean_pending):
 
 @pytest.mark.asyncio
 async def test_a_user_deletion_skipped_while_the_breaker_is_open_is_retried(clean_pending):
-    with patch("pecha_api.cache.cached_response.cache_enabled", return_value=True), \
-         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+    with patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
          patch("pecha_api.cache.cached_response.cache_is_available", return_value=False), \
          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock) as mock_delete:
         assert await invalidate_user_namespaces(
@@ -332,8 +334,7 @@ async def test_a_user_deletion_skipped_while_the_breaker_is_open_is_retried(clea
 
 @pytest.mark.asyncio
 async def test_a_failed_user_deletion_is_queued(clean_pending):
-    with patch("pecha_api.cache.cached_response.cache_enabled", return_value=True), \
-         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+    with patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
          patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
          patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
                side_effect=ConnectionError("redis down")):
@@ -343,3 +344,98 @@ async def test_a_failed_user_deletion_is_queued(clean_pending):
     assert (CacheType.USER_PLAN_PROGRESS, "iss|alice") in (
         cached_response_module._pending_user_invalidations
     )
+
+
+@pytest.mark.asyncio
+async def test_a_load_that_started_before_a_user_deletion_is_not_stored(clean_pending):
+    """The per-user counterpart of the namespace race.
+
+    A deletion that succeeds leaves no debt behind and does not touch the
+    namespace epoch, so nothing else tells this load that the progress it read
+    has since been replaced. Storing it would put the old progress back where
+    the write had just removed it, to be served until the entry expired.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def load():
+        started.set()
+        await release.wait()
+        return Sample(value="day-3")
+
+    with patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value=None), \
+         patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock) as mock_set, \
+         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=1):
+        task = asyncio.create_task(cached_response(
+            cache_type=CacheType.USER_PLAN_PROGRESS, parts=["plan"], model=Sample,
+            loader=load, timeout=60, user_identity="iss|alice",
+        ))
+        await started.wait()
+        await invalidate_user_namespaces([CacheType.USER_PLAN_PROGRESS], "iss|alice")
+        release.set()
+        result = await task
+
+    assert result.value == "day-3"
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_another_users_load_is_unaffected_by_that_deletion(clean_pending):
+    """The bump is per user: one person writing must not stop everyone else's
+    in-flight loads from being stored."""
+    with patch("pecha_api.cache.cached_response.get_cache_data", new_callable=AsyncMock,
+               return_value=None), \
+         patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock) as mock_set, \
+         patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=1):
+        await invalidate_user_namespaces([CacheType.USER_PLAN_PROGRESS], "iss|alice")
+        result = await cached_response(
+            cache_type=CacheType.USER_PLAN_PROGRESS, parts=["plan"], model=Sample,
+            loader=lambda: Sample(value="bob-day-1"), timeout=60,
+            user_identity="iss|bob",
+        )
+
+    assert result.value == "bob-day-1"
+    mock_set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_identity_stays_out_of_the_cache(clean_pending):
+    """Every key available for a caller we cannot name is one somebody else can
+    reach, so the request is served as though the cache were off."""
+    with patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.get_cache_data",
+               new_callable=AsyncMock) as mock_get, \
+         patch("pecha_api.cache.cached_response.set_cache", new_callable=AsyncMock) as mock_set:
+        result = await cached_response(
+            cache_type=CacheType.USER_PLAN_PROGRESS, parts=["plan"], model=Sample,
+            loader=lambda: Sample(value="fresh"), timeout=60,
+            user_identity=UNRESOLVED_IDENTITY,
+        )
+
+    assert result.value == "fresh"
+    mock_get.assert_not_awaited()
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_identity_invalidates_the_whole_namespace(clean_pending):
+    """There is no segment to target and the write it follows has landed, so the
+    superseded entries have to go the expensive way."""
+    with patch("pecha_api.cache.cached_response.cache_type_enabled", return_value=True), \
+         patch("pecha_api.cache.cached_response.cache_is_available", return_value=True), \
+         patch("pecha_api.cache.cached_response.delete_by_pattern", new_callable=AsyncMock,
+               return_value=4) as mock_delete:
+        deleted = await invalidate_user_namespaces(
+            [CacheType.USER_PLAN_PROGRESS], UNRESOLVED_IDENTITY
+        )
+
+    assert deleted == 4
+    pattern = mock_delete.await_args.args[0]
+    assert pattern.endswith("user_plan_progress:*")
