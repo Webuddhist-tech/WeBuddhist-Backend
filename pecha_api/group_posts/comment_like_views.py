@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.group_posts.posts_cache_service import POST_CACHE_TYPES
 from typing import Annotated, Optional
 from uuid import UUID
 
@@ -22,6 +24,8 @@ oauth2_scheme_optional = HTTPBearer(auto_error=False)
 public_group_post_comment_likes_router = APIRouter(
     prefix="/groups/author/comments/{comment_id}/likes",
     tags=["Public Group Post Comment Likes"],
+    # A like or comment changes liked_by_me for the caller; counts follow the timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*POST_CACHE_TYPES))],
 )
 
 

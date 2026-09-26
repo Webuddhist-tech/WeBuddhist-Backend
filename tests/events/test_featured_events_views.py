@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -36,7 +36,8 @@ def test_get_featured_events_success():
     event2 = _sample_event_dto()
     
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=[event1, event2],
     ) as mock_service:
         response = client.get("/events/featured")
@@ -50,7 +51,8 @@ def test_get_featured_events_success():
 
 def test_get_featured_events_default_params():
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=[],
     ) as mock_service:
         response = client.get("/events/featured")
@@ -63,7 +65,8 @@ def test_get_featured_events_custom_params():
     event = _sample_event_dto()
     
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=[event],
     ) as mock_service:
         response = client.get("/events/featured?language=bo&limit=5")
@@ -76,7 +79,8 @@ def test_get_featured_events_custom_params():
 
 def test_get_featured_events_empty():
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=[],
     ) as mock_service:
         response = client.get("/events/featured")
@@ -91,7 +95,8 @@ def test_get_featured_events_max_limit():
     events = [_sample_event_dto() for _ in range(20)]
     
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=events,
     ) as mock_service:
         response = client.get("/events/featured?limit=100")
@@ -104,7 +109,8 @@ def test_get_featured_events_max_limit():
 
 def test_get_featured_events_forwards_optional_token():
     with patch(
-        "pecha_api.events.event_views.get_featured_events_service",
+        "pecha_api.events.event_views.get_featured_events_service_cached",
+        new_callable=AsyncMock,
         return_value=[],
     ) as mock_service:
         response = client.get(

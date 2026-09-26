@@ -109,7 +109,7 @@ def _build_reaction_dtos(reactions, viewer_id: Optional[UUID]) -> list:
 def _sender_name(sender) -> str:
     if not sender:
         return "Unknown"
-    return f"{sender.firstname} {sender.lastname or ''}".strip() or sender.email
+    return f"{sender.firstname} {sender.lastname or ''}".strip() or sender.email or "Unknown"
 
 
 def _build_parent_dto(message: ChatMessage) -> Optional[ChatMessageParentDTO]:
@@ -121,7 +121,7 @@ def _build_parent_dto(message: ChatMessage) -> Optional[ChatMessageParentDTO]:
     return ChatMessageParentDTO(
         id=parent.id,
         sender_id=parent.sender_id,
-        sender_email=parent.sender.email if parent.sender else "unknown@example.com",
+        sender_email=(parent.sender.email if parent.sender else None) or "unknown@example.com",
         sender_name=_sender_name(parent.sender),
         sender_avatar_url=_generate_presigned_url(parent.sender.avatar_url if parent.sender else None),
         body="" if is_deleted else parent.body,
@@ -162,7 +162,7 @@ def build_message_dto(
     prayed_by_me: bool = False,
     recent_prayers=None,
 ) -> ChatMessageDTO:
-    sender_email = message.sender.email if message.sender else "unknown@example.com"
+    sender_email = (message.sender.email if message.sender else None) or "unknown@example.com"
     is_deleted = message.deleted_at is not None
     return ChatMessageDTO(
         id=message.id,

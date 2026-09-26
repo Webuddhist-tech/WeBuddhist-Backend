@@ -92,7 +92,6 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
     new_user.username = generate_and_validate_username(
         first_name=create_user_request.firstname,
         last_name=create_user_request.lastname,
-        phone_number=create_user_request.phone_number,
     )
 
     if registration_source == RegistrationSource.PHONE:
@@ -347,33 +346,76 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
-def generate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+# users.username is VARCHAR(255). A name-based handle is
+# first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
+# The fixed wrapper is 13 characters, leaving 242 for the two names.
+_USERNAME_MAX_LENGTH = 255
+_BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 5
+
+
+def _name_part(name: str | None) -> str:
+    if not name:
+        return ""
+    return "".join(char for char in name.strip().lower() if char.isalnum())
+
+
+def _fit_name_parts(first: str, last: str, max_combined: int) -> tuple[str, str]:
+    """Shorten names so both still appear and their combined length fits."""
+    if len(first) + len(last) <= max_combined:
+        return first, last
+
+    first_budget = min(len(first), max(1, max_combined // 2))
+    last_budget = max_combined - first_budget
+    if len(last) < last_budget:
+        last_budget = len(last)
+        first_budget = max_combined - last_budget
+    return first[:first_budget], last[:last_budget]
+
+
+def _random_base36(width: int = _BASE36_WIDTH) -> str:
+    value = secrets.randbelow(36 ** width)
+    chars = []
+    for _ in range(width):
+        value, remainder = divmod(value, 36)
+        chars.append(_BASE36_ALPHABET[remainder])
+    return "".join(reversed(chars))
+
+
+def _random_marked_suffix() -> str:
+    return "a" + str(secrets.randbelow(10000)).zfill(4)
+
+
+def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
-    Generate a username based on the following logic:
-    - If phone_number is present: webuddhist_{firstname}_{lastname}_{phonenumber}
-    - If phone_number is NOT present: webuddhist_user_{random_6_digit}
+    Generate a public username.
 
-    Uses cryptographically secure random number generation for username uniqueness.
+    Both names present: {firstname}_{lastname}_{base36}_a{dddd}
+    Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
+
+    Names are shortened so the result always fits users.username. The phone
+    number is never included. It stays on users.phone_number.
     """
-    random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
+    first = _name_part(first_name)
+    last = _name_part(last_name)
+    if not first or not last:
+        return f"webuddhist_user_{token}_{marked_suffix}"
 
-    if phone_number:
-        # Sanitize phone number - remove all non-digit characters
-        sanitized_phone = ''.join(filter(str.isdigit, phone_number))
-        return f"webuddhist_{first_name.lower()}_{last_name.lower()}_{sanitized_phone}.{random_suffix}"
-    else:
-        # Use random fallback if no phone number
-        random_num = str(secrets.randbelow(900000) + 100000)
-        return f"webuddhist_user_{random_num}.{random_suffix}"
+    tail = f"_{token}_{marked_suffix}"
+    name_budget = _USERNAME_MAX_LENGTH - len("_") - len(tail)
+    first, last = _fit_name_parts(first, last, name_budget)
+    return f"{first}_{last}{tail}"
 
 
-def generate_and_validate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate and validate a unique username.
     Keeps generating new usernames until a unique one is found.
     """
-    while True:  # Loop until a valid username is generated
-        username = generate_username(first_name=first_name, last_name=last_name, phone_number=phone_number)
+    while True:
+        username = generate_username(first_name=first_name, last_name=last_name)
         if validate_username(username=username):
             return username
 

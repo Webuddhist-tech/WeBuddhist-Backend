@@ -1,7 +1,9 @@
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -17,11 +19,14 @@ logger = logging.getLogger(__name__)
 # pooled connections sooner than it does keeps us from writing a request onto a
 # socket the server has already closed.
 _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
-_LIMITS = httpx.Limits(
-    max_connections=20,
-    max_keepalive_connections=10,
-    keepalive_expiry=15.0,
-)
+
+
+def _limits() -> httpx.Limits:
+    return httpx.Limits(
+        max_connections=config.get_int("OPENPECHA_MAX_CONNECTIONS"),
+        max_keepalive_connections=10,
+        keepalive_expiry=15.0,
+    )
 
 # Every one of these leaves the caller with no response at all. The reads
 # behind them are idempotent GETs, so replaying is safe even for the timeouts,
@@ -35,12 +40,40 @@ _RETRYABLE_ERRORS = (
     httpx.PoolTimeout,
 )
 
+class OpenPechaQueueTimeout(Exception):
+    """Gave up waiting for a slot on the openpecha concurrency gate.
+
+    Deliberately not in `_RETRYABLE_ERRORS`: the request never went out, and
+    retrying it means re-joining the same queue that just proved too long.
+    """
+
+
 # Gate every openpecha call, not just one caller's: plan resolution, bookmarks
 # and search all fan out over segments independently, so a per-caller cap still
 # lets them collectively exhaust the pool and fail on PoolTimeout. Held below
 # max_connections so the pool itself never becomes the bottleneck.
-_MAX_CONCURRENT_REQUESTS = 10
-_request_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)
+#
+# Built on first use rather than at import so its size comes from config, and
+# kept afterwards: resizing it while requests hold permits would hand out more
+# than the new size allows.
+#
+# Held per event loop. An asyncio.Semaphore binds to the loop the first time a
+# caller actually waits on it and refuses every other loop from then on, so a
+# single shared instance is only correct while exactly one loop ever exists -
+# true of the server, not of anything that calls asyncio.run more than once.
+# The map is weak so a finished loop takes its gate with it.
+_semaphores: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    WeakKeyDictionary()
+)
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(config.get_int("OPENPECHA_MAX_CONCURRENCY"))
+        _semaphores[loop] = semaphore
+    return semaphore
 
 
 def _resolve_pecha_base_url() -> str:
@@ -68,7 +101,7 @@ async def get_with_retry(
     kwargs: Dict[str, Any] = {} if params is None else {"params": params}
     for attempt in range(attempts):
         try:
-            async with _request_semaphore:
+            async with _gate():
                 return await http_client.get(url, **kwargs)
         except _RETRYABLE_ERRORS as error:
             if attempt == attempts - 1:
@@ -81,6 +114,29 @@ async def get_with_retry(
                 attempts - 1,
             )
             await asyncio.sleep(0.1 * 2 ** attempt)
+
+
+@asynccontextmanager
+async def _gate() -> AsyncIterator[None]:
+    """Hold a slot on the concurrency gate, or give up waiting for one.
+
+    Acquiring is what a caller actually queues on: the per-request timeouts
+    below only start once a slot is in hand, so without a bound here a wide
+    fan-out against a slow openpecha waits for as long as it takes and the
+    request has no timeout at all.
+    """
+    semaphore = _get_semaphore()
+    timeout = config.get_float("OPENPECHA_QUEUE_TIMEOUT")
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=timeout)
+    except asyncio.TimeoutError as error:
+        raise OpenPechaQueueTimeout(
+            f"No openpecha slot within {timeout}s"
+        ) from error
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
 @lru_cache()
@@ -96,7 +152,7 @@ def get_open_pecha_client() -> Client:
         raise_on_unexpected_status=True,
         follow_redirects=True,
         timeout=_TIMEOUT,
-        httpx_args={"limits": _LIMITS},
+        httpx_args={"limits": _limits()},
     )
 
 
@@ -128,5 +184,5 @@ def get_authenticated_open_pecha_client() -> AuthenticatedClient:
         headers={"X-Application": app_name},
         follow_redirects=True,
         timeout=_TIMEOUT,
-        httpx_args={"limits": _LIMITS},
+        httpx_args={"limits": _limits()},
     )

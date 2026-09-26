@@ -31,14 +31,27 @@ from .event_participant_service import (
 oauth2_scheme = HTTPBearer()
 optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.events.events_cache_service import (
+    EVENT_CACHE_TYPES,
+    get_event_by_id_service_cached,
+    get_events_service_cached,
+    get_events_today_service_cached,
+    get_featured_events_service_cached,
+)
+
 events_router = APIRouter(
     prefix="/events",
     tags=["Events"],
+    # Joining or leaving changes is_joined for the caller alone, so only
+    # their entries are evicted; counts follow the short timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*EVENT_CACHE_TYPES))],
 )
 
 
 @events_router.get("", status_code=status.HTTP_200_OK, response_model=EventsResponse, response_model_exclude_none=True)
-def get_events_endpoint(
+async def get_events_endpoint(
     group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
     plan_id: Annotated[Optional[UUID], Query(description="Filter by plan ID")] = None,
     accumulator_id: Annotated[Optional[UUID], Query(description="Filter by accumulator ID")] = None,
@@ -66,7 +79,7 @@ def get_events_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventsResponse:
-    return get_events_service(
+    return await get_events_service_cached(
         content_filter=EventContentFilter(
             group_id=group_id,
             plan_id=plan_id,
@@ -88,7 +101,7 @@ def get_events_endpoint(
 
 
 @events_router.get("/today", status_code=status.HTTP_200_OK, response_model=EventsResponse, response_model_exclude_none=True)
-def get_events_today_endpoint(
+async def get_events_today_endpoint(
     group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = None,
     should_include_unfollowed: Annotated[
@@ -112,7 +125,7 @@ def get_events_today_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventsResponse:
-    return get_events_today_service(
+    return await get_events_today_service_cached(
         timezone=x_timezone,
         group_id=group_id,
         language=language,
@@ -124,7 +137,7 @@ def get_events_today_endpoint(
 
 
 @events_router.get("/featured", status_code=status.HTTP_200_OK, response_model=list[EventDTO], response_model_exclude_none=True)
-def get_featured_events_endpoint(
+async def get_featured_events_endpoint(
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = "en",
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
     credentials: Annotated[
@@ -132,7 +145,7 @@ def get_featured_events_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> list[EventDTO]:
-    return get_featured_events_service(
+    return await get_featured_events_service_cached(
         language=language,
         limit=limit,
         token=credentials.credentials if credentials else None,
@@ -172,7 +185,8 @@ def update_participation_type_endpoint(
 ) -> None:
     """Switch how the caller attends an event: 'online' or 'offline'.
 
-    404 when the caller has not joined; 400 when the event only runs the
+    An upsert: a caller who has not joined yet is joined by this call, and
+    joining an event also joins its group. 400 when the event only runs the
     other way."""
     update_participation_type_service(
         token=credentials.credentials,
@@ -207,7 +221,7 @@ def get_event_participants_endpoint(
 
 
 @events_router.get("/{event_id}", status_code=status.HTTP_200_OK, response_model=EventDTO, response_model_exclude_none=True)
-def get_event_by_id_endpoint(
+async def get_event_by_id_endpoint(
     event_id: UUID,
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = None,
     credentials: Annotated[
@@ -215,7 +229,7 @@ def get_event_by_id_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventDTO:
-    return get_event_by_id_service(
+    return await get_event_by_id_service_cached(
         event_id=event_id,
         language=language,
         token=credentials.credentials if credentials else None,

@@ -1,5 +1,6 @@
 from unittest.mock import patch, AsyncMock
 import pytest
+from fastapi import HTTPException as _HTTPException
 from starlette.responses import StreamingResponse
 
 from types import SimpleNamespace
@@ -405,7 +406,6 @@ async def test_generate_segment_content_image_with_event():
         bg_color=BgColor.DEFAULT,
     )
     event = SimpleNamespace(
-        image_url="images/events/losar/original/banner.webp",
         metadata_entries=[
             SimpleNamespace(
                 name="Losar",
@@ -417,25 +417,120 @@ async def test_generate_segment_content_image_with_event():
 
     with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
          patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
-         patch("pecha_api.share.share_service.get", return_value="bucket") as mock_get, \
-         patch("pecha_api.share.share_service.download_bytes", return_value=b"event-photo") as mock_download, \
          patch("pecha_api.share.share_service.generate_event_share_image") as mock_generate_image, \
          patch("pecha_api.share.share_service.generate_segment_image") as mock_text_image:
         mock_session.return_value.__enter__.return_value = object()
         await _generate_segment_content_image_(share_request)
 
-        mock_download.assert_called_once_with(
-            bucket_name="bucket",
-            s3_key="images/events/losar/medium/banner.webp",
-        )
         mock_generate_image.assert_called_once_with(
             title="Losar",
             lang="en",
-            background=b"event-photo",
-            logo_path="pecha_api/share/static/img/webuddhist-logo.png",
+            logo_path="pecha_api/share/static/img/pecha-logo.png",
+            photo_bytes=None,
         )
         mock_text_image.assert_not_called()
-        mock_get.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_short_url_uses_the_site_name_and_the_event_name():
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        event_id=event_id,
+        url=f"https://webuddhist.com/events/{event_id}",
+        language="en",
+    )
+    event = SimpleNamespace(
+        metadata_entries=[
+            SimpleNamespace(
+                name="Losar",
+                description="Tibetan new year celebration",
+                language="EN",
+            )
+        ]
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
+         patch("pecha_api.share.share_service.generate_event_share_image"), \
+         patch(
+             "pecha_api.share.share_service.get_short_url",
+             new_callable=AsyncMock,
+             return_value=ShortUrlResponse(shortUrl="https://s.webuddhist.com/abc"),
+         ) as mock_short_url, \
+         patch("pecha_api.share.share_service.get", return_value="WeBuddhist"):
+        mock_session.return_value.__enter__.return_value = object()
+        await generate_short_url(share_request)
+
+    payload = mock_short_url.await_args.kwargs["payload"]
+    # The site name over the event's name, rather than the name in both slots.
+    assert payload["og_title"] == "WeBuddhist"
+    assert payload["og_description"] == "Losar"
+
+
+@pytest.mark.asyncio
+async def test_event_with_an_image_points_at_the_endpoint_not_the_s3_url():
+    """The stored file is WebP, which crawlers do not render, and a signed S3
+    URL expires while the short link does not. The endpoint serves the same
+    photo as JPEG from a URL with no deadline on it."""
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        event_id=event_id,
+        url=f"https://webuddhist.com/events/{event_id}",
+        language="en",
+    )
+    event = SimpleNamespace(
+        image_url="images/plan_images/abc/original/thangka.webp",
+        metadata_entries=[
+            SimpleNamespace(name="Losar", description="Tibetan new year", language="EN")
+        ],
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session,          patch("pecha_api.share.share_service.get_event_by_id", return_value=event),          patch("pecha_api.share.share_service.download_bytes", return_value=b"photo"),          patch("pecha_api.share.share_service.generate_event_share_image") as mock_card,          patch(
+             "pecha_api.share.share_service.get_short_url",
+             new_callable=AsyncMock,
+             return_value=ShortUrlResponse(shortUrl="https://s.webuddhist.com/abc"),
+         ) as mock_short_url:
+        mock_session.return_value.__enter__.return_value = object()
+        await generate_short_url(share_request)
+
+    payload = mock_short_url.await_args.kwargs["payload"]
+    assert "/share/image?" in payload["og_image"]
+    assert f"event_id={event_id}" in payload["og_image"]
+    assert "X-Amz-Signature" not in payload["og_image"]
+    # The photo reaches the render rather than a title card being drawn over it.
+    assert mock_card.call_args.kwargs["photo_bytes"] == b"photo"
+
+
+@pytest.mark.asyncio
+async def test_event_without_an_image_falls_back_to_the_rendered_card():
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        event_id=event_id,
+        url=f"https://webuddhist.com/events/{event_id}",
+        language="en",
+    )
+    event = SimpleNamespace(
+        image_url=None,
+        metadata_entries=[
+            SimpleNamespace(name="Losar", description=None, language="EN")
+        ],
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event), \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_card, \
+         patch(
+             "pecha_api.share.share_service.get_short_url",
+             new_callable=AsyncMock,
+             return_value=ShortUrlResponse(shortUrl="https://s.webuddhist.com/abc"),
+         ) as mock_short_url, \
+         patch("pecha_api.share.share_service.get", return_value="WeBuddhist"):
+        mock_session.return_value.__enter__.return_value = object()
+        await generate_short_url(share_request)
+
+    payload = mock_short_url.await_args.kwargs["payload"]
+    assert "/share/image?" in payload["og_image"]
+    mock_card.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -520,7 +615,7 @@ async def test_get_generated_image_with_poem_renders_content():
     with patch(
         "pecha_api.share.share_service._render_share_image_bytes",
         new_callable=AsyncMock,
-        return_value=b"poem-image",
+        return_value=(b"poem-image", "image/png"),
     ) as mock_render:
         response = await get_generated_image(share_request=share_request)
 
@@ -586,3 +681,133 @@ def test_apply_inferred_ids_fills_from_url_when_no_identifier_given():
     _apply_inferred_ids(share_request)
 
     assert share_request.post_id == post_id
+
+
+@pytest.mark.asyncio
+async def test_event_is_loaded_once_per_short_url():
+    """The card image needs the same event the OG title came from, and
+    get_event_by_id eager-loads the event's metadata, links, location and
+    linked resources - twice per share was the whole query again for nothing."""
+    event_id = str(uuid4())
+    share_request = ShareRequest(
+        event_id=event_id,
+        url=f"https://webuddhist.com/events/{event_id}",
+        language="en",
+    )
+    event = SimpleNamespace(
+        metadata_entries=[
+            SimpleNamespace(
+                name="Losar",
+                description="Tibetan new year celebration",
+                language="EN",
+            )
+        ]
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event) as mock_get_event, \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_image, \
+         patch(
+             "pecha_api.share.share_service.get_short_url",
+             new_callable=AsyncMock,
+             return_value=ShortUrlResponse(shortUrl="https://s.webuddhist.com/abc"),
+         ), \
+         patch("pecha_api.share.share_service.get", return_value="WeBuddhist"):
+        mock_session.return_value.__enter__.return_value = object()
+        await generate_short_url(share_request)
+
+    assert mock_get_event.call_count == 1
+    assert mock_session.call_count == 1
+    # The image still gets the event's own title, not the fallback site name.
+    assert mock_image.call_args.kwargs["title"] == "Losar"
+
+
+@pytest.mark.asyncio
+async def test_event_image_endpoint_still_loads_the_event_itself():
+    """Rendering the card on its own has no earlier lookup to reuse."""
+    from pecha_api.share.share_service import _generate_event_content_image_
+
+    event_id = str(uuid4())
+    share_request = ShareRequest(event_id=event_id, language="en")
+    event = SimpleNamespace(
+        metadata_entries=[
+            SimpleNamespace(name="Losar", description=None, language="EN")
+        ]
+    )
+
+    with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
+         patch("pecha_api.share.share_service.get_event_by_id", return_value=event) as mock_get_event, \
+         patch("pecha_api.share.share_service.generate_event_share_image") as mock_image, \
+         patch("pecha_api.share.share_service.get", return_value="WeBuddhist"):
+        mock_session.return_value.__enter__.return_value = object()
+        await _generate_event_content_image_(share_request)
+
+    assert mock_get_event.call_count == 1
+    assert mock_image.call_args.kwargs["title"] == "Losar"
+
+
+class TestEventPhotoFetch:
+    """The /share/image endpoint is public and re-renders per hit, so the fetch
+    behind it is bounded and memoised."""
+
+    def setup_method(self):
+        from pecha_api.share import share_service
+        share_service._event_photo_cache.clear()
+
+    def teardown_method(self):
+        from pecha_api.share import share_service
+        share_service._event_photo_cache.clear()
+
+    def test_the_download_is_bounded(self):
+        from pecha_api.share.share_service import _load_event_photo_bytes
+
+        with patch("pecha_api.share.share_service.download_bytes",
+                   return_value=b"photo") as mock_download:
+            _load_event_photo_bytes("events/original/a.webp")
+
+        assert mock_download.call_args.kwargs["max_bytes"] > 0
+
+    def test_a_second_request_for_the_same_event_skips_s3(self):
+        from pecha_api.share.share_service import _load_event_photo_bytes
+
+        with patch("pecha_api.share.share_service.download_bytes",
+                   return_value=b"photo") as mock_download:
+            first = _load_event_photo_bytes("events/original/a.webp")
+            second = _load_event_photo_bytes("events/original/a.webp")
+
+        assert first == second == b"photo"
+        mock_download.assert_called_once()
+
+    def test_an_oversized_object_falls_back_to_the_card(self):
+        from pecha_api.share.share_service import _load_event_photo_bytes
+
+        with patch("pecha_api.share.share_service.download_bytes",
+                   side_effect=_HTTPException(status_code=413, detail="too big")):
+            assert _load_event_photo_bytes("events/original/huge.webp") is None
+
+    def test_no_image_key_fetches_nothing(self):
+        from pecha_api.share.share_service import _load_event_photo_bytes
+
+        with patch("pecha_api.share.share_service.download_bytes") as mock_download:
+            assert _load_event_photo_bytes(None) is None
+
+        mock_download.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_jpeg_render_is_served_as_jpeg():
+    """Serving a JPEG labelled image/png is exactly what a strict crawler
+    rejects, so the type is read off the bytes."""
+    jpeg_magic = b"\xff\xd8\xff" + b"rest-of-a-jpeg"
+    share_request = ShareRequest(event_id=str(uuid4()), language="en")
+
+    with patch("pecha_api.share.share_service._generate_segment_content_image_",
+               new_callable=AsyncMock) as mock_render:
+        async def _write(share_request, output_path=None, event_metadata=None):
+            output_path.write(jpeg_magic)
+
+        mock_render.side_effect = _write
+        response = await get_generated_image(share_request=share_request)
+
+    assert response.media_type == "image/jpeg"
+    assert "max-age" in response.headers["cache-control"]

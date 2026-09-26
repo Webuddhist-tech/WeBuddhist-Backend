@@ -29,7 +29,7 @@ from pecha_api.users.users_models import Users
 def _build_member_dto(member: ChatRoomMember) -> ChatRoomMemberDTO:
     return ChatRoomMemberDTO(
         user_id=member.user_id,
-        email=member.user.email if member.user else "unknown@example.com",
+        email=(member.user.email if member.user else None) or "unknown@example.com",
         firstname=member.user.firstname if member.user else "",
         lastname=member.user.lastname if member.user else None,
         role=member.role,

@@ -21,6 +21,10 @@ class ChatNotificationTargetsResponse(BaseModel):
     sender_id: UUID
     chat_kind: str
     group_id: Optional[UUID] = None
+    message_type: str = "TEXT"
+    # Set for a prayer request only, where it stands in for the room name the
+    # copy leaves out. Presigned, so it is short-lived by design.
+    image_url: Optional[str] = None
     title: str
     body: str
     recipients: List[ChatNotificationRecipientDTO]

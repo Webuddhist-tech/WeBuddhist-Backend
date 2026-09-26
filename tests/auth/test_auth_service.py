@@ -771,69 +771,89 @@ def test_validate_username_user_does_not_exist():
         assert result is True
 
 
-def test_generate_username():
-    first_name = "John"
-    last_name = "Doe"
-
-    username = generate_username(first_name, last_name)
-
-    assert username.startswith("webuddhist_user_")
-    parts = username.split(".")
-    assert len(parts) == 2
-    assert len(parts[1]) == 4  # random suffix
+def _assert_random_tail(tail: str) -> None:
+    token, marked_suffix = tail.split("_")
+    assert len(token) == 5
+    assert token == token.lower()
+    assert all(char in "0123456789abcdefghijklmnopqrstuvwxyz" for char in token)
+    assert marked_suffix.startswith("a")
+    assert len(marked_suffix) == 5
+    assert marked_suffix[1:].isdigit()
 
 
-def test_generate_username_with_phone():
-    first_name = "John"
-    last_name = "Doe"
-    phone_number = "+1-234-567-8900"
+def test_generate_username_uses_both_names():
+    username = generate_username(first_name="John", last_name="Doe")
 
-    username = generate_username(first_name, last_name, phone_number)
+    assert username.startswith("john_doe_")
+    assert not username.startswith("webuddhist_")
+    _assert_random_tail(username.removeprefix("john_doe_"))
 
-    assert username.startswith("webuddhist_john_doe_12345678900.")
-    parts = username.split(".")
-    assert len(parts) == 2
-    assert len(parts[1]) == 4  # random suffix
+
+def test_generate_username_truncates_long_names_to_column_limit():
+    username = generate_username(first_name="A" * 255, last_name="B" * 255)
+
+    assert len(username) == 255
+    body, marked_suffix = username.rsplit("_", 1)
+    first, last, token = body.rsplit("_", 2)
+    assert first == "a" * len(first)
+    assert last == "b" * len(last)
+    assert len(first) + len(last) == 242
+    _assert_random_tail(f"{token}_{marked_suffix}")
+
+
+def test_generate_username_keeps_names_that_fit():
+    first_name = "a" * 100
+    last_name = "b" * 100
+
+    username = generate_username(first_name=first_name, last_name=last_name)
+
+    assert len(username) < 255
+    assert username.startswith(f"{first_name}_{last_name}_")
+
+
+def test_generate_username_falls_back_when_names_are_missing():
+    for first_name, last_name in (
+        (None, None),
+        ("", ""),
+        ("   ", "   "),
+        ("John", None),
+        ("John", "   "),
+        (None, "Doe"),
+        ("   ", "Doe"),
+    ):
+        username = generate_username(first_name=first_name, last_name=last_name)
+        assert username.startswith("webuddhist_user_")
+        _assert_random_tail(username.removeprefix("webuddhist_user_"))
 
 
 def test_generate_and_validate_username_success():
-    first_name = "John"
-    last_name = "Doe"
-
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.return_value = True
 
-        username = generate_and_validate_username(first_name, last_name)
+        username = generate_and_validate_username(first_name="John", last_name="Doe")
+
+        mock_validate_username.assert_called()
+        assert username.startswith("john_doe_")
+
+
+def test_generate_and_validate_username_falls_back_without_both_names():
+    with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
+        mock_validate_username.return_value = True
+
+        username = generate_and_validate_username(first_name="John", last_name="")
 
         mock_validate_username.assert_called()
         assert username.startswith("webuddhist_user_")
-
-
-def test_generate_and_validate_username_with_phone_success():
-    first_name = "John"
-    last_name = "Doe"
-    phone_number = "+1-234-567-8900"
-
-    with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
-        mock_validate_username.return_value = True
-
-        username = generate_and_validate_username(first_name, last_name, phone_number)
-
-        mock_validate_username.assert_called()
-        assert username.startswith("webuddhist_john_doe_12345678900.")
 
 
 def test_generate_and_validate_username_retry():
-    first_name = "John"
-    last_name = "Doe"
-
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.side_effect = [False, True]
 
-        username = generate_and_validate_username(first_name, last_name)
+        username = generate_and_validate_username(first_name="John", last_name="Doe")
 
         assert mock_validate_username.call_count == 2
-        assert username.startswith("webuddhist_user_")
+        assert username.startswith("john_doe_")
 
 
 def test_validate_username_returns_true_on_404():

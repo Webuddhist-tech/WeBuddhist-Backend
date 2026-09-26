@@ -1,8 +1,12 @@
 import asyncio
 import logging
+from functools import partial
 from typing import List, Optional
 
 from openpecha_api.segments.openpecha_segment_service import fetch_segment_content, fetch_segment_reference
+
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.plans.shared.segment_cache import cached_segment_value
 
 from ..plans_enums import ContentType
 
@@ -11,7 +15,11 @@ logger = logging.getLogger(__name__)
 
 async def _fetch_segment_content_safe(segment_id: str) -> Optional[str]:
     try:
-        return await fetch_segment_content(segment_id)
+        return await cached_segment_value(
+            cache_type=CacheType.OPENPECHA_SEGMENT_CONTENT,
+            segment_id=segment_id,
+            fetch=partial(fetch_segment_content, segment_id),
+        )
     except Exception:
         logger.exception("Failed to fetch segment content '%s' from openpecha", segment_id)
         return None
@@ -19,7 +27,11 @@ async def _fetch_segment_content_safe(segment_id: str) -> Optional[str]:
 
 async def _fetch_segment_reference_safe(segment_id: str) -> Optional[str]:
     try:
-        return await fetch_segment_reference(segment_id)
+        return await cached_segment_value(
+            cache_type=CacheType.OPENPECHA_SEGMENT_REFERENCE,
+            segment_id=segment_id,
+            fetch=partial(fetch_segment_reference, segment_id),
+        )
     except Exception:
         logger.exception("Failed to fetch segment reference '%s' from openpecha", segment_id)
         return None

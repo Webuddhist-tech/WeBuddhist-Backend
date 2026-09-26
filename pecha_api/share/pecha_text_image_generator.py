@@ -9,6 +9,9 @@ from pecha_api.share.pecha_text_image_generator_config import CONFIG
 # A render destination: either a filesystem path or an open binary buffer.
 ImageDestination = Union[str, BinaryIO]
 IMAGE_FORMAT = "PNG"
+# Photos go out as JPEG: link-preview crawlers render JPEG, PNG and GIF, and
+# every image this system stores is WebP, which they do not.
+PHOTO_IMAGE_FORMAT = "JPEG"
 
 class SyntheticImageGenerator:
     def __init__(
@@ -200,51 +203,80 @@ def generate_segment_image(
 def generate_event_share_image(
     title: str,
     lang: str = None,
-    background: Optional[bytes] = None,
     logo_path: str = None,
     output_path: ImageDestination = None,
+    photo_bytes: Optional[bytes] = None,
 ) -> None:
-    """Share card for an event: the event photo, the event name, and the logo."""
+    """Share card for an event.
+
+    With the event's own photo, that photo *is* the card: oriented, cropped to
+    the link-preview aspect and written out with nothing drawn over it. A title
+    burned into the image only competes with the title the preview already
+    renders underneath it as text.
+
+    Without a usable photo the old card stands in - red background, name in the
+    middle, logo bottom right - because a blank preview is worse than a plain
+    one.
+    """
     width = CONFIG["EVENT_CARD_WIDTH"]
     height = CONFIG["EVENT_CARD_HEIGHT"]
-    canvas = _event_background(background, width, height)
-    canvas = _add_bottom_scrim(canvas)
+    destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
+
+    photo = _load_event_photo(photo_bytes, width, height) if photo_bytes else None
+    if photo is not None:
+        # JPEG, not the PNG the cards use. Every image this system stores is
+        # WebP, and WebP is not one of the formats a link-preview crawler will
+        # render as an og:image - which is the whole reason the photo is served
+        # through here rather than linked straight from S3.
+        photo.convert("RGB").save(destination, format=PHOTO_IMAGE_FORMAT, quality=85)
+        return
+
+    canvas = Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
     logo = _load_bottom_right_logo(logo_path, height) if logo_path else None
-    _draw_event_title(canvas, title or "", lang, _logo_reserved_width(logo))
+    _draw_event_title(canvas, title or "", lang)
     if logo is not None:
         canvas = _paste_logo_bottom_right(canvas, logo)
-    destination = output_path if output_path is not None else CONFIG["IMG_OUTPUT_PATH"]
     canvas.save(destination, format=IMAGE_FORMAT)
 
-def _event_background(background: Optional[bytes], width: int, height: int) -> Image.Image:
-    if background:
-        try:
-            source = ImageOps.exif_transpose(Image.open(io.BytesIO(background))).convert("RGBA")
-            return _cover_crop(source, width, height)
-        except (OSError, ValueError) as error:
-            logging.warning("Could not read event image for share card: %s", error)
-    return Image.new("RGBA", (width, height), CONFIG["EVENT_FALLBACK_BG"])
 
-def _cover_crop(source: Image.Image, width: int, height: int) -> Image.Image:
-    scale = max(width / source.width, height / source.height)
-    resized = source.resize(
-        (max(width, int(source.width * scale)), max(height, int(source.height * scale))),
+def _load_event_photo(
+    photo_bytes: bytes,
+    width: int,
+    height: int,
+) -> Optional[Image.Image]:
+    """The event photo, oriented and cropped to fill the card exactly.
+
+    Cover rather than fit: letterbox bars around a photo read as a broken image
+    in a link preview. Returns None for anything Pillow cannot open, so the
+    caller falls back to the card it drew before.
+    """
+    try:
+        photo = Image.open(io.BytesIO(photo_bytes))
+        photo.load()
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        logging.warning("Could not open event share photo: %s", error)
+        return None
+
+    # A phone photo can carry its display rotation in EXIF rather than in its
+    # pixels. Without this the card comes out sideways, or crops the wrong part
+    # of a photo that looks right everywhere else.
+    try:
+        photo = ImageOps.exif_transpose(photo)
+    except Exception as error:
+        logging.warning("Could not read EXIF orientation on event photo: %s", error)
+
+    photo = photo.convert("RGBA")
+    if photo.width <= 0 or photo.height <= 0:
+        return None
+
+    scale = max(width / photo.width, height / photo.height)
+    scaled = photo.resize(
+        (max(int(photo.width * scale), width), max(int(photo.height * scale), height)),
         Image.Resampling.LANCZOS,
     )
-    left = (resized.width - width) // 2
-    top = (resized.height - height) // 2
-    return resized.crop((left, top, left + width, top + height))
-
-def _add_bottom_scrim(canvas: Image.Image) -> Image.Image:
-    overlay = Image.new("RGBA", canvas.size, CONFIG["RGBA_TRANSPARENT"])
-    draw = ImageDraw.Draw(overlay)
-    start = int(canvas.height * CONFIG["EVENT_SCRIM_START_RATIO"])
-    span = max(canvas.height - start, 1)
-    for y in range(start, canvas.height):
-        progress = (y - start) / span
-        alpha = int(200 * progress * progress)
-        draw.line([(0, y), (canvas.width, y)], fill=(0, 0, 0, alpha))
-    return Image.alpha_composite(canvas, overlay)
+    left = (scaled.width - width) // 2
+    top = (scaled.height - height) // 2
+    return scaled.crop((left, top, left + width, top + height))
 
 def _load_bottom_right_logo(logo_path: str, image_height: int) -> Optional[Image.Image]:
     try:
@@ -258,11 +290,6 @@ def _load_bottom_right_logo(logo_path: str, image_height: int) -> Optional[Image
     logo_width = int(logo_height * (logo.size[0] / logo.size[1]))
     return logo.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
 
-def _logo_reserved_width(logo: Optional[Image.Image]) -> int:
-    if logo is None:
-        return 0
-    return logo.width + CONFIG["EVENT_LOGO_GAP"]
-
 def _paste_logo_bottom_right(canvas: Image.Image, logo: Image.Image) -> Image.Image:
     margin = CONFIG["EVENT_MARGIN"]
     x = canvas.width - logo.width - margin
@@ -274,35 +301,35 @@ def _draw_event_title(
     canvas: Image.Image,
     title: str,
     lang: Optional[str],
-    reserved_right: int,
 ) -> None:
     cleaned = " ".join(title.split())
     if not cleaned:
         return
     margin = CONFIG["EVENT_MARGIN"]
-    max_width = canvas.width - margin - reserved_right - margin
+    max_width = canvas.width - (margin * 2)
     if max_width <= 0:
         return
     font, wrapped = _fit_event_title(cleaned, lang, max_width)
     draw = ImageDraw.Draw(canvas)
     spacing = int(font.size * 0.25)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=spacing)
-    text_height = bbox[3] - bbox[1]
-    x = margin
-    y = canvas.height - margin - text_height
+    center = (canvas.width / 2, canvas.height / 2)
     draw.multiline_text(
-        (x + 2, y + 2),
+        (center[0] + 2, center[1] + 2),
         wrapped,
         font=font,
         fill=(0, 0, 0, 170),
         spacing=spacing,
+        anchor=CONFIG["ANCHOR_MIDDLE"],
+        align=CONFIG["ALIGN_CENTER"],
     )
     draw.multiline_text(
-        (x, y),
+        center,
         wrapped,
         font=font,
         fill=CONFIG["COLOR_WHITE"],
         spacing=spacing,
+        anchor=CONFIG["ANCHOR_MIDDLE"],
+        align=CONFIG["ALIGN_CENTER"],
     )
 
 def _fit_event_title(
