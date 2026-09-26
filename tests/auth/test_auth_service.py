@@ -772,65 +772,31 @@ def test_validate_username_user_does_not_exist():
 
 
 def test_generate_username():
-    first_name = "John"
-    last_name = "Doe"
-
-    username = generate_username(first_name, last_name)
+    username = generate_username()
 
     assert username.startswith("webuddhist_user_")
-    parts = username.split(".")
-    assert len(parts) == 2
-    assert len(parts[1]) == 4  # random suffix
-
-
-def test_generate_username_with_phone():
-    first_name = "John"
-    last_name = "Doe"
-    phone_number = "+1-234-567-8900"
-
-    username = generate_username(first_name, last_name, phone_number)
-
-    assert username.startswith("webuddhist_john_doe_12345678900.")
-    parts = username.split(".")
-    assert len(parts) == 2
-    assert len(parts[1]) == 4  # random suffix
+    random_num, random_suffix = username.removeprefix("webuddhist_user_").split(".")
+    assert len(random_num) == 6
+    assert random_num.isdigit()
+    assert len(random_suffix) == 4
+    assert random_suffix.isdigit()
 
 
 def test_generate_and_validate_username_success():
-    first_name = "John"
-    last_name = "Doe"
-
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.return_value = True
 
-        username = generate_and_validate_username(first_name, last_name)
+        username = generate_and_validate_username()
 
         mock_validate_username.assert_called()
         assert username.startswith("webuddhist_user_")
 
 
-def test_generate_and_validate_username_with_phone_success():
-    first_name = "John"
-    last_name = "Doe"
-    phone_number = "+1-234-567-8900"
-
-    with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
-        mock_validate_username.return_value = True
-
-        username = generate_and_validate_username(first_name, last_name, phone_number)
-
-        mock_validate_username.assert_called()
-        assert username.startswith("webuddhist_john_doe_12345678900.")
-
-
 def test_generate_and_validate_username_retry():
-    first_name = "John"
-    last_name = "Doe"
-
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.side_effect = [False, True]
 
-        username = generate_and_validate_username(first_name, last_name)
+        username = generate_and_validate_username()
 
         assert mock_validate_username.call_count == 2
         assert username.startswith("webuddhist_user_")
