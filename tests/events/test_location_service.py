@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Iterator, List, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -46,7 +46,12 @@ def _author() -> SimpleNamespace:
     return SimpleNamespace(id=uuid4(), email="author@example.com")
 
 
-def _location_stub(group_id=None, name="Tushita Meditation Centre", latitude=None, longitude=None):
+def _location_stub(
+    group_id: Optional[UUID] = None,
+    name: str = "Tushita Meditation Centre",
+    latitude: Optional[Decimal] = None,
+    longitude: Optional[Decimal] = None,
+) -> SimpleNamespace:
     now = datetime.now(timezone.utc)
     return SimpleNamespace(
         id=uuid4(),
@@ -60,7 +65,7 @@ def _location_stub(group_id=None, name="Tushita Meditation Centre", latitude=Non
     )
 
 
-def _patch_auth(read_ok=True, write_ok=True):
+def _patch_auth(read_ok: bool = True, write_ok: bool = True) -> Tuple[Any, Any, Any]:
     return (
         patch(f"{MODULE}.validate_cms_author_details", return_value=_author()),
         patch(f"{MODULE}.require_can_read_group_content"),
@@ -128,7 +133,7 @@ def test_create_request_rejects_out_of_range_longitude(longitude: str) -> None:
     "latitude,longitude",
     [("0", "0"), ("90", "180"), ("-90", "-180"), ("0.000001", "-0.000001")],
 )
-def test_create_request_accepts_boundary_coordinates(latitude, longitude) -> None:
+def test_create_request_accepts_boundary_coordinates(latitude: str, longitude: str) -> None:
     request = CreateLocationRequest(
         name="X", latitude=Decimal(latitude), longitude=Decimal(longitude)
     )
