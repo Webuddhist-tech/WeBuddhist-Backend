@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 from starlette import status
@@ -38,7 +38,15 @@ def get_locations(
         .filter(Location.group_id == group_id)
     )
     if search and search.strip():
-        query = query.filter(Location.name.ilike(f"%{search.strip()}%"))
+        # Match the canonical name or any translated name. `.any()` is an
+        # EXISTS, so several matching translations still count as one row.
+        pattern = f"%{search.strip()}%"
+        query = query.filter(
+            or_(
+                Location.name.ilike(pattern),
+                Location.metadata_entries.any(LocationMetadata.name.ilike(pattern)),
+            )
+        )
 
     total = query.count()
     locations = (

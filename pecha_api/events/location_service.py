@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -7,6 +7,7 @@ from starlette import status
 
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.shared.permissions import (
     require_can_create_content,
     require_can_read_group_content,
@@ -31,7 +32,7 @@ from .location_response_models import (
 )
 
 
-def _language_value(language) -> str:
+def _language_value(language: Union[LanguageCode, str]) -> str:
     return language.value if hasattr(language, "value") else str(language)
 
 

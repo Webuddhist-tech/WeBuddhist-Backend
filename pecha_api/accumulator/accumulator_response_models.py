@@ -144,8 +144,14 @@ class PublicAccumulatorsResponse(BaseModel):
 
 class CMSPublicAccumulatorDTO(PublicAccumulatorDTO):
     """CMS-facing variant of PublicAccumulatorDTO whose nested mantra also
-    carries the raw deity image key."""
+    carries the raw deity image key, and whose linked text title is resolved
+    with the list so each row does not look the title up on its own."""
     mantra: Optional[CMSPresetMantraDTO] = None
+    text_title: Optional[str] = Field(
+        None,
+        description="Title of the linked OpenPecha text when text_id is set. "
+        "Null when the preset has no text or the title could not be resolved.",
+    )
 
 
 class CMSPublicAccumulatorsResponse(BaseModel):

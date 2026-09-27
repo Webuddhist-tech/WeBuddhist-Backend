@@ -1,22 +1,29 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Iterator, List, Tuple
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 from starlette import status
 
 from pecha_api.app import api  # noqa: F401
+from pecha_api.db.database import Base
+from pecha_api.events.location_metadata_model import LocationMetadata
+from pecha_api.events.location_model import Location
 from pecha_api.events.location_repository import (
     delete_location,
+    get_locations,
     save_location,
     update_location,
 )
-from pecha_api.events.location_metadata_model import LocationMetadata
 from pecha_api.events.location_response_models import (
     CreateLocationRequest,
     LocationMetadataInput,
@@ -29,6 +36,7 @@ from pecha_api.events.location_service import (
     get_locations_service,
     update_location_service,
 )
+from pecha_api.plans.plans_enums import LanguageCode
 
 MODULE = "pecha_api.events.location_service"
 REPO_MODULE = "pecha_api.events.location_repository"
@@ -714,3 +722,196 @@ def test_update_location_without_translations_leaves_rows_alone() -> None:
     update_location(db=db, location=_location_stub())
 
     db.query.assert_not_called()
+
+
+# --- translated-name search and translation replace, against a real database ---
+# A mocked session can only record that filter/delete/add were called. It
+# cannot tell whether a Tibetan translation matches, whether that match is
+# counted once, or whether the location handed back after commit and refresh
+# still holds the translations that were just replaced.
+
+
+def _location_sessionmaker() -> sessionmaker:
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[Location.__table__, LocationMetadata.__table__],
+    )
+    return sessionmaker(bind=engine)
+
+
+@pytest.fixture
+def location_db() -> Iterator[Session]:
+    db = _location_sessionmaker()()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def _persist_location(
+    db: Session,
+    group_id: UUID,
+    name: str,
+    translations: List[Tuple[str, str]] | None = None,
+) -> Location:
+    now = datetime.now(timezone.utc)
+    location = Location(
+        id=uuid4(),
+        group_id=group_id,
+        name=name,
+        created_at=now,
+        updated_at=now,
+        created_by="author@example.com",
+    )
+    db.add(location)
+    db.flush()
+    for language, translated_name in translations or []:
+        db.add(
+            LocationMetadata(
+                id=uuid4(),
+                location_id=location.id,
+                name=translated_name,
+                language=LanguageCode(language),
+            )
+        )
+    db.commit()
+    return location
+
+
+def test_search_matches_a_translated_name_in_the_same_group(location_db: Session) -> None:
+    """Canonical name is English; the editor searched the Tibetan translation."""
+    group_id = uuid4()
+    matching = _persist_location(
+        location_db,
+        group_id,
+        "Bodh Gaya",
+        [("BO", "རྡོ་རྗེ་གདན།")],
+    )
+    _persist_location(location_db, group_id, "Tushita", [("EN", "Tushita")])
+    _persist_location(
+        location_db,
+        uuid4(),
+        "Bodh Gaya",
+        [("BO", "རྡོ་རྗེ་གདན།")],
+    )
+
+    locations, total = get_locations(
+        db=location_db, group_id=group_id, search="རྡོ་རྗེ་གདན།"
+    )
+
+    assert [row.id for row in locations] == [matching.id]
+    assert total == 1
+
+
+def test_search_still_matches_the_canonical_name(location_db: Session) -> None:
+    group_id = uuid4()
+    matching = _persist_location(
+        location_db,
+        group_id,
+        "Bodh Gaya",
+        [("BO", "རྡོ་རྗེ་གདན།")],
+    )
+
+    locations, total = get_locations(db=location_db, group_id=group_id, search="bodh")
+
+    assert [row.id for row in locations] == [matching.id]
+    assert total == 1
+
+
+def test_search_counts_a_location_once_when_several_names_match(
+    location_db: Session,
+) -> None:
+    """EXISTS, not a join: the name and two translations are still one row."""
+    group_id = uuid4()
+    matching = _persist_location(
+        location_db,
+        group_id,
+        "Bodh Gaya",
+        [("EN", "Bodh Gaya"), ("BO", "Bodh Gaya in Tibetan")],
+    )
+    _persist_location(location_db, group_id, "Tushita", [("EN", "Tushita")])
+
+    locations, total = get_locations(db=location_db, group_id=group_id, search="bodh")
+
+    assert [row.id for row in locations] == [matching.id]
+    assert total == 1
+
+
+def test_search_paginates_while_total_reports_every_match(location_db: Session) -> None:
+    group_id = uuid4()
+    for name in ("Alpha", "Beta", "Gamma"):
+        _persist_location(
+            location_db,
+            group_id,
+            name,
+            [("BO", f"Temple {name}")],
+        )
+
+    first_page, total = get_locations(
+        db=location_db, group_id=group_id, search="Temple", skip=0, limit=2
+    )
+    second_page, second_total = get_locations(
+        db=location_db, group_id=group_id, search="Temple", skip=2, limit=2
+    )
+
+    assert [row.name for row in first_page] == ["Alpha", "Beta"]
+    assert [row.name for row in second_page] == ["Gamma"]
+    assert total == 3
+    assert second_total == 3
+
+
+def test_update_location_returns_replacement_translations_after_refresh() -> None:
+    factory = _location_sessionmaker()
+    db = factory()
+    group_id = uuid4()
+    location = _persist_location(
+        db,
+        group_id,
+        "Bodh Gaya",
+        [("EN", "Bodh Gaya"), ("BO", "རྡོ་")],
+    )
+    location_id = location.id
+    db.close()
+
+    request = UpdateLocationRequest(
+        translations=[
+            {"language": "EN", "name": "Vajrasana"},
+            {"language": "BO", "name": "རྡོ་རྗེ་གདན།"},
+        ]
+    )
+
+    with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+        f"{MODULE}.require_can_create_content"
+    ), patch(f"{MODULE}.SessionLocal", factory), patch(
+        f"{MODULE}.get_event_count", return_value=0
+    ):
+        result = update_location_service(
+            token="token",
+            group_id=group_id,
+            location_id=location_id,
+            request=request,
+        )
+
+    assert [(entry.language, entry.name) for entry in result.translations] == [
+        ("BO", "རྡོ་རྗེ་གདན།"),
+        ("EN", "Vajrasana"),
+    ]
+
+    check = factory()
+    try:
+        stored = (
+            check.query(LocationMetadata)
+            .filter(LocationMetadata.location_id == location_id)
+            .all()
+        )
+        assert sorted((row.language.value, row.name) for row in stored) == [
+            ("BO", "རྡོ་རྗེ་གདན།"),
+            ("EN", "Vajrasana"),
+        ]
+    finally:
+        check.close()

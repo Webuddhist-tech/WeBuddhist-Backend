@@ -1,4 +1,5 @@
-from typing import Optional, List
+import logging
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 from uuid import UUID, uuid4
@@ -20,6 +21,7 @@ from .accumulator_repository import (
     update_accumulator,
     delete_accumulator,
 )
+from ..texts.texts_openpecha_service import get_texts_by_edition_or_text_ids
 from .accumulator_response_models import (
     AccumulatorMetadataDTO,
     CreatePresetAccumulatorRequest,
@@ -39,6 +41,8 @@ from .response_message import (
     ONLY_PRESET_ACCUMULATORS_CAN_BE_UPDATED,
     ONLY_PRESET_ACCUMULATORS_CAN_BE_DELETED,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _build_metadata_entries(
@@ -80,7 +84,25 @@ def _validate_optional_mala_image(db: Session, mala_image_id: Optional[UUID]) ->
         )
 
 
-def list_preset_accumulators_cms_service(
+async def _resolve_preset_text_titles(text_ids: List[str]) -> Dict[str, str]:
+    """One batched OpenPecha lookup for every distinct edition on the page."""
+    unique_ids = list(dict.fromkeys(text_id for text_id in text_ids if text_id))
+    if not unique_ids:
+        return {}
+    try:
+        texts = await get_texts_by_edition_or_text_ids(unique_ids)
+    except Exception:
+        logger.exception("Failed to resolve preset text titles")
+        return {}
+    titles: Dict[str, str] = {}
+    for text_id, text in texts.items():
+        title = (text.title or "").strip()
+        if title:
+            titles[text_id] = title
+    return titles
+
+
+async def list_preset_accumulators_cms_service(
     token: str,
     skip: int = 0,
     limit: int = 20,
@@ -100,15 +122,33 @@ def list_preset_accumulators_cms_service(
         )
         mantra_ids = [a.mantra_id for a in accumulators if a.mantra_id is not None]
         mantras_by_id = get_mantras_by_ids(db, mantra_ids)
-        return CMSPublicAccumulatorsResponse(
-            accumulators=[
-                convert_accumulator_to_public_dto(a, mantras_by_id=mantras_by_id, language=language, include_key=True)
-                for a in accumulators
-            ],
-            total=total,
-            skip=skip,
-            limit=limit,
-        )
+        presets = [
+            convert_accumulator_to_public_dto(
+                accumulator,
+                mantras_by_id=mantras_by_id,
+                language=language,
+                include_key=True,
+            )
+            for accumulator in accumulators
+        ]
+
+    titles = await _resolve_preset_text_titles(
+        [preset.text_id for preset in presets if preset.text_id]
+    )
+    if titles:
+        presets = [
+            preset.model_copy(update={"text_title": titles[preset.text_id]})
+            if preset.text_id in titles
+            else preset
+            for preset in presets
+        ]
+
+    return CMSPublicAccumulatorsResponse(
+        accumulators=presets,
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
 
 
 def get_preset_accumulator_cms_service(

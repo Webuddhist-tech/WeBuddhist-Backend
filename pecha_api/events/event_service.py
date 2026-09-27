@@ -104,6 +104,7 @@ from .event_participant_repository import (
     get_user_participation_type,
     is_user_joined_event,
 )
+from .location_model import Location
 from .location_repository import get_location_without_group_filter
 from .location_response_models import LocationDTO
 
@@ -215,7 +216,7 @@ def _youtube_to_dtos(
     ]
 
 
-def _localized_location_name(location, language: Optional[str] = None) -> str:
+def _localized_location_name(location: Location, language: Optional[str] = None) -> str:
     """The location's name in the requested language.
 
     Falls back to English when the language asked for has no row, and to the

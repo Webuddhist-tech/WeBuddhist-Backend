@@ -97,7 +97,10 @@ class TestCmsPresetViews:
         )
         assert response.status_code == 422
 
-    @patch("pecha_api.accumulator.accumulator_cms_views.list_preset_accumulators_cms_service")
+    @patch(
+        "pecha_api.accumulator.accumulator_cms_views.list_preset_accumulators_cms_service",
+        new_callable=AsyncMock,
+    )
     def test_list_presets_success(self, mock_service):
         sample = _sample_public_dto()
         mock_service.return_value = PublicAccumulatorsResponse(
@@ -264,11 +267,12 @@ class TestCmsPresetService:
 
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_all_accumulators")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
-    def test_list_presets_service_success(
+    async def test_list_presets_service_success(
         self,
         mock_get_mantras,
         mock_get_all,
@@ -280,11 +284,69 @@ class TestCmsPresetService:
         mock_get_all.return_value = ([], 0)
         mock_get_mantras.return_value = {}
 
-        result = list_preset_accumulators_cms_service(token="token", skip=0, limit=20)
+        result = await list_preset_accumulators_cms_service(
+            token="token", skip=0, limit=20
+        )
 
         assert result.total == 0
         assert result.accumulators == []
         mock_validate_auth.assert_called_once_with(token="token")
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_texts_by_edition_or_text_ids", new_callable=AsyncMock)
+    @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
+    @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_all_accumulators")
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
+    @patch("pecha_api.accumulator.accumulator_cms_service.convert_accumulator_to_public_dto")
+    async def test_list_presets_resolves_linked_text_titles_once(
+        self,
+        mock_convert,
+        mock_get_mantras,
+        mock_get_all,
+        mock_session,
+        mock_validate_auth,
+        mock_get_texts,
+    ):
+        from pecha_api.accumulator.accumulator_response_models import (
+            CMSPublicAccumulatorDTO,
+        )
+
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        first = MagicMock(text_id="edition-1", mantra_id=None)
+        duplicate = MagicMock(text_id="edition-1", mantra_id=None)
+        second = MagicMock(text_id="edition-2", mantra_id=None)
+        mock_get_all.return_value = ([first, duplicate, second], 3)
+        mock_get_mantras.return_value = {}
+
+        def _dto(accumulator, **_kwargs):
+            return CMSPublicAccumulatorDTO(
+                id=uuid4(),
+                type=AccumulatorType.PRESET,
+                current_count=0,
+                text_id=accumulator.text_id,
+                created_at="2024-01-01T00:00:00Z",
+            )
+
+        mock_convert.side_effect = _dto
+        heart = MagicMock(title="Heart Sutra")
+        diamond = MagicMock(title="  Diamond Sutra  ")
+        mock_get_texts.return_value = {
+            "edition-1": heart,
+            "edition-2": diamond,
+        }
+
+        result = await list_preset_accumulators_cms_service(
+            token="token", skip=0, limit=20
+        )
+
+        mock_get_texts.assert_awaited_once_with(["edition-1", "edition-2"])
+        assert [preset.text_title for preset in result.accumulators] == [
+            "Heart Sutra",
+            "Heart Sutra",
+            "Diamond Sutra",
+        ]
 
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")

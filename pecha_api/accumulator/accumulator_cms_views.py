@@ -44,7 +44,7 @@ async def list_preset_accumulators(
         Query(description="Filter by preset name/description or mantra text/title/pronunciation"),
     ] = None,
 ):
-    return list_preset_accumulators_cms_service(
+    return await list_preset_accumulators_cms_service(
         token=credentials.credentials,
         skip=skip,
         limit=limit,
