@@ -1,11 +1,12 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from ..db.database import SessionLocal
 from ..plans.authors.plan_authors_service import validate_cms_author_details
@@ -102,15 +103,32 @@ async def _resolve_preset_text_titles(text_ids: List[str]) -> Dict[str, str]:
     return titles
 
 
-async def list_preset_accumulators_cms_service(
-    token: str,
-    skip: int = 0,
-    limit: int = 20,
-    search: Optional[str] = None,
-    language: Optional[str] = None,
-) -> CMSPublicAccumulatorsResponse:
-    validate_cms_author_details(token=token)
+async def _with_text_title(
+    preset: CMSPublicAccumulatorDTO,
+) -> CMSPublicAccumulatorDTO:
+    """Fills `text_title` for one preset, so a single preset carries the same
+    field the list does rather than dropping it for whoever reads it next."""
+    if not preset.text_id:
+        return preset
+    titles = await _resolve_preset_text_titles([preset.text_id])
+    title = titles.get(preset.text_id)
+    if not title:
+        return preset
+    return preset.model_copy(update={"text_title": title})
 
+
+def _list_presets_sync(
+    skip: int,
+    limit: int,
+    search: Optional[str],
+    language: Optional[str],
+) -> Tuple[List[CMSPublicAccumulatorDTO], int]:
+    """The synchronous half of the listing.
+
+    Kept apart so the async service can hand it to a worker thread: these are
+    blocking SQLAlchemy calls, and running them inline would stall the event
+    loop for every other request while a slow preset or mantra query ran.
+    """
     with SessionLocal() as db:
         # CMS always includes text-linked (recitation) presets.
         accumulators, total = get_all_accumulators(
@@ -131,6 +149,40 @@ async def list_preset_accumulators_cms_service(
             )
             for accumulator in accumulators
         ]
+    return presets, total
+
+
+def _get_preset_sync(
+    preset_id: UUID,
+    language: Optional[str],
+) -> CMSPublicAccumulatorDTO:
+    """The synchronous half of the by-id read; see _list_presets_sync."""
+    with SessionLocal() as db:
+        preset = get_preset_by_id(db, preset_id)
+        if preset is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": NOT_FOUND, "message": PRESET_NOT_FOUND},
+            )
+        return _to_public_dto(db, preset, language=language)
+
+
+async def list_preset_accumulators_cms_service(
+    token: str,
+    skip: int = 0,
+    limit: int = 20,
+    search: Optional[str] = None,
+    language: Optional[str] = None,
+) -> CMSPublicAccumulatorsResponse:
+    validate_cms_author_details(token=token)
+
+    presets, total = await run_in_threadpool(
+        _list_presets_sync,
+        skip=skip,
+        limit=limit,
+        search=search,
+        language=language,
+    )
 
     titles = await _resolve_preset_text_titles(
         [preset.text_id for preset in presets if preset.text_id]
@@ -151,21 +203,19 @@ async def list_preset_accumulators_cms_service(
     )
 
 
-def get_preset_accumulator_cms_service(
+async def get_preset_accumulator_cms_service(
     token: str,
     preset_id: UUID,
     language: Optional[str] = None,
 ) -> CMSPublicAccumulatorDTO:
     validate_cms_author_details(token=token)
 
-    with SessionLocal() as db:
-        preset = get_preset_by_id(db, preset_id)
-        if preset is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": NOT_FOUND, "message": PRESET_NOT_FOUND},
-            )
-        return _to_public_dto(db, preset, language=language)
+    preset = await run_in_threadpool(
+        _get_preset_sync,
+        preset_id=preset_id,
+        language=language,
+    )
+    return await _with_text_title(preset)
 
 
 async def create_preset_accumulator_cms_service(
@@ -193,7 +243,9 @@ async def create_preset_accumulator_cms_service(
         )
         preset.metadata_entries = _build_metadata_entries(request.metadata)
         saved = save_accumulator(db, preset)
-        return _to_public_dto(db, saved)
+        created = _to_public_dto(db, saved)
+
+    return await _with_text_title(created)
 
 
 async def update_preset_accumulator_cms_service(
@@ -233,7 +285,9 @@ async def update_preset_accumulator_cms_service(
             preset.metadata_entries.extend(_build_metadata_entries(request.metadata))
 
         updated = update_accumulator(db, preset)
-        return _to_public_dto(db, updated)
+        updated_dto = _to_public_dto(db, updated)
+
+    return await _with_text_title(updated_dto)
 
 
 def delete_preset_accumulator_cms_service(token: str, preset_id: UUID) -> None:

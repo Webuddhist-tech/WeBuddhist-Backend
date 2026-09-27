@@ -66,7 +66,7 @@ async def get_preset_accumulator(
         Query(description=language_query_description("Language code for mantra content", lowercase_example=True)),
     ] = None,
 ):
-    return get_preset_accumulator_cms_service(
+    return await get_preset_accumulator_cms_service(
         token=credentials.credentials,
         preset_id=preset_id,
         language=language,

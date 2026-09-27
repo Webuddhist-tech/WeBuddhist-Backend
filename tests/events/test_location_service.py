@@ -559,7 +559,7 @@ def test_delete_unknown_location_returns_404() -> None:
 # --------------------------- localized names ---------------------------
 
 
-def _translation(language, name):
+def _translation(language: str, name: str) -> SimpleNamespace:
     return SimpleNamespace(id=uuid4(), name=name, language=language)
 
 
