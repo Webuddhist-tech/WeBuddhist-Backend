@@ -16,8 +16,10 @@ from pecha_api.events.location_repository import (
     save_location,
     update_location,
 )
+from pecha_api.events.location_metadata_model import LocationMetadata
 from pecha_api.events.location_response_models import (
     CreateLocationRequest,
+    LocationMetadataInput,
     UpdateLocationRequest,
 )
 from pecha_api.events.location_service import (
@@ -355,7 +357,7 @@ def test_update_location_changes_name_only() -> None:
     ), patch(f"{MODULE}.SessionLocal"), patch(
         f"{MODULE}.get_location_by_id", return_value=location
     ), patch(
-        f"{MODULE}.update_location", side_effect=lambda db, location: location
+        f"{MODULE}.update_location", side_effect=lambda db, location, translations=None: location
     ), patch(
         f"{MODULE}.get_event_count", return_value=2
     ):
@@ -383,7 +385,7 @@ def test_update_location_clears_coordinates_with_explicit_nulls() -> None:
     ), patch(f"{MODULE}.SessionLocal"), patch(
         f"{MODULE}.get_location_by_id", return_value=location
     ), patch(
-        f"{MODULE}.update_location", side_effect=lambda db, location: location
+        f"{MODULE}.update_location", side_effect=lambda db, location, translations=None: location
     ), patch(
         f"{MODULE}.get_event_count", return_value=0
     ):
@@ -410,7 +412,7 @@ def test_update_location_omitting_coordinates_leaves_them_untouched() -> None:
     ), patch(f"{MODULE}.SessionLocal"), patch(
         f"{MODULE}.get_location_by_id", return_value=location
     ), patch(
-        f"{MODULE}.update_location", side_effect=lambda db, location: location
+        f"{MODULE}.update_location", side_effect=lambda db, location, translations=None: location
     ), patch(
         f"{MODULE}.get_event_count", return_value=0
     ):
@@ -544,3 +546,171 @@ def test_delete_unknown_location_returns_404() -> None:
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
     mock_delete.assert_not_called()
+
+
+# --------------------------- localized names ---------------------------
+
+
+def _translation(language, name):
+    return SimpleNamespace(id=uuid4(), name=name, language=language)
+
+
+def test_create_request_accepts_translations() -> None:
+    request = CreateLocationRequest(
+        name="Bodh Gaya",
+        translations=[
+            {"language": "EN", "name": "Bodh Gaya"},
+            {"language": "BO", "name": "རྡོ་རྗེ་གདན་"},
+        ],
+    )
+
+    assert [entry.language.value for entry in request.translations] == ["EN", "BO"]
+
+
+def test_create_request_rejects_duplicate_translation_languages() -> None:
+    with pytest.raises(ValidationError):
+        CreateLocationRequest(
+            name="Bodh Gaya",
+            translations=[
+                {"language": "EN", "name": "Bodh Gaya"},
+                {"language": "EN", "name": "Bodhgaya"},
+            ],
+        )
+
+
+def test_create_request_rejects_blank_translation_name() -> None:
+    with pytest.raises(ValidationError):
+        CreateLocationRequest(
+            name="Bodh Gaya", translations=[{"language": "EN", "name": "   "}]
+        )
+
+
+def test_update_request_omitting_translations_leaves_them_untouched() -> None:
+    request = UpdateLocationRequest(name="Renamed")
+
+    assert request.translations is None
+
+
+def test_update_request_empty_translations_clears_them() -> None:
+    request = UpdateLocationRequest(translations=[])
+
+    assert request.translations == []
+
+
+def test_create_location_forwards_translations_to_repository() -> None:
+    group_id = uuid4()
+    request = CreateLocationRequest(
+        name="Bodh Gaya", translations=[{"language": "BO", "name": "རྡོ་"}]
+    )
+    saved = _location_stub(group_id=group_id, name="Bodh Gaya")
+    saved.metadata_entries = [_translation("BO", "རྡོ་")]
+
+    with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+        f"{MODULE}.require_can_create_content"
+    ), patch(f"{MODULE}.SessionLocal"), patch(
+        f"{MODULE}.save_location", return_value=saved
+    ) as mock_save:
+        result = create_location_service(
+            token="token", group_id=group_id, request=request
+        )
+
+    forwarded = mock_save.mock_calls[0].kwargs["translations"]
+    assert [entry.language.value for entry in forwarded] == ["BO"]
+    assert [entry.language for entry in result.translations] == ["BO"]
+
+
+def test_update_location_forwards_translations_to_repository() -> None:
+    group_id = uuid4()
+    location = _location_stub(group_id=group_id)
+    location.metadata_entries = []
+    request = UpdateLocationRequest(
+        translations=[{"language": "EN", "name": "Tushita"}]
+    )
+
+    with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+        f"{MODULE}.require_can_create_content"
+    ), patch(f"{MODULE}.SessionLocal"), patch(
+        f"{MODULE}.get_location_by_id", return_value=location
+    ), patch(
+        f"{MODULE}.update_location", side_effect=lambda db, location, translations=None: location
+    ) as mock_update, patch(
+        f"{MODULE}.get_event_count", return_value=0
+    ):
+        update_location_service(
+            token="token",
+            group_id=group_id,
+            location_id=location.id,
+            request=request,
+        )
+
+    forwarded = mock_update.mock_calls[0].kwargs["translations"]
+    assert [entry.name for entry in forwarded] == ["Tushita"]
+
+
+def test_location_detail_lists_translations_by_language() -> None:
+    group_id = uuid4()
+    location = _location_stub(group_id=group_id)
+    location.metadata_entries = [
+        _translation("BO", "རྡོ་"),
+        _translation("EN", "Bodh Gaya"),
+    ]
+
+    with patch(f"{MODULE}.validate_cms_author_details", return_value=_author()), patch(
+        f"{MODULE}.require_can_read_group_content"
+    ), patch(f"{MODULE}.SessionLocal"), patch(
+        f"{MODULE}.get_location_by_id", return_value=location
+    ), patch(
+        f"{MODULE}.get_event_count", return_value=0
+    ):
+        result = get_location_by_id_service(
+            token="token", group_id=group_id, location_id=location.id
+        )
+
+    assert [entry.language for entry in result.translations] == ["BO", "EN"]
+
+
+def test_save_location_persists_translation_rows() -> None:
+    db = MagicMock()
+    location = _location_stub()
+
+    save_location(
+        db=db,
+        location=location,
+        translations=[LocationMetadataInput(name="Bodh Gaya", language="EN")],
+    )
+
+    added = [
+        call.args[0]
+        for call in db.add.mock_calls
+        if call.args and isinstance(call.args[0], LocationMetadata)
+    ]
+    assert [row.name for row in added] == ["Bodh Gaya"]
+    assert [row.location_id for row in added] == [location.id]
+
+
+def test_update_location_replaces_translation_rows() -> None:
+    db = MagicMock()
+    location = _location_stub()
+
+    update_location(
+        db=db,
+        location=location,
+        translations=[LocationMetadataInput(name="Tushita", language="EN")],
+    )
+
+    # The existing rows for this location are cleared before the new set lands.
+    db.query.return_value.filter.return_value.delete.assert_called_once()
+    added = [
+        call.args[0]
+        for call in db.add.mock_calls
+        if call.args and isinstance(call.args[0], LocationMetadata)
+    ]
+    assert [row.name for row in added] == ["Tushita"]
+
+
+def test_update_location_without_translations_leaves_rows_alone() -> None:
+    db = MagicMock()
+
+    update_location(db=db, location=_location_stub())
+
+    db.query.assert_not_called()

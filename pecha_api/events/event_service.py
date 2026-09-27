@@ -34,6 +34,7 @@ from pecha_api.users.users_models import Users
 from pecha_api.plans.groups.follow_scope import resolve_event_listing_group_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.group_recitation_collection.repository import get_collection_by_id
+from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.group_accumulator.group_accumulator_repository import (
     get_group_accumulator_by_id,
 )
@@ -214,14 +215,38 @@ def _youtube_to_dtos(
     ]
 
 
-def _location_to_dto(event: Event) -> Optional[LocationDTO]:
+def _localized_location_name(location, language: Optional[str] = None) -> str:
+    """The location's name in the requested language.
+
+    Falls back to English when the language asked for has no row, and to the
+    location's own `name` column when neither is there - a location always has
+    exactly one name to show. No language asked for means the canonical name.
+    """
+    if not language:
+        return location.name
+    entries = getattr(location, "metadata_entries", None) or []
+    if not entries:
+        return location.name
+    matched = filter_by_language_with_fallback(
+        entries=list(entries),
+        language=language,
+        language_of=lambda entry: _language_value(entry.language),
+    )
+    if not matched:
+        return location.name
+    return matched[0].name or location.name
+
+
+def _location_to_dto(
+    event: Event, language: Optional[str] = None
+) -> Optional[LocationDTO]:
     location = event.location
     if location is None:
         return None
     return LocationDTO(
         id=location.id,
         group_id=location.group_id,
-        name=location.name,
+        name=_localized_location_name(location, language=language),
         latitude=location.latitude,
         longitude=location.longitude,
     )
@@ -279,15 +304,32 @@ def _accumulator_to_linked_resource(
     )
 
 
+def _group_accumulator_name(
+    group_accumulator: GroupAccumulator, language: Optional[str]
+) -> Optional[str]:
+    """Title in the requested language, else the default title on the row."""
+    requested = (language or "").strip().upper()
+    if not requested:
+        return group_accumulator.title
+
+    for entry in getattr(group_accumulator, "metadata_entries", None) or []:
+        title = getattr(entry, "title", None)
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if _language_value(entry.language).upper() == requested:
+            return title
+    return group_accumulator.title
+
+
 def _group_accumulator_to_linked_resource(
-    event: Event,
+    event: Event, language: Optional[str] = None
 ) -> Optional[LinkedResourceDTO]:
     group_accumulator = getattr(event, "group_accumulator", None)
     if group_accumulator is None:
         return None
     return LinkedResourceDTO(
         id=group_accumulator.id,
-        name=group_accumulator.title,
+        name=_group_accumulator_name(group_accumulator, language),
         image_url=_presign_image_url(group_accumulator.image_key),
     )
 
@@ -474,7 +516,9 @@ def _event_to_dto(
         accumulator_id=event.accumulator_id,
         accumulator=_accumulator_to_linked_resource(event, language=language),
         group_accumulator_id=getattr(event, "group_accumulator_id", None),
-        group_accumulator=_group_accumulator_to_linked_resource(event),
+        group_accumulator=_group_accumulator_to_linked_resource(
+            event, language=language
+        ),
         mantra_id=event.mantra_id,
         mantra=_mantra_to_linked_resource(event, language=language),
         timer_id=event.timer_id,
@@ -483,7 +527,7 @@ def _event_to_dto(
         group_recitation_collection=_group_recitation_collection_to_linked_resource(event),
         group_id=event.group_id,
         location_id=event.location_id,
-        location=_location_to_dto(event),
+        location=_location_to_dto(event, language=language),
         start_date=dto_start,
         end_date=dto_end,
         timezone=getattr(event, "timezone", None),

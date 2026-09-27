@@ -10,6 +10,7 @@ from uuid import uuid4
 from pecha_api.events.event_service import (
     _accumulator_to_linked_resource,
     _event_to_dto,
+    _group_accumulator_to_linked_resource,
     _group_recitation_collection_to_linked_resource,
     _mantra_to_linked_resource,
     _plan_to_linked_resource,
@@ -162,6 +163,86 @@ def test_timer_to_linked_resource_populates_fields():
     assert resource.id == timer.id
     assert resource.name == "Morning Meditation"
     assert resource.image_url is None
+
+
+# --------------------------- group accumulator ---------------------------
+
+
+def test_group_accumulator_to_linked_resource_none_when_not_linked():
+    assert _group_accumulator_to_linked_resource(_event()) is None
+
+
+@patch(f"{MODULE}.generate_presigned_access_url")
+def test_group_accumulator_uses_localized_title(mock_presign):
+    mock_presign.return_value = "https://cdn.example.com/accumulation.jpg"
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key="images/accumulation.jpg",
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="Green Tara Accumulation"),
+            SimpleNamespace(language="BO", title="སྒྲོལ་མའི་བསགས་པ།"),
+        ],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.id == group_accumulator.id
+    assert resource.name == "སྒྲོལ་མའི་བསགས་པ།"
+    assert resource.image_url == "https://cdn.example.com/accumulation.jpg"
+
+
+def test_group_accumulator_falls_back_to_row_title_when_language_is_missing():
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key=None,
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="Green Tara Accumulation"),
+        ],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.name == "Green Tara Accumulation"
+
+
+def test_group_accumulator_uses_row_title_when_there_is_no_metadata():
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key=None,
+        metadata_entries=[],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.name == "Green Tara Accumulation"
+
+
+def test_event_to_dto_passes_language_to_group_accumulator_name():
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="English title",
+        image_key=None,
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="English title"),
+            SimpleNamespace(language="BO", title="བོད་ཡིག"),
+        ],
+    )
+
+    dto = _event_to_dto(
+        _event(group_accumulator=group_accumulator, group_accumulator_id=group_accumulator.id),
+        language="bo",
+    )
+
+    assert dto.group_accumulator.name == "བོད་ཡིག"
 
 
 # --------------------------- group recitation collection ---------------------------

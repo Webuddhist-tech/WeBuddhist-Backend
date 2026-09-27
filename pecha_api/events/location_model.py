@@ -8,6 +8,8 @@ from sqlalchemy import (
     String,
     UUID,
 )
+from sqlalchemy.orm import relationship
+
 from ..db.database import Base
 from uuid import uuid4
 import _datetime
@@ -26,6 +28,14 @@ class Location(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False)
     created_by = Column(String(255), nullable=False)
+
+    # Per-language names; `name` above is the canonical one and the fallback.
+    metadata_entries = relationship(
+        "LocationMetadata",
+        back_populates="location",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         CheckConstraint(
