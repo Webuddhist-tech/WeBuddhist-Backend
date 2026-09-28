@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, field_validator, model_serializer
 
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageType
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 
 MAX_PRAYER_BATCH_SIZE = 50
 MAX_MESSAGE_DELETE_BATCH_SIZE = 50
@@ -81,6 +82,7 @@ class ChatMessageDTO(BaseModel):
     prayer_count: int = 0
     prayed_by_me: bool = False
     recent_prayers: List[ChatMessagePrayerUserDTO] = []
+    intention: Optional[PrayerIntentionDTO] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -91,8 +93,10 @@ class ChatMessageDTO(BaseModel):
         if data.get("deleted_at") is None:
             data.pop("deleted_at", None)
         if data.get("message_type") != ChatMessageType.PRAYER.value:
-            for field in ("prayer_count", "prayed_by_me", "recent_prayers"):
+            for field in ("prayer_count", "prayed_by_me", "recent_prayers", "intention"):
                 data.pop(field, None)
+        elif data.get("intention") is None:
+            data.pop("intention", None)
         return data
 
 
@@ -215,6 +219,7 @@ class SendChatMessageRequest(BaseModel):
     body: str
     message_type: ChatMessageType = ChatMessageType.TEXT
     parent_message_id: Optional[UUID] = None
+    intention: Optional[str] = None
 
     @field_validator("body")
     @classmethod
@@ -397,6 +402,7 @@ class ChatSocketMessageFrame(ChatSocketFrame):
     body: str = ""
     message_type: str = ChatMessageType.TEXT.value
     parent_message_id: Optional[UUID] = None
+    intention: Optional[str] = None
 
     @field_validator("body", mode="before")
     @classmethod

@@ -234,6 +234,10 @@ class EventDTO(BaseModel):
     group_name: Optional[str] = None
     group_avatar_url: Optional[str] = None
     participant_count: int = 0
+    prayer_request_count: int = Field(
+        0,
+        description="Non-deleted prayer requests in the event chat room (0 if no room yet)",
+    )
     is_joined: Optional[bool] = Field(
         None,
         description="Whether the authenticated user has joined (null when unauthenticated)",

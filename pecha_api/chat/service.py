@@ -39,6 +39,7 @@ from pecha_api.chat.response_models import (
     ChatRoomDTO,
     ChatRoomsResponse,
 )
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_repository import get_event_by_id
@@ -161,6 +162,7 @@ def build_message_dto(
     prayer_count: int = 0,
     prayed_by_me: bool = False,
     recent_prayers=None,
+    intention: Optional[PrayerIntentionDTO] = None,
 ) -> ChatMessageDTO:
     sender_email = (message.sender.email if message.sender else None) or "unknown@example.com"
     is_deleted = message.deleted_at is not None
@@ -180,6 +182,7 @@ def build_message_dto(
         prayer_count=prayer_count,
         prayed_by_me=prayed_by_me,
         recent_prayers=build_prayer_user_dtos(recent_prayers),
+        intention=intention,
     )
 
 
