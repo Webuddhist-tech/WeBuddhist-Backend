@@ -13,6 +13,10 @@ from .prayer_intention_repository import (
     get_prayer_intentions_by_slugs,
     list_prayer_intentions,
 )
+from .intention_slugs import (
+    canonical_prayer_intention_slug,
+    catalog_slug_lookup_candidates,
+)
 from .prayer_intention_response_models import (
     PrayerIntentionDTO,
     PrayerIntentionsResponse,
@@ -36,6 +40,15 @@ def prayer_intention_to_dto(row: PrayerIntention) -> PrayerIntentionDTO:
     )
 
 
+def resolve_prayer_intention_catalog_slug(db: Session, slug: str) -> Optional[str]:
+    """Return the catalog slug present in the DB for this intention, if any."""
+    canonical = canonical_prayer_intention_slug(slug)
+    for candidate in catalog_slug_lookup_candidates(canonical):
+        if get_prayer_intention_by_slug(db=db, slug=candidate) is not None:
+            return candidate
+    return None
+
+
 def get_all_prayer_intentions_service() -> PrayerIntentionsResponse:
     with SessionLocal() as db:
         rows = list_prayer_intentions(db)
@@ -50,8 +63,21 @@ def resolve_intention_dtos_for_slugs(
     present = [slug for slug in slugs if slug]
     if not present:
         return {}
-    rows = get_prayer_intentions_by_slugs(db=db, slugs=present)
-    return {slug: prayer_intention_to_dto(rows[slug]) for slug in present if slug in rows}
+    catalog_slug_by_stored = {
+        slug: resolve_prayer_intention_catalog_slug(db=db, slug=slug)
+        for slug in present
+    }
+    unique_catalog_slugs = [
+        catalog_slug
+        for catalog_slug in dict.fromkeys(catalog_slug_by_stored.values())
+        if catalog_slug
+    ]
+    rows = get_prayer_intentions_by_slugs(db=db, slugs=unique_catalog_slugs)
+    return {
+        slug: prayer_intention_to_dto(rows[catalog_slug_by_stored[slug]])
+        for slug in present
+        if catalog_slug_by_stored[slug] in rows
+    }
 
 
 def validate_message_intention_and_body(
@@ -89,9 +115,12 @@ def validate_message_intention_and_body(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=PRAYER_BODY_TOO_LONG,
         )
-    if get_prayer_intention_by_slug(db=db, slug=normalized_intention) is None:
+    catalog_slug = resolve_prayer_intention_catalog_slug(
+        db=db, slug=normalized_intention
+    )
+    if catalog_slug is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=INVALID_PRAYER_INTENTION,
         )
-    return normalized_intention
+    return catalog_slug

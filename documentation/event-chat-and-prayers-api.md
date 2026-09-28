@@ -54,8 +54,8 @@ label, hex color, description, display order). The mobile app uses this for the
 cards in the prayer-requests list.
 
 Seed data lives in
-`pecha_api/prayer_intentions/intentions_seed.json` (`healing`, `protection`,
-`compassion`, `gratitude`, `dedication`).
+`pecha_api/prayer_intentions/intentions_seed.json` (`peace`, `healing`,
+`abundance`, `love`, `protection`).
 
 ---
 
@@ -74,7 +74,10 @@ POST /chat/events/{event_id}/messages
 ```
 
 `intention` is **required** when `message_type` is `PRAYER` (a known slug from
-`GET /intentions`). It must be **omitted** for `TEXT` messages (400
+`GET /intentions`). During catalog updates the API accepts both slug sets: former slugs
+(`compassion`, `gratitude`, `dedication`) and current slugs (`love`, `abundance`,
+`peace`) resolve against whichever catalog is in the database, including after a
+migration downgrade, so prayer messages keep a nested `intention` on read. It must be **omitted** for `TEXT` messages (400
 `INTENTION_NOT_ALLOWED_ON_TEXT` if sent). Prayer request bodies are limited to
 **280** characters (400 `PRAYER_BODY_TOO_LONG`); ordinary `TEXT` messages stay
 at 4000.
@@ -96,8 +99,8 @@ object, **omitted entirely** on a `TEXT` message:
     "slug": "healing",
     "label": "Healing",
     "color": "#4A78C2",
-    "description": "For illness, surgery and recovery. The lapis blue of the Medicine Buddha.",
-    "display_order": 0
+    "description": "Recovery from illness, emotional healing, calm after conflict",
+    "display_order": 1
   },
   "prayer_count": 12,
   "prayed_by_me": false,
@@ -189,7 +192,7 @@ To post a prayer request over the socket, add `message_type`:
   "type": "message",
   "body": "Please pray for…",
   "message_type": "PRAYER",
-  "intention": "compassion"
+  "intention": "love"
 }
 ```
 
