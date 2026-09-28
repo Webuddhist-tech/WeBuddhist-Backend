@@ -6,6 +6,7 @@ from pecha_api.openapi_config import configure_openapi_tag_groups
 from pecha_api.auth.auth_service import retrieve_client_info
 from pecha_api.middleware.request_observability import RequestObservabilityMiddleware
 from pecha_api.middleware.sentry import init_sentry
+from pecha_api.db.overload_handler import register_db_overload_handlers
 
 from pecha_api.db.mongo_database import lifespan
 from pecha_api.auth import auth_views
@@ -97,6 +98,7 @@ from pecha_api.events import notification_internal_views as event_notification_i
 from pecha_api.traditions import tradition_views
 from pecha_api.languages import language_views
 from pecha_api.plans.admin.admin_views import cms_admin_router
+from pecha_api.cache.cache_admin_views import cms_cache_router
 from pecha_api.id_remap.id_remap_views import id_remap_router
 from pecha_api.region_restrictions.region_restriction_views import cms_china_restrictions_router
 from pecha_api.plans.transfers.transfer_views import (
@@ -136,6 +138,7 @@ api.include_router(cms_analytics_views.analytics_router)
 api.include_router(author_groups_views.cms_groups_router)
 api.include_router(cms_notification_views.cms_notifications_router)
 api.include_router(cms_admin_router)
+api.include_router(cms_cache_router)
 api.include_router(id_remap_router)
 api.include_router(cms_china_restrictions_router)
 api.include_router(cms_chat_reports_router)
@@ -239,6 +242,9 @@ api.add_middleware(
     allow_headers=["*"],
 )
 api.add_middleware(RequestObservabilityMiddleware)
+# A short DB_POOL_TIMEOUT means saturation surfaces as an exception rather
+# than a 30s hang; this turns it into a 503 the client can retry.
+register_db_overload_handlers(api)
 configure_openapi_tag_groups(api)
 
 def _scalar_openapi_url() -> str:

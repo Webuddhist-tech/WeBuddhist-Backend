@@ -487,7 +487,7 @@ def get_group_accumulators_service(
 
         joined_ids: set[UUID] = set()
         if token:
-            current_user = validate_and_extract_user_details(token=token)
+            current_user = validate_and_extract_user_details(token=token, db=db)
             joined_ids = set(
                 get_joined_group_accumulator_ids_by_user(
                     db=db,
@@ -550,7 +550,7 @@ def get_group_accumulator_service(
         user = None
         is_joined = None
         if token:
-            current_user = validate_and_extract_user_details(token=token)
+            current_user = validate_and_extract_user_details(token=token, db=db)
             is_joined = is_user_joined_group_accumulator(
                 db=db,
                 group_accumulator_id=group_accumulator_id,

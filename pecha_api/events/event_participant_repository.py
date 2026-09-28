@@ -121,29 +121,6 @@ def upsert_event_participant(
         db.rollback()
 
 
-def set_event_participation_type(
-    db: Session,
-    event_id: UUID,
-    user_id: UUID,
-    participation_type: str,
-) -> bool:
-    """Change how a participant attends. False when they had not joined."""
-    participant = (
-        db.query(GroupEventParticipant)
-        .filter(
-            GroupEventParticipant.event_id == event_id,
-            GroupEventParticipant.user_id == user_id,
-        )
-        .first()
-    )
-    if participant is None:
-        return False
-    participant.participation_type = participation_type
-    participant.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    return True
-
-
 def remove_event_participant(db: Session, event_id: UUID, user_id: UUID) -> bool:
     """Leave an event. Returns True when a row was actually removed."""
     participant = (

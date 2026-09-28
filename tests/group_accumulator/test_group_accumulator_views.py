@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 from uuid import uuid4
 from datetime import datetime
 from fastapi.testclient import TestClient
@@ -106,7 +106,7 @@ class TestDataFactory:
 class TestGetGroupAccumulators:
     """Test cases for GET /group-accumulators/{group_id}/accumulators endpoint."""
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulators_success(self, mock_service):
         """Test successful retrieval of group accumulators."""
         group_id = uuid4()
@@ -141,7 +141,7 @@ class TestGetGroupAccumulators:
         assert data["accumulators"][1]["mantra_id"] == str(mantra_id)
         mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20, token=None, timezone_name=None, language=None)
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulators_with_pagination(self, mock_service):
         """Test get group accumulators with custom pagination."""
         group_id = uuid4()
@@ -158,7 +158,7 @@ class TestGetGroupAccumulators:
         assert response.status_code == status.HTTP_200_OK
         mock_service.assert_called_once_with(group_id=group_id, skip=5, limit=5, token=None, timezone_name=None, language=None)
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulators_empty(self, mock_service):
         """Test get group accumulators when no accumulators exist."""
         group_id = uuid4()
@@ -174,7 +174,7 @@ class TestGetGroupAccumulators:
         assert len(data["accumulators"]) == 0
         assert data["total"] == 0
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulators_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulators_group_not_found(self, mock_service):
         """Test get group accumulators when group doesn't exist."""
         from fastapi import HTTPException
@@ -193,7 +193,7 @@ class TestGetGroupAccumulators:
 class TestGetGroupAccumulator:
     """Test cases for GET /group-accumulators/{group_accumulator_id} endpoint."""
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulator_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulator_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulator_success(self, mock_service):
         """Test successful retrieval of group accumulator details."""
         group_accumulator_id = uuid4()
@@ -215,7 +215,7 @@ class TestGetGroupAccumulator:
             language=None,
         )
 
-    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulator_service')
+    @patch('pecha_api.group_accumulator.group_accumulator_views.get_group_accumulator_service_cached', new_callable=AsyncMock)
     def test_get_group_accumulator_not_found(self, mock_service):
         """Test get group accumulator when accumulator doesn't exist."""
         from fastapi import HTTPException

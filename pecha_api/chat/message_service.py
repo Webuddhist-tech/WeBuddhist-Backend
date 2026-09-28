@@ -234,7 +234,11 @@ def _persist_message(
     message.sender = user
     touch_room(db=db, room=room)
     dto = build_message_dto(message, viewer_id=user.id)
-    enqueue_chat_message_notification(message.id)
+    # The type and room are already in hand, so an ordinary message costs no
+    # extra read for the dispatcher to learn it is not a prayer request.
+    enqueue_chat_message_notification(
+        message.id, message_type=message_type, room_id=room.id
+    )
     return dto
 
 

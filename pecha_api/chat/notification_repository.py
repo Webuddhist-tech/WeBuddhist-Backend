@@ -302,7 +302,7 @@ def get_sender_display_name(db: Session, sender_id: UUID) -> str:
     user = db.query(Users).filter(Users.id == sender_id).first()
     if not user:
         return "Someone"
-    return f"{user.firstname} {user.lastname or ''}".strip() or user.email
+    return f"{user.firstname} {user.lastname or ''}".strip() or user.email or "Unknown"
 
 
 def normalize_platform(value) -> str:

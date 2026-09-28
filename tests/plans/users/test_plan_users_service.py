@@ -1,7 +1,7 @@
 import uuid
 import pytest
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from sqlalchemy.exc import IntegrityError
 
 from fastapi import HTTPException
@@ -2387,3 +2387,78 @@ async def test_get_user_plan_days_completion_status_service_plan_not_found():
         
         assert exc_info.value.status_code == 404
         assert "Plan not found" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_source_reference_content_comes_from_the_column_not_openpecha():
+    """This endpoint reads segment text from `content` and makes no upstream
+    call. openpecha has no bulk segment endpoint, so resolving live cost one
+    round trip per segment id and that is what made the day slow."""
+    user_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    day_id = uuid.uuid4()
+    task_id = uuid.uuid4()
+    sub_id = uuid.uuid4()
+
+    plan_item = SimpleNamespace(
+        id=day_id,
+        day_number=1,
+        videos=[],
+        tasks=[
+            SimpleNamespace(
+                id=task_id,
+                title="Reading",
+                estimated_time=5,
+                display_order=1,
+                sub_tasks=[
+                    SimpleNamespace(
+                        id=sub_id,
+                        content_type=ContentType.SOURCE_REFERENCE,
+                        content="the stored passage",
+                        duration=None,
+                        display_order=1,
+                        source_text_id=None,
+                        pecha_segment_id=None,
+                        segment_ids=["seg-1", "seg-2", "seg-3"],
+                        segment_numbers=[1, 2, 3],
+                        reference_id=None,
+                        audio_url=None,
+                    )
+                ],
+            )
+        ],
+    )
+
+    db_mock, session_cm = _mock_session_with_db()
+
+    with patch(
+        "pecha_api.plans.users.plan_users_service.validate_and_extract_user_details",
+        return_value=SimpleNamespace(id=user_id),
+    ), patch(
+        "pecha_api.plans.users.plan_users_service.SessionLocal",
+        return_value=session_cm,
+    ), patch(
+        "pecha_api.plans.users.plan_users_service.get_plan_day_with_tasks_and_subtasks",
+        return_value=plan_item,
+    ), patch(
+        "pecha_api.plans.users.plan_users_service.is_day_completed",
+        return_value=False,
+    ), patch(
+        "pecha_api.plans.users.plan_users_service.get_user_task_completions_by_user_id_and_task_ids",
+        return_value=[],
+    ), patch(
+        "pecha_api.plans.users.plan_users_service.get_user_subtask_completions_by_user_id_and_sub_task_ids",
+        return_value=[],
+    ), patch(
+        "pecha_api.plans.shared.subtask_content_resolver.fetch_segment_content",
+        new_callable=AsyncMock,
+    ) as mock_fetch:
+        result = await get_user_plan_day_details_service(
+            token="tok", plan_id=plan_id, day_number=1
+        )
+
+    sub = result.tasks[0].sub_tasks[0]
+    assert sub.content == "the stored passage"
+    # The segment ids still reach the client; only the text stops being fetched.
+    assert sub.segment_ids == ["seg-1", "seg-2", "seg-3"]
+    mock_fetch.assert_not_awaited()

@@ -9,7 +9,7 @@ from jwt import ExpiredSignatureError
 from starlette import status
 
 from pecha_api.config import get
-from pecha_api.auth.auth_repository import validate_token
+from pecha_api.auth.auth_repository import validate_token, is_refresh_token_payload
 from pecha_api.db.database import SessionLocal
 from pecha_api.error_contants import ErrorConstants
 from pecha_api.plans.authors.plan_authors_model import Author, AuthorSocialMediaAccount
@@ -203,6 +203,15 @@ def _get_author_social_profile(author: Author) -> List[SocialMediaProfile]:
 def validate_and_extract_author_details(token: str) -> Author:
     try:
         payload = validate_token(token)
+        if is_refresh_token_payload(payload):
+            # A refresh token is only good for minting access tokens at
+            # /refresh-token. Accepting it here would let it act as a bearer
+            # credential for its whole (much longer) lifetime, undoing the
+            # CMS access token expiry.
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=ErrorConstants.TOKEN_ERROR_MESSAGE,
+            )
         with SessionLocal() as db_session:
             subject = payload.get("sub")
             try:

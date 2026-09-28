@@ -106,3 +106,78 @@ class Utils:
         if not s3_key:
             return ""
         return s3_key
+
+    @staticmethod
+    def _url_host(value: str) -> str:
+        """The bare hostname, or "" for an address we refuse to resolve.
+
+        A host is returned only when a browser reads it the same way we do.
+        `urlparse` follows RFC 3986, browsers follow the WHATWG rules, and the
+        two part company over a backslash: it is an ordinary hostname
+        character here but a path separator there, so the authority in
+        "https://attacker.test\\@trusted.example/x" is trusted.example to us
+        and attacker.test to whoever loads the image. Whitespace and control
+        characters split the parsers the same way. A real image address spells
+        any of these percent-encoded, so their presence is refused outright
+        rather than parsed into a host one side will disagree with.
+
+        Userinfo is the same trick spelled with "@", which both parsers do
+        agree on: `urlparse` leaves it in `netloc` together with the port, so
+        the host is what follows the last "@" and precedes the ":".
+        """
+        if any(
+            character == "\\" or character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        ):
+            return ""
+        netloc = urlparse(value).netloc.lower()
+        return netloc.rpartition("@")[2].partition(":")[0]
+
+    @staticmethod
+    def is_social_picture_url(value: Optional[str]) -> bool:
+        """Whether an https address may be stored verbatim as an avatar.
+
+        Only the identity providers' own image hosts qualify, because that is
+        where Auth0's `picture` claim points. Any other address is a third
+        party of the submitter's choosing, and storing it would have every
+        viewer's browser fetch the avatar from a server outside ours - handing
+        whoever runs it the viewers' addresses, and control over what they see.
+        """
+        if not value or not str(value).strip():
+            return False
+        reference = str(value).strip()
+        if not reference.startswith("https://"):
+            return False
+        host = Utils._url_host(reference)
+        return any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in Constants.SOCIAL_PICTURE_HOSTS
+        )
+
+    @staticmethod
+    def stored_avatar_reference(value: Optional[str]) -> str:
+        """What to keep in users.avatar_url.
+
+        A normal path, or a presigned link to our bucket, is the object's key
+        in S3. An https address on an identity provider's image host is the
+        image itself (Auth0's profile photo) and is kept as given. Anything
+        else external is dropped: this value comes straight from whoever is
+        editing the profile, and it is served back to everyone who views it.
+        """
+        if not value or not str(value).strip():
+            return ""
+        reference = str(value).strip()
+        if reference.startswith("https://") or reference.startswith("http://"):
+            host = Utils._url_host(reference)
+            bucket = (get("AWS_BUCKET_NAME") or "").strip().lower()
+            is_s3_link = (
+                host == "amazonaws.com"
+                or host.endswith(".amazonaws.com")
+                or (bucket and bucket in host)
+            )
+            if is_s3_link:
+                return Utils.extract_s3_key(reference)
+            if Utils.is_social_picture_url(reference):
+                return reference
+            return ""
+        return reference.lstrip("/")

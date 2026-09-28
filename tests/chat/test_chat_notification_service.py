@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -10,11 +11,13 @@ import pecha_api.app  # noqa: F401
 
 from pecha_api.chat.message_service import send_direct_message_service, send_group_message_service
 from pecha_api.chat.notification_dispatch_service import (
+    SUPPRESSED_SQS_MESSAGE_ID,
     enqueue_chat_message_notification,
     reconcile_undispatched_chat_notifications,
 )
 from pecha_api.chat.notification_service import (
     _build_notification_copy,
+    _count_held_prayer_requests,
     _preview_body,
     deactivate_push_device_service,
     get_chat_notification_targets,
@@ -45,12 +48,13 @@ class MockMember:
 
 
 class MockMessage:
-    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", room=None):
+    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", room=None, message_type="TEXT"):
         self.id = uuid4()
         self.room_id = room_id or uuid4()
         self.sender_id = sender_id or uuid4()
         self.sender = sender or MockUser(user_id=self.sender_id)
         self.body = body
+        self.message_type = message_type
         self.created_at = datetime.now(timezone.utc)
         self.deleted_at = None
         self.room = room
@@ -59,12 +63,13 @@ class MockMessage:
 
 
 class MockRoom:
-    def __init__(self, group_id=None, sender_id=None, receiver_id=None, name="Room"):
+    def __init__(self, group_id=None, sender_id=None, receiver_id=None, name="Room", img_url=None):
         self.id = uuid4()
         self.group_id = group_id
         self.sender_id = sender_id
         self.receiver_id = receiver_id
         self.name = name
+        self.img_url = img_url
 
 
 class MockDevice:
@@ -100,6 +105,249 @@ class TestPreviewAndCopy:
             message_body="Hello group",
         )
         assert title == "Sangha"
+        assert body == "Alice Doe: Hello group"
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_prayer_copy_names_the_requester_and_drops_the_room(self, _get_int):
+        """With the room's image attached, the name is redundant."""
+        title, body = _build_notification_copy(
+            chat_kind="EVENT",
+            room_name="Dzongsar Drolma Bumtshok",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah, that her treatment is swift.",
+            message_type="PRAYER",
+            has_image=True,
+        )
+        assert title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert body == "For my niece Sarah, that her treatment is swift."
+        assert "Dzongsar" not in title and "Dzongsar" not in body
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_prayer_without_an_image_keeps_the_room_name(self, _get_int):
+        """Nothing else would say which sangha the prayer came from."""
+        title, body = _build_notification_copy(
+            chat_kind="EVENT",
+            room_name="Dzongsar Drolma Bumtshok",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah, that her treatment is swift.",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert body == (
+            "Dzongsar Drolma Bumtshok: For my niece Sarah, that her treatment is swift."
+        )
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_prayer_body_still_truncates(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=True,
+        )
+        assert len(body) == 20
+        assert body.endswith("…")
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_prayer_preview_truncates_around_the_room_name(self, _get_int):
+        """The limit governs the excerpt; the room prefix sits outside it, the
+        way the group-chat sender prefix already does."""
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=False,
+        )
+        assert body.startswith("Sangha: ")
+        assert len(body.removeprefix("Sangha: ")) == 20
+
+
+class TestCountHeldPrayerRequests:
+    SENT = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
+    NOW = datetime(2026, 9, 25, 10, 20, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _record(at):
+        return SimpleNamespace(dispatched_at=at, created_at=at - timedelta(seconds=2))
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=2)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request")
+    def test_counts_from_the_previous_push(self, mock_last_sent, mock_count):
+        mock_last_sent.return_value = self._record(self.SENT)
+
+        assert _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
+        ) == 2
+        # The suppression clock at both ends, so each held request lands in
+        # exactly one window.
+        assert mock_count.call_args.kwargs["since"] == self.SENT
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=1)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_a_room_that_never_pushed_counts_everything_held(self, _last_sent, mock_count):
+        assert _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
+        ) == 1
+        assert mock_count.call_args.kwargs["since"] is None
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_the_window_closes_at_this_push(self, _last_sent, mock_count):
+        """A request suppressed while the worker is building this push belongs
+        to the next one, not to this one and then the next one again."""
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
+        )
+
+        assert mock_count.call_args.kwargs["until"] == self.NOW
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_an_unstamped_push_bounds_at_now(self, _last_sent, mock_count):
+        """The worker beat the backend's mark. now() is the same instant either
+        way, and the window still has to close somewhere."""
+        before = datetime.now(timezone.utc)
+
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=None
+        )
+
+        assert mock_count.call_args.kwargs["until"] >= before
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_the_search_for_the_previous_push_stops_at_this_one(self, mock_last_sent, mock_count):
+        """Both ends of the window come off this message's own moment.
+
+        The worker is not guaranteed to reach a message before the next prayer
+        request pushes, so the room's latest push can be one that went out
+        after this message did. Taken as the window's start it would sit past
+        its end, the count would come out zero, and the requests this push
+        promised to carry would be announced by no push at all.
+        """
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=self.NOW
+        )
+
+        assert mock_last_sent.call_args.kwargs["before"] == self.NOW
+        assert mock_count.call_args.kwargs["until"] == self.NOW
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_an_unstamped_push_bounds_both_ends_at_the_same_now(self, mock_last_sent, mock_count):
+        """One now(), read once: two readings could put the window's start
+        after its end."""
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=uuid4(), dispatched_at=None
+        )
+
+        assert (
+            mock_last_sent.call_args.kwargs["before"]
+            == mock_count.call_args.kwargs["until"]
+        )
+
+    @patch("pecha_api.chat.notification_service.count_suppressed_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.last_dispatched_prayer_request", return_value=None)
+    def test_both_queries_exclude_the_message_being_sent(self, mock_last_sent, mock_count):
+        """Without this the "last sent push" would be this very message, since
+        the backend stamps it before the worker asks for targets, and the count
+        would always come out zero."""
+        message_id = uuid4()
+
+        _count_held_prayer_requests(
+            db=MagicMock(), room_id=uuid4(), message_id=message_id, dispatched_at=self.NOW
+        )
+
+        assert mock_last_sent.call_args.kwargs["exclude_message_id"] == message_id
+        assert mock_count.call_args.kwargs["exclude_message_id"] == message_id
+
+
+class TestHeldPrayerRequestCopy:
+    """What the interval skipped, as words on the end of the body. The held
+    requests are not listed - the room shows each one in full."""
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_no_suffix_when_nothing_was_held(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah.",
+            message_type="PRAYER",
+            has_image=True,
+            held_count=0,
+        )
+        assert body == "For my niece Sarah."
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_one_held_request_reads_singular(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah.",
+            message_type="PRAYER",
+            has_image=True,
+            held_count=1,
+        )
+        assert body == "For my niece Sarah. · +1 other prayer request"
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_several_held_requests_read_plural(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah.",
+            message_type="PRAYER",
+            has_image=True,
+            held_count=3,
+        )
+        assert body == "For my niece Sarah. · +3 other prayer requests"
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_suffix_sits_after_the_room_name_prefix(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Tenzin Youdon",
+            message_body="For my niece Sarah.",
+            message_type="PRAYER",
+            has_image=False,
+            held_count=3,
+        )
+        assert body == "Sangha: For my niece Sarah. · +3 other prayer requests"
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=20)
+    def test_suffix_survives_preview_truncation(self, _get_int):
+        """The cap governs the request text. The count is the part that must
+        survive - a long request is what gets the ellipsis."""
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Tenzin Youdon",
+            message_body="A prayer request far longer than the preview allows",
+            message_type="PRAYER",
+            has_image=True,
+            held_count=4,
+        )
+        assert body.endswith(" · +4 other prayer requests")
+        assert "…" in body
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    def test_ordinary_chat_never_gets_the_suffix(self, _get_int):
+        _, body = _build_notification_copy(
+            chat_kind="GROUP",
+            room_name="Sangha",
+            sender_name="Alice Doe",
+            message_body="Hello group",
+            held_count=5,
+        )
         assert body == "Alice Doe: Hello group"
 
 
@@ -146,6 +394,157 @@ class TestEnqueueChatMessageNotification:
         assert enqueue_chat_message_notification(uuid4()) is None
 
 
+class TestPrayerRequestNotificationInterval:
+    """A prayer request goes to every member of the room, so ten requests in a
+    busy sangha is ten notifications for everybody. One push per room per
+    interval; the rest are held and travel as a count on the next one."""
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-1")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_first_request_in_a_quiet_room_sends(
+        self, mock_session, _configured, _get_int, _last_sent, mock_send, mock_mark
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result == "sqs-1"
+        mock_send.assert_called_once()
+        assert mock_mark.call_args.kwargs["sqs_message_id"] == "sqs-1"
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_request_inside_the_interval_is_held(
+        self, mock_session, _configured, _get_int, mock_last_sent, mock_send, mock_mark
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=4),
+        )
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result is None
+        mock_send.assert_not_called()
+        # Marked, not left undispatched: reconcile only retries rows that never
+        # recorded an SQS id, so a held request stays held.
+        assert mock_mark.call_args.kwargs["sqs_message_id"] == SUPPRESSED_SQS_MESSAGE_ID
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-2")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_request_after_the_interval_sends(
+        self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+        )
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result == "sqs-2"
+        mock_send.assert_called_once()
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-3")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=0)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_zero_disables_the_interval(
+        self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_last_sent.return_value = SimpleNamespace(
+            dispatched_at=datetime.now(timezone.utc),
+            created_at=datetime.now(timezone.utc),
+        )
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result == "sqs-3"
+        mock_send.assert_called_once()
+        mock_last_sent.assert_not_called()
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-4")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_ordinary_chat_is_never_gated(
+        self, mock_session, _configured, mock_last_sent, mock_send, _mark
+    ):
+        """A TEXT message costs no extra read to find out it is not a prayer."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = enqueue_chat_message_notification(uuid4(), message_type="TEXT")
+
+        assert result == "sqs-4"
+        mock_last_sent.assert_not_called()
+
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-5")
+    @patch(
+        "pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request",
+        side_effect=RuntimeError("boom"),
+    )
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_a_failed_check_lets_the_push_through(
+        self, mock_session, _configured, _get_int, _last_sent, mock_send, _mark
+    ):
+        """One extra notification beats swallowing a prayer request."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result == "sqs-5"
+        mock_send.assert_called_once()
+
+    @patch("pecha_api.chat.notification_dispatch_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_chat_notification_message", return_value="sqs-6")
+    @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_a_missing_room_id_is_looked_up_rather_than_skipping_the_gate(
+        self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark, mock_get_message
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        message = MockMessage(message_type="PRAYER")
+        mock_get_message.return_value = message
+
+        enqueue_chat_message_notification(message.id, message_type="PRAYER")
+
+        assert mock_last_sent.call_args.kwargs["room_id"] == message.room_id
+
+
 class TestReconcileUndispatched:
     @patch("pecha_api.chat.notification_dispatch_service.enqueue_chat_message_notification", return_value="sqs-1")
     @patch("pecha_api.chat.notification_dispatch_service.list_undispatched_chat_notification_messages")
@@ -165,7 +564,11 @@ class TestReconcileUndispatched:
         mock_list.return_value = [message]
 
         assert reconcile_undispatched_chat_notifications() == 1
-        mock_enqueue.assert_called_once_with(message.id)
+        # The type and room travel with the retry so a prayer request is
+        # re-checked against the interval instead of becoming a second push.
+        mock_enqueue.assert_called_once_with(
+            message.id, message_type="TEXT", room_id=message.room_id
+        )
 
 
 class TestPersistMessageEnqueues:
@@ -192,7 +595,9 @@ class TestPersistMessageEnqueues:
         result = send_direct_message_service(receiver_id=uuid4(), user=user, body="Hey")
 
         assert result.body == "Hey"
-        mock_enqueue.assert_called_once_with(created.id)
+        mock_enqueue.assert_called_once_with(
+            created.id, message_type="TEXT", room_id=room.id
+        )
 
     @patch("pecha_api.chat.message_service.enqueue_chat_message_notification")
     @patch("pecha_api.chat.message_service.touch_room")
@@ -220,7 +625,9 @@ class TestPersistMessageEnqueues:
         result = send_group_message_service(group_id=uuid4(), user=user, body="Hi")
 
         assert result.body == "Hi"
-        mock_enqueue.assert_called_once_with(created.id)
+        mock_enqueue.assert_called_once_with(
+            created.id, message_type="TEXT", room_id=room.id
+        )
 
 
 class TestGetChatNotificationTargets:
@@ -297,6 +704,87 @@ class TestGetChatNotificationTargets:
         assert result.recipients[0].user_id == joiner_with_device
         assert result.total == 2
         assert result.has_more is False
+
+    @patch(
+        "pecha_api.chat.notification_service._generate_presigned_url",
+        return_value="https://example.com/event.png",
+    )
+    @patch("pecha_api.chat.notification_service._count_held_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Tenzin Youdon")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_prayer_request_targets_carry_prayer_copy_and_room_image(
+        self,
+        mock_session,
+        mock_get_message,
+        mock_sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        _held,
+        mock_presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        sender_id = uuid4()
+        joiner = uuid4()
+        group_id = uuid4()
+        room = MockRoom(
+            group_id=group_id,
+            name="Dzongsar Drolma Bumtshok",
+            img_url="groups/avatar.png",
+        )
+        message = MockMessage(
+            sender_id=sender_id,
+            room=room,
+            body="For my niece Sarah.",
+            message_type="PRAYER",
+        )
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.message_type == "PRAYER"
+        assert result.title == "Tenzin Youdon is requesting a prayer 🙏"
+        assert result.body == "For my niece Sarah."
+        assert result.image_url == "https://example.com/event.png"
+        mock_presign.assert_called_once_with("groups/avatar.png")
+
+    @patch("pecha_api.chat.notification_service._generate_presigned_url")
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Alice Doe")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_ordinary_message_carries_no_image(
+        self,
+        mock_session,
+        mock_get_message,
+        mock_sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        mock_presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        joiner = uuid4()
+        room = MockRoom(group_id=uuid4(), name="Sangha", img_url="groups/avatar.png")
+        message = MockMessage(sender_id=uuid4(), room=room, body="Hello group")
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.message_type == "TEXT"
+        assert result.image_url is None
+        assert result.title == "Sangha"
+        mock_presign.assert_not_called()
 
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room", return_value=None)
     @patch("pecha_api.chat.notification_service.SessionLocal")

@@ -9,6 +9,10 @@ from .subtask_preset_service import (
     get_preset_service,
     delete_preset_service,
 )
+from .subtask_preset_cache_service import (
+    get_preset_service_cached,
+    invalidate_preset_cache,
+)
 from .subtask_preset_response_models import PresetRequest, PresetResponse
 
 
@@ -35,11 +39,13 @@ async def create_or_update_preset(
     preset_request: PresetRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> PresetResponse:
-    return await create_or_update_preset_service(
+    result = await create_or_update_preset_service(
         token=authentication_credential.credentials,
         subtask_id=subtask_id,
         preset_request=preset_request
     )
+    await invalidate_preset_cache(subtask_id=subtask_id)
+    return result
 
 
 @preset_router.get(
@@ -49,7 +55,7 @@ async def create_or_update_preset(
     description="Get the version preset for a subtask"
 )
 async def get_preset(subtask_id: UUID) -> PresetResponse:
-    return await get_preset_service(subtask_id=subtask_id)
+    return await get_preset_service_cached(subtask_id=subtask_id)
 
 
 @preset_router.delete(
@@ -66,6 +72,7 @@ async def delete_preset(
         token=authentication_credential.credentials,
         subtask_id=subtask_id
     )
+    await invalidate_preset_cache(subtask_id=subtask_id)
 
 
 @public_preset_router.get(
@@ -75,4 +82,4 @@ async def delete_preset(
     description="Get the version preset for a subtask - public endpoint for app usage"
 )
 async def get_public_preset(subtask_id: UUID) -> PresetResponse:
-    return await get_preset_service(subtask_id=subtask_id)
+    return await get_preset_service_cached(subtask_id=subtask_id)

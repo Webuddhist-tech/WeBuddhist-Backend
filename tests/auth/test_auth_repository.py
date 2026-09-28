@@ -12,6 +12,7 @@ from pecha_api.auth.auth_repository import (
     verify_password,
     create_access_token,
     create_refresh_token,
+    is_refresh_token_payload,
     generate_token_data,
     decode_backend_token,
     verify_auth0_token,
@@ -174,6 +175,26 @@ def test_create_refresh_token_with_custom_expiry():
     assert "exp" in decoded_data
     assert decoded_data["exp"] == int((datetime.now(timezone.utc) + expires_delta).timestamp())
 
+
+
+def test_refresh_token_is_distinguishable_from_access_token():
+    """Both tokens carry the same claims, so the refresh token is marked - that
+    marker is what keeps it from being replayed as a bearer access token."""
+    data = {
+        "email": "test@example.com",
+        "name": "John Doe ",
+        "iss": PECHA_JWT_ISSUER,
+        "aud": PECHA_JWT_AUD,
+        "iat": datetime.now(timezone.utc)
+    }
+
+    refresh_payload = validate_token(create_refresh_token(data))
+    access_payload = validate_token(create_access_token(data))
+
+    assert refresh_payload["token_type"] == "refresh"
+    assert "token_type" not in access_payload
+    assert is_refresh_token_payload(refresh_payload) is True
+    assert is_refresh_token_payload(access_payload) is False
 
 
 def test_generate_token_data_success():

@@ -84,9 +84,9 @@ async def test_get_preset_success():
     )
     
     with patch(
-        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service",
-        return_value=expected,
+        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service_cached",
         new_callable=AsyncMock,
+        return_value=expected,
     ) as mock_get:
         resp = await get_preset(subtask_id=subtask_id)
         
@@ -118,9 +118,9 @@ async def test_get_public_preset_success():
     )
     
     with patch(
-        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service",
-        return_value=expected,
+        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service_cached",
         new_callable=AsyncMock,
+        return_value=expected,
     ) as mock_get:
         resp = await get_public_preset(subtask_id=subtask_id)
         
@@ -208,9 +208,9 @@ async def test_get_preset_not_found():
     subtask_id = uuid.uuid4()
     
     with patch(
-        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service",
-        side_effect=Exception("Preset not found"),
+        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service_cached",
         new_callable=AsyncMock,
+        side_effect=Exception("Preset not found"),
     ) as mock_get:
         with pytest.raises(Exception, match="Preset not found"):
             await get_preset(subtask_id=subtask_id)
@@ -224,9 +224,9 @@ async def test_get_public_preset_not_found():
     subtask_id = uuid.uuid4()
     
     with patch(
-        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service",
-        side_effect=Exception("Preset not found"),
+        "pecha_api.plans.tasks.sub_tasks.subtask_preset_views.get_preset_service_cached",
         new_callable=AsyncMock,
+        side_effect=Exception("Preset not found"),
     ) as mock_get:
         with pytest.raises(Exception, match="Preset not found"):
             await get_public_preset(subtask_id=subtask_id)

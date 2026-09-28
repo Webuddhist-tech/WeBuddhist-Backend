@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pecha_api.app import api
 from pecha_api.events.event_response_models import EventDTO, EventsResponse
@@ -26,7 +26,8 @@ def test_event_response_omits_null_fields():
     payload = EventsResponse(events=[event], total=1, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=payload,
     ):
         response = client.get("/events/today")
@@ -60,7 +61,8 @@ def test_event_response_includes_event_format_when_set():
     payload = EventsResponse(events=[event], total=1, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=payload,
     ):
         response = client.get("/events/today")

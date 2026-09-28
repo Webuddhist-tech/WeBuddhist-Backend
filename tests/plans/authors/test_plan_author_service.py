@@ -63,6 +63,25 @@ class TestValidateAndExtractAuthorDetails:
         mock_validate_token.assert_called_once_with(token)
         mock_find_author_by_id.assert_called_once_with(db=mock_db_session, author_id=author_id)
 
+    @patch('pecha_api.plans.authors.plan_authors_service.find_author_by_id')
+    @patch('pecha_api.plans.authors.plan_authors_service.validate_token')
+    def test_validate_and_extract_author_details_rejects_refresh_token(
+        self,
+        mock_validate_token: MagicMock,
+        mock_find_author_by_id: MagicMock
+    ) -> None:
+        """A refresh token is not a bearer credential: accepting it would give
+        the caller the refresh token's much longer lifetime on CMS endpoints."""
+        author_id = uuid4()
+        mock_validate_token.return_value = {"sub": str(author_id), "token_type": "refresh"}
+
+        with pytest.raises(HTTPException) as exception_info:
+            validate_and_extract_author_details("refresh_token")
+
+        assert exception_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+        assert exception_info.value.detail == ErrorConstants.TOKEN_ERROR_MESSAGE
+        mock_find_author_by_id.assert_not_called()
+
     @patch('pecha_api.plans.authors.plan_authors_service.SessionLocal')
     @patch('pecha_api.plans.authors.plan_authors_service.find_author_by_user_id')
     @patch('pecha_api.plans.authors.plan_authors_service.resolve_user_from_payload')

@@ -1,3 +1,7 @@
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.group_posts.posts_cache_service import POST_CACHE_TYPES
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.group_posts.posts_cache_service import POST_CACHE_TYPES
 import asyncio
 import json
 import logging
@@ -32,11 +36,15 @@ oauth2_scheme_optional = HTTPBearer(auto_error=False)
 public_group_post_comments_router = APIRouter(
     prefix="/groups/author/posts/{post_id}/comments",
     tags=["Public Group Post Comments"],
+    # A like or comment changes liked_by_me for the caller; counts follow the timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*POST_CACHE_TYPES))],
 )
 
 public_group_post_comment_actions_router = APIRouter(
     prefix="/groups/author/comments",
     tags=["Public Group Post Comments"],
+    # A like or comment changes liked_by_me for the caller; counts follow the timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*POST_CACHE_TYPES))],
 )
 
 

@@ -72,6 +72,22 @@ class TestBuildMessageDTO:
 
         assert dto.sender_email == "unknown@example.com"
 
+    def test_uses_placeholder_email_when_sender_has_no_email(self):
+        """Phone-signup users have a NULL email; the DTO must still validate."""
+        message = MockMessage(sender=MockUser(email=None))
+
+        dto = build_message_dto(message)
+
+        assert dto.sender_email == "unknown@example.com"
+        assert dto.sender_name == "Alice"
+
+    def test_sender_name_falls_back_when_no_name_and_no_email(self):
+        message = MockMessage(sender=MockUser(email=None, firstname="", lastname=None))
+
+        dto = build_message_dto(message)
+
+        assert dto.sender_name == "Unknown"
+
     @patch('pecha_api.chat.service.generate_presigned_access_url')
     def test_sender_avatar_url_is_presigned(self, mock_presign):
         mock_presign.return_value = "https://s3.example.com/signed?sig=abc"

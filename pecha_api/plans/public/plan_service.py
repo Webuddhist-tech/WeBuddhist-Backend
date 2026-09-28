@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional, List
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 import asyncio
 import logging
 from uuid import UUID
@@ -189,6 +190,12 @@ def _get_published_plans_sync(
             
             return PublicPlansResponse(plans=plan_dtos, skip=skip, limit=limit, total=total)
     
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching published plans: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -272,6 +279,12 @@ def _get_published_plan_sync(
                 series_id=plan.series_id,
             )
 
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching published plan details: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -885,6 +898,12 @@ def get_tags(language: str = "en") -> TagsResponse:
             language_upper = language.upper()
             tag_rows = get_published_tags_for_language(db=db, language=language_upper)
             return TagsResponse(tags=tags_to_summary_dtos(tag_rows))
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching tags: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -915,6 +934,12 @@ def get_public_tags(
                 limit=limit,
                 total=total,
             )
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching public tags: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -981,6 +1006,12 @@ async def get_public_tag_detail(
                 segments=segments_data,
             )
     except HTTPException:
+        raise
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
         raise
     except Exception as e:
         logger.error(f"Error fetching public tag detail: {str(e)}", exc_info=True)

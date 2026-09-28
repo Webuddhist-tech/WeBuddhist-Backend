@@ -1,3 +1,5 @@
+from pecha_api.cache.cache_invalidation_deps import invalidate_on_write
+from pecha_api.group_posts.posts_cache_service import POST_CACHE_TYPES
 from typing import Annotated, Optional
 from uuid import UUID
 
@@ -29,6 +31,8 @@ oauth2_scheme = HTTPBearer()
 cms_group_posts_router = APIRouter(
     prefix="/cms/author/groups/{group_id}/posts",
     tags=["CMS Group Posts"],
+    # Publishing or removing a post changes the feed for every reader.
+    dependencies=[Depends(invalidate_on_write(*POST_CACHE_TYPES))],
 )
 
 

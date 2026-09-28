@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, field_validator
 
 from pecha_api.auth.auth_enums import RegistrationSource
+from pecha_api.utils import Utils
 
 
 class CreateUserRequest(BaseModel):
@@ -12,6 +13,27 @@ class CreateUserRequest(BaseModel):
     email: Optional[str] = None
     password: Optional[str] = None
     phone_number: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+    @field_validator("avatar_url", mode="before")
+    @classmethod
+    def _https_avatar(cls, value: Any) -> Any:
+        """Keep only a picture an identity provider serves.
+
+        Social login sends Auth0's profile image here. Anything else is
+        dropped, so neither a blank nor a non-URL value is ever stored as the
+        user's avatar - and neither is an address on a host of the
+        registrant's choosing, which the profile would then hand to everyone
+        who views it. Registration is public, so this is the same restriction
+        the backfill and profile-update paths apply, at the one remaining
+        place an avatar can enter.
+        """
+        if not isinstance(value, str):
+            return None
+        picture = value.strip()
+        if not Utils.is_social_picture_url(picture):
+            return None
+        return picture
 
     @field_validator("email", "password", "phone_number", mode="before")
     @classmethod

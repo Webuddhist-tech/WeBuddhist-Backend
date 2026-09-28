@@ -769,25 +769,23 @@ class TestUpdateAccumulatorService:
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
-    @patch('pecha_api.accumulator.accumulator_service.TextUtils.validate_text_exists', new_callable=AsyncMock)
     @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
     @patch('pecha_api.accumulator.accumulator_service.update_accumulator')
     @patch('pecha_api.accumulator.accumulator_service.get_accumulator_by_id')
     @patch('pecha_api.accumulator.accumulator_service.validate_and_extract_user_details')
     @pytest.mark.asyncio
     async def test_update_accumulator_service_updates_text_id(
-        self, mock_validate, mock_get, mock_update, mock_session, mock_validate_text
+        self, mock_validate, mock_get, mock_update, mock_session
     ):
-        """Test update_accumulator_service updates text_id after validation."""
+        """Test update_accumulator_service stores a non-UUID text id as given."""
         user_id = uuid4()
         accumulator_id = uuid4()
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         token = "valid_token"
 
         mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        mock_validate_text.return_value = None
 
         existing = TestDataFactory.create_mock_accumulator(
             accumulator_id=accumulator_id, user_id=user_id
@@ -798,8 +796,7 @@ class TestUpdateAccumulatorService:
         request = TestDataFactory.create_update_request(text_id=text_id)
         await update_accumulator_service(token=token, accumulator_id=accumulator_id, request=request)
 
-        assert existing.text_id == str(text_id)
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
+        assert existing.text_id == text_id
 
     @patch('pecha_api.accumulator.accumulator_service.validate_mantra_exists')
     @patch('pecha_api.accumulator.accumulator_service.SessionLocal')

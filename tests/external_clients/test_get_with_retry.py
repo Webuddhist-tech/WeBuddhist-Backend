@@ -5,11 +5,16 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pecha_api import config
 from pecha_api.external_clients import (
-    _MAX_CONCURRENT_REQUESTS,
     _RETRYABLE_ERRORS,
+    _get_semaphore,
     get_with_retry,
 )
+
+
+def _cap() -> int:
+    return config.get_int("OPENPECHA_MAX_CONCURRENCY")
 
 
 def _http_client(*side_effects: Any) -> AsyncMock:
@@ -156,7 +161,7 @@ async def test_concurrency_never_exceeds_the_cap_across_callers():
 
     assert client.get.await_count == 60
     # Exactly the cap: proves the gate both throttles and is not over-restrictive.
-    assert peak == _MAX_CONCURRENT_REQUESTS
+    assert peak == _cap()
 
 
 @pytest.mark.asyncio
@@ -167,11 +172,10 @@ async def test_slot_is_released_while_backing_off():
 
     async def check_slot(_delay):
         nonlocal held_during_sleep
-        held_during_sleep = _MAX_CONCURRENT_REQUESTS - _semaphore_value()
+        held_during_sleep = _cap() - _semaphore_value()
 
     def _semaphore_value():
-        from pecha_api.external_clients import _request_semaphore
-        return _request_semaphore._value
+        return _get_semaphore()._value
 
     client = _http_client(httpx.ReadTimeout("slow"), _response())
 
@@ -179,3 +183,48 @@ async def test_slot_is_released_while_backing_off():
         await get_with_retry(client, "/v2/texts")
 
     assert held_during_sleep == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_too_long_for_a_slot_gives_up_instead_of_queueing():
+    """Without this the acquire is unbounded: the per-request timeouts only
+    start once a slot is held, so a wide fan-out had no timeout at all."""
+    from pecha_api.external_clients import OpenPechaQueueTimeout, _gate
+
+    semaphore = _get_semaphore()
+    held = 0
+    try:
+        # Every slot taken, so the next caller has nothing to do but queue.
+        for _ in range(_cap()):
+            await semaphore.acquire()
+            held += 1
+
+        with patch.object(config, "get_float", return_value=0.01):
+            with pytest.raises(OpenPechaQueueTimeout):
+                async with _gate():
+                    pass
+    finally:
+        for _ in range(held):
+            semaphore.release()
+
+
+@pytest.mark.asyncio
+async def test_a_slot_is_handed_back_after_a_request_fails():
+    """A gate that leaked a permit per failure would close itself over time."""
+    from pecha_api.external_clients import _gate
+
+    before = _get_semaphore()._value
+    with pytest.raises(RuntimeError):
+        async with _gate():
+            raise RuntimeError("upstream blew up")
+
+    assert _get_semaphore()._value == before
+
+
+@pytest.mark.asyncio
+async def test_a_queue_timeout_is_not_retried():
+    """It never reached the network, and retrying rejoins the same queue."""
+    from pecha_api.external_clients import OpenPechaQueueTimeout
+
+    assert OpenPechaQueueTimeout not in _RETRYABLE_ERRORS
+    assert not issubclass(OpenPechaQueueTimeout, _RETRYABLE_ERRORS)

@@ -1,13 +1,15 @@
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import jwt
 from jose import JWTError
 from jose.exceptions import ExpiredSignatureError as JoseExpiredSignatureError
 
 from pecha_api.auth.auth0_sms import verify_auth0_sms_token
+from pecha_api.uploads.S3_utils import generate_presigned_access_url
+from pecha_api.utils import Utils
 from ..config import get
 from ..notification.email_provider import send_email
 from .auth_models import CreateUserRequest, UserLoginResponse, RefreshTokenResponse, TokenResponse, UserInfo, \
@@ -16,11 +18,13 @@ from ..users.users_models import Users, PasswordReset
 from ..db.database import SessionLocal
 from ..users.users_repository import (
     get_user_by_email,
+    get_user_by_email_or_none,
     get_user_by_phone,
     get_user_by_username,
     link_user_phone,
     save_phone_user,
     save_user,
+    update_user,
 )
 from ..plans.authors.author_user_link_service import link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
@@ -92,7 +96,6 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
     new_user.username = generate_and_validate_username(
         first_name=create_user_request.firstname,
         last_name=create_user_request.lastname,
-        phone_number=create_user_request.phone_number,
     )
 
     if registration_source == RegistrationSource.PHONE:
@@ -107,6 +110,52 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
         saved_user = save_user(db=db_session, user=new_user)
         link_or_create_author_for_user(db=db_session, user=saved_user)
         return saved_user
+
+
+def is_trusted_social_register_caller(token: Optional[str]) -> bool:
+    """Whether a /auth/social_register call may write to an existing account.
+
+    Attempting to create an account is safe for anyone: an identifier that is
+    already taken is rejected. Writing to the account that did the rejecting
+    is not, so that part is reserved for the Auth0 Post Login Action, which is
+    the only caller holding this shared secret. An unset secret fails closed -
+    the backfill is skipped - rather than leaving the write open to everyone.
+    """
+    expected = get("SOCIAL_REGISTER_SECRET_TOKEN")
+    if not expected or not token:
+        return False
+    return secrets.compare_digest(token, expected)
+
+
+def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
+    """Store Auth0's picture on an account that already exists.
+
+    A picture the user uploaded themselves is an S3 key and is left alone.
+    An empty avatar, or one that is already an Auth0 https URL, takes the
+    picture from this login. Only the identity providers' own image hosts are
+    accepted, so a caller holding the shared secret still cannot point an
+    account's avatar at an arbitrary server.
+    """
+    picture = create_user_request.avatar_url
+    if not picture or not Utils.is_social_picture_url(picture):
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = None
+            if create_user_request.email:
+                user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None and create_user_request.phone_number:
+                user = get_user_by_phone(db=db_session, phone_number=create_user_request.phone_number)
+            if user is None:
+                return
+            if user.avatar_url and not str(user.avatar_url).startswith("https://"):
+                return
+            if user.avatar_url == picture:
+                return
+            user.avatar_url = picture
+            update_user(db=db_session, user=user)
+    except Exception:
+        logging.exception("Failed to store social profile image")
 
 
 def _validate_password(password: str):
@@ -142,7 +191,10 @@ def generate_token_user(user: Users):
     return UserLoginResponse(
         user=UserInfo(
             name=user.firstname + " " + user.lastname,
-            avatar_url=user.avatar_url
+            avatar_url=generate_presigned_access_url(
+                bucket_name=get("AWS_BUCKET_NAME"),
+                s3_key=user.avatar_url,
+            ) or None
         ),
         auth=token_response
     )
@@ -347,33 +399,76 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
-def generate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+# users.username is VARCHAR(255). A name-based handle is
+# first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
+# The fixed wrapper is 13 characters, leaving 242 for the two names.
+_USERNAME_MAX_LENGTH = 255
+_BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 5
+
+
+def _name_part(name: str | None) -> str:
+    if not name:
+        return ""
+    return "".join(char for char in name.strip().lower() if char.isalnum())
+
+
+def _fit_name_parts(first: str, last: str, max_combined: int) -> tuple[str, str]:
+    """Shorten names so both still appear and their combined length fits."""
+    if len(first) + len(last) <= max_combined:
+        return first, last
+
+    first_budget = min(len(first), max(1, max_combined // 2))
+    last_budget = max_combined - first_budget
+    if len(last) < last_budget:
+        last_budget = len(last)
+        first_budget = max_combined - last_budget
+    return first[:first_budget], last[:last_budget]
+
+
+def _random_base36(width: int = _BASE36_WIDTH) -> str:
+    value = secrets.randbelow(36 ** width)
+    chars = []
+    for _ in range(width):
+        value, remainder = divmod(value, 36)
+        chars.append(_BASE36_ALPHABET[remainder])
+    return "".join(reversed(chars))
+
+
+def _random_marked_suffix() -> str:
+    return "a" + str(secrets.randbelow(10000)).zfill(4)
+
+
+def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
-    Generate a username based on the following logic:
-    - If phone_number is present: webuddhist_{firstname}_{lastname}_{phonenumber}
-    - If phone_number is NOT present: webuddhist_user_{random_6_digit}
+    Generate a public username.
 
-    Uses cryptographically secure random number generation for username uniqueness.
+    Both names present: {firstname}_{lastname}_{base36}_a{dddd}
+    Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
+
+    Names are shortened so the result always fits users.username. The phone
+    number is never included. It stays on users.phone_number.
     """
-    random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
+    first = _name_part(first_name)
+    last = _name_part(last_name)
+    if not first or not last:
+        return f"webuddhist_user_{token}_{marked_suffix}"
 
-    if phone_number:
-        # Sanitize phone number - remove all non-digit characters
-        sanitized_phone = ''.join(filter(str.isdigit, phone_number))
-        return f"webuddhist_{first_name.lower()}_{last_name.lower()}_{sanitized_phone}.{random_suffix}"
-    else:
-        # Use random fallback if no phone number
-        random_num = str(secrets.randbelow(900000) + 100000)
-        return f"webuddhist_user_{random_num}.{random_suffix}"
+    tail = f"_{token}_{marked_suffix}"
+    name_budget = _USERNAME_MAX_LENGTH - len("_") - len(tail)
+    first, last = _fit_name_parts(first, last, name_budget)
+    return f"{first}_{last}{tail}"
 
 
-def generate_and_validate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate and validate a unique username.
     Keeps generating new usernames until a unique one is found.
     """
-    while True:  # Loop until a valid username is generated
-        username = generate_username(first_name=first_name, last_name=last_name, phone_number=phone_number)
+    while True:
+        username = generate_username(first_name=first_name, last_name=last_name)
         if validate_username(username=username):
             return username
 

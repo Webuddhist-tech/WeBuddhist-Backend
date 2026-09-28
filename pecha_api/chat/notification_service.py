@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
+from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
-from pecha_api.chat.enums import ChatRoomKind
+from pecha_api.chat.enums import ChatMessageType, ChatRoomKind
 from pecha_api.chat.notification_repository import (
     deactivate_push_device_token_by_id,
     filter_users_by_notification_preference,
@@ -24,10 +27,16 @@ from pecha_api.chat.notification_response_models import (
 )
 from pecha_api.chat.repository import (
     count_message_prayers,
+    count_suppressed_prayer_requests,
     get_message_by_id_any_room,
     get_prayer_by_id,
+    last_dispatched_prayer_request,
 )
-from pecha_api.chat.service import room_kind
+from pecha_api.chat.service import (
+    _generate_presigned_url,
+    _message_type_value,
+    room_kind,
+)
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.config import get_int
 from pecha_api.db.database import SessionLocal
@@ -52,17 +61,87 @@ def _preview_body(body: str, max_length: int) -> str:
     return text[: max(max_length - 1, 1)].rstrip() + "…"
 
 
+def _count_held_prayer_requests(
+    *,
+    db: Session,
+    room_id: UUID,
+    message_id: UUID,
+    dispatched_at: Optional[datetime],
+) -> int:
+    """How many prayer requests the interval held since the last push that went out.
+
+    `exclude_message_id` matters on both calls. By the time the worker asks for
+    targets the backend has usually already stamped this message with its real
+    SQS id, so without the exclusion the "last sent push" would be this very
+    message, `since` would be roughly now, and the count would always be zero.
+
+    The window closes at this push's own dispatch time, so a request suppressed
+    while the worker is building this push belongs to the next one rather than
+    being counted here and again there. `dispatched_at` is normally already set
+    - the backend stamps it before the worker asks for targets - and now() is
+    the fallback for the moment where the worker got there first.
+
+    Both bounds come off that one moment. The worker is not guaranteed to
+    reach a message before the next prayer request pushes, so the newest push
+    in the room can be one that went out after this message did; taken as the
+    window's start it would sit past its end, the count would come out zero,
+    and the requests this push promised to carry would be announced by no push
+    at all. `before` keeps the search on this message's side of the timeline.
+    """
+    window_end = dispatched_at or datetime.now(timezone.utc)
+    last_sent = last_dispatched_prayer_request(
+        db=db,
+        room_id=room_id,
+        exclude_message_id=message_id,
+        before=window_end,
+    )
+    return count_suppressed_prayer_requests(
+        db=db,
+        room_id=room_id,
+        since=last_sent.dispatched_at if last_sent else None,
+        until=window_end,
+        exclude_message_id=message_id,
+    )
+
+
+def _held_prayer_request_suffix(held_count: int) -> str:
+    """What the interval skipped, as words on the end of the body.
+
+    The held requests are not listed and their senders are not named: the room
+    shows each one in full. This is only how many notifications did not fire.
+    """
+    if held_count < 1:
+        return ""
+    if held_count == 1:
+        return " · +1 other prayer request"
+    return f" · +{held_count} other prayer requests"
+
+
 def _build_notification_copy(
     *,
     chat_kind: str,
     room_name: str,
     sender_name: str,
     message_body: str,
+    message_type: str = ChatMessageType.TEXT.value,
+    has_image: bool = False,
+    held_count: int = 0,
 ) -> tuple[str, str]:
     preview = _preview_body(
         message_body,
         max(get_int("CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH"), 1),
     )
+    if message_type == ChatMessageType.PRAYER.value:
+        # A prayer request leads with the person asking and what they asked
+        # for. The room name buys nothing beside that - as long as the room's
+        # image is there to say which sangha this came from. Rooms without an
+        # image, and images that could not be signed, keep the name instead:
+        # a prayer from an unidentified group is a stranger's prayer.
+        title = f"{sender_name} is requesting a prayer 🙏"
+        body = preview if has_image else f"{room_name}: {preview}"
+        # After the preview was truncated, so the cap applies to the request
+        # text and never to the count. A long request is what gets the ellipsis.
+        return title, f"{body}{_held_prayer_request_suffix(held_count)}"
     if chat_kind == "PRIVATE":
         return sender_name, preview
     return room_name, f"{sender_name}: {preview}"
@@ -88,12 +167,38 @@ def get_chat_notification_targets(
 
         room = message.room
         chat_kind = room_kind(room)
+        message_type = _message_type_value(message)
         sender_name = get_sender_display_name(db=db, sender_id=message.sender_id)
+        # Only a prayer request carries the room's image: it replaces the room
+        # name the copy drops. Ordinary chat keeps its unchanged look. Resolved
+        # before the copy is built, because whether the image is actually there
+        # decides whether the copy can afford to drop the name.
+        image_url = (
+            _generate_presigned_url(room.img_url)
+            if message_type == ChatMessageType.PRAYER.value
+            else None
+        )
+        # Counted at read time, so the number matches the rows that exist when
+        # the worker asks for targets rather than when the event was enqueued.
+        held_count = (
+            _count_held_prayer_requests(
+                db=db,
+                room_id=room.id,
+                message_id=message.id,
+                dispatched_at=message.notification_dispatched_at,
+            )
+            if message_type == ChatMessageType.PRAYER.value
+            else 0
+        )
         title, body = _build_notification_copy(
             chat_kind=chat_kind,
             room_name=room.name,
             sender_name=sender_name,
             message_body=message.body,
+            message_type=message_type,
+            held_count=held_count,
+            # Empty string too: the signer returns one for an unusable key.
+            has_image=bool(image_url),
         )
 
         if chat_kind == ChatRoomKind.PRIVATE.value:
@@ -157,6 +262,8 @@ def get_chat_notification_targets(
             sender_id=message.sender_id,
             chat_kind=chat_kind,
             group_id=room.group_id,
+            message_type=message_type,
+            image_url=image_url,
             title=title,
             body=body,
             recipients=recipients,
