@@ -1,4 +1,5 @@
 import pytest
+from typing import Any, List, Optional, Tuple
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 from datetime import datetime, timezone as tz
@@ -21,6 +22,7 @@ from pecha_api.chat.message_service import (
     send_group_message_service,
 )
 from pecha_api.chat.enums import ChatMessageReportReason
+from pecha_api.chat.response_models import ChatMessageDTO
 
 
 class MockUser:
@@ -646,10 +648,10 @@ class TestReportMessageService:
 
 class TestEditMessageService:
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         self.room = MagicMock(group_id=uuid4(), event_id=None)
 
-    def _patch_reads(self):
+    def _patch_reads(self) -> List[Any]:
         return [
             patch('pecha_api.chat.message_service.list_message_reactions', return_value=[]),
             patch('pecha_api.chat.message_service.validate_message_content'),
@@ -658,13 +660,17 @@ class TestEditMessageService:
             patch('pecha_api.chat.message_service.SessionLocal'),
         ]
 
-    def _run(self, message, user, **kwargs):
+    def _run(
+        self, message: MockMessage, user: MockUser, **kwargs: Any
+    ) -> Tuple[ChatMessageDTO, MagicMock]:
         patches = self._patch_reads()
         mocks = [p.start() for p in patches]
         try:
             mocks[-1].return_value.__enter__.return_value = MagicMock()
             with patch('pecha_api.chat.message_service.get_message_by_id', return_value=message),                  patch('pecha_api.chat.message_service.update_message') as mock_update:
-                def _apply(db, message, body, intention):
+                def _apply(
+                    db: Any, message: MockMessage, body: str, intention: Optional[str]
+                ) -> MockMessage:
                     message.body = body
                     message.intention = intention
                     message.is_edited = True
