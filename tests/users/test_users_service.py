@@ -446,6 +446,19 @@ def test_stored_avatar_reference_rejects_a_lookalike_host():
     assert Utils.stored_avatar_reference("https://lh3.googleusercontent.com@evil.test/x") == ""
 
 
+def test_stored_avatar_reference_rejects_a_host_browsers_read_differently():
+    """A backslash ends the authority for a browser but not for urlparse."""
+    backslash_host = "https://attacker.example\\@googleusercontent.com/track"
+    assert Utils.stored_avatar_reference(backslash_host) == ""
+    assert Utils.is_social_picture_url(backslash_host) is False
+    assert Utils.stored_avatar_reference(
+        "https://attacker.example @googleusercontent.com/track"
+    ) == ""
+    assert Utils.stored_avatar_reference(
+        "https://attacker.example\t@googleusercontent.com/track"
+    ) == ""
+
+
 def test_is_social_picture_url():
     assert Utils.is_social_picture_url("https://lh3.googleusercontent.com/a/photo") is True
     assert Utils.is_social_picture_url("https://s.gravatar.com/avatar/abc") is True

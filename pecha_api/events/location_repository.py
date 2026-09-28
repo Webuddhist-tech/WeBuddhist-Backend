@@ -10,10 +10,11 @@ from starlette import status
 from .event_model import Event
 from .location_metadata_model import LocationMetadata
 from .location_model import Location
+from .location_response_models import LocationMetadataInput
 
 
 def _persist_location_metadata(
-    db: Session, location_id: UUID, translations: List
+    db: Session, location_id: UUID, translations: List[LocationMetadataInput]
 ) -> None:
     for entry in translations:
         db.add(
@@ -94,7 +95,7 @@ def get_event_counts(db: Session, location_ids: List[UUID]) -> Dict[UUID, int]:
 
 
 def save_location(
-    db: Session, location: Location, translations: Optional[List] = None
+    db: Session, location: Location, translations: Optional[List[LocationMetadataInput]] = None
 ) -> Location:
     try:
         db.add(location)
@@ -113,7 +114,7 @@ def save_location(
 
 
 def update_location(
-    db: Session, location: Location, translations: Optional[List] = None
+    db: Session, location: Location, translations: Optional[List[LocationMetadataInput]] = None
 ) -> Location:
     try:
         # A list replaces the whole set, mirroring how event metadata is

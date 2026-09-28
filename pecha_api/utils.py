@@ -109,11 +109,27 @@ class Utils:
 
     @staticmethod
     def _url_host(value: str) -> str:
-        """The bare hostname, without credentials or port.
+        """The bare hostname, or "" for an address we refuse to resolve.
 
-        `urlparse` leaves both in `netloc`, and both are attacker-chosen:
-        "https://s3.amazonaws.com@example.com/x" is served by example.com.
+        A host is returned only when a browser reads it the same way we do.
+        `urlparse` follows RFC 3986, browsers follow the WHATWG rules, and the
+        two part company over a backslash: it is an ordinary hostname
+        character here but a path separator there, so the authority in
+        "https://attacker.test\\@trusted.example/x" is trusted.example to us
+        and attacker.test to whoever loads the image. Whitespace and control
+        characters split the parsers the same way. A real image address spells
+        any of these percent-encoded, so their presence is refused outright
+        rather than parsed into a host one side will disagree with.
+
+        Userinfo is the same trick spelled with "@", which both parsers do
+        agree on: `urlparse` leaves it in `netloc` together with the port, so
+        the host is what follows the last "@" and precedes the ":".
         """
+        if any(
+            character == "\\" or character.isspace() or ord(character) < 0x20 or ord(character) == 0x7F
+            for character in value
+        ):
+            return ""
         netloc = urlparse(value).netloc.lower()
         return netloc.rpartition("@")[2].partition(":")[0]
 

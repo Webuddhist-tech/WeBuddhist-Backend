@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import List, Optional, Union
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -36,7 +36,7 @@ def _language_value(language: Union[LanguageCode, str]) -> str:
     return language.value if hasattr(language, "value") else str(language)
 
 
-def _translations_to_dtos(location: Location) -> list:
+def _translations_to_dtos(location: Location) -> List[LocationMetadataDTO]:
     entries = getattr(location, "metadata_entries", None) or []
     return sorted(
         (
