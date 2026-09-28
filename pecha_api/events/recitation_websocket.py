@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
 from typing import Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from redis.asyncio import Redis
 
@@ -37,6 +38,35 @@ def position_revision_key(event_id: UUID) -> str:
 
 def position_rate_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:rate"
+
+
+def presence_key(event_id: UUID) -> str:
+    return f"recitation:event:{event_id}:presence"
+
+
+def instance_lease_key(instance_id: str) -> str:
+    return f"recitation:instance:{instance_id}"
+
+
+# One id per process. A socket's presence value is "{token}|{instance id}", so a
+# crashed instance's joins drop out of the count once its lease expires instead
+# of sitting there until someone deletes the hash.
+_INSTANCE_ID = str(uuid4())
+# The heartbeat runs well inside the lease, so one stalled loop does not look
+# like a crash and zero the room.
+INSTANCE_LEASE_SECONDS = 45
+INSTANCE_HEARTBEAT_SECONDS = 20
+
+
+# Drop this socket's presence only when it is still the one recorded. A
+# reconnect writes a new token first; the old socket's cleanup must not erase it.
+_RELEASE_PRESENCE_SCRIPT = """
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if current == ARGV[2] then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+end
+return redis.call('HLEN', KEYS[1])
+"""
 
 
 # Matches every key position_rate_key can produce, for the startup sweep.
@@ -92,6 +122,10 @@ class RecitationBroadcaster:
     mirrored into a Redis hash on every set, so a phone joining 40 minutes in -
     or an instance restarted by a deploy - lands on the live line instead of
     waiting for the operator's next click.
+
+    Who is in the room is the other shared value. Each join is a field in a
+    Redis hash, stamped with this process, so a count taken on any instance is
+    the whole room and not just the sockets that process happens to hold.
     """
 
     def __init__(self, redis_url: str) -> None:
@@ -102,6 +136,7 @@ class RecitationBroadcaster:
         self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {event_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """Initialize Redis connection."""
@@ -112,6 +147,16 @@ class RecitationBroadcaster:
             # A position is last-write-wins, so a socket that falls behind
             # wants the newest frame, not a backlog of stale ones.
             self.fanout = ChannelFanout(self.redis, queue_maxsize=64, drop_oldest=True)
+            # Claim the lease before serving, so the first join is already
+            # countable. A failure here is logged, not fatal: the puja still
+            # runs, and the heartbeat retries.
+            try:
+                await self.refresh_instance_lease()
+            except Exception as lease_error:
+                logger.exception(
+                    "Failed to claim recitation instance lease: %s", lease_error
+                )
+            self._heartbeat_task = asyncio.create_task(self._run_instance_heartbeat())
             logger.info("✅ Redis connection established for recitation broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -138,6 +183,11 @@ class RecitationBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self._heartbeat_task is not None:
+            task = self._heartbeat_task
+            self._heartbeat_task = None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if self.fanout:
             await self.fanout.aclose()
         if self.redis:
@@ -147,8 +197,8 @@ class RecitationBroadcaster:
     def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
         """Track a local WebSocket connection.
 
-        Plain dict bookkeeping: unlike chat, a recitation keeps no presence
-        in Redis, so there is nothing here to await.
+        The fleet-wide roster lives in Redis (`mark_present`); this dict is
+        only the sockets this process is holding.
         """
         if event_id not in self.connections:
             self.connections[event_id] = {}
@@ -383,9 +433,110 @@ class RecitationBroadcaster:
         return deleted
 
     def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
-        """Sockets this server holds for an event (local only - position is the
-        shared state here, not presence)."""
+        """Sockets this server holds for an event.
+
+        The number of people in the room is `presence_count`: it reads the
+        Redis roster, which every instance writes, and skips joins whose
+        server lease has expired.
+        """
         return self.connections.get(event_id, {})
+
+    async def refresh_instance_lease(self) -> None:
+        """Keep this process visible to the presence count."""
+        await self.redis.set(
+            instance_lease_key(_INSTANCE_ID), "1", ex=INSTANCE_LEASE_SECONDS
+        )
+
+    async def _run_instance_heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(INSTANCE_HEARTBEAT_SECONDS)
+            try:
+                await self.refresh_instance_lease()
+            except Exception as e:
+                logger.exception("Failed to refresh recitation instance lease: %s", e)
+
+    async def mark_present(self, event_id: UUID, user_id: UUID) -> str:
+        """Record this socket in the shared roster. Returns the token that
+        `mark_absent` must hand back, so an older socket cannot erase a newer one.
+        """
+        token = f"{uuid4()}|{_INSTANCE_ID}"
+        try:
+            await self.redis.hset(presence_key(event_id), str(user_id), token)
+        except Exception as e:
+            logger.exception("Failed to mark recitation presence in Redis: %s", e)
+        return token
+
+    async def mark_absent(self, event_id: UUID, user_id: UUID, token: str) -> None:
+        """Drop this socket's roster entry when it is still the current one."""
+        try:
+            await self.redis.eval(
+                _RELEASE_PRESENCE_SCRIPT,
+                1,
+                presence_key(event_id),
+                str(user_id),
+                token,
+            )
+        except Exception as e:
+            logger.exception("Failed to clear recitation presence in Redis: %s", e)
+
+    async def presence_count(self, event_id: UUID) -> int:
+        """People joined to this event across every live instance."""
+        try:
+            roster = await self.redis.hgetall(presence_key(event_id))
+        except Exception as e:
+            logger.exception("Failed to read recitation presence from Redis: %s", e)
+            return 0
+        if not roster:
+            return 0
+
+        by_instance: Dict[str, List[str]] = {}
+        for user_id, value in roster.items():
+            instance_id = str(value).rsplit("|", 1)[-1]
+            by_instance.setdefault(instance_id, []).append(str(user_id))
+
+        instance_ids = list(by_instance)
+        try:
+            alive_flags = await self.redis.mget(
+                *[instance_lease_key(instance_id) for instance_id in instance_ids]
+            )
+        except Exception as e:
+            logger.exception("Failed to read recitation instance leases: %s", e)
+            return 0
+
+        alive = {
+            instance_id
+            for instance_id, flag in zip(instance_ids, alive_flags)
+            if flag is not None
+        }
+        stale = [
+            user_id
+            for instance_id, user_ids in by_instance.items()
+            if instance_id not in alive
+            for user_id in user_ids
+        ]
+        if stale:
+            try:
+                await self.redis.hdel(presence_key(event_id), *stale)
+            except Exception as e:
+                logger.exception("Failed to drop stale recitation presence: %s", e)
+        return sum(
+            len(user_ids)
+            for instance_id, user_ids in by_instance.items()
+            if instance_id in alive
+        )
+
+    async def broadcast_presence(self, event_id: UUID) -> None:
+        """Tell every socket in the room how many people are joined."""
+        count = await self.presence_count(event_id)
+        payload = {
+            "type": "presence",
+            "event_id": str(event_id),
+            "count": count,
+        }
+        try:
+            await self.redis.publish(position_channel(event_id), json.dumps(payload))
+        except Exception as e:
+            logger.exception("Failed to broadcast recitation presence: %s", e)
 
 
 # Global broadcaster instance (initialized in app startup)

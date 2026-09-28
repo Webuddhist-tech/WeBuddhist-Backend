@@ -10,6 +10,7 @@ from starlette import status
 from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
+from pecha_api.events.recitation_live_service import RecitationCaller
 
 client = TestClient(api)
 
@@ -56,6 +57,7 @@ def _sync(websocket):
 @contextmanager
 def _ws_env(
     user=None,
+    caller=None,
     auth_error=None,
     access_error=None,
     is_operator=True,
@@ -69,6 +71,8 @@ def _ws_env(
     # Local dict bookkeeping, not I/O, so these are plain sync methods.
     broadcaster.add_connection = MagicMock()
     broadcaster.remove_connection = MagicMock()
+    broadcaster.mark_present.return_value = "presence-token"
+    broadcaster.presence_count.return_value = 1
     broadcaster.subscribe_to_event.return_value = (
         subscriber if subscriber is not None else FakeSubscriber()
     )
@@ -77,12 +81,18 @@ def _ws_env(
 
     with ExitStack() as stack:
         mock_validate = stack.enter_context(
-            patch("pecha_api.events.recitation_live_views.validate_and_extract_user_details")
+            patch("pecha_api.events.recitation_live_views.resolve_recitation_caller")
         )
         if auth_error is not None:
             mock_validate.side_effect = auth_error
+        elif caller is not None:
+            mock_validate.return_value = caller
         else:
-            mock_validate.return_value = user or MockUser()
+            # An app user: one identity serves as both roster key and eligibility.
+            resolved = user or MockUser()
+            mock_validate.return_value = RecitationCaller(
+                presence_id=resolved.id, user_id=resolved.id
+            )
 
         stack.enter_context(
             patch("pecha_api.events.recitation_live_views.get_broadcaster", return_value=broadcaster)
@@ -160,9 +170,30 @@ class TestRecitationConnection:
             "type": "session_info",
             "event_id": str(event_id),
             "is_operator": False,
+            "count": 1,
         }
         broadcaster.add_connection.assert_called_once()
+        broadcaster.mark_present.assert_awaited_once_with(event_id, user.id)
+        broadcaster.mark_absent.assert_awaited_once_with(event_id, user.id, "presence-token")
         broadcaster.remove_connection.assert_called_once_with(event_id, user.id)
+
+    def test_studio_author_joins_without_a_website_user(self):
+        """The Studio event page signs in as an Author, not an app user. It
+        still has to reach the socket, or the page reports it cannot join."""
+        author_id = uuid4()
+        event_id = uuid4()
+        caller = RecitationCaller(presence_id=author_id, user_id=None)
+        with _ws_env(caller=caller, is_operator=True) as (broadcaster, mock_access):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                message = websocket.receive_json()
+                _sync(websocket)
+
+        assert message["type"] == "session_info"
+        assert message["is_operator"] is True
+        # Eligibility is checked against the app identity, which is absent here.
+        assert mock_access.call_args.kwargs["user_id"] is None
+        broadcaster.mark_present.assert_awaited_once_with(event_id, author_id)
+        broadcaster.remove_connection.assert_called_once_with(event_id, author_id)
 
     def test_late_joiner_receives_current_position(self):
         event_id = uuid4()

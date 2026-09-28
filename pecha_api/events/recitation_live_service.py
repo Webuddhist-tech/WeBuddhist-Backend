@@ -1,4 +1,6 @@
 import logging
+from dataclasses import dataclass
+from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -87,7 +89,56 @@ def assert_live_event(event_id: UUID) -> None:
         load_live_event(db=db, event_id=event_id)
 
 
-def resolve_recitation_access(event_id: UUID, user_id: UUID, token: str) -> bool:
+@dataclass(frozen=True)
+class RecitationCaller:
+    """Who is on the socket.
+
+    `presence_id` keys the shared roster. `user_id` is the website User behind
+    the token, and is what eligibility is checked against - a Studio author
+    with no linked User has the first without the second.
+    """
+
+    presence_id: UUID
+    user_id: Optional[UUID]
+
+
+def resolve_recitation_caller(token: str) -> RecitationCaller:
+    """The identity behind a connecting socket, from the app or from Studio.
+
+    Two token shapes reach this socket. The app sends a website User token,
+    whose `sub` is a Users id. Studio sends a CMS token, whose `sub` is an
+    Author id, so user resolution rejects it outright - even though the
+    operator check below is written for precisely that caller. Accepting only
+    the first kept every author off their own event's socket.
+
+    Raises 401 when the token resolves to neither.
+    """
+    # Imported here for the same reason as in `is_event_operator`: the authors
+    # service pulls in most of the plans package.
+    from pecha_api.plans.authors.plan_authors_service import (
+        validate_and_extract_author_details,
+    )
+    from pecha_api.users.users_service import validate_and_extract_user_details
+
+    try:
+        user = validate_and_extract_user_details(token=token)
+        return RecitationCaller(presence_id=user.id, user_id=user.id)
+    except HTTPException:
+        pass
+
+    author = validate_and_extract_author_details(token=token)
+    # A linked User keeps one person to one roster slot whether they are
+    # following along in the app or driving the puja from Studio.
+    linked_user_id = author.user_id
+    return RecitationCaller(
+        presence_id=linked_user_id or author.id,
+        user_id=linked_user_id,
+    )
+
+
+def resolve_recitation_access(
+    event_id: UUID, user_id: Optional[UUID], token: str
+) -> bool:
     """Gate a connecting socket and say whether it may publish.
 
     Raises 404 for an unreachable event and 403 for an ineligible viewer;
@@ -105,5 +156,11 @@ def resolve_recitation_access(event_id: UUID, user_id: UUID, token: str) -> bool
         event = load_live_event(db=db, event_id=event_id)
         if is_event_operator(db=db, event=event, token=token):
             return True
+        if user_id is None:
+            # A Studio author who cannot edit this event has no app identity to
+            # check a join or a follow against.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=NOT_ELIGIBLE
+            )
         require_subscriber(db=db, event=event, user_id=user_id)
         return False

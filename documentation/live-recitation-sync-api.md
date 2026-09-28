@@ -13,8 +13,14 @@ wss://{host}/api/v1/events/{event_id}/recitation/live?token={auth_token}
 The server sends two frames on connect:
 
 ```json
-{"type": "session_info", "event_id": "550e…", "is_operator": false}
+{"type": "session_info", "event_id": "550e…", "is_operator": false, "count": 12}
 {"type": "position", "event_id": "550e…", "text_id": "abc…", "segment_id": "e47b…", "index": 12, "round_number": 3, "server_time": "2026-09-17T09:30:00Z", "revision": 57}
+```
+
+`count` is how many people are joined to this event's socket, including the socket that just connected. It is shared across API instances. Whenever someone joins or leaves, every socket also receives:
+
+```json
+{"type": "presence", "event_id": "550e…", "count": 13}
 ```
 
 The `position` frame is sent **only if the operator has already set one** — that is how a late joiner or a reconnecting phone lands on the live line.
@@ -72,7 +78,8 @@ The throttle budget is shared with the socket, so alternating routes does not do
 
 | Frame | When |
 |-------|------|
-| `session_info` | Once, on connect |
+| `session_info` | Once, on connect. `count` is people joined, including this socket |
+| `presence` | Whenever someone joins or leaves. `count` is the new total |
 | `position` | On connect (if a position exists) and on every operator `set` |
 | `session_ended` | Operator sent `end`; the server closes the socket right after |
 | `pong` | Reply to `ping` |

@@ -12,13 +12,17 @@ from pecha_api.events.recitation_websocket import (
     RATE_WINDOW_SECONDS,
     RecitationBroadcaster,
     _ALLOW_SET_SCRIPT,
+    _INSTANCE_ID,
     _RATE_KEY_PATTERN,
+    _RELEASE_PRESENCE_SCRIPT,
     get_broadcaster,
     init_broadcaster,
+    instance_lease_key,
     position_channel,
     position_rate_key,
     position_revision_key,
     position_state_key,
+    presence_key,
 )
 
 
@@ -110,6 +114,7 @@ class TestRecitationBroadcasterLifecycle:
             created = await init_broadcaster("redis://localhost:6379/0")
 
         assert get_broadcaster() is created
+        await created.disconnect()
 
     @pytest.mark.asyncio
     async def test_init_broadcaster_sweeps_rate_keys(self):
@@ -128,6 +133,7 @@ class TestRecitationBroadcasterLifecycle:
             await init_broadcaster("redis://localhost:6379/0")
 
         mock_redis.delete.assert_awaited_once_with(stale)
+        await get_broadcaster().disconnect()
 
     @pytest.mark.asyncio
     async def test_add_and_remove_connection(self):
@@ -141,6 +147,76 @@ class TestRecitationBroadcasterLifecycle:
 
         broadcaster.remove_connection(event_id, user_id)
         assert event_id not in broadcaster.connections
+
+
+class TestRecitationPresence:
+
+    @pytest.mark.asyncio
+    async def test_mark_present_records_this_instance(self):
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+
+        token = await broadcaster.mark_present(event_id, user_id)
+
+        assert token.endswith(f"|{_INSTANCE_ID}")
+        broadcaster.redis.hset.assert_awaited_once_with(
+            presence_key(event_id), str(user_id), token
+        )
+
+    @pytest.mark.asyncio
+    async def test_mark_absent_only_clears_the_same_socket(self):
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+
+        await broadcaster.mark_absent(event_id, user_id, "token-1")
+
+        script, key_count, key, field, token = broadcaster.redis.eval.await_args.args
+        assert script == _RELEASE_PRESENCE_SCRIPT
+        assert key_count == 1
+        assert key == presence_key(event_id)
+        assert field == str(user_id)
+        assert token == "token-1"
+
+    @pytest.mark.asyncio
+    async def test_presence_count_skips_a_dead_instance(self):
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+        live_user, dead_user = uuid4(), uuid4()
+        broadcaster.redis.hgetall.return_value = {
+            str(live_user): f"token-live|{_INSTANCE_ID}",
+            str(dead_user): "token-dead|gone-instance",
+        }
+        broadcaster.redis.mget.return_value = ["1", None]
+
+        count = await broadcaster.presence_count(event_id)
+
+        assert count == 1
+        broadcaster.redis.mget.assert_awaited_once_with(
+            instance_lease_key(_INSTANCE_ID),
+            instance_lease_key("gone-instance"),
+        )
+        broadcaster.redis.hdel.assert_awaited_once_with(
+            presence_key(event_id), str(dead_user)
+        )
+
+    @pytest.mark.asyncio
+    async def test_broadcast_presence_publishes_the_count(self):
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+        broadcaster.redis.hgetall.return_value = {
+            str(uuid4()): f"token|{_INSTANCE_ID}",
+        }
+        broadcaster.redis.mget.return_value = ["1"]
+
+        await broadcaster.broadcast_presence(event_id)
+
+        channel, raw = broadcaster.redis.publish.await_args.args
+        assert channel == position_channel(event_id)
+        assert json.loads(raw) == {
+            "type": "presence",
+            "event_id": str(event_id),
+            "count": 1,
+        }
 
 
 class TestRecitationPositionSnapshot:
