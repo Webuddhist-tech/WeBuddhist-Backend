@@ -33,7 +33,7 @@ from fastapi import HTTPException
 from starlette import status
 from datetime import datetime, timedelta, timezone
 from jose import jwt
-from pecha_api.config import get
+from pecha_api.config import get, get_float
 from pecha_api.notification.email_provider import send_email
 from jinja2 import Template
 from pathlib import Path
@@ -210,10 +210,21 @@ def generate_author_token_data(author: Author):
         data["phone_number"] = author.phone_number
     return data
 
+def _cms_access_token_expiry() -> timedelta:
+    """Studio-only lifetime. The app's tokens keep the shared defaults in
+    auth_repository; Studio overrides them so an author stays signed in for
+    two days and can renew silently for a month."""
+    return timedelta(days=get_float("CMS_ACCESS_TOKEN_EXPIRE_DAYS"))
+
+
+def _cms_refresh_token_expiry() -> timedelta:
+    return timedelta(days=get_float("CMS_REFRESH_TOKEN_EXPIRE_DAYS"))
+
+
 def generate_token_author(author: Author):
     data = generate_author_token_data(author)
-    access_token = create_access_token(data)
-    refresh_token = create_refresh_token(data)
+    access_token = create_access_token(data, expires_delta=_cms_access_token_expiry())
+    refresh_token = create_refresh_token(data, expires_delta=_cms_refresh_token_expiry())
 
     token_response = TokenResponse(
         access_token=access_token,
@@ -290,7 +301,7 @@ def refresh_access_token(refresh_token: str):
                     detail="Invalid refresh token",
                 )
             data = generate_author_token_data(author)
-            access_token = create_access_token(data=data)
+            access_token = create_access_token(data=data, expires_delta=_cms_access_token_expiry())
             return RefreshTokenResponse(
                 access_token=access_token,
                 token_type="Bearer"

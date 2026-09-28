@@ -5,6 +5,12 @@ DEFAULTS = dict(
     SITE_LANGUAGE="en",
     SITE_NAME="Pecha",
     ACCESS_TOKEN_EXPIRE_MINUTES=3000000,
+    # Studio (CMS) sessions only - the app keeps ACCESS_TOKEN_EXPIRE_MINUTES /
+    # REFRESH_TOKEN_EXPIRE_DAYS above. Studio runs in a browser the author
+    # keeps open across days, so the access token is scoped to two days and
+    # the refresh token to a month rather than inheriting the app's values.
+    CMS_ACCESS_TOKEN_EXPIRE_DAYS=2,
+    CMS_REFRESH_TOKEN_EXPIRE_DAYS=30,
     APP_NAME="Pecha Backend",
     AWS_ACCESS_KEY="",
     AWS_SECRET_KEY="",
