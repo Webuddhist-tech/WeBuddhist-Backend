@@ -713,5 +713,6 @@ def test_list_decided_join_requests_by_user_filters_decided_reviewed_live_groups
     assert "author_group_join_requests.status IN" in filter_sql
     assert "author_group_join_requests.reviewed_by IS NOT NULL" in filter_sql
     assert "author_groups.deleted_at IS NULL" in filter_sql
+    assert "author_groups.status =" in filter_sql
     order_sql = str(query.order_by.call_args.args[0])
     assert order_sql == "author_group_join_requests.reviewed_at DESC"

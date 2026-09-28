@@ -792,7 +792,8 @@ def list_decided_join_requests_by_user(
     """The user's moderator-reviewed requests, newest decision first.
 
     Rows with no reviewer are the silent approvals made when a group goes
-    public, which are deliberately never notified."""
+    public, which are deliberately never notified. Groups the app cannot open
+    (deleted or not published) are left out so no notification links to a 404."""
     query = (
         db.query(AuthorGroupJoinRequest)
         .join(AuthorGroup, AuthorGroup.id == AuthorGroupJoinRequest.group_id)
@@ -809,6 +810,7 @@ def list_decided_join_requests_by_user(
             ),
             AuthorGroupJoinRequest.reviewed_by.isnot(None),
             AuthorGroup.deleted_at.is_(None),
+            AuthorGroup.status == AuthorGroupStatus.PUBLISHED,
         )
     )
     total = query.count()
