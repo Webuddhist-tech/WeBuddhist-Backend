@@ -387,6 +387,33 @@ def test_generate_token_author_builds_response():
         assert result.user.name == "John Doe"
         assert result.user.image_url == "img.png"
 
+def test_generate_token_author_uses_studio_token_lifetimes():
+    """Studio sessions last two days and renew for a month; the app's shared
+    ACCESS_TOKEN_EXPIRE_MINUTES / REFRESH_TOKEN_EXPIRE_DAYS are untouched."""
+    author = MagicMock()
+    author.first_name = "John"
+    author.last_name = "Doe"
+    author.email = "john.doe@example.com"
+    author.image_url = "img.png"
+
+    with patch("pecha_api.plans.auth.plan_auth_services.generate_author_token_data", return_value={"sub": "123"}),         patch("pecha_api.plans.auth.plan_auth_services.create_access_token", return_value="access") as mock_access,         patch("pecha_api.plans.auth.plan_auth_services.create_refresh_token", return_value="refresh") as mock_refresh:
+        generate_token_author(author)
+
+        assert mock_access.call_args.kwargs["expires_delta"] == timedelta(days=2)
+        assert mock_refresh.call_args.kwargs["expires_delta"] == timedelta(days=30)
+
+
+def test_refresh_access_token_uses_studio_access_lifetime():
+    payload = {"sub": "123"}
+    with patch("pecha_api.plans.auth.plan_auth_services._validate_token", return_value=payload),         patch("pecha_api.plans.auth.plan_auth_services.SessionLocal") as mock_session_local,         patch("pecha_api.plans.auth.plan_auth_services.resolve_author_from_backend_payload", return_value=MagicMock()),         patch("pecha_api.plans.auth.plan_auth_services.generate_author_token_data", return_value=payload),         patch("pecha_api.plans.auth.plan_auth_services.create_access_token", return_value="access") as mock_access:
+        _mock_session_local(mock_session_local)
+
+        result = refresh_access_token("refresh-token")
+
+        assert result.access_token == "access"
+        assert mock_access.call_args.kwargs["expires_delta"] == timedelta(days=2)
+
+
 def test_request_reset_password_success():
     email = "john.doe@example.com"
     

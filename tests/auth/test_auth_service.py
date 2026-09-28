@@ -30,6 +30,98 @@ from pecha_api.auth.auth_enums import RegistrationSource
 from fastapi import HTTPException
 
 
+def test_create_user_request_keeps_only_https_pictures():
+    kept = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="https://lh3.googleusercontent.com/a/photo",
+    )
+    dropped = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="images/profile_images/ada.webp",
+    )
+    assert kept.avatar_url == "https://lh3.googleusercontent.com/a/photo"
+    assert dropped.avatar_url is None
+
+
+def test_remember_social_avatar_fills_an_empty_profile():
+    from pecha_api.auth.auth_service import remember_social_avatar
+
+    user = MagicMock()
+    user.avatar_url = None
+    request = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="https://lh3.googleusercontent.com/a/photo",
+    )
+    with patch("pecha_api.auth.auth_service.SessionLocal") as mock_session, patch(
+        "pecha_api.auth.auth_service.get_user_by_email_or_none", return_value=user
+    ), patch("pecha_api.auth.auth_service.update_user") as mock_update:
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        remember_social_avatar(request)
+
+    assert user.avatar_url == "https://lh3.googleusercontent.com/a/photo"
+    mock_update.assert_called_once()
+
+
+def test_remember_social_avatar_leaves_an_uploaded_photo():
+    from pecha_api.auth.auth_service import remember_social_avatar
+
+    user = MagicMock()
+    user.avatar_url = "images/profile_images/ada.webp"
+    request = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="https://lh3.googleusercontent.com/a/photo",
+    )
+    with patch("pecha_api.auth.auth_service.SessionLocal") as mock_session, patch(
+        "pecha_api.auth.auth_service.get_user_by_email_or_none", return_value=user
+    ), patch("pecha_api.auth.auth_service.update_user") as mock_update:
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        remember_social_avatar(request)
+
+    assert user.avatar_url == "images/profile_images/ada.webp"
+    mock_update.assert_not_called()
+
+
+def test_remember_social_avatar_ignores_an_untrusted_host():
+    """A picture is kept only when an identity provider serves it."""
+    from pecha_api.auth.auth_service import remember_social_avatar
+
+    user = MagicMock()
+    user.avatar_url = None
+    request = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="https://attacker.example.com/track.png",
+    )
+    with patch("pecha_api.auth.auth_service.SessionLocal") as mock_session, patch(
+        "pecha_api.auth.auth_service.get_user_by_email_or_none", return_value=user
+    ), patch("pecha_api.auth.auth_service.update_user") as mock_update:
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        remember_social_avatar(request)
+
+    assert user.avatar_url is None
+    mock_update.assert_not_called()
+
+
+def test_is_trusted_social_register_caller():
+    from pecha_api.auth.auth_service import is_trusted_social_register_caller
+
+    with patch("pecha_api.auth.auth_service.get", return_value="action-secret"):
+        assert is_trusted_social_register_caller("action-secret") is True
+        assert is_trusted_social_register_caller("guess") is False
+        assert is_trusted_social_register_caller(None) is False
+    with patch("pecha_api.auth.auth_service.get", return_value=""):
+        assert is_trusted_social_register_caller("action-secret") is False
+
+
 def test_register_user_with_email_success():
     create_user_request = CreateUserRequest(
         firstname="John",
@@ -128,7 +220,8 @@ def test_generate_token_user_success():
 
     with patch('pecha_api.auth.auth_service.generate_token_data') as mock_generate_token_data, \
             patch('pecha_api.auth.auth_service.create_access_token') as mock_create_access_token, \
-            patch('pecha_api.auth.auth_service.create_refresh_token') as mock_create_refresh_token:
+            patch('pecha_api.auth.auth_service.create_refresh_token') as mock_create_refresh_token, \
+            patch('pecha_api.auth.auth_service.generate_presigned_access_url', return_value="avatar"):
         mock_generate_token_data.return_value = {"sub": user.email}
         mock_create_access_token.return_value = "fake_access_token"
         mock_create_refresh_token.return_value = "fake_refresh_token"

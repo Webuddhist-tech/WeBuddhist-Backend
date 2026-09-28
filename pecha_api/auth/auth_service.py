@@ -1,13 +1,15 @@
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import jwt
 from jose import JWTError
 from jose.exceptions import ExpiredSignatureError as JoseExpiredSignatureError
 
 from pecha_api.auth.auth0_sms import verify_auth0_sms_token
+from pecha_api.uploads.S3_utils import generate_presigned_access_url
+from pecha_api.utils import Utils
 from ..config import get
 from ..notification.email_provider import send_email
 from .auth_models import CreateUserRequest, UserLoginResponse, RefreshTokenResponse, TokenResponse, UserInfo, \
@@ -16,11 +18,13 @@ from ..users.users_models import Users, PasswordReset
 from ..db.database import SessionLocal
 from ..users.users_repository import (
     get_user_by_email,
+    get_user_by_email_or_none,
     get_user_by_phone,
     get_user_by_username,
     link_user_phone,
     save_phone_user,
     save_user,
+    update_user,
 )
 from ..plans.authors.author_user_link_service import link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
@@ -108,6 +112,52 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
         return saved_user
 
 
+def is_trusted_social_register_caller(token: Optional[str]) -> bool:
+    """Whether a /auth/social_register call may write to an existing account.
+
+    Attempting to create an account is safe for anyone: an identifier that is
+    already taken is rejected. Writing to the account that did the rejecting
+    is not, so that part is reserved for the Auth0 Post Login Action, which is
+    the only caller holding this shared secret. An unset secret fails closed -
+    the backfill is skipped - rather than leaving the write open to everyone.
+    """
+    expected = get("SOCIAL_REGISTER_SECRET_TOKEN")
+    if not expected or not token:
+        return False
+    return secrets.compare_digest(token, expected)
+
+
+def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
+    """Store Auth0's picture on an account that already exists.
+
+    A picture the user uploaded themselves is an S3 key and is left alone.
+    An empty avatar, or one that is already an Auth0 https URL, takes the
+    picture from this login. Only the identity providers' own image hosts are
+    accepted, so a caller holding the shared secret still cannot point an
+    account's avatar at an arbitrary server.
+    """
+    picture = create_user_request.avatar_url
+    if not picture or not Utils.is_social_picture_url(picture):
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = None
+            if create_user_request.email:
+                user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None and create_user_request.phone_number:
+                user = get_user_by_phone(db=db_session, phone_number=create_user_request.phone_number)
+            if user is None:
+                return
+            if user.avatar_url and not str(user.avatar_url).startswith("https://"):
+                return
+            if user.avatar_url == picture:
+                return
+            user.avatar_url = picture
+            update_user(db=db_session, user=user)
+    except Exception:
+        logging.exception("Failed to store social profile image")
+
+
 def _validate_password(password: str):
     if not password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password cannot be empty")
@@ -141,7 +191,10 @@ def generate_token_user(user: Users):
     return UserLoginResponse(
         user=UserInfo(
             name=user.firstname + " " + user.lastname,
-            avatar_url=user.avatar_url
+            avatar_url=generate_presigned_access_url(
+                bucket_name=get("AWS_BUCKET_NAME"),
+                s3_key=user.avatar_url,
+            ) or None
         ),
         auth=token_response
     )

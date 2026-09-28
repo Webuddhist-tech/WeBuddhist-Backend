@@ -161,6 +161,57 @@ AUTH0_GOOGLE_EMAIL_CLAIM=https://webuddhist.com/email
 AUTH0_GOOGLE_EMAIL_VERIFIED_CLAIM=https://webuddhist.com/email_verified
 ```
 
+## Social registration (`/auth/social_register`)
+
+The Auth0 Post Login Action posts the logged-in profile to
+`/api/v1/auth/social_register` on every social login. The first call creates
+the account; later ones get `409 Conflict`, which is how the Action knows the
+account is already there.
+
+That `409` path also backfills Auth0's `picture` onto the existing account, so
+an account created before the avatar field existed still shows the photo. The
+route is public, so the Action must prove it is the caller for that write to
+happen: send the shared secret as `X-Social-Register-Token`. Without a matching
+header the registration attempt behaves exactly as before, but no existing
+account is touched — otherwise anyone who knows a user's email could post it
+back with a picture of their choosing and replace that user's avatar.
+
+```javascript
+await fetch(`${BACKEND_URL}/api/v1/auth/social_register`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Social-Register-Token": event.secrets.SOCIAL_REGISTER_SECRET_TOKEN,
+  },
+  body: JSON.stringify({
+    create_user_request: {
+      firstname: event.user.given_name,
+      lastname: event.user.family_name,
+      email: event.user.email,
+      avatar_url: event.user.picture,
+    },
+    platform: "google-oauth2",
+  }),
+});
+```
+
+Backend environment additions:
+
+```dotenv
+SOCIAL_REGISTER_SECRET_TOKEN=SecretTokenForSocialRegister
+```
+
+Empty (the default) fails closed: the avatar backfill is skipped entirely, so
+a deployment that never set the variable cannot be used to edit profiles.
+
+Only pictures served by the identity providers' own image hosts are stored —
+`googleusercontent.com`, `gravatar.com`, `auth0.com`, `fbcdn.net`,
+`graph.facebook.com`, `cdn-apple.com`, and their subdomains. Avatars are shown
+to other users, so an address on any other host is dropped rather than having
+every viewer's browser fetch it from a server outside ours. The same rule
+applies to `avatar_url` on the authenticated profile-update route; everything
+else there is stored as an S3 key.
+
 ## Studio environment
 
 ```dotenv

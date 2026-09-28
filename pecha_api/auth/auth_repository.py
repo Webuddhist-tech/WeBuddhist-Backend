@@ -38,12 +38,29 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return None
 
 
+# Access and refresh tokens carry identical claims, so without a marker the two
+# are indistinguishable and a refresh token works as a bearer credential on
+# protected endpoints - which hands it the refresh token's much longer lifetime
+# and makes the shorter access token expiry meaningless. Only the refresh token
+# is stamped: tokens minted before this claim existed carry no token_type and
+# stay accepted until they expire on their own, and Auth0-issued tokens (which
+# never carry it) are unaffected.
+TOKEN_TYPE_CLAIM = "token_type"
+REFRESH_TOKEN_TYPE = "refresh"
+
+
 def create_refresh_token(data: dict, expires_delta: timedelta = None):
     if data is not None:
         if expires_delta is None:
             expires_delta = timedelta(days=get_float("REFRESH_TOKEN_EXPIRE_DAYS"))
-        return _generate_token(data, expires_delta)
+        return _generate_token({**data, TOKEN_TYPE_CLAIM: REFRESH_TOKEN_TYPE}, expires_delta)
     return None
+
+
+def is_refresh_token_payload(payload: Dict[str, Any]) -> bool:
+    """True when the decoded payload belongs to a refresh token, which must
+    never be accepted where an access token is expected."""
+    return isinstance(payload, dict) and payload.get(TOKEN_TYPE_CLAIM) == REFRESH_TOKEN_TYPE
 
 
 def _generate_token(data: dict, expires_delta: timedelta):

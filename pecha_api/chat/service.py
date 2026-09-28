@@ -666,7 +666,7 @@ def list_group_people_service(
                     email=joiner.email,
                     firstname=joiner.firstname,
                     lastname=joiner.lastname,
-                    avatar_url=joiner.avatar_url,
+                    avatar_url=_generate_presigned_url(joiner.avatar_url),
                 )
                 for joiner in users
                 if joiner.id != user.id

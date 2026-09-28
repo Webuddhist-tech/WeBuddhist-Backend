@@ -5,6 +5,12 @@ DEFAULTS = dict(
     SITE_LANGUAGE="en",
     SITE_NAME="Pecha",
     ACCESS_TOKEN_EXPIRE_MINUTES=3000000,
+    # Studio (CMS) sessions only - the app keeps ACCESS_TOKEN_EXPIRE_MINUTES /
+    # REFRESH_TOKEN_EXPIRE_DAYS above. Studio runs in a browser the author
+    # keeps open across days, so the access token is scoped to two days and
+    # the refresh token to a month rather than inheriting the app's values.
+    CMS_ACCESS_TOKEN_EXPIRE_DAYS=2,
+    CMS_REFRESH_TOKEN_EXPIRE_DAYS=30,
     APP_NAME="Pecha Backend",
     AWS_ACCESS_KEY="",
     AWS_SECRET_KEY="",
@@ -218,6 +224,13 @@ DEFAULTS = dict(
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
+
+    # Shared secret proving a /auth/social_register call is the Auth0 Post
+    # Login Action. The route itself stays open so social signup works, but
+    # the header is what lets a call touch an account that already exists.
+    # Empty on purpose: without it that backfill is skipped, because a default
+    # here would be a published password for any deployment that never set it.
+    SOCIAL_REGISTER_SECRET_TOKEN="",
 
     # Shared secret for machines emitting live recitation positions over HTTP
     # (controller/pedal/OBS -> backend). Empty disables those endpoints.

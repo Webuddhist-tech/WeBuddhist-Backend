@@ -12,6 +12,22 @@ class CreateUserRequest(BaseModel):
     email: Optional[str] = None
     password: Optional[str] = None
     phone_number: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+    @field_validator("avatar_url", mode="before")
+    @classmethod
+    def _https_avatar(cls, value: Any) -> Any:
+        """Keep only a real https picture URL.
+
+        Social login sends Auth0's profile image here. Anything else is dropped
+        so a blank or non-URL value is never stored as the user's avatar.
+        """
+        if not isinstance(value, str):
+            return None
+        picture = value.strip()
+        if not picture.startswith("https://"):
+            return None
+        return picture
 
     @field_validator("email", "password", "phone_number", mode="before")
     @classmethod
