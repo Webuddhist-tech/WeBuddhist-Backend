@@ -135,6 +135,8 @@ class TestBroadcastMessageUpdated:
                     emoji="🙏", count=1, reacted_by_me=True, user_ids=[editor_id]
                 )
             ],
+            prayer_count=12,
+            recent_prayers=[],
             prayed_by_me=True,
             is_edited=True,
         )
@@ -146,9 +148,14 @@ class TestBroadcastMessageUpdated:
         payload = json.loads(raw)
         assert payload["type"] == "message_updated"
         assert payload["message"]["is_edited"] is True
-        assert payload["message"]["prayed_by_me"] is False
         assert payload["message"]["reactions"][0]["reacted_by_me"] is False
         assert payload["message"]["reactions"][0]["user_ids"] == [str(editor_id)]
+        # The editor prayed for their own request; sending that as False would
+        # unpray it on every screen in the room, and recent_prayers carries only
+        # the newest few, so nobody further down could tell it was wrong. The
+        # flag is left out; the counts that are true for everyone stay.
+        assert "prayed_by_me" not in payload["message"]
+        assert payload["message"]["prayer_count"] == 12
 
 class TestBroadcastMessageDeleted:
 
