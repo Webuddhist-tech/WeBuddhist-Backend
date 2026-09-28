@@ -16,7 +16,6 @@ when the timeout expires.
 """
 
 import asyncio
-import json
 import logging
 import threading
 from datetime import datetime
@@ -30,9 +29,6 @@ from starlette.concurrency import run_in_threadpool
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_identity import cache_identity_from_token
-from pecha_api.cache.cache_admin_service import SCAN_BATCH_SIZE
-from pecha_api.cache.cache_keys import namespace_scan_pattern
-from pecha_api.cache.cache_repository import cache_type_enabled, get_client, note_cache_failure
 from pecha_api.cache.cached_response import (
     cached_response,
     invalidate_namespace,
@@ -58,15 +54,6 @@ EVENT_CACHE_TYPES = (
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def _unlink_keys(client, keys: List[str]) -> int:
-    if not keys:
-        return 0
-    try:
-        return int(await client.unlink(*keys))
-    except Exception:
-        return int(await client.delete(*keys))
 
 
 class _FeaturedEvents(BaseModel):
@@ -230,49 +217,17 @@ async def invalidate_event_detail_caches() -> int:
 
 
 async def invalidate_event_detail_cache_for_event(event_id: UUID) -> int:
-    """Drop cached detail entries for one event (all languages and viewers).
+    """Refresh cached event detail after `prayer_request_count` changes.
 
-    `prayer_request_count` is shared across callers, but detail keys are per
-    user and language, so a namespace-wide sweep would evict unrelated events.
+    Detail keys hash `(event_id, language, user)` together, so evicting one
+    event without reading every stored value is not supported. The namespace
+    invalidator SCAN+UNLINKs without GETs and marks in-flight loads as
+    superseded so an older count cannot be written back after a prayer change.
     """
-    if not cache_type_enabled(CacheType.EVENT_DETAIL):
-        return 0
-
-    target_id = str(event_id)
-    pattern = namespace_scan_pattern(CacheType.EVENT_DETAIL)
-    client = get_client()
-    deleted = 0
-    batch: List[str] = []
-
-    try:
-        async for key in client.scan_iter(match=pattern, count=SCAN_BATCH_SIZE):
-            raw = await client.get(key)
-            if raw is None:
-                continue
-            try:
-                payload = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(payload, dict) or payload.get("id") != target_id:
-                continue
-            batch.append(key)
-            if len(batch) >= SCAN_BATCH_SIZE:
-                deleted += await _unlink_keys(client, batch)
-                batch = []
-        deleted += await _unlink_keys(client, batch)
-    except Exception as cache_error:
-        note_cache_failure()
-        logger.error(
-            "Could not invalidate event detail cache for %s: %s",
-            event_id,
-            cache_error,
-            exc_info=True,
-        )
-        return 0
-
+    deleted = await invalidate_namespace(CacheType.EVENT_DETAIL)
     if deleted:
         logger.info(
-            "Invalidated %d event_detail cache entries for event %s",
+            "Invalidated %d event_detail cache entries after prayer change on event %s",
             deleted,
             event_id,
         )

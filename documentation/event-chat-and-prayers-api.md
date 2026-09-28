@@ -243,18 +243,3 @@ member of the room.
 | 403 | — | Not an active member of the room |
 | 404 | `NOT_A_PRAYER_REQUEST` | Nothing in the batch was a live prayer request |
 | 404 | — | Room, event or message gone; chat switched off; group unpublished |
-
----
-
-## 8. Mobile UI checklist (Figma)
-
-Implement in the native app (not in this backend repo):
-
-1. **A2 — New prayer request:** `GET /intentions` → picker; 280-char field;
-   submit with `message_type: PRAYER` and `intention` slug.
-2. **A1 — Prayer requests list:** `GET .../messages?message_type=PRAYER`; card
-   background from `intention.color`; avatars from `recent_prayers`; “+N more”
-   from `prayer_count`; chevron → `GET /chat/messages/{id}/prayers`; **Pray**
-   → `POST /chat/rooms/{room_id}/prayers` (no intention on pray).
-3. **Live:** `/chat/live?event_id=...` for `message`, `prayers_updated`,
-   `room_closed`.

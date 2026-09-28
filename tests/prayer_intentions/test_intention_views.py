@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, Callable, TypeVar
 from unittest.mock import patch
 
 from pecha_api.prayer_intentions.prayer_intention_response_models import (
@@ -6,6 +7,14 @@ from pecha_api.prayer_intentions.prayer_intention_response_models import (
     PrayerIntentionsResponse,
 )
 from pecha_api.prayer_intentions.prayer_intention_views import get_prayer_intentions
+
+T = TypeVar("T")
+
+
+async def fake_run_in_threadpool(
+    fn: Callable[..., T], *args: Any, **kwargs: Any
+) -> T:
+    return fn(*args, **kwargs)
 
 
 class TestGetPrayerIntentions:
@@ -23,9 +32,6 @@ class TestGetPrayerIntentions:
             ]
         )
         mock_service.return_value = expected
-
-        async def fake_run_in_threadpool(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
 
         with patch(
             "pecha_api.prayer_intentions.prayer_intention_views.run_in_threadpool",

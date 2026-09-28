@@ -10,10 +10,12 @@ from starlette import status
 # before any ChatRoom()/ChatRoomMember() instantiation below triggers mapper configuration.
 import pecha_api.app  # noqa: F401
 
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 from pecha_api.chat.service import (
     _default_group_room_name,
     _generate_presigned_url,
     _get_room_or_404,
+    _intention_dto_for_message,
     _isoformat,
     _require_active_member,
     build_message_dto,
@@ -219,6 +221,69 @@ class TestBuildRoomDTO:
         assert dto.other_user_id == other_id
         assert dto.other_user_email == "other@example.com"
         assert dto.other_user_name == "Bob Smith"
+
+    @patch("pecha_api.chat.service.count_unread_messages")
+    @patch("pecha_api.chat.service.get_active_member")
+    @patch("pecha_api.chat.service.count_active_members")
+    @patch("pecha_api.chat.service.get_last_message")
+    @patch("pecha_api.chat.service._intention_dto_for_message")
+    def test_last_message_includes_prayer_intention(
+        self,
+        mock_intention_dto,
+        mock_last_message,
+        mock_count_active,
+        mock_get_active,
+        mock_unread,
+    ):
+        room = MockRoom(group_id=uuid4())
+        last = MockMessage(body="Please pray")
+        last.intention = "healing"
+        mock_last_message.return_value = last
+        mock_count_active.return_value = 1
+        mock_get_active.return_value = None
+        mock_unread.return_value = 0
+        intention = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_intention_dto.return_value = intention
+
+        dto = build_room_dto(db=MagicMock(), room=room, viewer_id=uuid4())
+
+        assert dto.last_message is not None
+        assert dto.last_message.intention == intention
+        mock_intention_dto.assert_called_once()
+
+
+class TestIntentionDtoForMessage:
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_returns_none_when_message_has_no_intention(self, mock_resolve):
+        message = MockMessage()
+        message.intention = None
+
+        assert _intention_dto_for_message(db=MagicMock(), message=message) is None
+        mock_resolve.assert_not_called()
+
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_resolves_slug_to_dto(self, mock_resolve):
+        message = MockMessage()
+        message.intention = "healing"
+        expected = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_resolve.return_value = {"healing": expected}
+
+        dto = _intention_dto_for_message(db=MagicMock(), message=message)
+
+        assert dto == expected
+        mock_resolve.assert_called_once()
 
 
 class TestListGroupPeopleService:
