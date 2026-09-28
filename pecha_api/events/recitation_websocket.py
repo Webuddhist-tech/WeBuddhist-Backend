@@ -1,7 +1,8 @@
 import asyncio
 import json
 import logging
-from typing import Dict, List, Optional, Set
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
 from redis.asyncio import Redis
@@ -207,7 +208,10 @@ class RecitationBroadcaster:
         # Held across a field's local removal and its Redis delete, and across
         # the heartbeat's snapshot and rewrite of an event's fields, so the two
         # cannot overlap. See `_reassert_presence` for what that would cost.
-        self._roster_lock = asyncio.Lock()
+        # One lock per event, so a slow Redis write for one room never holds up
+        # a close in another; refcounted so idle events do not leak a lock.
+        self._roster_locks: Dict[UUID, asyncio.Lock] = {}
+        self._roster_lock_refs: Dict[UUID, int] = {}
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
@@ -533,6 +537,24 @@ class RecitationBroadcaster:
                 continue
             await self._reassert_presence()
 
+    @asynccontextmanager
+    async def _roster_lock(self, event_id: UUID) -> AsyncIterator[None]:
+        """Hold this event's roster lock."""
+        lock = self._roster_locks.get(event_id)
+        if lock is None:
+            lock = self._roster_locks[event_id] = asyncio.Lock()
+        self._roster_lock_refs[event_id] = self._roster_lock_refs.get(event_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._roster_lock_refs[event_id] - 1
+            if remaining:
+                self._roster_lock_refs[event_id] = remaining
+            else:
+                self._roster_lock_refs.pop(event_id, None)
+                self._roster_locks.pop(event_id, None)
+
     async def mark_present(self, event_id: UUID, user_id: UUID) -> str:
         """Record this socket in the shared roster. Returns the token that
         `mark_absent` must hand back, so one socket cannot erase another's entry.
@@ -559,7 +581,7 @@ class RecitationBroadcaster:
         person's sockets, and never one a reconnect has since written.
         """
         field = presence_field(user_id, token)
-        async with self._roster_lock:
+        async with self._roster_lock(event_id):
             fields = self._roster.get(event_id)
             if fields is not None:
                 # Forgotten before the delete, so a failed delete is not undone
@@ -588,11 +610,12 @@ class RecitationBroadcaster:
         written after its HDEL landed is gone from `_roster` but alive in Redis,
         stamped with an instance whose lease this process keeps renewing - so no
         later heartbeat rewrites it, no count ever prunes it, and it pads the
-        room until the process stops. The lock covers one event's write, not the
-        whole sweep, so a close waits on a single command at most.
+        room until the process stops. The lock is per event and covers one
+        write, not the whole sweep, so a close waits on at most a single command
+        for its own event and never on another event's.
         """
         for event_id in list(self._roster):
-            async with self._roster_lock:
+            async with self._roster_lock(event_id):
                 fields = self._roster.get(event_id)
                 if not fields:
                     continue

@@ -68,6 +68,10 @@ def is_event_operator(db: Session, event: Event, token: str) -> bool:
     except Exception:
         logger.exception("Failed to resolve author for recitation operator check")
         return False
+    if not author.is_active:
+        # A deactivated author can still hold an unexpired token; CMS rights
+        # end with the account, not with the token.
+        return False
 
     try:
         _require_can_edit_event(db=db, group_id=event.group_id, author=author)
@@ -127,6 +131,12 @@ def resolve_recitation_caller(token: str) -> RecitationCaller:
         pass
 
     author = validate_and_extract_author_details(token=token)
+    if not author.is_active:
+        # Same token-outlives-account gap as the operator check above.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
     # A linked User keeps one person to one roster slot whether they are
     # following along in the app or driving the puja from Studio.
     linked_user_id = author.user_id

@@ -646,12 +646,15 @@ class TestReportMessageService:
 
 class TestEditMessageService:
 
+    def setup_method(self):
+        self.room = MagicMock(group_id=uuid4(), event_id=None)
+
     def _patch_reads(self):
         return [
             patch('pecha_api.chat.message_service.list_message_reactions', return_value=[]),
             patch('pecha_api.chat.message_service.validate_message_content'),
             patch('pecha_api.chat.message_service._require_active_member'),
-            patch('pecha_api.chat.message_service._get_room_or_404', return_value=MagicMock()),
+            patch('pecha_api.chat.message_service._get_room_or_404', return_value=self.room),
             patch('pecha_api.chat.message_service.SessionLocal'),
         ]
 
@@ -753,3 +756,15 @@ class TestEditMessageService:
         assert mock_validate.call_args.kwargs["intention"] == "healing"
         assert mock_update.call_args.kwargs["intention"] == "healing"
         assert result.is_edited is True
+
+    def test_rejected_when_group_unpublished_before_commit(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+
+        with patch('pecha_api.chat.message_service.is_group_id_published', return_value=False) as mock_published:
+            with pytest.raises(HTTPException) as exc_info:
+                self._run(message, user, body="Changed")
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert mock_published.call_args.kwargs["for_update"] is True

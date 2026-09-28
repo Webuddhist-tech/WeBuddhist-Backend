@@ -110,6 +110,15 @@ class TestIsEventOperator:
             assert is_event_operator(db=MagicMock(), event=_event(), token="t") is False
 
 
+    def test_false_when_author_is_deactivated(self):
+        """A deactivated author's unexpired token must not keep operator rights."""
+        with patch(
+            "pecha_api.plans.authors.plan_authors_service.validate_and_extract_author_details",
+            return_value=MagicMock(is_active=False),
+        ), patch("pecha_api.events.event_service._require_can_edit_event") as mock_edit:
+            assert is_event_operator(db=MagicMock(), event=_event(), token="t") is False
+        mock_edit.assert_not_called()
+
 class TestResolveRecitationAccess:
 
     @staticmethod
@@ -239,6 +248,19 @@ class TestResolveRecitationCaller:
         # No website User behind this author, so the Author id keys the roster
         # and there is no identity to check a join against.
         assert caller == RecitationCaller(presence_id=author.id, user_id=None)
+
+    def test_deactivated_studio_author_is_rejected(self):
+        stack, _, _ = self._patched(
+            user_error=HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ),
+            author=MagicMock(id=uuid4(), user_id=None, is_active=False),
+        )
+        with stack:
+            with pytest.raises(HTTPException) as exc:
+                resolve_recitation_caller(token="cms-token")
+
+        assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_linked_author_counts_as_one_person_not_two(self):
         linked_user_id = uuid4()

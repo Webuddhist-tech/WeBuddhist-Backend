@@ -344,6 +344,39 @@ class TestRecitationPresence:
         assert event_id not in broadcaster._roster
 
 
+    @pytest.mark.asyncio
+    async def test_a_stalled_write_for_one_event_does_not_block_another(self):
+        """The heartbeat's lock is per event: a close in another room must not
+        wait on a Redis write that has stalled for this one."""
+        broadcaster = _broadcaster()
+        stalled_event, other_event = uuid4(), uuid4()
+        user_id = uuid4()
+        await broadcaster.mark_present(stalled_event, uuid4())
+        token = await broadcaster.mark_present(other_event, user_id)
+        # The sweep reaches the stalled event first and sits on its write.
+        assert list(broadcaster._roster)[0] == stalled_event
+
+        writing = asyncio.Event()
+        finish_write = asyncio.Event()
+
+        async def hset(key: str, *args: Any, mapping: Optional[Dict[str, str]] = None):
+            writing.set()
+            await finish_write.wait()
+
+        broadcaster.redis.hset = hset
+        broadcaster.redis.hdel = AsyncMock()
+
+        heartbeat = asyncio.create_task(broadcaster._reassert_presence())
+        await writing.wait()
+        await asyncio.wait_for(
+            broadcaster.mark_absent(other_event, user_id, token), timeout=1
+        )
+        broadcaster.redis.hdel.assert_awaited_once()
+
+        finish_write.set()
+        await heartbeat
+        assert broadcaster._roster_locks == {}
+
 class TestRecitationPositionSnapshot:
 
     @pytest.mark.asyncio

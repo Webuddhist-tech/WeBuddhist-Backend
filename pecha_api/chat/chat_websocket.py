@@ -113,11 +113,21 @@ class ChatBroadcaster:
         message: ChatMessageDTO,
     ) -> None:
         """Publish an edited message to the room, so connected clients can
-        replace its body/intention and show it as edited."""
+        replace its body/intention and show it as edited.
+
+        The DTO was built for the editor, so its viewer-specific flags
+        (reacted_by_me, prayed_by_me) are forced False, as in
+        broadcast_reactions; clients derive their own from user_ids."""
         channel = room_channel(room_id)
+        data = message.model_dump(mode="json")
+        data["reactions"] = [
+            {**reaction, "reacted_by_me": False} for reaction in data.get("reactions", [])
+        ]
+        if "prayed_by_me" in data:
+            data["prayed_by_me"] = False
         payload = {
             "type": "message_updated",
-            "message": message.model_dump(mode="json"),
+            "message": data,
         }
 
         try:

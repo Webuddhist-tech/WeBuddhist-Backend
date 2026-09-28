@@ -109,6 +109,47 @@ class TestBroadcastReactions:
         ]
 
 
+
+class TestBroadcastMessageUpdated:
+
+    @pytest.mark.asyncio
+    async def test_strips_editor_specific_flags(self):
+        from datetime import datetime, timezone
+        from pecha_api.chat.response_models import ChatMessageDTO
+
+        broadcaster = ChatBroadcaster("redis://test")
+        broadcaster.redis = MagicMock()
+        broadcaster.redis.publish = AsyncMock()
+        room_id, editor_id = uuid4(), uuid4()
+        message = ChatMessageDTO(
+            id=uuid4(),
+            room_id=room_id,
+            sender_id=editor_id,
+            sender_email="e@example.com",
+            sender_name="Editor",
+            body="Edited",
+            message_type="PRAYER",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            reactions=[
+                ChatMessageReactionDTO(
+                    emoji="🙏", count=1, reacted_by_me=True, user_ids=[editor_id]
+                )
+            ],
+            prayed_by_me=True,
+            is_edited=True,
+        )
+
+        await broadcaster.broadcast_message_updated(room_id=room_id, message=message)
+
+        channel, raw = broadcaster.redis.publish.call_args.args
+        assert channel == f"chat:room:{room_id}:messages"
+        payload = json.loads(raw)
+        assert payload["type"] == "message_updated"
+        assert payload["message"]["is_edited"] is True
+        assert payload["message"]["prayed_by_me"] is False
+        assert payload["message"]["reactions"][0]["reacted_by_me"] is False
+        assert payload["message"]["reactions"][0]["user_ids"] == [str(editor_id)]
+
 class TestBroadcastMessageDeleted:
 
     @pytest.mark.asyncio

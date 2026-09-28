@@ -246,7 +246,7 @@ async def edit_room_message(
     message_id: UUID,
     request: EditChatMessageRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-):
+) -> ChatMessageDTO:
     """Edit the body and/or intention of your own message. Fields left out keep
     their current value; intention applies to prayer requests only. The message
     comes back with is_edited=true and a message_updated event is broadcast to
