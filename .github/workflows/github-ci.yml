@@ -30,6 +30,7 @@ jobs:
     outputs:
       image_name: ${{ steps.set-tag.outputs.image_name }}
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
+      image: ${{ steps.image.outputs.name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -66,6 +67,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build and push Docker image to GHCR
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -73,6 +75,13 @@ jobs:
           provenance: false
           sbom: false
           tags: ghcr.io/${{ env.LOWER_OWNER }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+      - name: Get image name
+        id: image
+        env:
+          IMAGE_REF: ${{ fromJSON(steps.build.outputs.metadata)['image.name'] }}
+        run: |
+          echo "name=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE_REF}"
 
   sonarqube:
     name: SonarQube Scan
