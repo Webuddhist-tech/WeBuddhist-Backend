@@ -40,6 +40,7 @@ from pecha_api.chat.repository import (
     get_reactions_map,
     get_recent_prayers_map,
     get_report_by_message_and_reporter,
+    get_room_by_id,
     get_room_messages,
     list_message_prayers,
     list_message_reactions,
@@ -80,6 +81,7 @@ from pecha_api.prayer_intentions.prayer_intention_service import (
     validate_message_intention_and_body,
 )
 from pecha_api.users.users_models import Users
+from pecha_api.events.events_cache_service import schedule_invalidate_event_detail_caches
 
 _PARENT_MESSAGE_NOT_FOUND = "PARENT_MESSAGE_NOT_FOUND"
 _ALREADY_REPORTED = "ALREADY_REPORTED"
@@ -266,7 +268,21 @@ def _persist_message(
     enqueue_chat_message_notification(
         message.id, message_type=message_type, room_id=room.id
     )
+    _schedule_event_prayer_count_cache_refresh(
+        db=db, room=room, message_type=message_type
+    )
     return dto
+
+
+def _schedule_event_prayer_count_cache_refresh(
+    db: Session, room: ChatRoom, message_type: str
+) -> None:
+    """Event detail caches `prayer_request_count`; refresh when PRAYER rows change."""
+    if message_type != ChatMessageType.PRAYER.value:
+        return
+    if room.event_id is None:
+        return
+    schedule_invalidate_event_detail_caches()
 
 
 def _prayer_message_ids(messages: Sequence[ChatMessage]) -> List[UUID]:
@@ -350,7 +366,13 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
                 detail="You can only delete your own messages",
             )
 
+        room = get_room_by_id(db=db, room_id=room_id)
+        message_type = _message_type_value(message)
         deleted_at = soft_delete_message(db=db, message=message)
+        if room is not None:
+            _schedule_event_prayer_count_cache_refresh(
+                db=db, room=room, message_type=message_type
+            )
         return deleted_at.isoformat()
 
 
@@ -389,7 +411,18 @@ def delete_messages_service(
             )
 
         ordered = [found[message_id] for message_id in message_ids]
+        room = get_room_by_id(db=db, room_id=room_id)
+        affects_prayer_count = any(
+            _message_type_value(message) == ChatMessageType.PRAYER.value
+            for message in ordered
+        )
         deleted_at = soft_delete_messages(db=db, messages=ordered)
+        if room is not None and affects_prayer_count:
+            _schedule_event_prayer_count_cache_refresh(
+                db=db,
+                room=room,
+                message_type=ChatMessageType.PRAYER.value,
+            )
         return BulkDeleteResult(
             message_ids=[message.id for message in ordered],
             deleted_at=deleted_at.isoformat(),

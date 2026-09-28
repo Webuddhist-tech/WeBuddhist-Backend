@@ -15,6 +15,7 @@ throw away the cache everyone else is reading. Participant counts catch up
 when the timeout expires.
 """
 
+import asyncio
 from datetime import datetime
 from functools import partial
 from typing import List, Optional
@@ -26,7 +27,11 @@ from starlette.concurrency import run_in_threadpool
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_identity import cache_identity_from_token
-from pecha_api.cache.cached_response import cached_response, invalidate_user_namespaces
+from pecha_api.cache.cached_response import (
+    cached_response,
+    invalidate_namespace,
+    invalidate_user_namespaces,
+)
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_filters import EventContentFilter
 from pecha_api.events.event_response_models import EventDTO, EventsResponse
@@ -200,6 +205,20 @@ async def invalidate_user_event_caches(token: Optional[str]) -> int:
     return await invalidate_user_namespaces(
         EVENT_CACHE_TYPES, await cache_identity_from_token(token)
     )
+
+
+async def invalidate_event_detail_caches() -> int:
+    """Drop cached event-detail responses (e.g. after prayer request count changes)."""
+    return await invalidate_namespace(CacheType.EVENT_DETAIL)
+
+
+def schedule_invalidate_event_detail_caches() -> None:
+    """Refresh event detail caches from sync chat writes without blocking."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(invalidate_event_detail_caches())
+    except RuntimeError:
+        asyncio.run(invalidate_event_detail_caches())
 
 
 async def get_events_today_service_cached(

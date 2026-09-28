@@ -24,7 +24,11 @@ class TestGetPrayerIntentions:
         )
         mock_service.return_value = expected
 
-        result = asyncio.run(get_prayer_intentions())
+        with patch(
+            "pecha_api.prayer_intentions.prayer_intention_views.run_in_threadpool",
+            side_effect=lambda fn: fn(),
+        ):
+            result = asyncio.run(get_prayer_intentions())
 
         assert result == expected
         mock_service.assert_called_once_with()

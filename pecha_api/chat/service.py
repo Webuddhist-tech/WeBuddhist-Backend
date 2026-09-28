@@ -40,6 +40,9 @@ from pecha_api.chat.response_models import (
     ChatRoomsResponse,
 )
 from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
+from pecha_api.prayer_intentions.prayer_intention_service import (
+    resolve_intention_dtos_for_slugs,
+)
 from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_repository import get_event_by_id
@@ -186,6 +189,15 @@ def build_message_dto(
     )
 
 
+def _intention_dto_for_message(
+    db: Session, message: ChatMessage
+) -> Optional[PrayerIntentionDTO]:
+    slug = getattr(message, "intention", None)
+    if not slug:
+        return None
+    return resolve_intention_dtos_for_slugs(db=db, slugs=[slug]).get(slug)
+
+
 def room_kind(room: ChatRoom) -> str:
     """Which of the three room shapes this row is, derived from its columns."""
     if room.group_id is not None:
@@ -230,7 +242,15 @@ def build_room_dto(
         created_by=room.created_by,
         member_count=count_active_members(db=db, room_id=room.id),
         updated_at=_isoformat(room.updated_at),
-        last_message=build_message_dto(last_message) if last_message else None,
+        last_message=(
+            build_message_dto(
+                last_message,
+                viewer_id=viewer_id,
+                intention=_intention_dto_for_message(db=db, message=last_message),
+            )
+            if last_message
+            else None
+        ),
         unread_count=unread_count,
         other_user_id=other_user_id,
         other_user_email=other_user_email,
