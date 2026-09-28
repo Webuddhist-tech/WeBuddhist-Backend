@@ -212,6 +212,8 @@ def build_room_dto(
     room: ChatRoom,
     viewer_id: UUID,
     last_message: Optional[ChatMessage] = None,
+    last_message_intention: Optional[PrayerIntentionDTO] = None,
+    resolve_last_message_intention: bool = True,
 ) -> ChatRoomDTO:
     if last_message is None:
         last_message = get_last_message(db=db, room_id=room.id)
@@ -246,7 +248,11 @@ def build_room_dto(
             build_message_dto(
                 last_message,
                 viewer_id=viewer_id,
-                intention=_intention_dto_for_message(db=db, message=last_message),
+                intention=(
+                    _intention_dto_for_message(db=db, message=last_message)
+                    if resolve_last_message_intention
+                    else last_message_intention
+                ),
             )
             if last_message
             else None
@@ -619,16 +625,32 @@ def list_my_rooms_service(user: Users, skip: int = 0, limit: int = 20) -> ChatRo
     with SessionLocal() as db:
         rooms, total = list_my_active_rooms(db=db, user_id=user.id, skip=skip, limit=limit)
         last_messages = get_last_messages_map(db=db, room_ids=[room.id for room in rooms])
-        return ChatRoomsResponse(
-            rooms=[
+        intention_slugs = [
+            message.intention
+            for message in last_messages.values()
+            if message is not None and getattr(message, "intention", None)
+        ]
+        intention_dtos = resolve_intention_dtos_for_slugs(db=db, slugs=intention_slugs)
+        room_dtos = []
+        for room in rooms:
+            last_message = last_messages.get(room.id)
+            last_intention = None
+            if last_message is not None:
+                slug = getattr(last_message, "intention", None)
+                if slug:
+                    last_intention = intention_dtos.get(slug)
+            room_dtos.append(
                 build_room_dto(
                     db=db,
                     room=room,
                     viewer_id=user.id,
-                    last_message=last_messages.get(room.id),
+                    last_message=last_message,
+                    last_message_intention=last_intention,
+                    resolve_last_message_intention=False,
                 )
-                for room in rooms
-            ],
+            )
+        return ChatRoomsResponse(
+            rooms=room_dtos,
             skip=skip,
             limit=limit,
             total=total,

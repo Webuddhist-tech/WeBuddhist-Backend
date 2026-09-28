@@ -29,10 +29,14 @@ from starlette.concurrency import run_in_threadpool
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_identity import cache_identity_from_token
+from pecha_api.cache.cache_admin_service import delete_by_pattern
+from pecha_api.cache.cache_keys import resource_scan_pattern
+from pecha_api.cache.cache_repository import cache_type_enabled, note_cache_failure
 from pecha_api.cache.cached_response import (
     cached_response,
     invalidate_namespace,
     invalidate_user_namespaces,
+    mark_namespace_superseded,
 )
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_filters import EventContentFilter
@@ -180,6 +184,7 @@ async def get_event_by_id_service_cached(
         ),
         timeout=_timeout(),
         user_identity=await cache_identity_from_token(token),
+        resource_id=event_id,
     )
 
 
@@ -217,14 +222,25 @@ async def invalidate_event_detail_caches() -> int:
 
 
 async def invalidate_event_detail_cache_for_event(event_id: UUID) -> int:
-    """Refresh cached event detail after `prayer_request_count` changes.
+    """Drop cached detail entries for one event after `prayer_request_count` changes."""
+    if not cache_type_enabled(CacheType.EVENT_DETAIL):
+        return 0
 
-    Detail keys hash `(event_id, language, user)` together, so evicting one
-    event without reading every stored value is not supported. The namespace
-    invalidator SCAN+UNLINKs without GETs and marks in-flight loads as
-    superseded so an older count cannot be written back after a prayer change.
-    """
-    deleted = await invalidate_namespace(CacheType.EVENT_DETAIL)
+    mark_namespace_superseded(CacheType.EVENT_DETAIL)
+    try:
+        deleted = await delete_by_pattern(
+            resource_scan_pattern(CacheType.EVENT_DETAIL, event_id)
+        )
+    except Exception as cache_error:
+        note_cache_failure()
+        logger.error(
+            "Could not invalidate event detail cache for %s: %s",
+            event_id,
+            cache_error,
+            exc_info=True,
+        )
+        return 0
+
     if deleted:
         logger.info(
             "Invalidated %d event_detail cache entries after prayer change on event %s",
