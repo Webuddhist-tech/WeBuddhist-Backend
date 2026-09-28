@@ -14,7 +14,9 @@ from .event_metadata_model import EventMetadata
 from .event_link_model import EventLink
 from .event_enums import EventLinkType
 from .event_filters import EventContentFilter
+from .location_model import Location
 from ..accumulator.accumulator_models import Accumulator
+from ..accumulator.group_accumulator_models import GroupAccumulator
 from ..mantra.mantra_model import Mantra
 from ..plans.plans_models import Plan
 from ..plans.plans_enums import PlanStatus
@@ -103,6 +105,9 @@ def _linked_resource_options() -> tuple:
         selectinload(Event.accumulator).selectinload(Accumulator.mala),
         selectinload(Event.mantra).selectinload(Mantra.metadata_entries),
         selectinload(Event.mantra).selectinload(Mantra.mala),
+        selectinload(Event.group_accumulator).selectinload(
+            GroupAccumulator.metadata_entries
+        ),
         selectinload(Event.timer),
         selectinload(Event.group_recitation_collection),
     )
@@ -114,7 +119,7 @@ def get_event_by_id(db: Session, event_id: UUID) -> Optional[Event]:
         .options(
             selectinload(Event.metadata_entries),
             selectinload(Event.links),
-            selectinload(Event.location),
+            selectinload(Event.location).selectinload(Location.metadata_entries),
             *_linked_resource_options(),
         )
         .filter(Event.id == event_id)
@@ -330,7 +335,7 @@ def get_events(
         db.query(Event).options(
             selectinload(Event.metadata_entries),
             selectinload(Event.links),
-            selectinload(Event.location),
+            selectinload(Event.location).selectinload(Location.metadata_entries),
             *_linked_resource_options(),
         ).filter(Event.is_recurring == False),
         content_filter=content_filter,
@@ -409,7 +414,7 @@ def iter_recurring_publishable_template_batches(
             .options(
                 selectinload(Event.metadata_entries),
                 selectinload(Event.links),
-                selectinload(Event.location),
+                selectinload(Event.location).selectinload(Location.metadata_entries),
                 *_linked_resource_options(),
             )
             .filter(Event.is_recurring.is_(True)),
@@ -442,7 +447,7 @@ def get_events_by_ids(
             db.query(Event).options(
                 selectinload(Event.metadata_entries),
                 selectinload(Event.links),
-                selectinload(Event.location),
+                selectinload(Event.location).selectinload(Location.metadata_entries),
                 *_linked_resource_options(),
             ).filter(Event.is_recurring == False),
             restrict_group_ids=restrict_group_ids,
@@ -464,7 +469,7 @@ def get_featured_events(
         .options(
             selectinload(Event.metadata_entries),
             selectinload(Event.links),
-            selectinload(Event.location),
+            selectinload(Event.location).selectinload(Location.metadata_entries),
             *_linked_resource_options(),
         )
         .filter(Event.featured == True)
@@ -487,7 +492,7 @@ def get_featured_recurring_events(
         .options(
             selectinload(Event.metadata_entries),
             selectinload(Event.links),
-            selectinload(Event.location),
+            selectinload(Event.location).selectinload(Location.metadata_entries),
             *_linked_resource_options(),
         )
         .filter(Event.featured == True)
@@ -525,7 +530,7 @@ def get_recurring_events(
     query = db.query(Event).options(
         selectinload(Event.metadata_entries),
         selectinload(Event.links),
-        selectinload(Event.location),
+        selectinload(Event.location).selectinload(Location.metadata_entries),
         *_linked_resource_options(),
     ).filter(Event.is_recurring == True)
 

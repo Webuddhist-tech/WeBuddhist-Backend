@@ -44,7 +44,7 @@ async def list_preset_accumulators(
         Query(description="Filter by preset name/description or mantra text/title/pronunciation"),
     ] = None,
 ):
-    return list_preset_accumulators_cms_service(
+    return await list_preset_accumulators_cms_service(
         token=credentials.credentials,
         skip=skip,
         limit=limit,
@@ -66,7 +66,7 @@ async def get_preset_accumulator(
         Query(description=language_query_description("Language code for mantra content", lowercase_example=True)),
     ] = None,
 ):
-    return get_preset_accumulator_cms_service(
+    return await get_preset_accumulator_cms_service(
         token=credentials.credentials,
         preset_id=preset_id,
         language=language,

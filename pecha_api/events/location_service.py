@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -7,6 +7,7 @@ from starlette import status
 
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.shared.permissions import (
     require_can_create_content,
     require_can_read_group_content,
@@ -25,9 +26,29 @@ from .location_repository import (
 from .location_response_models import (
     CreateLocationRequest,
     LocationDetailDTO,
+    LocationMetadataDTO,
     LocationsResponse,
     UpdateLocationRequest,
 )
+
+
+def _language_value(language: Union[LanguageCode, str]) -> str:
+    return language.value if hasattr(language, "value") else str(language)
+
+
+def _translations_to_dtos(location: Location) -> list:
+    entries = getattr(location, "metadata_entries", None) or []
+    return sorted(
+        (
+            LocationMetadataDTO(
+                id=entry.id,
+                name=entry.name,
+                language=_language_value(entry.language),
+            )
+            for entry in entries
+        ),
+        key=lambda dto: dto.language,
+    )
 
 
 def _location_to_dto(location: Location, event_count: int = 0) -> LocationDetailDTO:
@@ -38,6 +59,7 @@ def _location_to_dto(location: Location, event_count: int = 0) -> LocationDetail
         latitude=location.latitude,
         longitude=location.longitude,
         event_count=event_count,
+        translations=_translations_to_dtos(location),
     )
 
 
@@ -105,7 +127,9 @@ def create_location_service(
             updated_at=now,
             created_by=current_author.email,
         )
-        saved = save_location(db=db, location=location)
+        saved = save_location(
+            db=db, location=location, translations=request.translations
+        )
         return _location_to_dto(saved)
 
 
@@ -124,7 +148,9 @@ def update_location_service(
             location.longitude = request.longitude
 
         location.updated_at = datetime.now(timezone.utc)
-        saved = update_location(db=db, location=location)
+        saved = update_location(
+            db=db, location=location, translations=request.translations
+        )
         event_count = get_event_count(db=db, location_id=location_id)
         return _location_to_dto(saved, event_count=event_count)
 
