@@ -30,9 +30,10 @@ class FakeSubscriber:
     channel stopped.
     """
 
-    def __init__(self, messages=None):
+    def __init__(self, messages=None, dropped=0):
         self.messages = list(messages or [])
         self._index = 0
+        self._dropped = dropped
 
     async def get(self):
         while self._index < len(self.messages):
@@ -41,6 +42,11 @@ class FakeSubscriber:
             if message.get("type") == "message":
                 return message["data"]
         return None
+
+    def take_dropped(self):
+        dropped = self._dropped
+        self._dropped = 0
+        return dropped
 
 
 def _ws_url(event_id, token="test-token"):
@@ -73,6 +79,7 @@ def _ws_env(
     broadcaster.remove_connection = MagicMock()
     broadcaster.mark_present.return_value = "presence-token"
     broadcaster.presence_count.return_value = 1
+    broadcaster.broadcast_presence.return_value = 1
     broadcaster.subscribe_to_event.return_value = (
         subscriber if subscriber is not None else FakeSubscriber()
     )
@@ -233,6 +240,67 @@ class TestRecitationConnection:
             with client.websocket_connect(_ws_url(event_id)) as websocket:
                 websocket.receive_json()
                 assert websocket.receive_json() == published
+
+    def test_join_count_is_the_one_announced_to_the_room(self):
+        """session_info must quote the broadcast's own reading. A separate count
+        can disagree with the number every other phone was just handed."""
+        event_id = uuid4()
+        with _ws_env(is_operator=False) as (broadcaster, _):
+            broadcaster.broadcast_presence.return_value = 4
+            broadcaster.presence_count.return_value = 99
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                message = websocket.receive_json()
+                _sync(websocket)
+
+        assert message["count"] == 4
+        broadcaster.broadcast_presence.assert_awaited_with(event_id)
+
+    def test_a_dropped_frame_resyncs_the_count(self):
+        """Presence shares the queue with positions, and a socket that falls
+        behind has its oldest frames evicted. Losing the count that way would
+        leave this client showing an old number for the rest of the puja."""
+        event_id = uuid4()
+        position = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-9",
+            "index": 9,
+            "round_number": 1,
+            "server_time": "2026-09-14T09:30:05Z",
+            "revision": 58,
+        }
+        subscriber = FakeSubscriber(
+            [{"type": "message", "data": json.dumps(position)}], dropped=3
+        )
+
+        with _ws_env(subscriber=subscriber, is_operator=False) as (broadcaster, _):
+            broadcaster.presence_count.return_value = 7
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()                        # session_info
+                assert websocket.receive_json() == position
+                assert websocket.receive_json() == {
+                    "type": "presence",
+                    "event_id": str(event_id),
+                    "count": 7,
+                }
+
+    def test_no_resync_when_nothing_was_dropped(self):
+        event_id = uuid4()
+        published = {
+            "type": "presence",
+            "event_id": str(event_id),
+            "count": 2,
+        }
+        subscriber = FakeSubscriber([{"type": "message", "data": json.dumps(published)}])
+
+        with _ws_env(subscriber=subscriber, is_operator=False) as (broadcaster, _):
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
+                websocket.receive_json()
+                assert websocket.receive_json() == published
+                _sync(websocket)
+
+        broadcaster.presence_count.assert_not_awaited()
 
     def test_queued_frames_older_than_the_snapshot_are_dropped(self):
         """Frames published between subscribe and the snapshot read are already

@@ -170,6 +170,38 @@ async def test_slow_subscriber_on_a_last_write_wins_channel_keeps_the_newest(mak
 
 
 @pytest.mark.asyncio
+async def test_evicted_frames_are_reported_to_the_consumer(make_fanout):
+    """The newest frame always survives, so a value that is only overwritten
+    loses nothing. A consumer sharing the channel with another kind of frame -
+    a recitation head count among positions - needs to know one went missing so
+    it can re-read it."""
+    pubsub = FakePubSub()
+    fanout = make_fanout(_redis_with(pubsub), queue_maxsize=2, drop_oldest=True)
+    subscriber = await fanout.subscribe("event:1")
+
+    for frame in ("first", "second", "third", "fourth"):
+        pubsub.publish(frame)
+    await _settle()
+
+    assert subscriber.take_dropped() == 2
+    # Reported once: the consumer resyncs, it does not keep resyncing.
+    assert subscriber.take_dropped() == 0
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_reported_dropped_when_the_consumer_keeps_up(make_fanout):
+    pubsub = FakePubSub()
+    fanout = make_fanout(_redis_with(pubsub), queue_maxsize=2, drop_oldest=True)
+    subscriber = await fanout.subscribe("event:1")
+
+    pubsub.publish("only")
+    await _settle()
+
+    assert await subscriber.get() == "only"
+    assert subscriber.take_dropped() == 0
+
+
+@pytest.mark.asyncio
 async def test_slow_subscriber_on_an_ordered_channel_is_told_it_lagged(make_fanout):
     """Chat cannot silently skip a message: the gap is invisible to the client,
     so the socket is closed and the client refetches."""

@@ -218,14 +218,16 @@ async def websocket_recitation_live(
         broadcaster.add_connection(event_id, caller.presence_id, websocket)
         # Count this socket before telling anyone, so the number includes them.
         presence_token = await broadcaster.mark_present(event_id, caller.presence_id)
-        joined = await broadcaster.presence_count(event_id)
+        # Announce and count in one step, and quote what was announced: a
+        # separate reading can disagree with the number the rest of the room was
+        # just given.
+        joined = await broadcaster.broadcast_presence(event_id)
         await websocket.send_json({
             "type": "session_info",
             "event_id": str(event_id),
             "is_operator": is_operator,
             "count": joined,
         })
-        await broadcaster.broadcast_presence(event_id)
 
         # A late joiner is the normal case, not the exception: send whatever the
         # operator's last click was so the phone lands on the live line.
@@ -257,6 +259,15 @@ async def websocket_recitation_live(
                         # Channel stopped (shutdown, or Redis went away).
                         break
 
+                    # A socket that falls behind has its oldest queued frames
+                    # evicted. Positions survive that untouched - the newest is
+                    # always the one kept, and it carries the whole state - but
+                    # presence shares the queue with them, so a burst of clicks
+                    # can push out the one frame carrying the new count and
+                    # leave this client showing an old number for the rest of
+                    # the puja. Re-read it instead of waiting for the next join.
+                    dropped = subscriber.take_dropped()
+
                     try:
                         frame = json.loads(payload)
                     except (ValueError, TypeError):
@@ -282,6 +293,16 @@ async def websocket_recitation_live(
                     if isinstance(frame, dict) and frame.get("type") == "session_ended":
                         ended_remotely.set()
                         break
+
+                    if dropped:
+                        try:
+                            await websocket.send_json({
+                                "type": "presence",
+                                "event_id": str(event_id),
+                                "count": await broadcaster.presence_count(event_id),
+                            })
+                        except (ConnectionClosedOK, ConnectionClosedError):
+                            break
             except Exception as e:
                 logger.exception("Error listening to Redis: %s", e)
 
