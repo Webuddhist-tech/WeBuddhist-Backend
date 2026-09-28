@@ -161,6 +161,30 @@ def test_get_event_by_id_service_uses_fallback(mock_get_by_id, _mock_count, _moc
     assert dto.is_joined is None
 
 
+@patch(f"{MODULE}._prayer_request_count_for_event", return_value=4)
+@patch(f"{MODULE}._chat_room_id_for_event", return_value=None)
+@patch(f"{MODULE}.SessionLocal")
+@patch(f"{MODULE}.get_groups_by_ids", return_value=[])
+@patch(f"{MODULE}.get_event_participant_count", return_value=0)
+@patch(f"{MODULE}.get_event_by_id")
+def test_get_event_by_id_service_includes_prayer_request_count(
+    mock_get_by_id,
+    _mock_count,
+    _mock_groups,
+    mock_session,
+    _mock_chat_room,
+    mock_prayer_count,
+):
+    mock_session.return_value.__enter__.return_value = MagicMock()
+    event = _event([_metadata("en", "English")])
+    mock_get_by_id.return_value = event
+
+    dto = get_event_by_id_service(event_id=event.id)
+
+    assert dto.prayer_request_count == 4
+    mock_prayer_count.assert_called_once()
+
+
 # --------------------------- _event_to_dto links/youtube fallback behaviour ---------------------------
 # Mirrors the metadata fallback tests above, except links/youtube never
 # collapse to a single object - a "no match" result is an empty list, not None.

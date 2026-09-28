@@ -32,24 +32,52 @@ unpublished, or an admin switches `chat_enabled` off in the CMS. Requests then
 **Recurring events** compute their occurrences rather than storing them, so one
 room per event serves every occurrence.
 
-`EventDTO` gains two fields:
+`EventDTO` gains chat fields (and on `GET /events/{event_id}` a prayer tally):
 
 ```json
 "chat_enabled": true,
-"chat_room_id": "0f5c…"   // null until the room is created on first use
+"chat_room_id": "0f5c…",   // null until the room is created on first use
+"prayer_request_count": 12 // live PRAYER messages in that room; 0 if no room yet
 ```
 
 ---
 
-## 2. Message types
+## 2. Prayer intentions catalog
+
+```http
+GET /intentions
+```
+
+Public, unauthenticated. Returns the five configured intention types (slug,
+label, hex color, description, display order). The mobile app uses this for the
+“Choose an intention” picker when creating a prayer request and to tint request
+cards in the prayer-requests list.
+
+Seed data lives in
+`pecha_api/prayer_intentions/intentions_seed.json` (`healing`, `protection`,
+`compassion`, `gratitude`, `dedication`).
+
+---
+
+## 3. Message types
 
 `ChatMessageDTO.message_type` is `TEXT` (the default) or `PRAYER` (a prayer
 request). Send it on any room's message endpoint:
 
 ```http
 POST /chat/events/{event_id}/messages
-{ "body": "Please pray for my mother's health", "message_type": "PRAYER" }
+{
+  "body": "Please pray for my mother's health",
+  "message_type": "PRAYER",
+  "intention": "healing"
+}
 ```
+
+`intention` is **required** when `message_type` is `PRAYER` (a known slug from
+`GET /intentions`). It must be **omitted** for `TEXT` messages (400
+`INTENTION_NOT_ALLOWED_ON_TEXT` if sent). Prayer request bodies are limited to
+**280** characters (400 `PRAYER_BODY_TOO_LONG`); ordinary `TEXT` messages stay
+at 4000.
 
 `PRAYER` is accepted in event rooms and group rooms, and rejected in DMs with
 400 `PRAYER_NOT_ALLOWED_IN_DM` — a prayer request needs a congregation.
@@ -57,13 +85,20 @@ POST /chat/events/{event_id}/messages
 Prayer requests are ordinary messages otherwise: they can be replied to,
 reacted to, reported and deleted exactly like any other.
 
-On a `PRAYER` message the DTO carries three extra fields, **omitted entirely**
-on a `TEXT` message:
+On a `PRAYER` message the DTO carries prayer fields and a nested `intention`
+object, **omitted entirely** on a `TEXT` message:
 
 ```json
 {
   "id": "…", "body": "Please pray for my mother's health",
   "message_type": "PRAYER",
+  "intention": {
+    "slug": "healing",
+    "label": "Healing",
+    "color": "#4A78C2",
+    "description": "For illness, surgery and recovery. The lapis blue of the Medicine Buddha.",
+    "display_order": 0
+  },
   "prayer_count": 12,
   "prayed_by_me": false,
   "recent_prayers": [ { "user_id": "…", "name": "Tenzin", "avatar_url": "…" } ]
@@ -81,7 +116,7 @@ GET /chat/rooms/{room_id}/messages?message_type=PRAYER
 
 ---
 
-## 3. Praying
+## 4. Praying
 
 ### Pray for one or several selected requests
 
@@ -131,7 +166,7 @@ Newest first. Active room members only.
 
 ---
 
-## 4. Live events
+## 5. Live events
 
 The WebSocket stream gains one server event, published to the room when anyone
 prays or un-prays:
@@ -150,12 +185,17 @@ by looking for your own id in `user_ids`.
 To post a prayer request over the socket, add `message_type`:
 
 ```json
-{ "type": "message", "body": "Please pray for…", "message_type": "PRAYER" }
+{
+  "type": "message",
+  "body": "Please pray for…",
+  "message_type": "PRAYER",
+  "intention": "compassion"
+}
 ```
 
 ---
 
-## 5. Notifications
+## 6. Notifications
 
 The requester is notified when someone prays for their request:
 `notification_type: "PRAYER_RECEIVED"`, with `message_id`, `room_id`,
@@ -190,11 +230,15 @@ member of the room.
 
 ---
 
-## 6. Errors
+## 7. Errors
 
 | Status | Detail | Meaning |
 |--------|--------|---------|
 | 400 | `PRAYER_NOT_ALLOWED_IN_DM` | Prayer requests need a group or event room |
+| 400 | `PRAYER_INTENTION_REQUIRED` | `PRAYER` message without `intention` |
+| 400 | `INVALID_PRAYER_INTENTION` | Unknown intention slug |
+| 400 | `PRAYER_BODY_TOO_LONG` | Prayer request body exceeds 280 characters |
+| 400 | `INTENTION_NOT_ALLOWED_ON_TEXT` | `intention` sent with a `TEXT` message |
 | 400 | `NOT_A_PRAYER_REQUEST` | The message exists but is a `TEXT` message |
 | 403 | — | Not an active member of the room |
 | 404 | `NOT_A_PRAYER_REQUEST` | Nothing in the batch was a live prayer request |

@@ -479,6 +479,19 @@ def _chat_room_ids_for_events(*, db, event_ids) -> dict:
     return get_room_ids_by_event_ids(db=db, event_ids=event_ids)
 
 
+def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
+    """How many live prayer requests exist in the event's chat room."""
+    from pecha_api.chat.repository import (
+        count_prayer_requests_in_room,
+        get_room_by_event_id,
+    )
+
+    room = get_room_by_event_id(db=db, event_id=event_id)
+    if room is None:
+        return 0
+    return count_prayer_requests_in_room(db=db, room_id=room.id)
+
+
 def _event_to_dto(
     event: Event,
     language: Optional[str] = None,
@@ -492,6 +505,7 @@ def _event_to_dto(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     chat_room_id: Optional[UUID] = None,
+    prayer_request_count: int = 0,
 ) -> EventDTO:
     recurrence_dto = None
     if event.is_recurring:
@@ -553,6 +567,7 @@ def _event_to_dto(
         group_name=group_name,
         group_avatar_url=group_avatar_url,
         participant_count=participant_count,
+        prayer_request_count=prayer_request_count,
         is_joined=is_joined,
         my_participation_type=my_participation_type,
         created_at=event.created_at,
@@ -1216,6 +1231,9 @@ def get_event_by_id_service(
             start_date=start_date,
             end_date=end_date,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
+            prayer_request_count=_prayer_request_count_for_event(
+                db=db, event_id=event.id
+            ),
         )
 
 

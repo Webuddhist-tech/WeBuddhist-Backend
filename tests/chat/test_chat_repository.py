@@ -10,6 +10,7 @@ from pecha_api.chat.repository import (
     count_suppressed_prayer_requests,
     last_dispatched_prayer_request,
     count_active_members,
+    count_prayer_requests_in_room,
     count_unread_messages,
     create_message,
     create_room,
@@ -364,6 +365,21 @@ class TestMessages:
         query.scalar.return_value = None
 
         assert count_unread_messages(db=db, room_id=uuid4(), last_read_at=None) == 0
+
+    def test_count_prayer_requests_in_room(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = 5
+
+        assert count_prayer_requests_in_room(db=db, room_id=uuid4()) == 5
+        assert query.filter.call_count == 1
+
+    def test_count_prayer_requests_returns_zero_when_scalar_none(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = None
+
+        assert count_prayer_requests_in_room(db=db, room_id=uuid4()) == 0
 
 
 class TestBulkMessageDeletion:

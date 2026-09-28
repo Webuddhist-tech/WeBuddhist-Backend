@@ -1,0 +1,42 @@
+[
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000001",
+    "slug": "healing",
+    "label": "Healing",
+    "color": "#4A78C2",
+    "description": "For illness, surgery and recovery. The lapis blue of the Medicine Buddha.",
+    "display_order": 0
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000002",
+    "slug": "protection",
+    "label": "Protection",
+    "color": "#5B9A6F",
+    "description": "For safety on a journey, through difficulty, or from harm.",
+    "display_order": 1
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000003",
+    "slug": "compassion",
+    "label": "Compassion",
+    "color": "#C8503D",
+    "description": "For those who suffer, and for opening the heart to all beings.",
+    "display_order": 2
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000004",
+    "slug": "gratitude",
+    "label": "Gratitude",
+    "color": "#E8A317",
+    "description": "For blessings received, teachers, and the goodness in one's life.",
+    "display_order": 3
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000005",
+    "slug": "dedication",
+    "label": "Dedication",
+    "color": "#FFFFFF",
+    "description": "To dedicate merit for the benefit of others and for awakening.",
+    "display_order": 4
+  }
+]

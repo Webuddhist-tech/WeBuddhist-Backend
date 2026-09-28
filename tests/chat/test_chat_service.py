@@ -10,10 +10,12 @@ from starlette import status
 # before any ChatRoom()/ChatRoomMember() instantiation below triggers mapper configuration.
 import pecha_api.app  # noqa: F401
 
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 from pecha_api.chat.service import (
     _default_group_room_name,
     _generate_presigned_url,
     _get_room_or_404,
+    _intention_dto_for_message,
     _isoformat,
     _require_active_member,
     build_message_dto,
@@ -219,6 +221,69 @@ class TestBuildRoomDTO:
         assert dto.other_user_id == other_id
         assert dto.other_user_email == "other@example.com"
         assert dto.other_user_name == "Bob Smith"
+
+    @patch("pecha_api.chat.service.count_unread_messages")
+    @patch("pecha_api.chat.service.get_active_member")
+    @patch("pecha_api.chat.service.count_active_members")
+    @patch("pecha_api.chat.service.get_last_message")
+    @patch("pecha_api.chat.service._intention_dto_for_message")
+    def test_last_message_includes_prayer_intention(
+        self,
+        mock_intention_dto,
+        mock_last_message,
+        mock_count_active,
+        mock_get_active,
+        mock_unread,
+    ):
+        room = MockRoom(group_id=uuid4())
+        last = MockMessage(body="Please pray")
+        last.intention = "healing"
+        mock_last_message.return_value = last
+        mock_count_active.return_value = 1
+        mock_get_active.return_value = None
+        mock_unread.return_value = 0
+        intention = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_intention_dto.return_value = intention
+
+        dto = build_room_dto(db=MagicMock(), room=room, viewer_id=uuid4())
+
+        assert dto.last_message is not None
+        assert dto.last_message.intention == intention
+        mock_intention_dto.assert_called_once()
+
+
+class TestIntentionDtoForMessage:
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_returns_none_when_message_has_no_intention(self, mock_resolve):
+        message = MockMessage()
+        message.intention = None
+
+        assert _intention_dto_for_message(db=MagicMock(), message=message) is None
+        mock_resolve.assert_not_called()
+
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_resolves_slug_to_dto(self, mock_resolve):
+        message = MockMessage()
+        message.intention = "healing"
+        expected = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_resolve.return_value = {"healing": expected}
+
+        dto = _intention_dto_for_message(db=MagicMock(), message=message)
+
+        assert dto == expected
+        mock_resolve.assert_called_once()
 
 
 class TestListGroupPeopleService:
@@ -579,16 +644,20 @@ class TestRoomServices:
         mock_require.assert_called_once()
 
     @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_intention_dtos_for_slugs')
     @patch('pecha_api.chat.service.get_last_messages_map')
     @patch('pecha_api.chat.service.list_my_active_rooms')
     @patch('pecha_api.chat.service.SessionLocal')
-    def test_list_my_rooms_service(self, mock_session, mock_list, mock_last, mock_build):
+    def test_list_my_rooms_service(
+        self, mock_session, mock_list, mock_last, mock_resolve, mock_build
+    ):
         from pecha_api.chat.response_models import ChatRoomDTO
 
         mock_session.return_value.__enter__.return_value = MagicMock()
         room = MockRoom()
         mock_list.return_value = ([room], 1)
         mock_last.return_value = {}
+        mock_resolve.return_value = {}
         mock_build.return_value = ChatRoomDTO(
             id=room.id,
             kind="GROUP",
@@ -603,7 +672,57 @@ class TestRoomServices:
 
         assert result.total == 1
         assert len(result.rooms) == 1
+        mock_resolve.assert_called_once()
 
+    @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_intention_dtos_for_slugs')
+    @patch('pecha_api.chat.service.get_last_messages_map')
+    @patch('pecha_api.chat.service.list_my_active_rooms')
+    @patch('pecha_api.chat.service.SessionLocal')
+    def test_list_my_rooms_batches_intention_lookup(
+        self, mock_session, mock_list, mock_last, mock_resolve, mock_build
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        room_a = MockRoom()
+        room_b = MockRoom()
+        msg_a = MockMessage(body="Pray A")
+        msg_a.intention = "healing"
+        msg_b = MockMessage(body="Pray B")
+        msg_b.intention = "healing"
+        mock_list.return_value = ([room_a, room_b], 2)
+        mock_last.return_value = {room_a.id: msg_a, room_b.id: msg_b}
+        healing_dto = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_resolve.return_value = {"healing": healing_dto}
+
+        def _room_dto(**kwargs):
+            from pecha_api.chat.response_models import ChatRoomDTO
+
+            return ChatRoomDTO(
+                id=kwargs["room"].id,
+                kind="GROUP",
+                name=kwargs["room"].name,
+                created_by=kwargs["room"].created_by,
+                member_count=1,
+                updated_at=kwargs["room"].updated_at.isoformat(),
+                unread_count=0,
+            )
+
+        mock_build.side_effect = _room_dto
+
+        list_my_rooms_service(user=MockUser(), skip=0, limit=20)
+
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["slugs"] == ["healing", "healing"]
+        assert mock_build.call_count == 2
+        for call in mock_build.call_args_list:
+            assert call.kwargs["resolve_last_message_intention"] is False
+            assert call.kwargs["last_message_intention"] == healing_dto
 
     @patch('pecha_api.chat.service.build_room_dto')
     @patch('pecha_api.chat.service.update_room')

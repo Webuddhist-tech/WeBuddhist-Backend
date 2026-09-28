@@ -364,6 +364,7 @@ def send_group_chat_message(
         body=request.body,
         parent_message_id=request.parent_message_id,
         message_type=request.message_type.value,
+        intention=request.intention,
     )
 
 
@@ -402,6 +403,7 @@ def send_event_chat_message(
         body=request.body,
         parent_message_id=request.parent_message_id,
         message_type=request.message_type.value,
+        intention=request.intention,
     )
 
 
@@ -424,6 +426,7 @@ def send_direct_chat_message(
         body=request.body,
         parent_message_id=request.parent_message_id,
         message_type=request.message_type.value,
+        intention=request.intention,
     )
 
 
@@ -698,6 +701,7 @@ def _persist_message(
     body: str,
     parent_id: Optional[UUID],
     kind: str,
+    intention: Optional[str] = None,
 ) -> ChatMessageDTO:
     """Write the message through the same service the HTTP route uses.
 
@@ -710,6 +714,7 @@ def _persist_message(
             body=body,
             parent_message_id=parent_id,
             message_type=kind,
+            intention=intention,
         )
     if target.event_id is not None:
         return send_event_message_service(
@@ -718,6 +723,7 @@ def _persist_message(
             body=body,
             parent_message_id=parent_id,
             message_type=kind,
+            intention=intention,
         )
     return send_direct_message_service(
         receiver_id=target.receiver_id,
@@ -725,6 +731,7 @@ def _persist_message(
         body=body,
         parent_message_id=parent_id,
         message_type=kind,
+        intention=intention,
     )
 
 
@@ -887,6 +894,7 @@ async def _handle_message(
             frame.body,
             frame.parent_message_id,
             frame.message_type,
+            frame.intention,
         )
     except HTTPException as e:
         logger.warning("Message send failed: %s", e.detail)
@@ -1056,8 +1064,9 @@ async def websocket_chat_live(
     resolved/auto-created on connect.
 
     Client -> server messages:
-      {"type": "message", "body": "...", "message_type": "TEXT"|"PRAYER", "parent_message_id": "..."}
-          (message_type defaults to TEXT; parent_message_id optional, makes it a reply)
+      {"type": "message", "body": "...", "message_type": "TEXT"|"PRAYER", "intention": "healing", "parent_message_id": "..."}
+          (message_type defaults to TEXT; intention required when message_type is PRAYER;
+           parent_message_id optional, makes it a reply)
       {"type": "typing", "is_typing": true|false}   (ephemeral, not persisted)
       {"type": "ping"}                              (heartbeat; answered with pong)
 

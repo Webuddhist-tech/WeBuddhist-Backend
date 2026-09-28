@@ -40,6 +40,7 @@ from pecha_api.chat.repository import (
     get_reactions_map,
     get_recent_prayers_map,
     get_report_by_message_and_reporter,
+    get_room_by_id,
     get_room_messages,
     list_message_prayers,
     list_message_reactions,
@@ -75,7 +76,12 @@ from pecha_api.chat.service import (
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.groups.groups_repository import is_group_id_published
 from pecha_api.plans.response_message import NOT_FOUND
+from pecha_api.prayer_intentions.prayer_intention_service import (
+    resolve_intention_dtos_for_slugs,
+    validate_message_intention_and_body,
+)
 from pecha_api.users.users_models import Users
+from pecha_api.events.events_cache_service import schedule_invalidate_event_detail_caches
 
 _PARENT_MESSAGE_NOT_FOUND = "PARENT_MESSAGE_NOT_FOUND"
 _ALREADY_REPORTED = "ALREADY_REPORTED"
@@ -110,6 +116,7 @@ def send_group_message_service(
     body: str,
     parent_message_id: Optional[UUID] = None,
     message_type: str = ChatMessageType.TEXT.value,
+    intention: Optional[str] = None,
 ) -> ChatMessageDTO:
     with SessionLocal() as db:
         room = resolve_or_create_group_room(
@@ -123,6 +130,7 @@ def send_group_message_service(
             body=body,
             parent_message_id=parent_message_id,
             message_type=message_type,
+            intention=intention,
         )
 
 
@@ -132,6 +140,7 @@ def send_event_message_service(
     body: str,
     parent_message_id: Optional[UUID] = None,
     message_type: str = ChatMessageType.TEXT.value,
+    intention: Optional[str] = None,
 ) -> ChatMessageDTO:
     with SessionLocal() as db:
         room = resolve_or_create_event_room(
@@ -145,6 +154,7 @@ def send_event_message_service(
             body=body,
             parent_message_id=parent_message_id,
             message_type=message_type,
+            intention=intention,
         )
 
 
@@ -154,6 +164,7 @@ def send_direct_message_service(
     body: str,
     parent_message_id: Optional[UUID] = None,
     message_type: str = ChatMessageType.TEXT.value,
+    intention: Optional[str] = None,
 ) -> ChatMessageDTO:
     with SessionLocal() as db:
         room = resolve_or_create_private_room(db=db, user=user, receiver_id=receiver_id)
@@ -164,6 +175,7 @@ def send_direct_message_service(
             body=body,
             parent_message_id=parent_message_id,
             message_type=message_type,
+            intention=intention,
         )
 
 
@@ -209,8 +221,18 @@ def _persist_message(
     body: str,
     parent_message_id: Optional[UUID] = None,
     message_type: str = ChatMessageType.TEXT.value,
+    intention: Optional[str] = None,
 ) -> ChatMessageDTO:
     message_type = _validate_message_type(room=room, message_type=message_type)
+    body = body.strip()
+    if not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message body must not be empty",
+        )
+    stored_intention = validate_message_intention_and_body(
+        db=db, message_type=message_type, body=body, intention=intention
+    )
     validate_message_content(db=db, room=room, user=user, body=body)
     parent = _resolve_parent_message(db=db, room=room, parent_message_id=parent_message_id)
     message = ChatMessage(
@@ -219,6 +241,7 @@ def _persist_message(
         body=body,
         message_type=message_type,
         parent_message_id=parent.id if parent else None,
+        intention=stored_intention,
     )
     # Must sit in the same transaction as the INSERT: room creation and
     # touch_room commit, releasing any lock taken earlier. create_message
@@ -233,13 +256,31 @@ def _persist_message(
     message = create_message(db=db, message=message)
     message.sender = user
     touch_room(db=db, room=room)
-    dto = build_message_dto(message, viewer_id=user.id)
+    intention_dto = None
+    if stored_intention:
+        intention_map = resolve_intention_dtos_for_slugs(db=db, slugs=[stored_intention])
+        intention_dto = intention_map.get(stored_intention)
+    dto = build_message_dto(
+        message, viewer_id=user.id, intention=intention_dto
+    )
     # The type and room are already in hand, so an ordinary message costs no
     # extra read for the dispatcher to learn it is not a prayer request.
     enqueue_chat_message_notification(
         message.id, message_type=message_type, room_id=room.id
     )
+    _schedule_event_prayer_count_cache_refresh(room=room, message_type=message_type)
     return dto
+
+
+def _schedule_event_prayer_count_cache_refresh(
+    room: ChatRoom, message_type: str
+) -> None:
+    """Event detail caches `prayer_request_count`; refresh when PRAYER rows change."""
+    if message_type != ChatMessageType.PRAYER.value:
+        return
+    if room.event_id is None:
+        return
+    schedule_invalidate_event_detail_caches(room.event_id)
 
 
 def _prayer_message_ids(messages: Sequence[ChatMessage]) -> List[UUID]:
@@ -281,6 +322,10 @@ def list_room_messages_service(
         recent_prayers = get_recent_prayers_map(
             db=db, message_ids=prayer_ids, per_message=_RECENT_PRAYERS_LIMIT
         )
+        intention_slugs = [
+            message.intention for message in messages if message.intention
+        ]
+        intention_dtos = resolve_intention_dtos_for_slugs(db=db, slugs=intention_slugs)
         return ChatMessagesResponse(
             messages=[
                 build_message_dto(
@@ -290,6 +335,9 @@ def list_room_messages_service(
                     prayer_count=prayer_counts.get(message.id, 0),
                     prayed_by_me=message.id in prayed_by_me,
                     recent_prayers=recent_prayers.get(message.id),
+                    intention=intention_dtos.get(message.intention)
+                    if message.intention
+                    else None,
                 )
                 for message in messages
             ],
@@ -316,7 +364,13 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
                 detail="You can only delete your own messages",
             )
 
+        room = get_room_by_id(db=db, room_id=room_id)
+        message_type = _message_type_value(message)
         deleted_at = soft_delete_message(db=db, message=message)
+        if room is not None:
+            _schedule_event_prayer_count_cache_refresh(
+                room=room, message_type=message_type
+            )
         return deleted_at.isoformat()
 
 
@@ -355,7 +409,17 @@ def delete_messages_service(
             )
 
         ordered = [found[message_id] for message_id in message_ids]
+        room = get_room_by_id(db=db, room_id=room_id)
+        affects_prayer_count = any(
+            _message_type_value(message) == ChatMessageType.PRAYER.value
+            for message in ordered
+        )
         deleted_at = soft_delete_messages(db=db, messages=ordered)
+        if room is not None and affects_prayer_count:
+            _schedule_event_prayer_count_cache_refresh(
+                room=room,
+                message_type=ChatMessageType.PRAYER.value,
+            )
         return BulkDeleteResult(
             message_ids=[message.id for message in ordered],
             deleted_at=deleted_at.isoformat(),
