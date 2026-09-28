@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..db import database
 from starlette import status
 from .auth_service import authenticate_and_generate_tokens, refresh_access_token, register_user_with_source, \
-    request_reset_password, update_password, create_user, exchange_phone_token, link_phone_identity
+    request_reset_password, update_password, create_user, exchange_phone_token, link_phone_identity, \
+    remember_social_avatar
 from .auth_models import CreateUserRequest, UserLoginRequest, RefreshTokenRequest, PasswordResetRequest, \
     ResetPasswordRequest, UserLoginResponse, RefreshTokenResponse, CreateSocialUserRequest, \
     PhoneExchangeRequest, PhoneExchangeResponse, PhoneLinkRequest, PhoneLinkResponse
@@ -39,10 +40,19 @@ def register_user(create_social_user_request: CreateSocialUserRequest):
     registration_source = RegistrationSource.EMAIL
     if create_social_user_request.platform:
         registration_source =  create_social_user_request.platform
-    return create_user(
-        create_user_request=create_social_user_request.create_user_request,
-        registration_source=registration_source
-    )
+    try:
+        return create_user(
+            create_user_request=create_social_user_request.create_user_request,
+            registration_source=registration_source
+        )
+    except HTTPException as exc:
+        # The Auth0 action calls this on every login. After the first one the
+        # user already exists, and that 409 is how the action knows to stop.
+        # The picture still has to land, or an account created before this
+        # field existed never shows the Auth0 photo.
+        if exc.status_code == status.HTTP_409_CONFLICT:
+            remember_social_avatar(create_social_user_request.create_user_request)
+        raise
 
 @auth_router.post("/login", status_code=status.HTTP_200_OK)
 def login_user(user_login_request: UserLoginRequest) -> UserLoginResponse:

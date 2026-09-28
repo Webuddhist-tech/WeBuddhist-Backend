@@ -2680,7 +2680,7 @@ def get_group_member_accumulations(
                     GroupMemberAccumulationDTO(
                         username=user.username,
                         fullname=fullname,
-                        avatar_url=user.avatar_url,
+                        avatar_url=_user_avatar_url(user),
                         count=row.total_count,
                     )
                 )

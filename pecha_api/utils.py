@@ -106,3 +106,23 @@ class Utils:
         if not s3_key:
             return ""
         return s3_key
+
+    @staticmethod
+    def stored_avatar_reference(value: Optional[str]) -> str:
+        """What to keep in users.avatar_url.
+
+        An https address that is not one of our S3 links is the image itself
+        (Auth0's profile photo). A normal path, or a presigned link to our
+        bucket, is the object's key in S3.
+        """
+        if not value or not str(value).strip():
+            return ""
+        reference = str(value).strip()
+        if reference.startswith("https://") or reference.startswith("http://"):
+            host = urlparse(reference).netloc.lower()
+            bucket = (get("AWS_BUCKET_NAME") or "").strip().lower()
+            is_s3_link = "amazonaws.com" in host or (bucket and bucket in host)
+            if is_s3_link:
+                return Utils.extract_s3_key(reference)
+            return reference
+        return reference.lstrip("/")

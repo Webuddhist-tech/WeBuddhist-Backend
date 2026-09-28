@@ -80,6 +80,11 @@ def presigned_url_expiry_seconds() -> int:
 
 def generate_presigned_access_url(bucket_name: str, s3_key: str):
     if isinstance(s3_key, str) and s3_key.strip():
+        # Social login stores Auth0's picture as a full https URL. That is
+        # already something the app can load; signing it as an S3 key would
+        # point at an object that does not exist.
+        if s3_key.startswith("https://") or s3_key.startswith("http://"):
+            return s3_key
         # Generate a presigned URL for uploading an object
         presigned_url = s3_client.generate_presigned_url(
             ClientMethod="get_object",

@@ -419,6 +419,22 @@ def test_get_social_profile_invalid():
     assert str(exc_info.value) == "'INVALID_PROFILE' is not a valid SocialProfile"
 
 
+def test_stored_avatar_reference_keeps_an_external_picture():
+    picture = "https://lh3.googleusercontent.com/a/photo"
+    assert Utils.stored_avatar_reference(picture) == picture
+
+
+def test_stored_avatar_reference_keeps_an_s3_path():
+    assert Utils.stored_avatar_reference("images/profile_images/user.webp") == (
+        "images/profile_images/user.webp"
+    )
+
+
+def test_stored_avatar_reference_reduces_a_presigned_link_to_its_key():
+    presigned = "https://example-bucket.s3.amazonaws.com/images/profile_images/user_id.jpg"
+    assert Utils.stored_avatar_reference(presigned) == "images/profile_images/user_id.jpg"
+
+
 def test_extract_s3_key_valid_url():
     presigned_url = "https://example-bucket.s3.amazonaws.com/images/profile_images/user_id.jpg"
     assert Utils.extract_s3_key(presigned_url) == "images/profile_images/user_id.jpg"

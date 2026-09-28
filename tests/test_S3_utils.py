@@ -43,6 +43,13 @@ def test_upload_bytes_invalid_file(mock_s3_client):
         upload_bytes("test-bucket", "test-key", "invalid file", "text/plain")
 
 
+def test_generate_presigned_access_url_returns_hosted_picture_unchanged(mock_s3_client):
+    picture = "https://lh3.googleusercontent.com/a/photo"
+    result = generate_presigned_access_url("test-bucket", picture)
+    assert result == picture
+    mock_s3_client.generate_presigned_url.assert_not_called()
+
+
 def test_generate_presigned_access_url_success(mock_s3_client):
     mock_s3_client.generate_presigned_url.return_value = "http://example.com"
     result = generate_presigned_access_url("test-bucket", "test-key")

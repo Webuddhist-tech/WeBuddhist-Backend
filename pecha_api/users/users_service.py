@@ -109,7 +109,7 @@ def update_user_info(token: str, user_info_request: UserInfoRequest) -> Users:
     current_user.organization = user_info_request.organization
     current_user.location = user_info_request.location
     current_user.education = ','.join(user_info_request.educations)
-    current_user.avatar_url = Utils.extract_s3_key(presigned_url=user_info_request.avatar_url)
+    current_user.avatar_url = Utils.stored_avatar_reference(user_info_request.avatar_url)
     current_user.about_me = user_info_request.about_me
     with SessionLocal() as db_session:
         try:
@@ -226,7 +226,7 @@ def delete_user_account(token: str) -> None:
     with SessionLocal() as db_session:
         db_session.add(current_user)
         delete_user(db=db_session, user=current_user)
-    if avatar_key:
+    if avatar_key and not str(avatar_key).startswith(("http://", "https://")):
         try:
             delete_file(file_path=avatar_key)
         except Exception as e:
