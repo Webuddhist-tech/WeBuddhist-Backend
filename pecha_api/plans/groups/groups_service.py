@@ -13,7 +13,7 @@ from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id, \
     find_author_by_user_id
-from pecha_api.auth.auth_repository import validate_token
+from pecha_api.auth.auth_repository import validate_token, is_refresh_token_payload
 from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details, validate_cms_author_details
 from pecha_api.plans.shared.permissions import (
@@ -2781,6 +2781,13 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
     try:
         payload = validate_token(token)
     except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+    if is_refresh_token_payload(payload):
+        # Same rule as validate_and_extract_author_details: a refresh token is
+        # only good for minting access tokens, never as a bearer credential.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

@@ -25,7 +25,7 @@ from pecha_api.plans.authors.plan_authors_repository import (
     save_phone_author,
     update_author,
 )
-from pecha_api.auth.auth_repository import get_hashed_password, verify_password, create_access_token, create_refresh_token
+from pecha_api.auth.auth_repository import get_hashed_password, verify_password, create_access_token, create_refresh_token, is_refresh_token_payload
 from pecha_api.auth.password_reset_repository import save_password_reset, get_password_reset_by_token_for_author
 from pecha_api.auth.auth_service import send_reset_email
 from pecha_api.plans.groups.groups_service import notify_pending_group_invites
@@ -392,6 +392,14 @@ def link_phone_identity(backend_token: str, auth0_token: str) -> PhoneLinkRespon
     try:
         backend_payload = _validate_token(backend_token)
     except jwt.JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid backend token",
+        )
+    if is_refresh_token_payload(backend_payload):
+        # Same rule as validate_and_extract_author_details: a refresh token
+        # only mints access tokens at /refresh-token. It must not authorize a
+        # change to the author's phone identity.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid backend token",
