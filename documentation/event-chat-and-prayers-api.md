@@ -74,9 +74,10 @@ POST /chat/events/{event_id}/messages
 ```
 
 `intention` is **required** when `message_type` is `PRAYER` (a known slug from
-`GET /intentions`). During catalog updates the API also accepts the previous
-slugs `compassion`, `gratitude`, and `dedication`, normalising them to `love`,
-`abundance`, and `peace` when stored. It must be **omitted** for `TEXT` messages (400
+`GET /intentions`). During catalog updates the API accepts both slug sets: former slugs
+(`compassion`, `gratitude`, `dedication`) and current slugs (`love`, `abundance`,
+`peace`) resolve against whichever catalog is in the database, including after a
+migration downgrade, so prayer messages keep a nested `intention` on read. It must be **omitted** for `TEXT` messages (400
 `INTENTION_NOT_ALLOWED_ON_TEXT` if sent). Prayer request bodies are limited to
 **280** characters (400 `PRAYER_BODY_TOO_LONG`); ordinary `TEXT` messages stay
 at 4000.

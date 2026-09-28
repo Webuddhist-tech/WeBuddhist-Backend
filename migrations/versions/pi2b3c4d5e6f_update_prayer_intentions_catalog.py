@@ -155,6 +155,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     if not table_exists("prayer_intentions"):
         return
-    # Restore catalog rows only. Do not rewrite chat_messages.intention: post-upgrade
-    # requests use new slugs (peace, abundance, love) and must not become dedication, etc.
+    # Restore catalog rows only; leave chat_messages.intention unchanged. The API resolves
+    # stored new slugs (peace, abundance, love) against legacy catalog rows via
+    # pecha_api.prayer_intentions.intention_slugs.catalog_slug_lookup_candidates.
     _apply_catalog(PREVIOUS_CATALOG_BY_ID)

@@ -72,7 +72,12 @@ class TestPrayerIntentionDTOHelpers:
     @patch(
         "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intentions_by_slugs"
     )
-    def test_resolve_intention_dtos_for_slugs_maps_legacy_slug(self, mock_get):
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
+    )
+    def test_resolve_intention_dtos_for_slugs_maps_legacy_slug(
+        self, mock_get_by_slug, mock_get_batch
+    ):
         db = MagicMock()
         row = MagicMock(
             slug="love",
@@ -81,17 +86,52 @@ class TestPrayerIntentionDTOHelpers:
             description="Relationships.",
             display_order=3,
         )
-        mock_get.return_value = {"love": row}
+        mock_get_by_slug.side_effect = lambda *, slug, **_kwargs: (
+            row if slug == "love" else None
+        )
+        mock_get_batch.return_value = {"love": row}
 
         result = resolve_intention_dtos_for_slugs(db=db, slugs=["compassion"])
 
         assert result["compassion"].slug == "love"
-        mock_get.assert_called_once_with(db=db, slugs=["love"])
+        mock_get_batch.assert_called_once_with(db=db, slugs=["love"])
 
     @patch(
         "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intentions_by_slugs"
     )
-    def test_resolve_intention_dtos_for_slugs_maps_rows(self, mock_get):
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
+    )
+    def test_resolve_intention_dtos_for_slugs_maps_stored_new_slug_on_legacy_catalog(
+        self, mock_get_by_slug, mock_get_batch
+    ):
+        db = MagicMock()
+        row = MagicMock(
+            slug="dedication",
+            label="Dedication",
+            color="#FFFFFF",
+            description="To dedicate merit.",
+            display_order=4,
+        )
+        mock_get_by_slug.side_effect = lambda *, slug, **_kwargs: (
+            row if slug == "dedication" else None
+        )
+        mock_get_batch.return_value = {"dedication": row}
+
+        result = resolve_intention_dtos_for_slugs(db=db, slugs=["peace"])
+
+        assert result["peace"].slug == "dedication"
+        mock_get_batch.assert_called_once_with(db=db, slugs=["dedication"])
+
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intentions_by_slugs"
+    )
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
+    )
+    def test_resolve_intention_dtos_for_slugs_maps_rows(
+        self, mock_get_by_slug, mock_get_batch
+    ):
         db = MagicMock()
         row = MagicMock(
             slug="healing",
@@ -100,13 +140,16 @@ class TestPrayerIntentionDTOHelpers:
             description="For illness.",
             display_order=0,
         )
-        mock_get.return_value = {"healing": row}
+        mock_get_by_slug.side_effect = lambda *, slug, **_kwargs: (
+            row if slug == "healing" else None
+        )
+        mock_get_batch.return_value = {"healing": row}
 
         result = resolve_intention_dtos_for_slugs(db=db, slugs=["healing", None])
 
         assert "healing" in result
         assert result["healing"].slug == "healing"
-        mock_get.assert_called_once_with(db=db, slugs=["healing"])
+        mock_get_batch.assert_called_once_with(db=db, slugs=["healing"])
 
 
 class TestValidateMessageIntentionAndBody:
@@ -226,9 +269,11 @@ class TestValidateMessageIntentionAndBody:
     @patch(
         "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
     )
-    def test_prayer_accepts_legacy_slug_and_stores_canonical(self, mock_get):
+    def test_prayer_accepts_legacy_slug_and_stores_catalog_slug(self, mock_get):
         db = MagicMock()
-        mock_get.return_value = MagicMock()
+        mock_get.side_effect = lambda *, slug, **_kwargs: (
+            MagicMock() if slug == "love" else None
+        )
 
         slug = validate_message_intention_and_body(
             db=db,
@@ -238,7 +283,24 @@ class TestValidateMessageIntentionAndBody:
         )
 
         assert slug == "love"
-        mock_get.assert_called_once_with(db=db, slug="love")
+
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
+    )
+    def test_prayer_accepts_new_slug_on_downgraded_catalog(self, mock_get):
+        db = MagicMock()
+        mock_get.side_effect = lambda *, slug, **_kwargs: (
+            MagicMock() if slug == "dedication" else None
+        )
+
+        slug = validate_message_intention_and_body(
+            db=db,
+            message_type=ChatMessageType.PRAYER.value,
+            body="Please pray",
+            intention="peace",
+        )
+
+        assert slug == "dedication"
 
     def test_text_rejects_body_over_4000_chars(self):
         db = MagicMock()
