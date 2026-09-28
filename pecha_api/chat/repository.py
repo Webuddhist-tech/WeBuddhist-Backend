@@ -388,6 +388,17 @@ def soft_delete_message(db: Session, message: ChatMessage) -> datetime:
     return deleted_at
 
 
+def update_message(
+    db: Session, message: ChatMessage, body: str, intention: Optional[str]
+) -> ChatMessage:
+    message.body = body
+    message.intention = intention
+    message.is_edited = True
+    db.commit()
+    db.refresh(message)
+    return message
+
+
 def get_messages_by_ids(
     db: Session, message_ids: Sequence[UUID], room_id: UUID
 ) -> List[ChatMessage]:

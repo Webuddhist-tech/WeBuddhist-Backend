@@ -3,6 +3,7 @@ import datetime as dt
 from uuid import uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -148,6 +149,10 @@ class ChatMessage(Base):
     )
     # Prayer-request intention slug (peace, healing, …). Null for TEXT messages.
     intention = Column(String(32), nullable=True)
+    # Set once the sender edits the body or intention; never reset.
+    is_edited = Column(
+        Boolean, nullable=False, default=False, server_default=sql_text("false")
+    )
 
     created_at = Column(
         DateTime(timezone=True),

@@ -581,3 +581,53 @@ class TestSendReplyViaRest:
 
         assert response.status_code == status.HTTP_201_CREATED
         assert mock_service.call_args.kwargs["parent_message_id"] == parent_id
+
+
+class TestEditMessage:
+
+    @patch('pecha_api.chat.views.get_broadcaster')
+    @patch('pecha_api.chat.views.edit_message_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_edit_returns_edited_message_and_broadcasts(
+        self, mock_validate, mock_service, mock_get_broadcaster
+    ):
+        client = get_client()
+        mock_validate.return_value = MagicMock(id=uuid4())
+        room_id = uuid4()
+        dto = _message_dto(room_id=room_id)
+        dto.body = "Edited"
+        dto.is_edited = True
+        mock_service.return_value = dto
+        broadcaster = MagicMock()
+        broadcaster.broadcast_message_updated = MagicMock(return_value=_noop())
+        mock_get_broadcaster.return_value = broadcaster
+
+        response = client.patch(
+            f"/chat/rooms/{room_id}/messages/{dto.id}",
+            json={"body": "Edited"},
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["body"] == "Edited"
+        assert response.json()["is_edited"] is True
+        assert mock_service.call_args.kwargs["body"] == "Edited"
+        assert mock_service.call_args.kwargs["intention"] is None
+        broadcaster.broadcast_message_updated.assert_called_once()
+
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_edit_rejects_blank_body(self, mock_validate):
+        client = get_client()
+        mock_validate.return_value = MagicMock(id=uuid4())
+
+        response = client.patch(
+            f"/chat/rooms/{uuid4()}/messages/{uuid4()}",
+            json={"body": "   "},
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == 422
+
+
+async def _noop():
+    return None

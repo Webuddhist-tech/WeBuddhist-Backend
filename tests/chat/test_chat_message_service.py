@@ -13,6 +13,7 @@ from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
     delete_messages_service,
+    edit_message_service,
     list_room_messages_service,
     remove_message_reaction_service,
     report_message_service,
@@ -641,3 +642,114 @@ class TestReportMessageService:
             )
 
         assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+
+
+class TestEditMessageService:
+
+    def _patch_reads(self):
+        return [
+            patch('pecha_api.chat.message_service.list_message_reactions', return_value=[]),
+            patch('pecha_api.chat.message_service.validate_message_content'),
+            patch('pecha_api.chat.message_service._require_active_member'),
+            patch('pecha_api.chat.message_service._get_room_or_404', return_value=MagicMock()),
+            patch('pecha_api.chat.message_service.SessionLocal'),
+        ]
+
+    def _run(self, message, user, **kwargs):
+        patches = self._patch_reads()
+        mocks = [p.start() for p in patches]
+        try:
+            mocks[-1].return_value.__enter__.return_value = MagicMock()
+            with patch('pecha_api.chat.message_service.get_message_by_id', return_value=message),                  patch('pecha_api.chat.message_service.update_message') as mock_update:
+                def _apply(db, message, body, intention):
+                    message.body = body
+                    message.intention = intention
+                    message.is_edited = True
+                    return message
+                mock_update.side_effect = _apply
+                result = edit_message_service(
+                    room_id=message.room_id, message_id=message.id, user=user, **kwargs
+                )
+                return result, mock_update
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_edits_own_text_message_and_flags_it(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+
+        result, mock_update = self._run(message, user, body="  Hello there ")
+
+        mock_update.assert_called_once()
+        assert result.body == "Hello there"
+        assert result.is_edited is True
+        assert result.model_dump()["is_edited"] is True
+
+    def test_unchanged_edit_does_not_flag(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+        message.is_edited = False
+
+        result, mock_update = self._run(message, user, body="Hello")
+
+        mock_update.assert_not_called()
+        assert result.is_edited is False
+
+    def test_intention_rejected_on_text_message(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id)
+        message.message_type = "TEXT"
+
+        with pytest.raises(HTTPException) as exc_info:
+            self._run(message, user, intention="peace")
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_cannot_edit_others_message(self):
+        message = MockMessage(sender_id=uuid4())
+        message.message_type = "TEXT"
+
+        with pytest.raises(HTTPException) as exc_info:
+            self._run(message, MockUser(), body="Hijack")
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_message_not_found(self):
+        message = MockMessage()
+        patches = self._patch_reads()
+        mocks = [p.start() for p in patches]
+        try:
+            mocks[-1].return_value.__enter__.return_value = MagicMock()
+            with patch('pecha_api.chat.message_service.get_message_by_id', return_value=None):
+                with pytest.raises(HTTPException) as exc_info:
+                    edit_message_service(
+                        room_id=uuid4(), message_id=message.id, user=MockUser(), body="x"
+                    )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_requires_body_or_intention(self):
+        with pytest.raises(HTTPException) as exc_info:
+            edit_message_service(room_id=uuid4(), message_id=uuid4(), user=MockUser())
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_edits_prayer_intention(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = "peace"
+
+        with patch('pecha_api.chat.message_service.validate_message_intention_and_body', return_value="healing") as mock_validate,              patch('pecha_api.chat.message_service.get_prayer_counts_map', return_value={}),              patch('pecha_api.chat.message_service.get_prayed_message_ids', return_value=set()),              patch('pecha_api.chat.message_service.get_recent_prayers_map', return_value={}),              patch('pecha_api.chat.message_service.resolve_intention_dtos_for_slugs', return_value={}):
+            result, mock_update = self._run(message, user, intention="healing")
+
+        assert mock_validate.call_args.kwargs["body"] == "Pray for me"
+        assert mock_validate.call_args.kwargs["intention"] == "healing"
+        assert mock_update.call_args.kwargs["intention"] == "healing"
+        assert result.is_edited is True

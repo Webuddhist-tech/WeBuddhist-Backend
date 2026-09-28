@@ -107,6 +107,25 @@ class ChatBroadcaster:
             logger.exception("Failed to broadcast message to Redis: %s", e)
             raise
 
+    async def broadcast_message_updated(
+        self,
+        room_id: UUID,
+        message: ChatMessageDTO,
+    ) -> None:
+        """Publish an edited message to the room, so connected clients can
+        replace its body/intention and show it as edited."""
+        channel = room_channel(room_id)
+        payload = {
+            "type": "message_updated",
+            "message": message.model_dump(mode="json"),
+        }
+
+        try:
+            await self.redis.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.exception("Failed to broadcast message update to Redis: %s", e)
+            raise
+
     async def broadcast_reactions(
         self,
         room_id: UUID,

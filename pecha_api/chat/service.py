@@ -186,6 +186,7 @@ def build_message_dto(
         prayed_by_me=prayed_by_me,
         recent_prayers=build_prayer_user_dtos(recent_prayers),
         intention=intention,
+        is_edited=getattr(message, "is_edited", None) is True,
     )
 
 
