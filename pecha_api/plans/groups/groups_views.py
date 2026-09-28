@@ -28,6 +28,7 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
+    GroupJoinRequestNotificationListResponse,
     GroupMemberAccumulationsResponse,
     GroupPermissionDTO,
     GroupPracticesFeedResponse,
@@ -73,6 +74,7 @@ from pecha_api.plans.groups.groups_service import (
     list_followed_groups,
     list_group_bans,
     list_joined_groups,
+    list_my_join_request_notifications,
     list_group_members,
     list_group_invites,
     list_group_join_requests,
@@ -112,6 +114,10 @@ user_joined_groups_router = APIRouter(
 user_permission_router = APIRouter(
     prefix="/users/me/permission",
     tags=["User Group Permission"],
+)
+user_join_request_notifications_router = APIRouter(
+    prefix="/users/me/notifications/group-join-requests",
+    tags=["User Author Groups"],
 )
 
 
@@ -856,4 +862,23 @@ def get_my_group_permission(
     return get_group_permission(
         token=authentication_credential.credentials,
         group_id=group_id,
+    )
+
+
+@user_join_request_notifications_router.get(
+    "",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupJoinRequestNotificationListResponse,
+)
+def get_my_join_request_notifications(
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    language: Annotated[Optional[str], Query(description=_LANGUAGE_QUERY_DESCRIPTION)] = None,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    return list_my_join_request_notifications(
+        token=authentication_credential.credentials,
+        skip=skip,
+        limit=limit,
+        language=language,
     )

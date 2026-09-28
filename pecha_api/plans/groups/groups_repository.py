@@ -783,6 +783,44 @@ def list_join_requests_by_group(
     return rows, total
 
 
+def list_decided_join_requests_by_user(
+    db: Session,
+    user_id: UUID,
+    skip: int,
+    limit: int,
+) -> Tuple[List[AuthorGroupJoinRequest], int]:
+    """The user's moderator-reviewed requests, newest decision first.
+
+    Rows with no reviewer are the silent approvals made when a group goes
+    public, which are deliberately never notified."""
+    query = (
+        db.query(AuthorGroupJoinRequest)
+        .join(AuthorGroup, AuthorGroup.id == AuthorGroupJoinRequest.group_id)
+        .options(
+            selectinload(AuthorGroupJoinRequest.group).selectinload(AuthorGroup.metadata_entries)
+        )
+        .filter(
+            AuthorGroupJoinRequest.user_id == user_id,
+            AuthorGroupJoinRequest.status.in_(
+                [
+                    AuthorGroupJoinRequestStatus.APPROVED.value,
+                    AuthorGroupJoinRequestStatus.REJECTED.value,
+                ]
+            ),
+            AuthorGroupJoinRequest.reviewed_by.isnot(None),
+            AuthorGroup.deleted_at.is_(None),
+        )
+    )
+    total = query.count()
+    rows = (
+        query.order_by(AuthorGroupJoinRequest.reviewed_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return rows, total
+
+
 def get_join_request_status_map(
     db: Session,
     user_id: UUID,

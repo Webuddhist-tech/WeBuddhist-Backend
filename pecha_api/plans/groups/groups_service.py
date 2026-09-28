@@ -112,6 +112,7 @@ from pecha_api.plans.groups.groups_repository import (
     list_group_joiners_paginated,
     list_group_joiners_with_join_date_paginated,
     list_group_member_ids_by_roles,
+    list_decided_join_requests_by_user,
     list_join_requests_by_group,
     list_pending_invites_by_email,
     list_pending_join_requests_by_group,
@@ -171,6 +172,8 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupJoinedUsersListResponse,
     GroupJoinRequestDTO,
     GroupJoinRequestListResponse,
+    GroupJoinRequestNotificationDTO,
+    GroupJoinRequestNotificationListResponse,
     GroupJoinRequestUserDTO,
     GroupMantraAccumulationDTO,
     GroupMemberAccumulationDTO,
@@ -237,6 +240,9 @@ USER_BANNED_FROM_GROUP = (
 )
 NOTIFICATION_CATEGORY_GROUP_INVITE = "group_invite"
 NOTIFICATION_CATEGORY_GROUP_JOIN_REQUEST = "group_join_request"
+JOIN_REQUEST_NOTIFICATION_TITLE = "WeBuddhist"
+JOIN_REQUEST_APPROVED_MESSAGE = "{group_name} accepted your request. Tap to open the group."
+JOIN_REQUEST_REJECTED_MESSAGE = "Your request to join {group_name} was not approved."
 _PRACTICES_FETCH_LIMIT = 1000
 
 
@@ -1960,6 +1966,54 @@ def list_group_join_requests(
             limit=limit,
             total=total,
         )
+
+
+def list_my_join_request_notifications(
+    token: str,
+    skip: int,
+    limit: int,
+    language: Optional[str] = None,
+) -> GroupJoinRequestNotificationListResponse:
+    user = validate_and_extract_user_details(token=token)
+    with SessionLocal() as db:
+        rows, total = list_decided_join_requests_by_user(
+            db=db,
+            user_id=user.id,
+            skip=skip,
+            limit=limit,
+        )
+        return GroupJoinRequestNotificationListResponse(
+            notifications=[
+                _join_request_to_notification_dto(row, language=language) for row in rows
+            ],
+            skip=skip,
+            limit=limit,
+            total=total,
+        )
+
+
+def _join_request_to_notification_dto(
+    join_request: AuthorGroupJoinRequest,
+    language: Optional[str] = None,
+) -> GroupJoinRequestNotificationDTO:
+    group = join_request.group
+    group_name = _group_card_title(group, language) or "Group"
+    request_status = _to_join_request_status(join_request.status)
+    template = (
+        JOIN_REQUEST_APPROVED_MESSAGE
+        if request_status == AuthorGroupJoinRequestStatus.APPROVED
+        else JOIN_REQUEST_REJECTED_MESSAGE
+    )
+    return GroupJoinRequestNotificationDTO(
+        id=join_request.id,
+        group_id=join_request.group_id,
+        group_name=group_name,
+        group_avatar_url=_generate_group_asset_url(group.avatar_key),
+        status=request_status,
+        title=JOIN_REQUEST_NOTIFICATION_TITLE,
+        message=template.format(group_name=group_name),
+        created_at=join_request.reviewed_at,
+    )
 
 
 def approve_group_join_request(
