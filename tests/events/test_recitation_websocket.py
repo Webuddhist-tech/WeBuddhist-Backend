@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
@@ -297,6 +298,50 @@ class TestRecitationPresence:
             presence_key(event_id),
             mapping={presence_field(user_id, token): _INSTANCE_ID},
         )
+
+    @pytest.mark.asyncio
+    async def test_a_socket_closing_mid_heartbeat_is_not_resurrected(self):
+        """A close landing while the heartbeat's write is in flight must win.
+
+        An entry rewritten after its own HDEL is untracked locally but live in
+        Redis under a lease this process keeps renewing: nothing prunes it, and
+        the room counts the person who left for as long as the process runs.
+        """
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+        token = await broadcaster.mark_present(event_id, user_id)
+        field = presence_field(user_id, token)
+
+        # Stand in for the Redis hash, so the assertion is what the room would
+        # be counted from rather than which calls happened to be made.
+        roster: Dict[str, str] = {field: _INSTANCE_ID}
+        writing = asyncio.Event()
+        finish_write = asyncio.Event()
+
+        async def hset(key: str, *args: Any, mapping: Optional[Dict[str, str]] = None):
+            writing.set()
+            await finish_write.wait()
+            roster.update(mapping or {})
+
+        async def hdel(key: str, *fields: str):
+            for stale in fields:
+                roster.pop(stale, None)
+
+        broadcaster.redis.hset = hset
+        broadcaster.redis.hdel = hdel
+
+        heartbeat = asyncio.create_task(broadcaster._reassert_presence())
+        await writing.wait()
+        closing = asyncio.create_task(
+            broadcaster.mark_absent(event_id, user_id, token)
+        )
+        # Let the close get as far as it can while the write is outstanding.
+        await asyncio.sleep(0)
+        finish_write.set()
+        await asyncio.gather(heartbeat, closing)
+
+        assert roster == {}
+        assert event_id not in broadcaster._roster
 
 
 class TestRecitationPositionSnapshot:

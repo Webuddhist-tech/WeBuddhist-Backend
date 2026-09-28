@@ -204,6 +204,10 @@ class RecitationBroadcaster:
         # live socket, reasserted by the heartbeat so a lapsed lease cannot
         # retire a socket that is still sitting there.
         self._roster: Dict[UUID, Set[str]] = {}
+        # Held across a field's local removal and its Redis delete, and across
+        # the heartbeat's snapshot and rewrite of an event's fields, so the two
+        # cannot overlap. See `_reassert_presence` for what that would cost.
+        self._roster_lock = asyncio.Lock()
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
@@ -555,17 +559,18 @@ class RecitationBroadcaster:
         person's sockets, and never one a reconnect has since written.
         """
         field = presence_field(user_id, token)
-        fields = self._roster.get(event_id)
-        if fields is not None:
-            # Forgotten before the delete, so a failed delete is not undone by
-            # the heartbeat putting it straight back.
-            fields.discard(field)
-            if not fields:
-                self._roster.pop(event_id, None)
-        try:
-            await self.redis.hdel(presence_key(event_id), field)
-        except Exception as e:
-            logger.exception("Failed to clear recitation presence in Redis: %s", e)
+        async with self._roster_lock:
+            fields = self._roster.get(event_id)
+            if fields is not None:
+                # Forgotten before the delete, so a failed delete is not undone
+                # by the heartbeat putting it straight back.
+                fields.discard(field)
+                if not fields:
+                    self._roster.pop(event_id, None)
+            try:
+                await self.redis.hdel(presence_key(event_id), field)
+            except Exception as e:
+                logger.exception("Failed to clear recitation presence in Redis: %s", e)
 
     async def _reassert_presence(self) -> None:
         """Rewrite every roster entry this instance is holding sockets for.
@@ -576,19 +581,30 @@ class RecitationBroadcaster:
         does not bring them back, so the room would read low until every one of
         those people reconnected. Writing them again on each heartbeat makes
         that window one heartbeat wide instead of the rest of the session.
+
+        Reading the fields and writing them back is one step, under the roster
+        lock, because a socket closing in between is worse than one counted a
+        heartbeat late. An entry snapshotted before `mark_absent` dropped it and
+        written after its HDEL landed is gone from `_roster` but alive in Redis,
+        stamped with an instance whose lease this process keeps renewing - so no
+        later heartbeat rewrites it, no count ever prunes it, and it pads the
+        room until the process stops. The lock covers one event's write, not the
+        whole sweep, so a close waits on a single command at most.
         """
-        for event_id, fields in list(self._roster.items()):
-            if not fields:
-                continue
-            mapping = {field: _INSTANCE_ID for field in fields}
-            try:
-                await self.redis.hset(presence_key(event_id), mapping=mapping)
-            except Exception as e:
-                logger.exception(
-                    "Failed to reassert recitation presence for event %s: %s",
-                    event_id,
-                    e,
-                )
+        for event_id in list(self._roster):
+            async with self._roster_lock:
+                fields = self._roster.get(event_id)
+                if not fields:
+                    continue
+                mapping = {field: _INSTANCE_ID for field in fields}
+                try:
+                    await self.redis.hset(presence_key(event_id), mapping=mapping)
+                except Exception as e:
+                    logger.exception(
+                        "Failed to reassert recitation presence for event %s: %s",
+                        event_id,
+                        e,
+                    )
 
     async def presence_count(self, event_id: UUID) -> int:
         """People joined to this event across every live instance."""
