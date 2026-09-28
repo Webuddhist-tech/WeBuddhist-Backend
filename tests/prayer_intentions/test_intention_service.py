@@ -72,6 +72,25 @@ class TestPrayerIntentionDTOHelpers:
     @patch(
         "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intentions_by_slugs"
     )
+    def test_resolve_intention_dtos_for_slugs_maps_legacy_slug(self, mock_get):
+        db = MagicMock()
+        row = MagicMock(
+            slug="love",
+            label="Love",
+            color="#C8503D",
+            description="Relationships.",
+            display_order=3,
+        )
+        mock_get.return_value = {"love": row}
+
+        result = resolve_intention_dtos_for_slugs(db=db, slugs=["compassion"])
+
+        assert result["compassion"].slug == "love"
+        mock_get.assert_called_once_with(db=db, slugs=["love"])
+
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intentions_by_slugs"
+    )
     def test_resolve_intention_dtos_for_slugs_maps_rows(self, mock_get):
         db = MagicMock()
         row = MagicMock(
@@ -203,6 +222,23 @@ class TestValidateMessageIntentionAndBody:
         )
 
         assert slug == "healing"
+
+    @patch(
+        "pecha_api.prayer_intentions.prayer_intention_service.get_prayer_intention_by_slug"
+    )
+    def test_prayer_accepts_legacy_slug_and_stores_canonical(self, mock_get):
+        db = MagicMock()
+        mock_get.return_value = MagicMock()
+
+        slug = validate_message_intention_and_body(
+            db=db,
+            message_type=ChatMessageType.PRAYER.value,
+            body="Please pray",
+            intention="compassion",
+        )
+
+        assert slug == "love"
+        mock_get.assert_called_once_with(db=db, slug="love")
 
     def test_text_rejects_body_over_4000_chars(self):
         db = MagicMock()

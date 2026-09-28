@@ -13,6 +13,7 @@ from .prayer_intention_repository import (
     get_prayer_intentions_by_slugs,
     list_prayer_intentions,
 )
+from .intention_slugs import canonical_prayer_intention_slug
 from .prayer_intention_response_models import (
     PrayerIntentionDTO,
     PrayerIntentionsResponse,
@@ -50,8 +51,16 @@ def resolve_intention_dtos_for_slugs(
     present = [slug for slug in slugs if slug]
     if not present:
         return {}
-    rows = get_prayer_intentions_by_slugs(db=db, slugs=present)
-    return {slug: prayer_intention_to_dto(rows[slug]) for slug in present if slug in rows}
+    canonical_by_stored = {
+        slug: canonical_prayer_intention_slug(slug) for slug in present
+    }
+    unique_canonical = list(dict.fromkeys(canonical_by_stored.values()))
+    rows = get_prayer_intentions_by_slugs(db=db, slugs=unique_canonical)
+    return {
+        slug: prayer_intention_to_dto(rows[canonical_by_stored[slug]])
+        for slug in present
+        if canonical_by_stored[slug] in rows
+    }
 
 
 def validate_message_intention_and_body(
@@ -89,9 +98,10 @@ def validate_message_intention_and_body(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=PRAYER_BODY_TOO_LONG,
         )
-    if get_prayer_intention_by_slug(db=db, slug=normalized_intention) is None:
+    canonical_intention = canonical_prayer_intention_slug(normalized_intention)
+    if get_prayer_intention_by_slug(db=db, slug=canonical_intention) is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=INVALID_PRAYER_INTENTION,
         )
-    return normalized_intention
+    return canonical_intention

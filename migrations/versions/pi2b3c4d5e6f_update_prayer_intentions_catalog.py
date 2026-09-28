@@ -111,11 +111,6 @@ PREVIOUS_CATALOG_BY_ID: List[dict[str, Any]] = [
     },
 ]
 
-REVERSE_MESSAGE_INTENTION_SLUG_REMAP: List[tuple[str, str]] = [
-    (new, old) for old, new in MESSAGE_INTENTION_SLUG_REMAP
-]
-
-
 def _apply_catalog(rows: List[dict[str, Any]]) -> None:
     update_row = sa.text(
         """
@@ -125,7 +120,7 @@ def _apply_catalog(rows: List[dict[str, Any]]) -> None:
             color = :color,
             description = :description,
             display_order = :display_order
-        WHERE id = CAST(:id AS uuid)
+        WHERE id = :id
         """
     )
     connection = op.get_bind()
@@ -160,5 +155,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     if not table_exists("prayer_intentions"):
         return
-    _remap_message_intentions(REVERSE_MESSAGE_INTENTION_SLUG_REMAP)
+    # Restore catalog rows only. Do not rewrite chat_messages.intention: post-upgrade
+    # requests use new slugs (peace, abundance, love) and must not become dedication, etc.
     _apply_catalog(PREVIOUS_CATALOG_BY_ID)
