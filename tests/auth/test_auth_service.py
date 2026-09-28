@@ -30,7 +30,7 @@ from pecha_api.auth.auth_enums import RegistrationSource
 from fastapi import HTTPException
 
 
-def test_create_user_request_keeps_only_https_pictures():
+def test_create_user_request_keeps_only_https_pictures() -> None:
     kept = CreateUserRequest(
         firstname="Ada",
         lastname="Lovelace",
@@ -54,7 +54,7 @@ def test_create_user_request_keeps_only_https_pictures():
     assert untrusted.avatar_url is None
 
 
-def test_remember_social_avatar_fills_an_empty_profile():
+def test_remember_social_avatar_fills_an_empty_profile() -> None:
     from pecha_api.auth.auth_service import remember_social_avatar
 
     user = MagicMock()
@@ -75,7 +75,7 @@ def test_remember_social_avatar_fills_an_empty_profile():
     mock_update.assert_called_once()
 
 
-def test_remember_social_avatar_leaves_an_uploaded_photo():
+def test_remember_social_avatar_leaves_an_uploaded_photo() -> None:
     from pecha_api.auth.auth_service import remember_social_avatar
 
     user = MagicMock()
@@ -96,7 +96,7 @@ def test_remember_social_avatar_leaves_an_uploaded_photo():
     mock_update.assert_not_called()
 
 
-def test_remember_social_avatar_ignores_an_untrusted_host():
+def test_remember_social_avatar_ignores_an_untrusted_host() -> None:
     """A picture is kept only when an identity provider serves it."""
     from pecha_api.auth.auth_service import remember_social_avatar
 
@@ -118,7 +118,7 @@ def test_remember_social_avatar_ignores_an_untrusted_host():
     mock_update.assert_not_called()
 
 
-def test_is_trusted_social_register_caller():
+def test_is_trusted_social_register_caller() -> None:
     from pecha_api.auth.auth_service import is_trusted_social_register_caller
 
     with patch("pecha_api.auth.auth_service.get", return_value="action-secret"):
@@ -881,7 +881,7 @@ def _assert_random_tail(tail: str) -> None:
     assert marked_suffix[1:].isdigit()
 
 
-def test_generate_username_uses_both_names():
+def test_generate_username_uses_both_names() -> None:
     username = generate_username(first_name="John", last_name="Doe")
 
     assert username.startswith("john_doe_")
@@ -889,7 +889,7 @@ def test_generate_username_uses_both_names():
     _assert_random_tail(username.removeprefix("john_doe_"))
 
 
-def test_generate_username_truncates_long_names_to_column_limit():
+def test_generate_username_truncates_long_names_to_column_limit() -> None:
     username = generate_username(first_name="A" * 255, last_name="B" * 255)
 
     assert len(username) == 255
@@ -901,7 +901,7 @@ def test_generate_username_truncates_long_names_to_column_limit():
     _assert_random_tail(f"{token}_{marked_suffix}")
 
 
-def test_generate_username_keeps_names_that_fit():
+def test_generate_username_keeps_names_that_fit() -> None:
     first_name = "a" * 100
     last_name = "b" * 100
 
@@ -911,7 +911,7 @@ def test_generate_username_keeps_names_that_fit():
     assert username.startswith(f"{first_name}_{last_name}_")
 
 
-def test_generate_username_falls_back_when_names_are_missing():
+def test_generate_username_falls_back_when_names_are_missing() -> None:
     for first_name, last_name in (
         (None, None),
         ("", ""),
@@ -926,7 +926,7 @@ def test_generate_username_falls_back_when_names_are_missing():
         _assert_random_tail(username.removeprefix("webuddhist_user_"))
 
 
-def test_generate_and_validate_username_success():
+def test_generate_and_validate_username_success() -> None:
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.return_value = True
 
@@ -936,7 +936,7 @@ def test_generate_and_validate_username_success():
         assert username.startswith("john_doe_")
 
 
-def test_generate_and_validate_username_falls_back_without_both_names():
+def test_generate_and_validate_username_falls_back_without_both_names() -> None:
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.return_value = True
 
