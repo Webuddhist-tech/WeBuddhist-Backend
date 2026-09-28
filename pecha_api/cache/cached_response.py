@@ -229,6 +229,12 @@ def mark_namespace_superseded(cache_type: CacheType) -> None:
     _note_namespace_changed(cache_type)
 
 
+def queue_namespace_invalidation(cache_type: CacheType) -> None:
+    """Record that this namespace is owed a sweep (cache off, or delete failed)."""
+    _note_namespace_changed(cache_type)
+    _mark_pending(cache_type)
+
+
 async def cached_response(
     cache_type: CacheType,
     parts: Sequence[KeyPart],

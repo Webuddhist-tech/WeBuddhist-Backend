@@ -115,6 +115,13 @@ def user_scan_pattern(cache_type: CacheType, user_identity: Optional[str]) -> st
     Anonymous callers share the `anon` segment, so passing None here matches
     every anonymous entry in the namespace - correct, since they are all the
     same response.
+
+    Event detail keys may include ``r:<event_id>`` before the user segment;
+    the wider pattern still matches the legacy ``<user>:<hash>`` layout.
     """
     prefix = config.get("CACHE_PREFIX")
-    return f"{prefix}{_namespace(cache_type)}:{user_segment(user_identity)}:*"
+    segment = user_segment(user_identity)
+    namespace = _namespace(cache_type)
+    if cache_type == CacheType.EVENT_DETAIL:
+        return f"{prefix}{namespace}:*:{segment}:*"
+    return f"{prefix}{namespace}:{segment}:*"

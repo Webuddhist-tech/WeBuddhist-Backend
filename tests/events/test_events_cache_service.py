@@ -54,19 +54,25 @@ async def test_invalidate_event_detail_cache_for_event_scoped_delete():
 
 
 @pytest.mark.asyncio
-async def test_invalidate_event_detail_cache_for_event_skips_when_cache_disabled():
+async def test_invalidate_event_detail_cache_for_event_queues_when_cache_disabled():
     event_id = uuid.uuid4()
 
     with patch(
         "pecha_api.events.events_cache_service.cache_type_enabled",
         return_value=False,
     ), patch(
+        "pecha_api.events.events_cache_service.mark_namespace_superseded",
+    ) as mock_supersede, patch(
+        "pecha_api.events.events_cache_service.queue_namespace_invalidation",
+    ) as mock_queue, patch(
         "pecha_api.events.events_cache_service.delete_by_pattern",
         new_callable=AsyncMock,
     ) as mock_delete:
         deleted = await invalidate_event_detail_cache_for_event(event_id)
 
     assert deleted == 0
+    mock_supersede.assert_called_once_with(CacheType.EVENT_DETAIL)
+    mock_queue.assert_called_once_with(CacheType.EVENT_DETAIL)
     mock_delete.assert_not_awaited()
 
 
@@ -84,11 +90,14 @@ async def test_invalidate_event_detail_cache_for_event_handles_redis_error():
         new_callable=AsyncMock,
         side_effect=RuntimeError("redis down"),
     ), patch(
+        "pecha_api.events.events_cache_service.queue_namespace_invalidation",
+    ) as mock_queue, patch(
         "pecha_api.events.events_cache_service.note_cache_failure",
     ) as mock_note:
         deleted = await invalidate_event_detail_cache_for_event(event_id)
 
     assert deleted == 0
+    mock_queue.assert_called_once_with(CacheType.EVENT_DETAIL)
     mock_note.assert_called_once()
 
 

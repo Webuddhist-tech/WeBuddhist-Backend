@@ -37,6 +37,7 @@ from pecha_api.cache.cached_response import (
     invalidate_namespace,
     invalidate_user_namespaces,
     mark_namespace_superseded,
+    queue_namespace_invalidation,
 )
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_filters import EventContentFilter
@@ -223,15 +224,17 @@ async def invalidate_event_detail_caches() -> int:
 
 async def invalidate_event_detail_cache_for_event(event_id: UUID) -> int:
     """Drop cached detail entries for one event after `prayer_request_count` changes."""
+    mark_namespace_superseded(CacheType.EVENT_DETAIL)
     if not cache_type_enabled(CacheType.EVENT_DETAIL):
+        queue_namespace_invalidation(CacheType.EVENT_DETAIL)
         return 0
 
-    mark_namespace_superseded(CacheType.EVENT_DETAIL)
     try:
         deleted = await delete_by_pattern(
             resource_scan_pattern(CacheType.EVENT_DETAIL, event_id)
         )
     except Exception as cache_error:
+        queue_namespace_invalidation(CacheType.EVENT_DETAIL)
         note_cache_failure()
         logger.error(
             "Could not invalidate event detail cache for %s: %s",
