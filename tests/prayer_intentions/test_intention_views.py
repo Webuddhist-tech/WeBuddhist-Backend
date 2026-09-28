@@ -24,9 +24,12 @@ class TestGetPrayerIntentions:
         )
         mock_service.return_value = expected
 
+        async def fake_run_in_threadpool(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
         with patch(
             "pecha_api.prayer_intentions.prayer_intention_views.run_in_threadpool",
-            side_effect=lambda fn: fn(),
+            side_effect=fake_run_in_threadpool,
         ):
             result = asyncio.run(get_prayer_intentions())
 

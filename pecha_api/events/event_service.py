@@ -479,7 +479,7 @@ def _chat_room_ids_for_events(*, db, event_ids) -> dict:
     return get_room_ids_by_event_ids(db=db, event_ids=event_ids)
 
 
-def _prayer_request_count_for_event(*, db, event_id: UUID) -> int:
+def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
     """How many live prayer requests exist in the event's chat room."""
     from pecha_api.chat.repository import (
         count_prayer_requests_in_room,

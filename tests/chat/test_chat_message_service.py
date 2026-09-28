@@ -51,6 +51,7 @@ class MockMessage:
         self.deleted_at = None
         self.parent = parent
         self.parent_message_id = parent.id if parent else None
+        self.intention = None
 
 
 class MockReaction:

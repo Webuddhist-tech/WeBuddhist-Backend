@@ -268,21 +268,19 @@ def _persist_message(
     enqueue_chat_message_notification(
         message.id, message_type=message_type, room_id=room.id
     )
-    _schedule_event_prayer_count_cache_refresh(
-        db=db, room=room, message_type=message_type
-    )
+    _schedule_event_prayer_count_cache_refresh(room=room, message_type=message_type)
     return dto
 
 
 def _schedule_event_prayer_count_cache_refresh(
-    db: Session, room: ChatRoom, message_type: str
+    room: ChatRoom, message_type: str
 ) -> None:
     """Event detail caches `prayer_request_count`; refresh when PRAYER rows change."""
     if message_type != ChatMessageType.PRAYER.value:
         return
     if room.event_id is None:
         return
-    schedule_invalidate_event_detail_caches()
+    schedule_invalidate_event_detail_caches(room.event_id)
 
 
 def _prayer_message_ids(messages: Sequence[ChatMessage]) -> List[UUID]:
@@ -371,7 +369,7 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
         deleted_at = soft_delete_message(db=db, message=message)
         if room is not None:
             _schedule_event_prayer_count_cache_refresh(
-                db=db, room=room, message_type=message_type
+                room=room, message_type=message_type
             )
         return deleted_at.isoformat()
 
@@ -419,7 +417,6 @@ def delete_messages_service(
         deleted_at = soft_delete_messages(db=db, messages=ordered)
         if room is not None and affects_prayer_count:
             _schedule_event_prayer_count_cache_refresh(
-                db=db,
                 room=room,
                 message_type=ChatMessageType.PRAYER.value,
             )
