@@ -9,6 +9,18 @@ class Constants:
     MONTH_IN_SECONDS = 2592000
     YEAR_IN_SECONDS = 31536000
 
+    # Image hosts an avatar may point at without living in our bucket. These
+    # are the identity providers' own CDNs, where Auth0's `picture` claim
+    # points; a match is on the host itself or a subdomain of it.
+    SOCIAL_PICTURE_HOSTS = (
+        "googleusercontent.com",
+        "gravatar.com",
+        "auth0.com",
+        "fbcdn.net",
+        "graph.facebook.com",
+        "cdn-apple.com",
+    )
+
 
     LANGUAGE_NUMBER = {
         "bo": {

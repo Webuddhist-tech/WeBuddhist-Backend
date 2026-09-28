@@ -1,16 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from ..db import database
 from starlette import status
 from .auth_service import authenticate_and_generate_tokens, refresh_access_token, register_user_with_source, \
     request_reset_password, update_password, create_user, exchange_phone_token, link_phone_identity, \
-    remember_social_avatar
+    remember_social_avatar, is_trusted_social_register_caller
 from .auth_models import CreateUserRequest, UserLoginRequest, RefreshTokenRequest, PasswordResetRequest, \
     ResetPasswordRequest, UserLoginResponse, RefreshTokenResponse, CreateSocialUserRequest, \
     PhoneExchangeRequest, PhoneExchangeResponse, PhoneLinkRequest, PhoneLinkResponse
 from .auth_enums import RegistrationSource
-from typing import Annotated
+from typing import Annotated, Optional
 
 oauth2_scheme = HTTPBearer()
 auth_router = APIRouter(
@@ -36,7 +36,10 @@ def register_user(create_user_request: CreateUserRequest) -> UserLoginResponse:
     )
 
 @auth_router.post("/social_register", status_code=status.HTTP_201_CREATED)
-def register_user(create_social_user_request: CreateSocialUserRequest):
+def register_user(
+    create_social_user_request: CreateSocialUserRequest,
+    x_social_register_token: Annotated[Optional[str], Header(alias="X-Social-Register-Token")] = None,
+):
     registration_source = RegistrationSource.EMAIL
     if create_social_user_request.platform:
         registration_source =  create_social_user_request.platform
@@ -50,7 +53,14 @@ def register_user(create_social_user_request: CreateSocialUserRequest):
         # user already exists, and that 409 is how the action knows to stop.
         # The picture still has to land, or an account created before this
         # field existed never shows the Auth0 photo.
-        if exc.status_code == status.HTTP_409_CONFLICT:
+        #
+        # Writing to an account the caller has not proved anything about is
+        # the dangerous half of that: the route is public, so without the
+        # shared secret anyone knowing an email could post it back with a
+        # picture of their choosing and have it replace that user's avatar.
+        if exc.status_code == status.HTTP_409_CONFLICT and is_trusted_social_register_caller(
+            x_social_register_token
+        ):
             remember_social_avatar(create_social_user_request.create_user_request)
         raise
 

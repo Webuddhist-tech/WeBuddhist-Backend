@@ -435,6 +435,25 @@ def test_stored_avatar_reference_reduces_a_presigned_link_to_its_key():
     assert Utils.stored_avatar_reference(presigned) == "images/profile_images/user_id.jpg"
 
 
+def test_stored_avatar_reference_drops_an_untrusted_external_picture():
+    """Avatars are served to other users, so they may not point anywhere."""
+    assert Utils.stored_avatar_reference("https://attacker.example.com/track.png") == ""
+    assert Utils.stored_avatar_reference("http://attacker.example.com/track.png") == ""
+
+
+def test_stored_avatar_reference_rejects_a_lookalike_host():
+    assert Utils.stored_avatar_reference("https://googleusercontent.com.evil.test/x") == ""
+    assert Utils.stored_avatar_reference("https://lh3.googleusercontent.com@evil.test/x") == ""
+
+
+def test_is_social_picture_url():
+    assert Utils.is_social_picture_url("https://lh3.googleusercontent.com/a/photo") is True
+    assert Utils.is_social_picture_url("https://s.gravatar.com/avatar/abc") is True
+    assert Utils.is_social_picture_url("https://attacker.example.com/track.png") is False
+    assert Utils.is_social_picture_url("images/profile_images/user.webp") is False
+    assert Utils.is_social_picture_url(None) is False
+
+
 def test_extract_s3_key_valid_url():
     presigned_url = "https://example-bucket.s3.amazonaws.com/images/profile_images/user_id.jpg"
     assert Utils.extract_s3_key(presigned_url) == "images/profile_images/user_id.jpg"

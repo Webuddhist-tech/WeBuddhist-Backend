@@ -108,21 +108,60 @@ class Utils:
         return s3_key
 
     @staticmethod
+    def _url_host(value: str) -> str:
+        """The bare hostname, without credentials or port.
+
+        `urlparse` leaves both in `netloc`, and both are attacker-chosen:
+        "https://s3.amazonaws.com@example.com/x" is served by example.com.
+        """
+        netloc = urlparse(value).netloc.lower()
+        return netloc.rpartition("@")[2].partition(":")[0]
+
+    @staticmethod
+    def is_social_picture_url(value: Optional[str]) -> bool:
+        """Whether an https address may be stored verbatim as an avatar.
+
+        Only the identity providers' own image hosts qualify, because that is
+        where Auth0's `picture` claim points. Any other address is a third
+        party of the submitter's choosing, and storing it would have every
+        viewer's browser fetch the avatar from a server outside ours - handing
+        whoever runs it the viewers' addresses, and control over what they see.
+        """
+        if not value or not str(value).strip():
+            return False
+        reference = str(value).strip()
+        if not reference.startswith("https://"):
+            return False
+        host = Utils._url_host(reference)
+        return any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in Constants.SOCIAL_PICTURE_HOSTS
+        )
+
+    @staticmethod
     def stored_avatar_reference(value: Optional[str]) -> str:
         """What to keep in users.avatar_url.
 
-        An https address that is not one of our S3 links is the image itself
-        (Auth0's profile photo). A normal path, or a presigned link to our
-        bucket, is the object's key in S3.
+        A normal path, or a presigned link to our bucket, is the object's key
+        in S3. An https address on an identity provider's image host is the
+        image itself (Auth0's profile photo) and is kept as given. Anything
+        else external is dropped: this value comes straight from whoever is
+        editing the profile, and it is served back to everyone who views it.
         """
         if not value or not str(value).strip():
             return ""
         reference = str(value).strip()
         if reference.startswith("https://") or reference.startswith("http://"):
-            host = urlparse(reference).netloc.lower()
+            host = Utils._url_host(reference)
             bucket = (get("AWS_BUCKET_NAME") or "").strip().lower()
-            is_s3_link = "amazonaws.com" in host or (bucket and bucket in host)
+            is_s3_link = (
+                host == "amazonaws.com"
+                or host.endswith(".amazonaws.com")
+                or (bucket and bucket in host)
+            )
             if is_s3_link:
                 return Utils.extract_s3_key(reference)
-            return reference
+            if Utils.is_social_picture_url(reference):
+                return reference
+            return ""
         return reference.lstrip("/")
