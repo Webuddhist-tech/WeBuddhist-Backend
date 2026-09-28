@@ -43,8 +43,15 @@ def test_create_user_request_keeps_only_https_pictures():
         email="ada@example.com",
         avatar_url="images/profile_images/ada.webp",
     )
+    untrusted = CreateUserRequest(
+        firstname="Ada",
+        lastname="Lovelace",
+        email="ada@example.com",
+        avatar_url="https://attacker.example.com/track.png",
+    )
     assert kept.avatar_url == "https://lh3.googleusercontent.com/a/photo"
     assert dropped.avatar_url is None
+    assert untrusted.avatar_url is None
 
 
 def test_remember_social_avatar_fills_an_empty_profile():
