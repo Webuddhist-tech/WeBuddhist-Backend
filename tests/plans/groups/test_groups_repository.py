@@ -674,3 +674,45 @@ def test_upsert_group_follow_skips_the_chat_room_for_an_existing_follower(mock_r
     upsert_group_follow(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
 
     mock_rejoin.assert_not_called()
+
+
+def test_list_decided_join_requests_by_user_returns_rows_and_total():
+    from pecha_api.plans.groups.groups_repository import list_decided_join_requests_by_user
+
+    db = _make_session_mock()
+    row = MagicMock()
+    query = db.query.return_value.join.return_value.options.return_value.filter.return_value
+    query.count.return_value = 1
+    query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = [row]
+
+    rows, total = list_decided_join_requests_by_user(
+        db=db, user_id=uuid.uuid4(), skip=5, limit=10
+    )
+
+    assert rows == [row]
+    assert total == 1
+    query.order_by.return_value.offset.assert_called_once_with(5)
+    query.order_by.return_value.offset.return_value.limit.assert_called_once_with(10)
+
+
+def test_list_decided_join_requests_by_user_filters_decided_reviewed_live_groups():
+    from pecha_api.plans.groups.groups_repository import list_decided_join_requests_by_user
+
+    db = _make_session_mock()
+    query = db.query.return_value.join.return_value.options.return_value.filter.return_value
+    query.count.return_value = 0
+    query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = []
+
+    list_decided_join_requests_by_user(db=db, user_id=uuid.uuid4(), skip=0, limit=20)
+
+    filter_sql = " ".join(
+        str(clause)
+        for clause in db.query.return_value.join.return_value.options.return_value.filter.call_args.args
+    )
+    assert "author_group_join_requests.user_id" in filter_sql
+    assert "author_group_join_requests.status IN" in filter_sql
+    assert "author_group_join_requests.reviewed_by IS NOT NULL" in filter_sql
+    assert "author_groups.deleted_at IS NULL" in filter_sql
+    assert "author_groups.status =" in filter_sql
+    order_sql = str(query.order_by.call_args.args[0])
+    assert order_sql == "author_group_join_requests.reviewed_at DESC"

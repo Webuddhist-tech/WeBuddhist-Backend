@@ -6318,3 +6318,113 @@ def test_get_group_member_accumulations_hides_unpublished_group():
             get_group_member_accumulations(group_id=group.id, accumulation_id=uuid4())
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+from pecha_api.plans.groups.groups_service import list_my_join_request_notifications
+
+
+def _make_decided_join_request(group, request_status, reviewed_at=None):
+    join_request = _make_join_request(group_id=group.id, request_status=request_status)
+    join_request.group = group
+    join_request.reviewed_by = uuid4()
+    join_request.reviewed_at = reviewed_at or datetime.now(timezone.utc)
+    return join_request
+
+
+def _metadata_entry(title, language):
+    entry = MagicMock()
+    entry.title = title
+    entry.language = language
+    return entry
+
+
+def _list_notifications(rows, total=None, language=None, user=None):
+    user = user or MagicMock(id=uuid4())
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_decided_join_requests_by_user",
+        return_value=(rows, len(rows) if total is None else total),
+    ) as mock_repo, patch(
+        "pecha_api.plans.groups.groups_service.generate_presigned_access_url",
+        return_value="https://signed/avatar.jpg",
+    ):
+        mock_db = _session_local_context(mock_session)
+        result = list_my_join_request_notifications(
+            token="t", skip=0, limit=20, language=language
+        )
+    mock_repo.assert_called_once_with(db=mock_db, user_id=user.id, skip=0, limit=20)
+    return result
+
+
+def test_list_my_join_request_notifications_approved_message():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [_metadata_entry("Vajra foundation", LanguageCode.EN)]
+    group.avatar_key = "images/avatar.jpg"
+    reviewed_at = datetime(2026, 9, 28, 9, 36, tzinfo=timezone.utc)
+    join_request = _make_decided_join_request(
+        group, AuthorGroupJoinRequestStatus.APPROVED, reviewed_at=reviewed_at
+    )
+
+    result = _list_notifications([join_request])
+
+    assert result.total == 1
+    item = result.notifications[0]
+    assert item.id == join_request.id
+    assert item.group_id == group.id
+    assert item.group_name == "Vajra foundation"
+    assert item.group_avatar_url == "https://signed/avatar.jpg"
+    assert item.status == AuthorGroupJoinRequestStatus.APPROVED
+    assert item.title == "WeBuddhist"
+    assert item.message == "Vajra foundation accepted your request. Tap to open the group."
+    assert item.created_at == reviewed_at
+
+
+def test_list_my_join_request_notifications_rejected_message():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [_metadata_entry("Vajra foundation", LanguageCode.EN)]
+    join_request = _make_decided_join_request(group, AuthorGroupJoinRequestStatus.REJECTED)
+
+    result = _list_notifications([join_request])
+
+    item = result.notifications[0]
+    assert item.status == AuthorGroupJoinRequestStatus.REJECTED
+    assert item.message == "Your request to join Vajra foundation was not approved."
+    assert item.group_avatar_url is None
+
+
+def test_list_my_join_request_notifications_uses_requested_language():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [
+        _metadata_entry("Vajra foundation", LanguageCode.EN),
+        _metadata_entry("རྡོ་རྗེ།", LanguageCode.BO),
+    ]
+    join_request = _make_decided_join_request(group, AuthorGroupJoinRequestStatus.APPROVED)
+
+    result = _list_notifications([join_request], language="bo")
+
+    assert result.notifications[0].group_name == "རྡོ་རྗེ།"
+
+
+def test_list_my_join_request_notifications_empty():
+    result = _list_notifications([], total=0)
+
+    assert result.notifications == []
+    assert result.total == 0
+    assert result.skip == 0
+    assert result.limit == 20
+
+
+def test_list_my_join_request_notifications_rejects_invalid_token():
+    with patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        side_effect=HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid"),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_decided_join_requests_by_user",
+    ) as mock_repo:
+        with pytest.raises(HTTPException) as exc:
+            list_my_join_request_notifications(token="bad", skip=0, limit=20)
+
+    assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+    mock_repo.assert_not_called()
