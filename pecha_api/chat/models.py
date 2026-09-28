@@ -146,7 +146,7 @@ class ChatMessage(Base):
         default="TEXT",
         server_default="TEXT",
     )
-    # Prayer-request intention slug (healing, compassion, …). Null for TEXT messages.
+    # Prayer-request intention slug (peace, healing, …). Null for TEXT messages.
     intention = Column(String(32), nullable=True)
 
     created_at = Column(

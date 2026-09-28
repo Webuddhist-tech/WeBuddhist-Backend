@@ -54,8 +54,8 @@ label, hex color, description, display order). The mobile app uses this for the
 cards in the prayer-requests list.
 
 Seed data lives in
-`pecha_api/prayer_intentions/intentions_seed.json` (`healing`, `protection`,
-`compassion`, `gratitude`, `dedication`).
+`pecha_api/prayer_intentions/intentions_seed.json` (`peace`, `healing`,
+`abundance`, `love`, `protection`).
 
 ---
 
@@ -189,7 +189,7 @@ To post a prayer request over the socket, add `message_type`:
   "type": "message",
   "body": "Please pray for…",
   "message_type": "PRAYER",
-  "intention": "compassion"
+  "intention": "love"
 }
 ```
 
