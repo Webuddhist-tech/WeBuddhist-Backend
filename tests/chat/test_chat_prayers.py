@@ -19,6 +19,7 @@ from pecha_api.chat.message_service import (
 )
 from pecha_api.chat.response_models import PrayForMessagesRequest
 from pecha_api.chat.service import build_message_dto
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 
 MODULE = "pecha_api.chat.message_service"
 
@@ -44,6 +45,7 @@ class MockMessage:
         self.deleted_at = None
         self.parent = None
         self.parent_message_id = None
+        self.intention = None
 
 
 class MockPrayer:
@@ -424,6 +426,7 @@ class TestPrayerFieldsOnMessageDTO:
         assert "prayer_count" not in payload
         assert "prayed_by_me" not in payload
         assert "recent_prayers" not in payload
+        assert "intention" not in payload
 
     def test_prayer_fields_present_for_a_prayer_request(self):
         praying_user = MockUser(email="bob@example.com", firstname="Bob")
@@ -440,6 +443,24 @@ class TestPrayerFieldsOnMessageDTO:
         assert payload["prayer_count"] == 12
         assert payload["prayed_by_me"] is True
         assert payload["recent_prayers"][0]["user_id"] == praying_user.id
+
+    def test_intention_present_for_a_prayer_request(self):
+        intention = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness and recovery.",
+            display_order=0,
+        )
+
+        dto = build_message_dto(
+            MockMessage(message_type="PRAYER"),
+            intention=intention,
+        )
+        payload = dto.model_dump()
+
+        assert payload["intention"]["slug"] == "healing"
+        assert payload["intention"]["color"] == "#4A78C2"
 
     def test_enum_valued_message_type_serializes_as_a_string(self):
         message = MockMessage(message_type=ChatMessageType.PRAYER)

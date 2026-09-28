@@ -33,6 +33,7 @@ from pecha_api.mantra.mantra_model import Mantra
 from pecha_api.timers.timer_model import Timer
 from pecha_api.timers.timer_history_model import TimerHistory
 from pecha_api.ambient_sounds.ambient_sound_model import AmbientSound
+from pecha_api.prayer_intentions.prayer_intention_model import PrayerIntention
 from pecha_api.accumulator.accumulator_models import Accumulator
 from pecha_api.accumulator.accumulator_metadata_model import AccumulatorMetadata
 from pecha_api.accumulator.mala_image_model import MalaImage

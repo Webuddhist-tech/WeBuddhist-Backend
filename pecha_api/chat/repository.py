@@ -355,6 +355,20 @@ def get_room_messages(
     return messages, total
 
 
+def count_prayer_requests_in_room(db: Session, room_id: UUID) -> int:
+    """Live prayer-request messages in a room (non-deleted PRAYER rows)."""
+    return (
+        db.query(func.count(ChatMessage.id))
+        .filter(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+        )
+        .scalar()
+        or 0
+    )
+
+
 def get_message_by_id(db: Session, message_id: UUID, room_id: UUID) -> Optional[ChatMessage]:
     return (
         db.query(ChatMessage)

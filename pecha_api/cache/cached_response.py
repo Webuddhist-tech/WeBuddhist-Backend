@@ -25,6 +25,7 @@ from typing import (
     Type,
     TypeVar,
 )
+from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -223,6 +224,17 @@ def _read_is_blocked(cache_type: CacheType, user_identity: Optional[str]) -> boo
     return _user_debt_key(cache_type, user_identity) in _pending_user_invalidations
 
 
+def mark_namespace_superseded(cache_type: CacheType) -> None:
+    """Mark in-flight loads stale before a targeted eviction (e.g. one event)."""
+    _note_namespace_changed(cache_type)
+
+
+def queue_namespace_invalidation(cache_type: CacheType) -> None:
+    """Record that this namespace is owed a sweep (cache off, or delete failed)."""
+    _note_namespace_changed(cache_type)
+    _mark_pending(cache_type)
+
+
 async def cached_response(
     cache_type: CacheType,
     parts: Sequence[KeyPart],
@@ -230,6 +242,7 @@ async def cached_response(
     loader: Callable[[], ModelT],
     timeout: int,
     user_identity: Optional[str] = None,
+    resource_id: Optional[UUID] = None,
 ) -> ModelT:
     """Return the cached response for these inputs, or build and store it.
 
@@ -253,7 +266,10 @@ async def cached_response(
         return await run_in_threadpool(loader)
 
     hash_key = build_cache_key(
-        cache_type=cache_type, parts=parts, user_identity=user_identity
+        cache_type=cache_type,
+        parts=parts,
+        user_identity=user_identity,
+        resource_id=resource_id,
     )
 
     await _drain_pending_invalidations()

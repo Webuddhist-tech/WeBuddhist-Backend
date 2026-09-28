@@ -60,6 +60,7 @@ def build_cache_key(
     cache_type: CacheType,
     parts: Sequence[KeyPart] = (),
     user_identity: Optional[str] = None,
+    resource_id: Optional[UUID] = None,
 ) -> str:
     """Namespaced key for a cached response.
 
@@ -71,10 +72,12 @@ def build_cache_key(
     payload = [SCHEMA_VERSION, _namespace(cache_type)]
     payload.extend("~" if part is None else str(part) for part in parts)
     payload.append(f"user:{user_identity}" if user_identity is not None else "user:anon")
-    return (
-        f"{_namespace(cache_type)}:{user_segment(user_identity)}:"
-        f"{Utils.generate_hash_key(payload=payload)}"
-    )
+    hash_suffix = Utils.generate_hash_key(payload=payload)
+    user_seg = user_segment(user_identity)
+    namespace = _namespace(cache_type)
+    if resource_id is not None:
+        return f"{namespace}:r:{resource_id}:{user_seg}:{hash_suffix}"
+    return f"{namespace}:{user_seg}:{hash_suffix}"
 
 
 def user_segment(user_identity: Optional[str]) -> str:
@@ -100,12 +103,25 @@ def namespace_scan_pattern(cache_type: CacheType) -> str:
     return f"{prefix}{_namespace(cache_type)}:*"
 
 
+def resource_scan_pattern(cache_type: CacheType, resource_id: UUID) -> str:
+    """Pattern matching cached entries for one resource (e.g. one event detail)."""
+    prefix = config.get("CACHE_PREFIX")
+    return f"{prefix}{_namespace(cache_type)}:r:{resource_id}:*"
+
+
 def user_scan_pattern(cache_type: CacheType, user_identity: Optional[str]) -> str:
     """Pattern matching one user's keys in a namespace.
 
     Anonymous callers share the `anon` segment, so passing None here matches
     every anonymous entry in the namespace - correct, since they are all the
     same response.
+
+    Event detail keys may include ``r:<event_id>`` before the user segment;
+    the wider pattern still matches the legacy ``<user>:<hash>`` layout.
     """
     prefix = config.get("CACHE_PREFIX")
-    return f"{prefix}{_namespace(cache_type)}:{user_segment(user_identity)}:*"
+    segment = user_segment(user_identity)
+    namespace = _namespace(cache_type)
+    if cache_type == CacheType.EVENT_DETAIL:
+        return f"{prefix}{namespace}:*:{segment}:*"
+    return f"{prefix}{namespace}:{segment}:*"

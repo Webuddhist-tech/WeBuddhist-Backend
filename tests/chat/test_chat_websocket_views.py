@@ -326,6 +326,7 @@ class TestWebSocketChatMessages:
             body="Hello",
             parent_message_id=None,
             message_type="TEXT",
+            intention=None,
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -348,6 +349,7 @@ class TestWebSocketChatMessages:
             body="Hey",
             parent_message_id=None,
             message_type="TEXT",
+            intention=None,
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -569,6 +571,7 @@ class TestWebSocketEventRoomsAndPrayers:
             body="Tashi delek",
             parent_message_id=None,
             message_type="TEXT",
+            intention=None,
         )
         broadcaster.broadcast_message.assert_awaited_once_with(room.id, dto)
 
@@ -587,11 +590,13 @@ class TestWebSocketEventRoomsAndPrayers:
                         "type": "message",
                         "body": "Please pray for my mother",
                         "message_type": "PRAYER",
+                        "intention": "healing",
                     }
                 )
                 _sync(websocket)
 
         assert mock_send_group.call_args.kwargs["message_type"] == "PRAYER"
+        assert mock_send_group.call_args.kwargs["intention"] == "healing"
 
     def test_message_type_is_normalised_to_upper_case(self):
         group_id = uuid4()

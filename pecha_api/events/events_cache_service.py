@@ -15,6 +15,9 @@ throw away the cache everyone else is reading. Participant counts catch up
 when the timeout expires.
 """
 
+import asyncio
+import logging
+import threading
 from datetime import datetime
 from functools import partial
 from typing import List, Optional
@@ -26,7 +29,16 @@ from starlette.concurrency import run_in_threadpool
 from pecha_api import config
 from pecha_api.cache.cache_enums import CacheType
 from pecha_api.cache.cache_identity import cache_identity_from_token
-from pecha_api.cache.cached_response import cached_response, invalidate_user_namespaces
+from pecha_api.cache.cache_admin_service import delete_by_pattern
+from pecha_api.cache.cache_keys import resource_scan_pattern
+from pecha_api.cache.cache_repository import cache_type_enabled, note_cache_failure
+from pecha_api.cache.cached_response import (
+    cached_response,
+    invalidate_namespace,
+    invalidate_user_namespaces,
+    mark_namespace_superseded,
+    queue_namespace_invalidation,
+)
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_filters import EventContentFilter
 from pecha_api.events.event_response_models import EventDTO, EventsResponse
@@ -45,6 +57,8 @@ EVENT_CACHE_TYPES = (
     CacheType.EVENT_DETAIL,
     CacheType.EVENT_FEATURED,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _FeaturedEvents(BaseModel):
@@ -171,6 +185,7 @@ async def get_event_by_id_service_cached(
         ),
         timeout=_timeout(),
         user_identity=await cache_identity_from_token(token),
+        resource_id=event_id,
     )
 
 
@@ -200,6 +215,55 @@ async def invalidate_user_event_caches(token: Optional[str]) -> int:
     return await invalidate_user_namespaces(
         EVENT_CACHE_TYPES, await cache_identity_from_token(token)
     )
+
+
+async def invalidate_event_detail_caches() -> int:
+    """Drop every cached event-detail response."""
+    return await invalidate_namespace(CacheType.EVENT_DETAIL)
+
+
+async def invalidate_event_detail_cache_for_event(event_id: UUID) -> int:
+    """Drop cached detail entries for one event after `prayer_request_count` changes."""
+    mark_namespace_superseded(CacheType.EVENT_DETAIL)
+    if not cache_type_enabled(CacheType.EVENT_DETAIL):
+        queue_namespace_invalidation(CacheType.EVENT_DETAIL)
+        return 0
+
+    try:
+        deleted = await delete_by_pattern(
+            resource_scan_pattern(CacheType.EVENT_DETAIL, event_id)
+        )
+    except Exception as cache_error:
+        queue_namespace_invalidation(CacheType.EVENT_DETAIL)
+        note_cache_failure()
+        logger.error(
+            "Could not invalidate event detail cache for %s: %s",
+            event_id,
+            cache_error,
+            exc_info=True,
+        )
+        return 0
+
+    if deleted:
+        logger.info(
+            "Invalidated %d event_detail cache entries after prayer change on event %s",
+            deleted,
+            event_id,
+        )
+    return deleted
+
+
+def schedule_invalidate_event_detail_caches(event_id: UUID) -> None:
+    """Refresh one event's detail cache from sync chat writes without blocking."""
+
+    async def _run() -> None:
+        await invalidate_event_detail_cache_for_event(event_id)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run())
+    except RuntimeError:
+        threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
 
 
 async def get_events_today_service_cached(

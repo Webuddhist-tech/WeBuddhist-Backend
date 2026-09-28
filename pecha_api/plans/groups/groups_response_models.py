@@ -290,6 +290,24 @@ class GroupJoinRequestListResponse(BaseModel):
     total: int
 
 
+class GroupJoinRequestNotificationDTO(BaseModel):
+    id: UUID
+    group_id: UUID
+    group_name: str
+    group_avatar_url: Optional[str] = None
+    status: AuthorGroupJoinRequestStatus
+    title: str
+    message: str
+    created_at: datetime
+
+
+class GroupJoinRequestNotificationListResponse(BaseModel):
+    notifications: List[GroupJoinRequestNotificationDTO]
+    skip: int
+    limit: int
+    total: int
+
+
 class UpdateGroupMemberRoleRequest(BaseModel):
     role: AuthorGroupMemberRole
 
