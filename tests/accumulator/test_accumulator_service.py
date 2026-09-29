@@ -1661,8 +1661,8 @@ class TestGetAccumulatorGroupsService:
         group_acc_2.created_at = datetime.utcnow()
         group_acc_2.image_key = None
 
-        item_1 = GroupAccumulatorWithUserCount(group_acc_1, 1234, is_joined=True)
-        item_2 = GroupAccumulatorWithUserCount(group_acc_2, 567, is_joined=False)
+        item_1 = GroupAccumulatorWithUserCount(group_acc_1, 1234, is_joined=True, group_total_count=54321)
+        item_2 = GroupAccumulatorWithUserCount(group_acc_2, 567, is_joined=False, group_total_count=567)
 
         mock_get_groups.return_value = ([item_1, item_2], 2)
 
@@ -1684,6 +1684,7 @@ class TestGetAccumulatorGroupsService:
         assert result.groups[0].title == "Group Practice 1"
         assert result.groups[0].target_count == 100000
         assert result.groups[0].user_total_count == 1234
+        assert result.groups[0].group_total_count == 54321
         assert result.groups[0].is_joined is True
         assert result.groups[0].image is None
 
@@ -1692,6 +1693,7 @@ class TestGetAccumulatorGroupsService:
         assert result.groups[1].title == "Group Practice 2"
         assert result.groups[1].target_count == 50000
         assert result.groups[1].user_total_count == 567
+        assert result.groups[1].group_total_count == 567
         assert result.groups[1].is_joined is False
         assert result.groups[1].image is None
 

@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import case, func
 from typing import List, Tuple, Optional, Dict
 from uuid import UUID
 import _datetime
@@ -345,16 +345,18 @@ def get_user_accumulator_history(
 
 
 class GroupAccumulatorWithUserCount:
-    """Data class for group accumulator with user's total count."""
+    """Data class for group accumulator with user's and group's total count."""
     def __init__(
         self,
         group_accumulator: GroupAccumulator,
         user_total_count: int,
         is_joined: bool = False,
-    ):
+        group_total_count: int = 0,
+    ) -> None:
         self.group_accumulator = group_accumulator
         self.user_total_count = user_total_count
         self.is_joined = is_joined
+        self.group_total_count = group_total_count
 
 
 def get_groups_by_accumulator_id(
@@ -395,21 +397,22 @@ def get_groups_by_accumulator_id(
     
     group_accumulator_ids = [ga.id for ga in group_accumulators]
     
-    # Get user's total count for each group accumulator
-    user_counts_query = (
+    # Get the user's total and the group's total (all members) for each group accumulator in one query
+    counts_query = (
         db.query(
             GroupAccumulatorHistory.group_accumulator_id,
-            func.sum(GroupAccumulatorHistory.count).label('total_count')
+            func.sum(
+                case((GroupAccumulatorHistory.user_id == user_id, GroupAccumulatorHistory.count), else_=0)
+            ).label('user_total_count'),
+            func.sum(GroupAccumulatorHistory.count).label('group_total_count'),
         )
-        .filter(
-            GroupAccumulatorHistory.group_accumulator_id.in_(group_accumulator_ids),
-            GroupAccumulatorHistory.user_id == user_id
-        )
+        .filter(GroupAccumulatorHistory.group_accumulator_id.in_(group_accumulator_ids))
         .group_by(GroupAccumulatorHistory.group_accumulator_id)
         .all()
     )
-    
-    user_counts_map = {row.group_accumulator_id: int(row.total_count or 0) for row in user_counts_query}
+
+    user_counts_map = {row.group_accumulator_id: int(row.user_total_count or 0) for row in counts_query}
+    group_counts_map = {row.group_accumulator_id: int(row.group_total_count or 0) for row in counts_query}
 
     from pecha_api.group_accumulator.group_accumulator_repository import (
         get_joined_group_accumulator_ids_by_user,
@@ -428,6 +431,7 @@ def get_groups_by_accumulator_id(
             group_accumulator=ga,
             user_total_count=user_counts_map.get(ga.id, 0),
             is_joined=ga.id in joined_ids,
+            group_total_count=group_counts_map.get(ga.id, 0),
         )
         for ga in group_accumulators
     ]

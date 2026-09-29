@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated, Optional
 from uuid import UUID
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.plans.language_constants import language_query_description
 from .accumulator_service import (
@@ -159,8 +160,9 @@ async def get_accumulator_groups(
         description="When true, return only group accumulators the authenticated user has joined",
     ),
 ):
-    """Get groups using this accumulator with the authenticated user's total count for each group."""
-    return get_accumulator_groups_service(
+    """Get groups using this accumulator with the authenticated user's and the group's total count for each group."""
+    return await run_in_threadpool(
+        get_accumulator_groups_service,
         token=credentials.credentials,
         accumulator_id=accumulator_id,
         skip=skip,

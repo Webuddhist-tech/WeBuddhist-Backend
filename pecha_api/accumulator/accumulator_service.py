@@ -637,6 +637,7 @@ def get_accumulator_groups_service(
                     image=get_image_url(item.group_accumulator.image_key),
                     target_count=item.group_accumulator.target_count,
                     user_total_count=item.user_total_count,
+                    group_total_count=item.group_total_count,
                     is_joined=item.is_joined,
                     start_date=item.group_accumulator.start_date,
                     end_date=item.group_accumulator.end_date,
