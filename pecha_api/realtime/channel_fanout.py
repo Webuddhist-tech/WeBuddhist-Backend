@@ -46,6 +46,7 @@ class Subscriber:
         self._drop_oldest = drop_oldest
         self._lagged = False
         self._ended = False
+        self._dropped = 0
 
     async def get(self) -> Optional[str]:
         """Next payload, or None once the channel has stopped.
@@ -62,6 +63,20 @@ class Subscriber:
         if item is _END:
             return None
         return item
+
+    def take_dropped(self) -> int:
+        """Frames evicted from this subscriber's queue since the last call.
+
+        Only ever non-zero on a drop-oldest channel, where falling behind is
+        survivable but not free: the newest frame is always kept, so a value
+        that is only ever overwritten needs nothing, while one interleaved with
+        another kind of frame can be evicted by it and never come back. A
+        consumer that mixes the two reads this and resyncs whatever it cannot
+        reconstruct from the frames it did receive.
+        """
+        dropped = self._dropped
+        self._dropped = 0
+        return dropped
 
     def _deliver(self, payload: str) -> None:
         if self._lagged:
@@ -83,12 +98,13 @@ class Subscriber:
             # the newest frame, so make room for it rather than stall.
             try:
                 self._queue.get_nowait()
+                self._dropped += 1
             except asyncio.QueueEmpty:
                 pass
             try:
                 self._queue.put_nowait(payload)
             except asyncio.QueueFull:
-                pass
+                self._dropped += 1
             return
 
         # Ordered channels cannot silently skip: flag it and let the caller

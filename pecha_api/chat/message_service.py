@@ -49,6 +49,7 @@ from pecha_api.chat.repository import (
     soft_delete_message,
     soft_delete_messages,
     touch_room,
+    update_message,
 )
 from pecha_api.chat.response_models import (
     ChatMessageDTO,
@@ -89,6 +90,7 @@ _CANNOT_REPORT_OWN_MESSAGE = "CANNOT_REPORT_OWN_MESSAGE"
 _PRAYER_NOT_ALLOWED_IN_DM = "PRAYER_NOT_ALLOWED_IN_DM"
 _NOT_A_PRAYER_REQUEST = "NOT_A_PRAYER_REQUEST"
 _NOT_OWN_MESSAGES = "message_ids include other users' messages"
+_NOTHING_TO_EDIT = "Provide body or intention to edit"
 _RECENT_PRAYERS_LIMIT = 3
 
 
@@ -246,13 +248,7 @@ def _persist_message(
     # Must sit in the same transaction as the INSERT: room creation and
     # touch_room commit, releasing any lock taken earlier. create_message
     # commits just below, so this is the lock that holds until the row lands.
-    if room.group_id is not None and not is_group_id_published(
-        db=db, group_id=room.group_id, for_update=True
-    ):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
-    # Same lock for an event room, whose publication gate hangs off the event.
-    if room.event_id is not None:
-        load_open_event(db=db, event_id=room.event_id, for_update=True)
+    _lock_room_publication(db=db, room=room)
     message = create_message(db=db, message=message)
     message.sender = user
     touch_room(db=db, room=room)
@@ -270,6 +266,19 @@ def _persist_message(
     )
     _schedule_event_prayer_count_cache_refresh(room=room, message_type=message_type)
     return dto
+
+
+def _lock_room_publication(db: Session, room: ChatRoom) -> None:
+    """Lock and recheck the room's publication gate in the caller's
+    transaction, so a write cannot land in a group that was just unpublished
+    or an event chat that was just closed. 404 when the gate is shut."""
+    if room.group_id is not None and not is_group_id_published(
+        db=db, group_id=room.group_id, for_update=True
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+    # Same lock for an event room, whose publication gate hangs off the event.
+    if room.event_id is not None:
+        load_open_event(db=db, event_id=room.event_id, for_update=True)
 
 
 def _schedule_event_prayer_count_cache_refresh(
@@ -372,6 +381,80 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
                 room=room, message_type=message_type
             )
         return deleted_at.isoformat()
+
+
+def edit_message_service(
+    room_id: UUID,
+    message_id: UUID,
+    user: Users,
+    body: Optional[str] = None,
+    intention: Optional[str] = None,
+) -> ChatMessageDTO:
+    """Edit the body and/or intention of the caller's own message.
+
+    A field left out keeps its current value. The result goes through the same
+    intention and moderation checks as a new message, and the row is marked
+    is_edited. An edit that changes nothing leaves the flag untouched."""
+    if body is None and intention is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=_NOTHING_TO_EDIT
+        )
+    with SessionLocal() as db:
+        room = _get_room_or_404(db=db, room_id=room_id)
+        _require_active_member(db=db, room_id=room_id, user_id=user.id)
+
+        message = get_message_by_id(db=db, message_id=message_id, room_id=room_id)
+        if not message:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+        if message.sender_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only edit your own messages",
+            )
+
+        message_type = _message_type_value(message)
+        new_body = body.strip() if body is not None else message.body
+        if not new_body:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message body must not be empty",
+            )
+        stored_intention = validate_message_intention_and_body(
+            db=db,
+            message_type=message_type,
+            body=new_body,
+            intention=intention if intention is not None else message.intention,
+        )
+        if new_body != message.body or stored_intention != message.intention:
+            validate_message_content(db=db, room=room, user=user, body=new_body)
+            # Held until update_message commits, as for a new message.
+            _lock_room_publication(db=db, room=room)
+            message = update_message(
+                db=db, message=message, body=new_body, intention=stored_intention
+            )
+
+        reactions = list_message_reactions(db=db, message_id=message.id)
+        prayer_kwargs: Dict[str, Any] = {}
+        if message_type == ChatMessageType.PRAYER.value:
+            prayer_ids = [message.id]
+            prayer_kwargs = {
+                "prayer_count": get_prayer_counts_map(
+                    db=db, message_ids=prayer_ids
+                ).get(message.id, 0),
+                "prayed_by_me": message.id
+                in get_prayed_message_ids(db=db, message_ids=prayer_ids, user_id=user.id),
+                "recent_prayers": get_recent_prayers_map(
+                    db=db, message_ids=prayer_ids, per_message=_RECENT_PRAYERS_LIMIT
+                ).get(message.id),
+                "intention": resolve_intention_dtos_for_slugs(
+                    db=db, slugs=[stored_intention]
+                ).get(stored_intention)
+                if stored_intention
+                else None,
+            }
+        return build_message_dto(
+            message, reactions=reactions, viewer_id=user.id, **prayer_kwargs
+        )
 
 
 def delete_messages_service(

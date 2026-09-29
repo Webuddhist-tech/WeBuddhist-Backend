@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
-from typing import Dict, List, Optional
-from uuid import UUID
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Dict, List, Optional, Set
+from uuid import UUID, uuid4
 
 from redis.asyncio import Redis
 
@@ -37,6 +39,99 @@ def position_revision_key(event_id: UUID) -> str:
 
 def position_rate_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:rate"
+
+
+def presence_key(event_id: UUID) -> str:
+    return f"recitation:event:{event_id}:presence"
+
+
+# Shared with the presence script, which rebuilds lease keys itself from the
+# instance id stamped on each roster entry.
+INSTANCE_LEASE_PREFIX = "recitation:instance:"
+
+
+def instance_lease_key(instance_id: str) -> str:
+    return f"{INSTANCE_LEASE_PREFIX}{instance_id}"
+
+
+def presence_field(user_id: UUID, token: str) -> str:
+    """One roster field per socket, not per person.
+
+    A field per person cannot survive the same person holding two sockets: the
+    second join overwrites the first, and whichever socket closes first takes
+    the other's entry with it. The count is still per person - the script
+    behind `presence_count` folds a person's sockets back into one - but the
+    bookkeeping is per socket, so closing one leaves the others standing.
+    """
+    return f"{user_id}|{token}"
+
+
+# One id per process, stored as each roster entry's value, so a crashed
+# instance's joins drop out of the count once its lease expires instead of
+# sitting there until someone deletes the hash.
+_INSTANCE_ID = str(uuid4())
+# The heartbeat runs well inside the lease, so one stalled loop does not look
+# like a crash and zero the room.
+INSTANCE_LEASE_SECONDS = 45
+INSTANCE_HEARTBEAT_SECONDS = 20
+
+
+# Counting the room has to be one step with pruning the entries it decided were
+# dead, and - for the broadcast - with publishing the number it arrived at.
+#
+# Split across round trips, both halves go wrong. The prune deletes by a value
+# it read earlier, so a socket that reconnected in between loses its brand new
+# entry and stops being counted. And two joins racing each other can read 1 and
+# 2, then publish in the other order, leaving every phone in the room showing
+# the older number until somebody else joins or leaves. Redis runs a script
+# start to finish with nothing in between, so neither gap exists.
+#
+# Fields are "{user id}|{socket token}" and values are the instance holding the
+# socket. Sockets are what expire; people are what get counted, so the fold
+# back to one entry per person happens here.
+_PRESENCE_COUNT_BODY = """
+local roster = redis.call('HGETALL', KEYS[1])
+local lease_prefix = ARGV[1]
+local alive = {}
+local people = {}
+local stale = {}
+for i = 1, #roster, 2 do
+    local field = roster[i]
+    local instance = roster[i + 1]
+    local live = alive[instance]
+    if live == nil then
+        live = redis.call('EXISTS', lease_prefix .. instance) == 1
+        alive[instance] = live
+    end
+    if live then
+        people[string.match(field, '^(.*)|[^|]*$') or field] = true
+    else
+        stale[#stale + 1] = field
+    end
+end
+local cursor = 1
+while cursor <= #stale do
+    local last = math.min(cursor + 199, #stale)
+    redis.call('HDEL', KEYS[1], unpack(stale, cursor, last))
+    cursor = last + 1
+end
+local count = 0
+for _ in pairs(people) do
+    count = count + 1
+end
+"""
+
+_PRESENCE_COUNT_SCRIPT = _PRESENCE_COUNT_BODY + """
+return count
+"""
+
+# ARGV[2] is the event id, interpolated into the frame here rather than passed
+# as a finished payload, because the count is only known once the script runs.
+_PRESENCE_BROADCAST_SCRIPT = _PRESENCE_COUNT_BODY + """
+redis.call('PUBLISH', KEYS[2],
+    '{"type":"presence","event_id":"' .. ARGV[2] .. '","count":' .. count .. '}')
+return count
+"""
 
 
 # Matches every key position_rate_key can produce, for the startup sweep.
@@ -92,6 +187,10 @@ class RecitationBroadcaster:
     mirrored into a Redis hash on every set, so a phone joining 40 minutes in -
     or an instance restarted by a deploy - lands on the live line instead of
     waiting for the operator's next click.
+
+    Who is in the room is the other shared value. Each join is a field in a
+    Redis hash, stamped with this process, so a count taken on any instance is
+    the whole room and not just the sockets that process happens to hold.
     """
 
     def __init__(self, redis_url: str) -> None:
@@ -102,6 +201,18 @@ class RecitationBroadcaster:
         self.fanout: Optional[ChannelFanout] = None
         # Track local WebSocket connections: {event_id: {user_id: websocket}}
         self.connections: Dict[UUID, Dict[UUID, object]] = {}
+        # Roster fields this process owns: {event_id: {presence field}}. One per
+        # live socket, reasserted by the heartbeat so a lapsed lease cannot
+        # retire a socket that is still sitting there.
+        self._roster: Dict[UUID, Set[str]] = {}
+        # Held across a field's local removal and its Redis delete, and across
+        # the heartbeat's snapshot and rewrite of an event's fields, so the two
+        # cannot overlap. See `_reassert_presence` for what that would cost.
+        # One lock per event, so a slow Redis write for one room never holds up
+        # a close in another; refcounted so idle events do not leak a lock.
+        self._roster_locks: Dict[UUID, asyncio.Lock] = {}
+        self._roster_lock_refs: Dict[UUID, int] = {}
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """Initialize Redis connection."""
@@ -112,6 +223,16 @@ class RecitationBroadcaster:
             # A position is last-write-wins, so a socket that falls behind
             # wants the newest frame, not a backlog of stale ones.
             self.fanout = ChannelFanout(self.redis, queue_maxsize=64, drop_oldest=True)
+            # Claim the lease before serving, so the first join is already
+            # countable. A failure here is logged, not fatal: the puja still
+            # runs, and the heartbeat retries.
+            try:
+                await self.refresh_instance_lease()
+            except Exception as lease_error:
+                logger.exception(
+                    "Failed to claim recitation instance lease: %s", lease_error
+                )
+            self._heartbeat_task = asyncio.create_task(self._run_instance_heartbeat())
             logger.info("✅ Redis connection established for recitation broadcaster")
         except ConnectionRefusedError as e:
             error_msg = (
@@ -138,6 +259,11 @@ class RecitationBroadcaster:
 
     async def disconnect(self) -> None:
         """Close Redis connection."""
+        if self._heartbeat_task is not None:
+            task = self._heartbeat_task
+            self._heartbeat_task = None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if self.fanout:
             await self.fanout.aclose()
         if self.redis:
@@ -147,8 +273,8 @@ class RecitationBroadcaster:
     def add_connection(self, event_id: UUID, user_id: UUID, ws: object) -> None:
         """Track a local WebSocket connection.
 
-        Plain dict bookkeeping: unlike chat, a recitation keeps no presence
-        in Redis, so there is nothing here to await.
+        The fleet-wide roster lives in Redis (`mark_present`); this dict is
+        only the sockets this process is holding.
         """
         if event_id not in self.connections:
             self.connections[event_id] = {}
@@ -383,9 +509,160 @@ class RecitationBroadcaster:
         return deleted
 
     def get_connected_users(self, event_id: UUID) -> Dict[UUID, object]:
-        """Sockets this server holds for an event (local only - position is the
-        shared state here, not presence)."""
+        """Sockets this server holds for an event.
+
+        The number of people in the room is `presence_count`: it reads the
+        Redis roster, which every instance writes, and skips joins whose
+        server lease has expired.
+        """
         return self.connections.get(event_id, {})
+
+    async def refresh_instance_lease(self) -> None:
+        """Keep this process visible to the presence count."""
+        await self.redis.set(
+            instance_lease_key(_INSTANCE_ID), "1", ex=INSTANCE_LEASE_SECONDS
+        )
+
+    async def _run_instance_heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(INSTANCE_HEARTBEAT_SECONDS)
+            try:
+                # Lease first, roster second. The other order leaves the
+                # rewritten entries pointing at an instance that is still
+                # expired, and a count landing between the two prunes them
+                # again.
+                await self.refresh_instance_lease()
+            except Exception as e:
+                logger.exception("Failed to refresh recitation instance lease: %s", e)
+                continue
+            await self._reassert_presence()
+
+    @asynccontextmanager
+    async def _roster_lock(self, event_id: UUID) -> AsyncIterator[None]:
+        """Hold this event's roster lock."""
+        lock = self._roster_locks.get(event_id)
+        if lock is None:
+            lock = self._roster_locks[event_id] = asyncio.Lock()
+        self._roster_lock_refs[event_id] = self._roster_lock_refs.get(event_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._roster_lock_refs[event_id] - 1
+            if remaining:
+                self._roster_lock_refs[event_id] = remaining
+            else:
+                self._roster_lock_refs.pop(event_id, None)
+                self._roster_locks.pop(event_id, None)
+
+    async def mark_present(self, event_id: UUID, user_id: UUID) -> str:
+        """Record this socket in the shared roster. Returns the token that
+        `mark_absent` must hand back, so one socket cannot erase another's entry.
+
+        The field is remembered locally too, because the heartbeat reasserts it:
+        a count taken while this instance's lease had lapsed would prune the
+        entry even though the socket never went anywhere.
+        """
+        token = str(uuid4())
+        field = presence_field(user_id, token)
+        self._roster.setdefault(event_id, set()).add(field)
+        try:
+            await self.redis.hset(presence_key(event_id), field, _INSTANCE_ID)
+        except Exception as e:
+            # Left in `_roster` on purpose: the next heartbeat writes it again.
+            logger.exception("Failed to mark recitation presence in Redis: %s", e)
+        return token
+
+    async def mark_absent(self, event_id: UUID, user_id: UUID, token: str) -> None:
+        """Drop this socket's roster entry.
+
+        The field names the socket, not the person, so this can only ever remove
+        the entry this socket wrote - never one belonging to another of the same
+        person's sockets, and never one a reconnect has since written.
+        """
+        field = presence_field(user_id, token)
+        async with self._roster_lock(event_id):
+            fields = self._roster.get(event_id)
+            if fields is not None:
+                # Forgotten before the delete, so a failed delete is not undone
+                # by the heartbeat putting it straight back.
+                fields.discard(field)
+                if not fields:
+                    self._roster.pop(event_id, None)
+            try:
+                await self.redis.hdel(presence_key(event_id), field)
+            except Exception as e:
+                logger.exception("Failed to clear recitation presence in Redis: %s", e)
+
+    async def _reassert_presence(self) -> None:
+        """Rewrite every roster entry this instance is holding sockets for.
+
+        A lease can lapse while the sockets under it are perfectly healthy - a
+        Redis blip, an event loop stalled past the lease - and the next count
+        prunes their entries as if the process had died. Reclaiming the lease
+        does not bring them back, so the room would read low until every one of
+        those people reconnected. Writing them again on each heartbeat makes
+        that window one heartbeat wide instead of the rest of the session.
+
+        Reading the fields and writing them back is one step, under the roster
+        lock, because a socket closing in between is worse than one counted a
+        heartbeat late. An entry snapshotted before `mark_absent` dropped it and
+        written after its HDEL landed is gone from `_roster` but alive in Redis,
+        stamped with an instance whose lease this process keeps renewing - so no
+        later heartbeat rewrites it, no count ever prunes it, and it pads the
+        room until the process stops. The lock is per event and covers one
+        write, not the whole sweep, so a close waits on at most a single command
+        for its own event and never on another event's.
+        """
+        for event_id in list(self._roster):
+            async with self._roster_lock(event_id):
+                fields = self._roster.get(event_id)
+                if not fields:
+                    continue
+                mapping = {field: _INSTANCE_ID for field in fields}
+                try:
+                    await self.redis.hset(presence_key(event_id), mapping=mapping)
+                except Exception as e:
+                    logger.exception(
+                        "Failed to reassert recitation presence for event %s: %s",
+                        event_id,
+                        e,
+                    )
+
+    async def presence_count(self, event_id: UUID) -> int:
+        """People joined to this event across every live instance."""
+        try:
+            count = await self.redis.eval(
+                _PRESENCE_COUNT_SCRIPT,
+                1,
+                presence_key(event_id),
+                INSTANCE_LEASE_PREFIX,
+            )
+        except Exception as e:
+            logger.exception("Failed to read recitation presence from Redis: %s", e)
+            return 0
+        return int(count)
+
+    async def broadcast_presence(self, event_id: UUID) -> int:
+        """Tell every socket in the room how many people are joined.
+
+        Returns the count that was published, so a caller that also has to
+        report it - the joining socket's session_info - quotes the same number
+        the room was just given instead of taking its own reading.
+        """
+        try:
+            count = await self.redis.eval(
+                _PRESENCE_BROADCAST_SCRIPT,
+                2,
+                presence_key(event_id),
+                position_channel(event_id),
+                INSTANCE_LEASE_PREFIX,
+                str(event_id),
+            )
+        except Exception as e:
+            logger.exception("Failed to broadcast recitation presence: %s", e)
+            return 0
+        return int(count)
 
 
 # Global broadcaster instance (initialized in app startup)

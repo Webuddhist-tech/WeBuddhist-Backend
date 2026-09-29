@@ -83,6 +83,7 @@ class ChatMessageDTO(BaseModel):
     prayed_by_me: bool = False
     recent_prayers: List[ChatMessagePrayerUserDTO] = []
     intention: Optional[PrayerIntentionDTO] = None
+    is_edited: bool = False
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -224,6 +225,26 @@ class SendChatMessageRequest(BaseModel):
     @field_validator("body")
     @classmethod
     def validate_body(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Message body must not be empty")
+        if len(value) > 4000:
+            raise ValueError("Message body must not exceed 4000 characters")
+        return value
+
+
+class EditChatMessageRequest(BaseModel):
+    """Request to edit one of the caller's own messages. Send body, intention,
+    or both; a field left out keeps its current value. intention only applies
+    to a PRAYER message."""
+    body: Optional[str] = None
+    intention: Optional[str] = None
+
+    @field_validator("body")
+    @classmethod
+    def validate_body(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
         value = value.strip()
         if not value:
             raise ValueError("Message body must not be empty")

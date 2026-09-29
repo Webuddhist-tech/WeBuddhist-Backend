@@ -13,12 +13,15 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.events.recitation_dependencies import verify_recitation_emit_token
 from pecha_api.events.recitation_live_models import PositionAcceptedResponse, SetPositionFrame
-from pecha_api.events.recitation_live_service import assert_live_event, resolve_recitation_access
+from pecha_api.events.recitation_live_service import (
+    assert_live_event,
+    resolve_recitation_access,
+    resolve_recitation_caller,
+)
 from pecha_api.events.recitation_websocket import (
     RecitationBroadcaster,
     get_broadcaster,
 )
-from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +164,10 @@ async def websocket_recitation_live(
       {"type": "ping"}
 
     Server -> client events:
-      {"type": "session_info", "event_id": "...", "is_operator": true|false}  (once, on connect)
+      {"type": "session_info", "event_id": "...", "is_operator": true|false, "count": N}
+          (once, on connect; count is people joined to this event, including this socket)
+      {"type": "presence", "event_id": "...", "count": N}
+          (whenever someone joins or leaves)
       {"type": "position", "event_id": "...", "text_id": "...", "segment_id": "...",
        "index": 12, "round_number": 3, "server_time": "...", "revision": 57}
           (on connect when a position exists, then on every change)
@@ -169,7 +175,8 @@ async def websocket_recitation_live(
       {"type": "pong"}
       {"type": "error", "code": "...", "message": "..."}
     """
-    user = None
+    caller = None
+    presence_token = None
 
     try:
         broadcaster = get_broadcaster()
@@ -180,7 +187,7 @@ async def websocket_recitation_live(
 
     try:
         try:
-            user = await run_in_threadpool(validate_and_extract_user_details, token=token)
+            caller = await run_in_threadpool(resolve_recitation_caller, token=token)
         except HTTPException as auth_error:
             logger.warning("Recitation WebSocket auth failed: %s", auth_error.detail)
             await websocket.accept()
@@ -194,7 +201,7 @@ async def websocket_recitation_live(
             is_operator = await run_in_threadpool(
                 resolve_recitation_access,
                 event_id=event_id,
-                user_id=user.id,
+                user_id=caller.user_id,
                 token=token,
             )
         except HTTPException as access_error:
@@ -206,14 +213,21 @@ async def websocket_recitation_live(
             return
 
         await websocket.accept()
+
+        subscriber = await broadcaster.subscribe_to_event(event_id)
+        broadcaster.add_connection(event_id, caller.presence_id, websocket)
+        # Count this socket before telling anyone, so the number includes them.
+        presence_token = await broadcaster.mark_present(event_id, caller.presence_id)
+        # Announce and count in one step, and quote what was announced: a
+        # separate reading can disagree with the number the rest of the room was
+        # just given.
+        joined = await broadcaster.broadcast_presence(event_id)
         await websocket.send_json({
             "type": "session_info",
             "event_id": str(event_id),
             "is_operator": is_operator,
+            "count": joined,
         })
-
-        subscriber = await broadcaster.subscribe_to_event(event_id)
-        broadcaster.add_connection(event_id, user.id, websocket)
 
         # A late joiner is the normal case, not the exception: send whatever the
         # operator's last click was so the phone lands on the live line.
@@ -245,6 +259,15 @@ async def websocket_recitation_live(
                         # Channel stopped (shutdown, or Redis went away).
                         break
 
+                    # A socket that falls behind has its oldest queued frames
+                    # evicted. Positions survive that untouched - the newest is
+                    # always the one kept, and it carries the whole state - but
+                    # presence shares the queue with them, so a burst of clicks
+                    # can push out the one frame carrying the new count and
+                    # leave this client showing an old number for the rest of
+                    # the puja. Re-read it instead of waiting for the next join.
+                    dropped = subscriber.take_dropped()
+
                     try:
                         frame = json.loads(payload)
                     except (ValueError, TypeError):
@@ -270,6 +293,16 @@ async def websocket_recitation_live(
                     if isinstance(frame, dict) and frame.get("type") == "session_ended":
                         ended_remotely.set()
                         break
+
+                    if dropped:
+                        try:
+                            await websocket.send_json({
+                                "type": "presence",
+                                "event_id": str(event_id),
+                                "count": await broadcaster.presence_count(event_id),
+                            })
+                        except (ConnectionClosedOK, ConnectionClosedError):
+                            break
             except Exception as e:
                 logger.exception("Error listening to Redis: %s", e)
 
@@ -381,5 +414,10 @@ async def websocket_recitation_live(
             pass
 
     finally:
-        if user is not None:
-            broadcaster.remove_connection(event_id, user.id)
+        if caller is not None:
+            broadcaster.remove_connection(event_id, caller.presence_id)
+            if presence_token is not None:
+                await broadcaster.mark_absent(
+                    event_id, caller.presence_id, presence_token
+                )
+                await broadcaster.broadcast_presence(event_id)

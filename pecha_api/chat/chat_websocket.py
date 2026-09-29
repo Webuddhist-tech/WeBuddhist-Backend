@@ -107,6 +107,41 @@ class ChatBroadcaster:
             logger.exception("Failed to broadcast message to Redis: %s", e)
             raise
 
+    async def broadcast_message_updated(
+        self,
+        room_id: UUID,
+        message: ChatMessageDTO,
+    ) -> None:
+        """Publish an edited message to the room, so connected clients can
+        replace its body/intention and show it as edited.
+
+        The DTO was built for the editor, so its viewer-specific flags must not
+        reach the room. reacted_by_me goes out False beside each summary's
+        user_ids, as in broadcast_reactions: that roster is whole, so a client
+        works its own state out from it. Prayers have no such roster here -
+        recent_prayers holds only the newest few who prayed - so a False would
+        tell everyone further down the list they had not prayed. The flag is left
+        out instead of answered wrongly, and an edit cannot change who prayed, so
+        a client keeps the prayer state it already has. prayer_count and
+        recent_prayers are read fresh for the edit and are the same for everyone,
+        so they ride along."""
+        channel = room_channel(room_id)
+        data = message.model_dump(mode="json")
+        data["reactions"] = [
+            {**reaction, "reacted_by_me": False} for reaction in data.get("reactions", [])
+        ]
+        data.pop("prayed_by_me", None)
+        payload = {
+            "type": "message_updated",
+            "message": data,
+        }
+
+        try:
+            await self.redis.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.exception("Failed to broadcast message update to Redis: %s", e)
+            raise
+
     async def broadcast_reactions(
         self,
         room_id: UUID,

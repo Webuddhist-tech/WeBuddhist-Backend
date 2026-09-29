@@ -23,6 +23,7 @@ from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
     delete_messages_service,
+    edit_message_service,
     list_message_prayers_service,
     list_room_messages_service,
     pray_for_messages_service,
@@ -49,6 +50,7 @@ from pecha_api.chat.response_models import (
     ChatSocketPingFrame,
     ChatSocketTypingFrame,
     DeleteChatMessagesRequest,
+    EditChatMessageRequest,
     PrayerBatchResponse,
     PrayForMessagesRequest,
     ReportChatMessageRequest,
@@ -221,6 +223,45 @@ async def delete_room_message(
         deleted_at=deleted_at,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _broadcast_message_updated_safe(room_id: UUID, message: ChatMessageDTO) -> None:
+    """Push a message_updated event to the room's live stream. Best-effort:
+    the edit is already persisted, so a broadcast failure must not fail the
+    request."""
+    try:
+        broadcaster = get_broadcaster()
+        await broadcaster.broadcast_message_updated(room_id=room_id, message=message)
+    except Exception as e:
+        logger.exception("Failed to broadcast edit for message %s: %s", message.id, e)
+
+
+@chat_router.patch(
+    "/chat/rooms/{room_id}/messages/{message_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=ChatMessageDTO,
+)
+async def edit_room_message(
+    room_id: UUID,
+    message_id: UUID,
+    request: EditChatMessageRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> ChatMessageDTO:
+    """Edit the body and/or intention of your own message. Fields left out keep
+    their current value; intention applies to prayer requests only. The message
+    comes back with is_edited=true and a message_updated event is broadcast to
+    the room."""
+    user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    message = await run_in_threadpool(
+        edit_message_service,
+        room_id=room_id,
+        message_id=message_id,
+        user=user,
+        body=request.body,
+        intention=request.intention,
+    )
+    await _broadcast_message_updated_safe(room_id=room_id, message=message)
+    return message
 
 
 @chat_router.delete(

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
@@ -7,18 +8,25 @@ from uuid import uuid4
 import pytest
 
 from pecha_api.events.recitation_websocket import (
+    INSTANCE_LEASE_PREFIX,
     MAX_SETS_PER_SECOND,
     POSITION_TTL_SECONDS,
     RATE_WINDOW_SECONDS,
     RecitationBroadcaster,
     _ALLOW_SET_SCRIPT,
+    _INSTANCE_ID,
+    _PRESENCE_BROADCAST_SCRIPT,
+    _PRESENCE_COUNT_SCRIPT,
     _RATE_KEY_PATTERN,
     get_broadcaster,
     init_broadcaster,
+    instance_lease_key,
     position_channel,
     position_rate_key,
     position_revision_key,
     position_state_key,
+    presence_field,
+    presence_key,
 )
 
 
@@ -110,6 +118,7 @@ class TestRecitationBroadcasterLifecycle:
             created = await init_broadcaster("redis://localhost:6379/0")
 
         assert get_broadcaster() is created
+        await created.disconnect()
 
     @pytest.mark.asyncio
     async def test_init_broadcaster_sweeps_rate_keys(self):
@@ -128,6 +137,7 @@ class TestRecitationBroadcasterLifecycle:
             await init_broadcaster("redis://localhost:6379/0")
 
         mock_redis.delete.assert_awaited_once_with(stale)
+        await get_broadcaster().disconnect()
 
     @pytest.mark.asyncio
     async def test_add_and_remove_connection(self):
@@ -142,6 +152,230 @@ class TestRecitationBroadcasterLifecycle:
         broadcaster.remove_connection(event_id, user_id)
         assert event_id not in broadcaster.connections
 
+
+class TestRecitationPresence:
+
+    @pytest.mark.asyncio
+    async def test_mark_present_records_this_instance(self):
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+
+        token = await broadcaster.mark_present(event_id, user_id)
+
+        field = presence_field(user_id, token)
+        broadcaster.redis.hset.assert_awaited_once_with(
+            presence_key(event_id), field, _INSTANCE_ID
+        )
+        assert broadcaster._roster[event_id] == {field}
+
+    @pytest.mark.asyncio
+    async def test_a_second_socket_does_not_displace_the_first(self):
+        """Two tabs, one person: closing the newer one must leave the older
+        counted, which a field per person cannot do."""
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+
+        first = await broadcaster.mark_present(event_id, user_id)
+        second = await broadcaster.mark_present(event_id, user_id)
+
+        assert first != second
+        assert broadcaster._roster[event_id] == {
+            presence_field(user_id, first),
+            presence_field(user_id, second),
+        }
+
+        await broadcaster.mark_absent(event_id, user_id, second)
+
+        broadcaster.redis.hdel.assert_awaited_once_with(
+            presence_key(event_id), presence_field(user_id, second)
+        )
+        assert broadcaster._roster[event_id] == {presence_field(user_id, first)}
+
+    @pytest.mark.asyncio
+    async def test_mark_absent_targets_only_this_socket(self):
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+
+        await broadcaster.mark_absent(event_id, user_id, "token-1")
+
+        broadcaster.redis.hdel.assert_awaited_once_with(
+            presence_key(event_id), f"{user_id}|token-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_mark_absent_forgets_the_field_before_deleting_it(self):
+        """A failed delete must not be undone by the heartbeat writing it back."""
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+        token = await broadcaster.mark_present(event_id, user_id)
+        broadcaster.redis.hdel.side_effect = Exception("redis down")
+
+        await broadcaster.mark_absent(event_id, user_id, token)
+
+        assert event_id not in broadcaster._roster
+
+    @pytest.mark.asyncio
+    async def test_presence_count_runs_the_counting_script(self):
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+        broadcaster.redis.eval.return_value = 2
+
+        count = await broadcaster.presence_count(event_id)
+
+        assert count == 2
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _PRESENCE_COUNT_SCRIPT,
+            1,
+            presence_key(event_id),
+            INSTANCE_LEASE_PREFIX,
+        )
+
+    @pytest.mark.asyncio
+    async def test_presence_count_is_zero_when_redis_fails(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.side_effect = Exception("redis down")
+
+        assert await broadcaster.presence_count(uuid4()) == 0
+
+    @pytest.mark.asyncio
+    async def test_broadcast_presence_counts_and_publishes_atomically(self):
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+        broadcaster.redis.eval.return_value = 1
+
+        count = await broadcaster.broadcast_presence(event_id)
+
+        assert count == 1
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _PRESENCE_BROADCAST_SCRIPT,
+            2,
+            presence_key(event_id),
+            position_channel(event_id),
+            INSTANCE_LEASE_PREFIX,
+            str(event_id),
+        )
+        # The count the room is told is the one this reading produced, so a
+        # slower concurrent join cannot publish a staler number afterwards.
+        broadcaster.redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_presence_is_zero_when_redis_fails(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.side_effect = Exception("redis down")
+
+        assert await broadcaster.broadcast_presence(uuid4()) == 0
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_rewrites_the_roster_after_the_lease(self):
+        """A lapsed lease gets this instance's sockets pruned; they have to come
+        back without the people behind them reconnecting."""
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+        token = await broadcaster.mark_present(event_id, user_id)
+        broadcaster.redis.hset.reset_mock()
+
+        await broadcaster.refresh_instance_lease()
+        await broadcaster._reassert_presence()
+
+        broadcaster.redis.hset.assert_awaited_once_with(
+            presence_key(event_id),
+            mapping={presence_field(user_id, token): _INSTANCE_ID},
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_join_is_rewritten_by_the_heartbeat(self):
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+        broadcaster.redis.hset.side_effect = Exception("redis down")
+
+        token = await broadcaster.mark_present(event_id, user_id)
+
+        broadcaster.redis.hset.side_effect = None
+        broadcaster.redis.hset.reset_mock()
+        await broadcaster._reassert_presence()
+
+        broadcaster.redis.hset.assert_awaited_once_with(
+            presence_key(event_id),
+            mapping={presence_field(user_id, token): _INSTANCE_ID},
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_socket_closing_mid_heartbeat_is_not_resurrected(self):
+        """A close landing while the heartbeat's write is in flight must win.
+
+        An entry rewritten after its own HDEL is untracked locally but live in
+        Redis under a lease this process keeps renewing: nothing prunes it, and
+        the room counts the person who left for as long as the process runs.
+        """
+        broadcaster = _broadcaster()
+        event_id, user_id = uuid4(), uuid4()
+        token = await broadcaster.mark_present(event_id, user_id)
+        field = presence_field(user_id, token)
+
+        # Stand in for the Redis hash, so the assertion is what the room would
+        # be counted from rather than which calls happened to be made.
+        roster: Dict[str, str] = {field: _INSTANCE_ID}
+        writing = asyncio.Event()
+        finish_write = asyncio.Event()
+
+        async def hset(key: str, *args: Any, mapping: Optional[Dict[str, str]] = None):
+            writing.set()
+            await finish_write.wait()
+            roster.update(mapping or {})
+
+        async def hdel(key: str, *fields: str):
+            for stale in fields:
+                roster.pop(stale, None)
+
+        broadcaster.redis.hset = hset
+        broadcaster.redis.hdel = hdel
+
+        heartbeat = asyncio.create_task(broadcaster._reassert_presence())
+        await writing.wait()
+        closing = asyncio.create_task(
+            broadcaster.mark_absent(event_id, user_id, token)
+        )
+        # Let the close get as far as it can while the write is outstanding.
+        await asyncio.sleep(0)
+        finish_write.set()
+        await asyncio.gather(heartbeat, closing)
+
+        assert roster == {}
+        assert event_id not in broadcaster._roster
+
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_write_for_one_event_does_not_block_another(self):
+        """The heartbeat's lock is per event: a close in another room must not
+        wait on a Redis write that has stalled for this one."""
+        broadcaster = _broadcaster()
+        stalled_event, other_event = uuid4(), uuid4()
+        user_id = uuid4()
+        await broadcaster.mark_present(stalled_event, uuid4())
+        token = await broadcaster.mark_present(other_event, user_id)
+        # The sweep reaches the stalled event first and sits on its write.
+        assert list(broadcaster._roster)[0] == stalled_event
+
+        writing = asyncio.Event()
+        finish_write = asyncio.Event()
+
+        async def hset(key: str, *args: Any, mapping: Optional[Dict[str, str]] = None):
+            writing.set()
+            await finish_write.wait()
+
+        broadcaster.redis.hset = hset
+        broadcaster.redis.hdel = AsyncMock()
+
+        heartbeat = asyncio.create_task(broadcaster._reassert_presence())
+        await writing.wait()
+        await asyncio.wait_for(
+            broadcaster.mark_absent(other_event, user_id, token), timeout=1
+        )
+        broadcaster.redis.hdel.assert_awaited_once()
+
+        finish_write.set()
+        await heartbeat
+        assert broadcaster._roster_locks == {}
 
 class TestRecitationPositionSnapshot:
 

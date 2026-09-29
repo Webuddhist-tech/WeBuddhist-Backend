@@ -7,10 +7,12 @@ from fastapi import HTTPException
 from starlette import status
 
 from pecha_api.events.recitation_live_service import (
+    RecitationCaller,
     is_event_operator,
     load_live_event,
     require_subscriber,
     resolve_recitation_access,
+    resolve_recitation_caller,
 )
 
 MODULE = "pecha_api.events.recitation_live_service"
@@ -108,6 +110,15 @@ class TestIsEventOperator:
             assert is_event_operator(db=MagicMock(), event=_event(), token="t") is False
 
 
+    def test_false_when_author_is_deactivated(self):
+        """A deactivated author's unexpired token must not keep operator rights."""
+        with patch(
+            "pecha_api.plans.authors.plan_authors_service.validate_and_extract_author_details",
+            return_value=MagicMock(is_active=False),
+        ), patch("pecha_api.events.event_service._require_can_edit_event") as mock_edit:
+            assert is_event_operator(db=MagicMock(), event=_event(), token="t") is False
+        mock_edit.assert_not_called()
+
 class TestResolveRecitationAccess:
 
     @staticmethod
@@ -154,6 +165,25 @@ class TestResolveRecitationAccess:
 
         assert exc.value.status_code == status.HTTP_403_FORBIDDEN
 
+    def test_operator_without_an_app_identity_is_still_allowed(self):
+        """A Studio author driving the puja may have no website User at all."""
+        stack, _, mock_require, _ = self._patched(is_operator=True)
+        with stack:
+            assert resolve_recitation_access(uuid4(), None, "t") is True
+
+        mock_require.assert_not_called()
+
+    def test_non_operator_without_an_app_identity_is_rejected(self):
+        # Nothing to check a join or a follow against, so this cannot be waved
+        # through on the strength of a CMS login alone.
+        stack, _, mock_require, _ = self._patched(is_operator=False)
+        with stack:
+            with pytest.raises(HTTPException) as exc:
+                resolve_recitation_access(uuid4(), None, "t")
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_require.assert_not_called()
+
     def test_unreachable_event_is_rejected_before_any_permission_check(self):
         stack, _, mock_require, mock_operator = self._patched(
             is_operator=True,
@@ -166,3 +196,95 @@ class TestResolveRecitationAccess:
         assert exc.value.status_code == status.HTTP_404_NOT_FOUND
         mock_operator.assert_not_called()
         mock_require.assert_not_called()
+
+
+class TestResolveRecitationCaller:
+    """Studio signs its authors in with a CMS token whose `sub` is an Author
+    id, so resolving the caller as a website User alone turned every Studio
+    event page into "Could not join the live socket"."""
+
+    @staticmethod
+    def _patched(user=None, user_error=None, author=None, author_error=None):
+        stack = ExitStack()
+        mock_user = stack.enter_context(
+            patch("pecha_api.users.users_service.validate_and_extract_user_details")
+        )
+        if user_error is not None:
+            mock_user.side_effect = user_error
+        else:
+            mock_user.return_value = user
+        mock_author = stack.enter_context(
+            patch(
+                "pecha_api.plans.authors.plan_authors_service."
+                "validate_and_extract_author_details"
+            )
+        )
+        if author_error is not None:
+            mock_author.side_effect = author_error
+        else:
+            mock_author.return_value = author
+        return stack, mock_user, mock_author
+
+    def test_app_user_token_resolves_to_that_user(self):
+        user = MagicMock(id=uuid4())
+        stack, _, mock_author = self._patched(user=user)
+        with stack:
+            caller = resolve_recitation_caller(token="app-token")
+
+        assert caller == RecitationCaller(presence_id=user.id, user_id=user.id)
+        mock_author.assert_not_called()
+
+    def test_studio_author_token_is_accepted(self):
+        author = MagicMock(id=uuid4(), user_id=None)
+        stack, _, _ = self._patched(
+            user_error=HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ),
+            author=author,
+        )
+        with stack:
+            caller = resolve_recitation_caller(token="cms-token")
+
+        # No website User behind this author, so the Author id keys the roster
+        # and there is no identity to check a join against.
+        assert caller == RecitationCaller(presence_id=author.id, user_id=None)
+
+    def test_deactivated_studio_author_is_rejected(self):
+        stack, _, _ = self._patched(
+            user_error=HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ),
+            author=MagicMock(id=uuid4(), user_id=None, is_active=False),
+        )
+        with stack:
+            with pytest.raises(HTTPException) as exc:
+                resolve_recitation_caller(token="cms-token")
+
+        assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_linked_author_counts_as_one_person_not_two(self):
+        linked_user_id = uuid4()
+        author = MagicMock(id=uuid4(), user_id=linked_user_id)
+        stack, _, _ = self._patched(
+            user_error=HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+            ),
+            author=author,
+        )
+        with stack:
+            caller = resolve_recitation_caller(token="cms-token")
+
+        assert caller == RecitationCaller(
+            presence_id=linked_user_id, user_id=linked_user_id
+        )
+
+    def test_401_when_the_token_is_neither(self):
+        unauthorized = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        )
+        stack, _, _ = self._patched(user_error=unauthorized, author_error=unauthorized)
+        with stack:
+            with pytest.raises(HTTPException) as exc:
+                resolve_recitation_caller(token="junk")
+
+        assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
