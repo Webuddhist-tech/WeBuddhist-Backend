@@ -16,7 +16,9 @@ from pecha_api.accumulator.group_accumulator_link_model import GroupAccumulatorL
 from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
 from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.db.database import Base
+from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_model import Event
+from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata
 from pecha_api.group_accumulator.group_accumulator_repository import (
     get_group_accumulators,
     get_group_accumulators_for_group_ids,
@@ -42,6 +44,9 @@ def _sessionmaker() -> sessionmaker:
             GroupAccumulatorHistory.__table__,
             group_accumulator_joins,
             Event.__table__,
+            EventMetadata.__table__,
+            AuthorGroup.__table__,
+            AuthorGroupMetadata.__table__,
         ],
     )
     return sessionmaker(bind=engine)
@@ -296,3 +301,102 @@ def test_groups_by_accumulator_returns_user_and_group_totals(
     assert by_id[others_only.id].group_total_count == 21
     assert by_id[no_history.id].user_total_count == 0
     assert by_id[no_history.id].group_total_count == 0
+
+
+def _add_group(db: Session, *, slug: str, titles: dict) -> AuthorGroup:
+    group = AuthorGroup(id=uuid4(), slug=slug, created_by="author@example.com")
+    db.add(group)
+    for language, title in titles.items():
+        db.add(AuthorGroupMetadata(id=uuid4(), group_id=group.id, language=language, title=title))
+    db.commit()
+    return group
+
+
+def _add_event_metadata(db: Session, *, event_id: UUID, names: dict) -> None:
+    for language, name in names.items():
+        db.add(EventMetadata(id=uuid4(), event_id=event_id, language=language, name=name))
+    db.commit()
+
+
+def _join(db: Session, *, group_accumulator_id: UUID, user_id: UUID) -> None:
+    db.execute(
+        group_accumulator_joins.insert().values(
+            group_accumulator_id=group_accumulator_id,
+            user_id=user_id,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+
+
+def test_accumulator_groups_service_returns_group_name_and_event_title(
+    listing_db: Session,
+) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from pecha_api.accumulator.accumulator_service import get_accumulator_groups_service
+
+    preset_id = uuid4()
+    user_id = uuid4()
+    sangha = _add_group(listing_db, slug="sangha-circle", titles={"EN": "Sangha Circle", "BO": "དགེ་འདུན"})
+    untitled = _add_group(listing_db, slug="untitled-group", titles={})
+    other = _add_group(listing_db, slug="other-group", titles={"EN": "Other Group"})
+
+    event_linked = GroupAccumulator(
+        id=uuid4(),
+        group_id=sangha.id,
+        accumulator_id=preset_id,
+        title="Retreat accumulation",
+        created_at=datetime.now(timezone.utc),
+    )
+    standalone = GroupAccumulator(
+        id=uuid4(),
+        group_id=untitled.id,
+        accumulator_id=preset_id,
+        title="Standalone accumulation",
+        created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add_all([event_linked, standalone])
+    listing_db.commit()
+    for ga in (event_linked, standalone):
+        _join(listing_db, group_accumulator_id=ga.id, user_id=user_id)
+
+    retreat = _add_event(listing_db, group_id=sangha.id, group_accumulator_id=event_linked.id)
+    _add_event_metadata(listing_db, event_id=retreat.id, names={"EN": "Saga Dawa Retreat", "BO": "ས་ག་ཟླ་བ"})
+    # An event in another group does not link this group accumulator.
+    foreign = _add_event(listing_db, group_id=other.id, group_accumulator_id=standalone.id)
+    _add_event_metadata(listing_db, event_id=foreign.id, names={"EN": "Other group event"})
+
+    def run(language):
+        with patch(
+            "pecha_api.accumulator.accumulator_service.SessionLocal",
+            return_value=MagicMock(__enter__=MagicMock(return_value=listing_db), __exit__=MagicMock(return_value=False)),
+        ), patch(
+            "pecha_api.accumulator.accumulator_service.validate_and_extract_user_details",
+            return_value=MagicMock(id=user_id),
+        ), patch(
+            "pecha_api.accumulator.accumulator_service.get_accumulator_by_id",
+            return_value=MagicMock(),
+        ):
+            response = get_accumulator_groups_service(
+                token="token",
+                accumulator_id=preset_id,
+                joined_only=True,
+                language=language,
+            )
+        return {group.group_accumulator_id: group for group in response.groups}
+
+    default = run(None)
+    assert default[event_linked.id].group_name == "Sangha Circle"
+    assert default[event_linked.id].event_title == "Saga Dawa Retreat"
+    assert default[standalone.id].group_name == "untitled-group"
+    assert default[standalone.id].event_title is None
+
+    tibetan = run("bo")
+    assert tibetan[event_linked.id].group_name == "དགེ་འདུན"
+    assert tibetan[event_linked.id].event_title == "ས་ག་ཟླ་བ"
+
+    # No Chinese metadata: falls back to English.
+    chinese = run("zh")
+    assert chinese[event_linked.id].group_name == "Sangha Circle"
+    assert chinese[event_linked.id].event_title == "Saga Dawa Retreat"

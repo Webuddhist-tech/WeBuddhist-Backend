@@ -159,6 +159,10 @@ async def get_accumulator_groups(
         False,
         description="When true, return only group accumulators the authenticated user has joined",
     ),
+    language: Annotated[
+        Optional[str],
+        Query(description=language_query_description("Language code for the group name and event title", lowercase_example=True)),
+    ] = None,
 ):
     """Get groups using this accumulator with the authenticated user's and the group's total count for each group."""
     return await run_in_threadpool(
@@ -168,6 +172,7 @@ async def get_accumulator_groups(
         skip=skip,
         limit=limit,
         joined_only=joined_only,
+        language=language,
     )
 
 

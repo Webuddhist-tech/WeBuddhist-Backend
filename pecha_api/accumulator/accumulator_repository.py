@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import case, func
 from typing import List, Tuple, Optional, Dict
@@ -352,11 +352,15 @@ class GroupAccumulatorWithUserCount:
         user_total_count: int,
         is_joined: bool = False,
         group_total_count: int = 0,
+        group=None,
+        event=None,
     ) -> None:
         self.group_accumulator = group_accumulator
         self.user_total_count = user_total_count
         self.is_joined = is_joined
         self.group_total_count = group_total_count
+        self.group = group
+        self.event = event
 
 
 def get_groups_by_accumulator_id(
@@ -426,12 +430,43 @@ def get_groups_by_accumulator_id(
         )
     )
 
+    from pecha_api.events.event_model import Event
+    from pecha_api.plans.groups.groups_models import AuthorGroup
+
+    group_ids = list({ga.group_id for ga in group_accumulators})
+    groups_by_id = {
+        group.id: group
+        for group in db.query(AuthorGroup)
+        .options(selectinload(AuthorGroup.metadata_entries))
+        .filter(AuthorGroup.id.in_(group_ids))
+        .all()
+    }
+
+    # An event links a group accumulator only within the same group (see
+    # group_accumulator_not_linked_to_event); keep the most recently created one.
+    events = (
+        db.query(Event)
+        .join(GroupAccumulator, GroupAccumulator.id == Event.group_accumulator_id)
+        .options(selectinload(Event.metadata_entries))
+        .filter(
+            Event.group_accumulator_id.in_(group_accumulator_ids),
+            Event.group_id == GroupAccumulator.group_id,
+        )
+        .order_by(Event.created_at.desc())
+        .all()
+    )
+    events_by_group_accumulator_id = {}
+    for event in events:
+        events_by_group_accumulator_id.setdefault(event.group_accumulator_id, event)
+
     result = [
         GroupAccumulatorWithUserCount(
             group_accumulator=ga,
             user_total_count=user_counts_map.get(ga.id, 0),
             is_joined=ga.id in joined_ids,
             group_total_count=group_counts_map.get(ga.id, 0),
+            group=groups_by_id.get(ga.group_id),
+            event=events_by_group_accumulator_id.get(ga.id),
         )
         for ga in group_accumulators
     ]
