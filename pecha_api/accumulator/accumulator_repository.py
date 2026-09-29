@@ -352,7 +352,7 @@ class GroupAccumulatorWithUserCount:
         user_total_count: int,
         is_joined: bool = False,
         group_total_count: int = 0,
-    ):
+    ) -> None:
         self.group_accumulator = group_accumulator
         self.user_total_count = user_total_count
         self.is_joined = is_joined
