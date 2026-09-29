@@ -30,8 +30,10 @@ Only returns poems with `status = PUBLISHED`.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/poems` | List published poems, newest first. Query: `skip`, `limit` (1-100, default 20), `chapter_name`, `author_name` (exact match filters), `language` (filter by language code) |
+| GET | `/poems` | List published poems in a shuffled order that changes once a day. Query: `skip`, `limit` (1-100, default 20), `chapter_name`, `author_name` (exact match filters), `language` (filter by language code), `seed` (optional, see below). Header: `X-Timezone` (optional IANA timezone) |
 | GET | `/poems/{poem_id}` | Get one published poem. 404 if missing or not published |
+
+**Order of `GET /poems`**: poems are shuffled by a seed, and the same seed always gives the same order. By default the seed is today's date in the `X-Timezone` timezone (UTC when the header is missing, as for verse of the day), so every reader sees one order per day and it changes at their midnight. The seed used is returned as `seed` in the response; pages fetched with `skip` on the same day share it, so they neither repeat nor skip poems. Passing `?seed=...` fixes a specific order (useful for testing). An invalid `X-Timezone` returns `422`.
 
 ## CMS endpoints (`/cms/poems`) — Bearer token, CMS author required
 

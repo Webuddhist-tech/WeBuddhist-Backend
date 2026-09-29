@@ -1340,7 +1340,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             after_flush=_schedule_reminders_after_flush,
         )
         sync_event_youtube_to_plan_day(
-            db, saved, previous_keys=set(), author_email=current_author.email
+            db, saved, previous_keys=set(), author=current_author
         )
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
@@ -1593,7 +1593,7 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
             sync_event_youtube_to_plan_day(
                 db, saved,
                 previous_keys=youtube_video_keys_before,
-                author_email=current_author.email,
+                author=current_author,
             )
 
         # Switching the chat off has to reach sockets that are already open;
