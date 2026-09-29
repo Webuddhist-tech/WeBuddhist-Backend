@@ -231,3 +231,68 @@ def test_joined_only_includes_event_linked_group_accumulator(
     assert discovery_rows == []
     assert joined_total == 1
     assert joined_rows[0].group_accumulator.id == linked.id
+
+
+def _add_history(
+    db: Session, *, group_accumulator_id: UUID, user_id: UUID, count: int
+) -> None:
+    db.add(
+        GroupAccumulatorHistory(
+            id=uuid4(),
+            group_accumulator_id=group_accumulator_id,
+            user_id=user_id,
+            count=count,
+        )
+    )
+    db.commit()
+
+
+def test_groups_by_accumulator_returns_user_and_group_totals(
+    listing_db: Session,
+) -> None:
+    preset_id = uuid4()
+    user_id = uuid4()
+    other_user_id = uuid4()
+    with_history = GroupAccumulator(
+        id=uuid4(),
+        group_id=uuid4(),
+        accumulator_id=preset_id,
+        title="Has history",
+        created_at=datetime.now(timezone.utc),
+    )
+    others_only = GroupAccumulator(
+        id=uuid4(),
+        group_id=uuid4(),
+        accumulator_id=preset_id,
+        title="Only other members",
+        created_at=datetime.now(timezone.utc),
+    )
+    no_history = GroupAccumulator(
+        id=uuid4(),
+        group_id=uuid4(),
+        accumulator_id=preset_id,
+        title="No history",
+        created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add_all([with_history, others_only, no_history])
+    listing_db.commit()
+
+    _add_history(listing_db, group_accumulator_id=with_history.id, user_id=user_id, count=100)
+    _add_history(listing_db, group_accumulator_id=with_history.id, user_id=user_id, count=8)
+    _add_history(listing_db, group_accumulator_id=with_history.id, user_id=other_user_id, count=500)
+    _add_history(listing_db, group_accumulator_id=others_only.id, user_id=other_user_id, count=21)
+
+    rows, total = get_groups_by_accumulator_id(
+        db=listing_db,
+        accumulator_id=preset_id,
+        user_id=user_id,
+    )
+
+    by_id = {row.group_accumulator.id: row for row in rows}
+    assert total == 3
+    assert by_id[with_history.id].user_total_count == 108
+    assert by_id[with_history.id].group_total_count == 608
+    assert by_id[others_only.id].user_total_count == 0
+    assert by_id[others_only.id].group_total_count == 21
+    assert by_id[no_history.id].user_total_count == 0
+    assert by_id[no_history.id].group_total_count == 0
