@@ -3,6 +3,8 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy.dialects import postgresql
+
 from pecha_api.poems.enums import PoemStatus
 from pecha_api.poems.models import Poem
 from pecha_api.poems.repository import (
@@ -132,6 +134,36 @@ def test_get_poems_list_pagination(mock_db_session):
     assert total == 100
     mock_query.offset.assert_called_once_with(10)
     mock_query.limit.assert_called_once_with(5)
+
+
+def test_get_poems_list_with_shuffle_seed(mock_db_session):
+    """Test shuffle seed orders by a seeded hash instead of newest first."""
+    mock_query = MagicMock()
+    mock_db_session.query.return_value = mock_query
+    mock_query.filter.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.count.return_value = 0
+    mock_query.offset.return_value = mock_query
+    mock_query.limit.return_value = mock_query
+    mock_query.all.return_value = []
+
+    get_poems_list(mock_db_session, shuffle_seed="abc123")
+
+    # Compiled for PostgreSQL rather than executed, as the listing-gate tests
+    # in tests/plans/test_event_linked_listing_visibility.py do: this repo has
+    # no database-backed test setup. Asserting the exact expression is what
+    # guarantees stable pagination: md5(id + seed) is deterministic per seed,
+    # so pages fetched with the same seed neither repeat nor skip poems, and
+    # id breaks any tie.
+    order_clauses = mock_query.order_by.call_args.args
+    compiled = [
+        str(clause.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for clause in order_clauses
+    ]
+    assert compiled == [
+        "md5(concat(CAST(poems.id AS VARCHAR), 'abc123'))",
+        "poems.id",
+    ]
 
 
 def test_get_poems_list_empty(mock_db_session):

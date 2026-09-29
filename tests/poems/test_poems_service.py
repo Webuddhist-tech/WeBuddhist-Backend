@@ -1,6 +1,6 @@
 import pytest
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch, MagicMock, Mock
 
 from fastapi import HTTPException
@@ -169,6 +169,7 @@ def test_list_poems_service_success(sample_poem_list, mock_db_session):
             chapter_name=None,
             author_name=None,
             language=None,
+            shuffle_seed=result.seed,
         )
 
 
@@ -198,7 +199,43 @@ def test_list_poems_service_with_filters(sample_poem_list, mock_db_session):
             chapter_name="Buddha Nature",
             author_name="Gampopa",
             language=None,
+            shuffle_seed=result.seed,
         )
+
+
+def test_list_poems_service_defaults_seed_to_today(mock_db_session):
+    """Test the shuffle seed defaults to today's UTC date (one order per day)."""
+    with patch("pecha_api.poems.service.SessionLocal", return_value=mock_db_session), \
+         patch("pecha_api.poems.service.get_poems_list", return_value=([], 0)) as mock_repo:
+
+        result = list_poems_service()
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert result.seed == today
+        assert mock_repo.call_args.kwargs["shuffle_seed"] == today
+
+
+def test_list_poems_service_uses_timezone_for_today(mock_db_session):
+    """Test 'today' is resolved in the caller's timezone, like verse of the day."""
+    with patch("pecha_api.poems.service.SessionLocal", return_value=mock_db_session), \
+         patch("pecha_api.poems.service.get_poems_list", return_value=([], 0)), \
+         patch("pecha_api.poems.service.get_date_in_timezone", return_value=date(2026, 9, 30)) as mock_tz:
+
+        result = list_poems_service(timezone="Asia/Kathmandu")
+
+        mock_tz.assert_called_once_with("Asia/Kathmandu")
+        assert result.seed == "2026-09-30"
+
+
+def test_list_poems_service_reuses_given_seed(mock_db_session):
+    """Test a client-provided seed is passed through to keep order across pages."""
+    with patch("pecha_api.poems.service.SessionLocal", return_value=mock_db_session), \
+         patch("pecha_api.poems.service.get_poems_list", return_value=([], 0)) as mock_repo:
+
+        result = list_poems_service(skip=20, limit=20, seed="abc123")
+
+        assert result.seed == "abc123"
+        assert mock_repo.call_args.kwargs["shuffle_seed"] == "abc123"
 
 
 def test_list_poems_service_empty(mock_db_session):
@@ -234,6 +271,7 @@ def test_list_poems_service_pagination(sample_poem_list, mock_db_session):
             chapter_name=None,
             author_name=None,
             language=None,
+            shuffle_seed=result.seed,
         )
 
 
