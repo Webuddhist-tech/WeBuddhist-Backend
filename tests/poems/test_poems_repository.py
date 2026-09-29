@@ -134,6 +134,25 @@ def test_get_poems_list_pagination(mock_db_session):
     mock_query.limit.assert_called_once_with(5)
 
 
+def test_get_poems_list_with_shuffle_seed(mock_db_session):
+    """Test shuffle seed orders by a seeded hash instead of newest first."""
+    mock_query = MagicMock()
+    mock_db_session.query.return_value = mock_query
+    mock_query.filter.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.count.return_value = 0
+    mock_query.offset.return_value = mock_query
+    mock_query.limit.return_value = mock_query
+    mock_query.all.return_value = []
+
+    get_poems_list(mock_db_session, shuffle_seed="abc123")
+
+    order_clauses = mock_query.order_by.call_args.args
+    compiled = str(order_clauses[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "md5" in compiled
+    assert "abc123" in compiled
+
+
 def test_get_poems_list_empty(mock_db_session):
     """Test listing when no poems exist."""
     mock_query = MagicMock()

@@ -11,6 +11,7 @@ from pecha_api.poems.enums import PoemStatus
 from pecha_api.poems.repository import get_poem_by_id, get_poems_list
 from pecha_api.poems.response_models import PoemDTO, PoemsResponse
 from pecha_api.poems.models import Poem
+from pecha_api.timezone_utils import get_date_in_timezone
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
 
@@ -47,8 +48,15 @@ def list_poems_service(
     chapter_name: Optional[str] = None,
     author_name: Optional[str] = None,
     language: Optional[LanguageCode] = None,
+    seed: Optional[str] = None,
+    timezone: Optional[str] = None,
 ) -> PoemsResponse:
-    """List published poems for public consumption."""
+    """List published poems for public consumption in shuffled order.
+
+    Defaults to today's date in the given timezone (UTC if none) as the seed,
+    so the order changes once a day and stays consistent across pages.
+    """
+    seed = seed or get_date_in_timezone(timezone).isoformat()
     with SessionLocal() as db:
         poems, total = get_poems_list(
             db=db,
@@ -58,6 +66,7 @@ def list_poems_service(
             chapter_name=chapter_name,
             author_name=author_name,
             language=language,
+            shuffle_seed=seed,
         )
 
         poem_dtos = [_build_poem_dto(poem) for poem in poems]
@@ -67,6 +76,7 @@ def list_poems_service(
             skip=skip,
             limit=limit,
             total=total,
+            seed=seed,
         )
 
 
