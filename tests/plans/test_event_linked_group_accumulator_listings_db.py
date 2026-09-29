@@ -1,6 +1,6 @@
 """Database-backed checks for event-linked group accumulator listing rules."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 from uuid import UUID, uuid4
 
@@ -18,6 +18,7 @@ from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.db.database import Base
 from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_model import Event
+from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata
 from pecha_api.group_accumulator.group_accumulator_repository import (
     get_group_accumulators,
@@ -303,8 +304,14 @@ def test_groups_by_accumulator_returns_user_and_group_totals(
     assert by_id[no_history.id].group_total_count == 0
 
 
-def _add_group(db: Session, *, slug: str, titles: dict) -> AuthorGroup:
-    group = AuthorGroup(id=uuid4(), slug=slug, created_by="author@example.com")
+def _add_group(
+    db: Session,
+    *,
+    slug: str,
+    titles: dict,
+    status: AuthorGroupStatus = AuthorGroupStatus.PUBLISHED,
+) -> AuthorGroup:
+    group = AuthorGroup(id=uuid4(), slug=slug, status=status, created_by="author@example.com")
     db.add(group)
     for language, title in titles.items():
         db.add(AuthorGroupMetadata(id=uuid4(), group_id=group.id, language=language, title=title))
@@ -341,6 +348,9 @@ def test_accumulator_groups_service_returns_group_name_and_event_title(
     sangha = _add_group(listing_db, slug="sangha-circle", titles={"EN": "Sangha Circle", "BO": "དགེ་འདུན"})
     untitled = _add_group(listing_db, slug="untitled-group", titles={})
     other = _add_group(listing_db, slug="other-group", titles={"EN": "Other Group"})
+    draft = _add_group(
+        listing_db, slug="draft-group", titles={"EN": "Draft Group"}, status=AuthorGroupStatus.DRAFT
+    )
 
     event_linked = GroupAccumulator(
         id=uuid4(),
@@ -356,13 +366,28 @@ def test_accumulator_groups_service_returns_group_name_and_event_title(
         title="Standalone accumulation",
         created_at=datetime.now(timezone.utc),
     )
-    listing_db.add_all([event_linked, standalone])
+    in_draft_group = GroupAccumulator(
+        id=uuid4(),
+        group_id=draft.id,
+        accumulator_id=preset_id,
+        title="Draft accumulation",
+        created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add_all([event_linked, standalone, in_draft_group])
     listing_db.commit()
-    for ga in (event_linked, standalone):
+    for ga in (event_linked, standalone, in_draft_group):
         _join(listing_db, group_accumulator_id=ga.id, user_id=user_id)
 
+    # Only the most recently created linked event is used.
+    earlier = _add_event(listing_db, group_id=sangha.id, group_accumulator_id=event_linked.id)
+    earlier.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+    _add_event_metadata(listing_db, event_id=earlier.id, names={"EN": "Last year's retreat"})
     retreat = _add_event(listing_db, group_id=sangha.id, group_accumulator_id=event_linked.id)
+    retreat.created_at = datetime.now(timezone.utc)
+    listing_db.commit()
     _add_event_metadata(listing_db, event_id=retreat.id, names={"EN": "Saga Dawa Retreat", "BO": "ས་ག་ཟླ་བ"})
+    draft_event = _add_event(listing_db, group_id=draft.id, group_accumulator_id=in_draft_group.id)
+    _add_event_metadata(listing_db, event_id=draft_event.id, names={"EN": "Draft event"})
     # An event in another group does not link this group accumulator.
     foreign = _add_event(listing_db, group_id=other.id, group_accumulator_id=standalone.id)
     _add_event_metadata(listing_db, event_id=foreign.id, names={"EN": "Other group event"})
@@ -391,6 +416,9 @@ def test_accumulator_groups_service_returns_group_name_and_event_title(
     assert default[event_linked.id].event_title == "Saga Dawa Retreat"
     assert default[standalone.id].group_name == "untitled-group"
     assert default[standalone.id].event_title is None
+    # Unpublished groups never reach the app, so their names stay hidden.
+    assert default[in_draft_group.id].group_name is None
+    assert default[in_draft_group.id].event_title is None
 
     tibetan = run("bo")
     assert tibetan[event_linked.id].group_name == "དགེ་འདུན"

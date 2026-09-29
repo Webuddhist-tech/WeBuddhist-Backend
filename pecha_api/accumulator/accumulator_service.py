@@ -1,4 +1,4 @@
-from typing import Dict, Optional, List
+from typing import TYPE_CHECKING, Dict, Optional, List
 from uuid import UUID, uuid4
 import logging
 
@@ -73,6 +73,10 @@ from .response_message import (
     ONLY_USER_ACCUMULATORS_CAN_BE_UPDATED,
     ONLY_USER_ACCUMULATORS_CAN_BE_DELETED
 )
+
+if TYPE_CHECKING:
+    from pecha_api.events.event_model import Event
+    from pecha_api.plans.groups.groups_models import AuthorGroup
 
 logger = logging.getLogger(__name__)
 
@@ -600,14 +604,14 @@ def update_mala_image_service(
         return convert_accumulator_to_dto(updated_accumulator, mantras_by_id)
 
 
-def _group_name(group, language: Optional[str]) -> Optional[str]:
+def _group_name(group: Optional["AuthorGroup"], language: Optional[str]) -> Optional[str]:
     if group is None:
         return None
     metadata = _pick_mantra_metadata(group.metadata_entries, language)
     return metadata.title if metadata else group.slug
 
 
-def _event_title(event, language: Optional[str]) -> Optional[str]:
+def _event_title(event: Optional["Event"], language: Optional[str]) -> Optional[str]:
     if event is None:
         return None
     metadata = _pick_mantra_metadata(event.metadata_entries, language)

@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import case, func
-from typing import List, Tuple, Optional, Dict
+from typing import TYPE_CHECKING, List, Tuple, Optional, Dict
 from uuid import UUID
 import _datetime
 from _datetime import datetime
@@ -17,6 +17,10 @@ from .group_accumulator_history_model import GroupAccumulatorHistory
 from .group_accumulator_join_model import group_accumulator_joins
 from ..mantra.mantra_model import Mantra
 from ..mantra.mantra_metadata_model import MantraMetadata
+
+if TYPE_CHECKING:
+    from pecha_api.events.event_model import Event
+    from pecha_api.plans.groups.groups_models import AuthorGroup
 
 
 def mantra_exists(db: Session, mantra_id: UUID) -> bool:
@@ -352,8 +356,8 @@ class GroupAccumulatorWithUserCount:
         user_total_count: int,
         is_joined: bool = False,
         group_total_count: int = 0,
-        group=None,
-        event=None,
+        group: Optional["AuthorGroup"] = None,
+        event: Optional["Event"] = None,
     ) -> None:
         self.group_accumulator = group_accumulator
         self.user_total_count = user_total_count
@@ -361,6 +365,59 @@ class GroupAccumulatorWithUserCount:
         self.group_total_count = group_total_count
         self.group = group
         self.event = event
+
+
+def _get_published_groups_by_id(db: Session, group_ids: List[UUID]) -> Dict[UUID, "AuthorGroup"]:
+    """Published, non-deleted groups with their metadata; other groups never reach the app."""
+    from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
+    from pecha_api.plans.groups.groups_models import AuthorGroup
+
+    groups = (
+        db.query(AuthorGroup)
+        .options(selectinload(AuthorGroup.metadata_entries))
+        .filter(
+            AuthorGroup.id.in_(set(group_ids)),
+            AuthorGroup.status == AuthorGroupStatus.PUBLISHED,
+            AuthorGroup.deleted_at.is_(None),
+        )
+        .all()
+    )
+    return {group.id: group for group in groups}
+
+
+def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) -> Dict[UUID, "Event"]:
+    """The most recently created event linking each group accumulator, with its metadata.
+
+    An event links a group accumulator only within the same group (see
+    group_accumulator_not_linked_to_event).
+    """
+    if not group_accumulator_ids:
+        return {}
+
+    from pecha_api.events.event_model import Event
+
+    latest = (
+        db.query(
+            Event.id.label("event_id"),
+            func.row_number()
+            .over(partition_by=Event.group_accumulator_id, order_by=Event.created_at.desc())
+            .label("rank"),
+        )
+        .join(GroupAccumulator, GroupAccumulator.id == Event.group_accumulator_id)
+        .filter(
+            Event.group_accumulator_id.in_(group_accumulator_ids),
+            Event.group_id == GroupAccumulator.group_id,
+        )
+        .subquery()
+    )
+    events = (
+        db.query(Event)
+        .join(latest, latest.c.event_id == Event.id)
+        .filter(latest.c.rank == 1)
+        .options(selectinload(Event.metadata_entries))
+        .all()
+    )
+    return {event.group_accumulator_id: event for event in events}
 
 
 def get_groups_by_accumulator_id(
@@ -430,34 +487,11 @@ def get_groups_by_accumulator_id(
         )
     )
 
-    from pecha_api.events.event_model import Event
-    from pecha_api.plans.groups.groups_models import AuthorGroup
-
-    group_ids = list({ga.group_id for ga in group_accumulators})
-    groups_by_id = {
-        group.id: group
-        for group in db.query(AuthorGroup)
-        .options(selectinload(AuthorGroup.metadata_entries))
-        .filter(AuthorGroup.id.in_(group_ids))
-        .all()
-    }
-
-    # An event links a group accumulator only within the same group (see
-    # group_accumulator_not_linked_to_event); keep the most recently created one.
-    events = (
-        db.query(Event)
-        .join(GroupAccumulator, GroupAccumulator.id == Event.group_accumulator_id)
-        .options(selectinload(Event.metadata_entries))
-        .filter(
-            Event.group_accumulator_id.in_(group_accumulator_ids),
-            Event.group_id == GroupAccumulator.group_id,
-        )
-        .order_by(Event.created_at.desc())
-        .all()
+    groups_by_id = _get_published_groups_by_id(db, [ga.group_id for ga in group_accumulators])
+    events_by_group_accumulator_id = _get_latest_linked_events(
+        db,
+        [ga.id for ga in group_accumulators if ga.group_id in groups_by_id],
     )
-    events_by_group_accumulator_id = {}
-    for event in events:
-        events_by_group_accumulator_id.setdefault(event.group_accumulator_id, event)
 
     result = [
         GroupAccumulatorWithUserCount(
