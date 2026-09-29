@@ -159,7 +159,7 @@ async def get_accumulator_groups(
         description="When true, return only group accumulators the authenticated user has joined",
     ),
 ):
-    """Get groups using this accumulator with the authenticated user's total count for each group."""
+    """Get groups using this accumulator with the authenticated user's and the group's total count for each group."""
     return get_accumulator_groups_service(
         token=credentials.credentials,
         accumulator_id=accumulator_id,
