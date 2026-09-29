@@ -59,6 +59,10 @@ from pecha_api.users.users_service import validate_and_extract_user_details
 
 from .event_model import Event
 from .event_enums import EventLinkType
+from .event_day_video_sync import (
+    sync_event_youtube_to_plan_day,
+    youtube_video_keys_of_event,
+)
 from .event_filters import EventContentFilter
 from .event_response_models import (
     CreateEventRequest,
@@ -1335,6 +1339,9 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             youtube_entries=request.youtube,
             after_flush=_schedule_reminders_after_flush,
         )
+        sync_event_youtube_to_plan_day(
+            db, saved, previous_keys=set(), author_email=current_author.email
+        )
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
         return _event_to_dto(saved)
@@ -1548,6 +1555,7 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         _require_can_edit_event(db, event.group_id, current_author)
 
         chat_was_enabled = bool(getattr(event, "chat_enabled", True))
+        youtube_video_keys_before = youtube_video_keys_of_event(event)
 
         should_rebuild_reminders = _apply_recurrence_or_dates(event, request)
         timezone_before = event.timezone
@@ -1581,6 +1589,12 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
             link_entries=request.links,
             youtube_entries=request.youtube,
         )
+        if request.youtube is not None:
+            sync_event_youtube_to_plan_day(
+                db, saved,
+                previous_keys=youtube_video_keys_before,
+                author_email=current_author.email,
+            )
 
         # Switching the chat off has to reach sockets that are already open;
         # the request-layer gate only ends them at their next frame.
