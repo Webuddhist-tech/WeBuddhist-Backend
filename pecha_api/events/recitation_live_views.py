@@ -150,6 +150,7 @@ async def publish_recitation_position(
         revision=revision,
         accepted_at_ms=_epoch_ms(accepted_at),
         autoplay=frame.autoplay,
+        run=frame.run,
     )
 
     return PositionAcceptedResponse(
@@ -463,6 +464,7 @@ async def websocket_recitation_live(
                         revision=revision,
                         accepted_at_ms=_epoch_ms(accepted_at),
                         autoplay=frame.autoplay,
+                        run=frame.run,
                     ))
                 except Exception as e:
                     logger.exception("Failed to broadcast recitation position: %s", e)

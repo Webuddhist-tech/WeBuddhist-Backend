@@ -25,6 +25,12 @@ class SetPositionFrame(BaseModel):
     # Set by the controller's autoplay. Such a move is timed by the play times
     # themselves, so it is not measured back into them.
     autoplay: bool = False
+    # The controller's name for an unbroken stretch of this text: kept for as
+    # long as every move the controller makes includes the text, replaced when a
+    # move leaves it out. Two lines are only timed against each other within one
+    # run, so time the room spent on another text is never billed to this one.
+    # Without it nothing is timed.
+    run: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
     @field_validator("text_id", "segment_id")
     @classmethod

@@ -51,13 +51,6 @@ def segment_mark_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:marks"
 
 
-def segment_moves_key(event_id: UUID) -> str:
-    """Every recent mark as `<revision>|<text id>`, scored by revision - which
-    texts moved between two of one text's marks, in the order the room made
-    those moves rather than the order background work recorded them."""
-    return f"recitation:event:{event_id}:moves"
-
-
 def segment_boundary_key(event_id: UUID) -> str:
     """The revision a session ended on. Marks at or below it belong to that
     session, so nothing is measured across the gap between two pujas."""
@@ -180,30 +173,17 @@ return revision
 """
 
 # Swaps a text's mark for the newer one and hands back the old, in one step.
-# Marks are `<revision>|<accepted at ms>|<autoplay 0/1>|<line>` and lead with the
-# revision they were accepted under, so a mark that arrives late - background
-# work is not ordered - never overwrites a newer one and is never measured
-# against it.
+# Marks are `<revision>|<accepted at ms>|<autoplay 0/1>|<run>|<line>` and lead
+# with the revision they were accepted under, so a mark that arrives late -
+# background work is not ordered - never overwrites a newer one and is never
+# measured against it.
 #
 # The same line sent twice - the controller re-sends the edition on screen
 # behind its followers - keeps the first mark: the line started when the room
 # first reached it, not when it was repeated.
 #
-# A text left for another one must not be billed the excursion when the
-# operator comes back to its next line. Several texts move together, though:
-# every move publishes each followed edition and then the one on screen, so
-# another text's mark changing says nothing on its own. What does is how far it
-# moved. In step, another text has at most two marks between two of this
-# text's - one from the move this text's old mark belongs to, one from the move
-# being made. A third means moves were made without this text, so the old mark
-# is not handed back. That is judged from revisions alone, never by deleting
-# other texts' marks, so no order the background work runs in can take a newer
-# mark away. The count is taken by revision range, not from whatever the other
-# texts' latest marks are when this runs: a mark written late must not be
-# charged for moves the room made after it.
-#
-# The moves kept are capped. If this text's own old mark has fallen out of them,
-# what happened since cannot be told, so nothing is handed back.
+# Whether the text stayed with the room between two marks is not judged here:
+# the run each mark carries says so, and the caller compares them.
 #
 # The session boundary is a revision, not a deletion, because ending a session
 # and writing a mark are both background work and cannot be ordered against
@@ -217,44 +197,21 @@ if revision <= boundary then
     return false
 end
 local previous = redis.call('HGET', KEYS[1], ARGV[1])
-local previous_revision = false
 if previous then
-    local stored_revision, stored_line = string.match(previous, '^(%d+)|%d+|%d|(.*)$')
-    previous_revision = tonumber(stored_revision)
-    if previous_revision and previous_revision >= revision then
+    local stored_revision, stored_line = string.match(previous, '^(%d+)|%d+|%d|[^|]*|(.*)$')
+    stored_revision = tonumber(stored_revision)
+    if stored_revision and stored_revision >= revision then
         return false
     end
     if stored_line == ARGV[5] then
         return false
     end
-    if not previous_revision or previous_revision <= boundary then
+    if not stored_revision or stored_revision <= boundary then
         previous = false
-    end
-end
-if previous and redis.call('ZCARD', KEYS[3]) >= 256 then
-    local oldest = redis.call('ZRANGE', KEYS[3], 0, 0)
-    if tonumber(string.match(oldest[1], '^(%d+)|')) > previous_revision then
-        previous = false
-    end
-end
-if previous then
-    local between = redis.call('ZRANGEBYSCORE', KEYS[3], previous_revision + 1, revision - 1)
-    local moves = {}
-    for i = 1, #between do
-        local other = string.match(between[i], '^%d+|(.*)$')
-        if other ~= ARGV[1] then
-            moves[other] = (moves[other] or 0) + 1
-            if moves[other] > 2 then
-                previous = false
-            end
-        end
     end
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
-redis.call('ZADD', KEYS[3], revision, ARGV[2] .. '|' .. ARGV[1])
-redis.call('ZREMRANGEBYRANK', KEYS[3], 0, -257)
 redis.call('EXPIRE', KEYS[1], ARGV[4])
-redis.call('EXPIRE', KEYS[3], ARGV[4])
 return previous
 """
 
@@ -550,21 +507,19 @@ class RecitationBroadcaster:
         """Record `mark` as where `text_id` now stands and return the mark it
         replaced.
 
-        `mark` is `"<revision>|<accepted at ms>|<autoplay 0/1>|<line>"`, where
-        `line` names the line itself. None when there was nothing before it,
-        when a newer mark is already stored, when the same line is already
+        `mark` is `"<revision>|<accepted at ms>|<autoplay 0/1>|<run>|<line>"`,
+        where `line` names the line itself. None when there was nothing before
+        it, when a newer mark is already stored, when the same line is already
         marked, when the mark or the one before it belongs to a session that has
-        ended, when other texts moved on without this one since, or when Redis
-        could not be reached - in every case there is nothing to measure, and
+        ended, or when Redis could not be reached - in every case there is nothing to measure, and
         play times are never worth failing over.
         """
         try:
             previous = await self.redis.eval(
                 _SWAP_SEGMENT_MARK_SCRIPT,
-                3,
+                2,
                 segment_mark_key(event_id),
                 segment_boundary_key(event_id),
-                segment_moves_key(event_id),
                 text_id,
                 str(revision),
                 mark,

@@ -28,17 +28,18 @@ def _line(index: Optional[int], round_number: Optional[int], segment_id: str) ->
 
 
 def _parse_mark(mark: str) -> Optional[tuple]:
-    """`<revision>|<accepted at ms>|<autoplay 0/1>|<index>|<round>|<segment id>`
-    back into (accepted at ms, autoplay, index, segment id); None for anything
-    unreadable."""
-    parts = mark.split("|", 5)
-    if len(parts) != 6:
+    """`<revision>|<accepted at ms>|<autoplay 0/1>|<run>|<index>|<round>|<segment id>`
+    back into (accepted at ms, autoplay, run, index, segment id); None for
+    anything unreadable."""
+    parts = mark.split("|", 6)
+    if len(parts) != 7:
         return None
-    _, accepted_at, autoplay, index, _, segment_id = parts
+    _, accepted_at, autoplay, run, index, _, segment_id = parts
     try:
         return (
             int(accepted_at),
             autoplay == "1",
+            run,
             (int(index) if index else None),
             segment_id,
         )
@@ -62,6 +63,7 @@ async def record_segment_play_time(
     revision: Optional[int],
     accepted_at_ms: int,
     autoplay: bool = False,
+    run: Optional[str] = None,
 ) -> None:
     """Measure the line the room just left, now that it has moved on.
 
@@ -76,11 +78,12 @@ async def record_segment_play_time(
     and feeding it back would only drown out the operator's real ones. Such a
     move still marks where the room is, flagged, so the next move knows.
 
-    Time spent on another text, and the gap between two sessions, are ruled out
-    by the mark store itself: it does not hand back a mark other texts have
-    moved on from without this one, nor one from a session that has ended. Both
-    have to be settled there, because this runs as unordered background work
-    and cannot tell how much happened between two marks.
+    Nor is a step that spans time the room spent on another text. The
+    controller names each unbroken stretch of a text with a run, replaced
+    whenever one of its moves leaves the text out, so two marks of the same run
+    had the text in every move between them. A position without a run cannot
+    say so and is never measured. The gap between two sessions is ruled out by
+    the mark store, which hands back nothing from a session that has ended.
     """
     try:
         if revision is None:
@@ -90,7 +93,7 @@ async def record_segment_play_time(
         previous = await broadcaster.swap_segment_mark(
             event_id=event_id,
             text_id=text_id,
-            mark=f"{revision}|{accepted_at_ms}|{1 if autoplay else 0}|{line}",
+            mark=f"{revision}|{accepted_at_ms}|{1 if autoplay else 0}|{run or ''}|{line}",
             revision=revision,
             line=line,
         )
@@ -99,8 +102,10 @@ async def record_segment_play_time(
         parsed = _parse_mark(previous)
         if parsed is None:
             return
-        started_at_ms, started_by_autoplay, previous_index, previous_segment_id = parsed
+        started_at_ms, started_by_autoplay, previous_run, previous_index, previous_segment_id = parsed
         if started_by_autoplay:
+            return
+        if not run or previous_run != run:
             return
         if index is None or previous_index is None or index != previous_index + 1:
             return

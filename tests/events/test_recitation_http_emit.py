@@ -81,6 +81,19 @@ class TestPublishPositionOverHttp:
         assert kwargs["revision"] == 58
         assert isinstance(kwargs["accepted_at_ms"], int)
         assert kwargs["autoplay"] is False
+        assert kwargs["run"] is None
+
+    def test_the_run_is_passed_on(self):
+        with _http_env() as broadcaster:
+            client.post(_url(uuid4()), json=_body(run="run-7"), headers=AUTH)
+
+        assert broadcaster.record.await_args.kwargs["run"] == "run-7"
+
+    def test_a_run_that_could_break_the_mark_is_refused(self):
+        with _http_env():
+            response = client.post(_url(uuid4()), json=_body(run="a|b"), headers=AUTH)
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
     def test_an_autoplayed_move_says_so(self):
         with _http_env() as broadcaster:
