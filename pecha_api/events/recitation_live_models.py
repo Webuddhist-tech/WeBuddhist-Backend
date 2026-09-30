@@ -31,6 +31,14 @@ class SetPositionFrame(BaseModel):
     # run, so time the room spent on another text is never billed to this one.
     # Without it nothing is timed.
     run: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # How long the controller held the line this move leaves behind, measured on
+    # its own monotonic clock. The controller is the only place that knows when
+    # the operator actually left the line: a duration worked out here instead
+    # would be the gap between two HTTP arrivals, and would carry the network,
+    # the liveness check, the throttle and the controller's own send pacing into
+    # a figure that is meant to be speech alone. Advisory: whether this move is
+    # measured at all is still settled here, and the duration is clamped.
+    elapsed_ms: Optional[int] = Field(None, ge=0)
 
     @field_validator("text_id", "segment_id")
     @classmethod

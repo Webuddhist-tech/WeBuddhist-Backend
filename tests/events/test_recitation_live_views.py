@@ -480,6 +480,7 @@ class TestOperatorPublishing:
                         "segment_id": "seg-42",
                         "index": 12,
                         "round_number": 3,
+                        "elapsed_ms": 2_750,
                     })
                     _sync(websocket)
 
@@ -492,6 +493,9 @@ class TestOperatorPublishing:
         assert kwargs["round_number"] == 3
         assert kwargs["revision"] == 57
         assert isinstance(kwargs["accepted_at_ms"], int)
+        # The socket route carries the hold too: a controller on either route is
+        # timed by its own clock, not by when its frames arrived.
+        assert kwargs["elapsed_ms"] == 2_750
 
     def test_set_without_optional_fields_is_accepted(self):
         with _ws_env(is_operator=True) as (broadcaster, _):
