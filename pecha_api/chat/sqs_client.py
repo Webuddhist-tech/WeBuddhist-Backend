@@ -28,6 +28,10 @@ def get_prayer_notification_sqs_queue_url() -> str:
     )
 
 
+def is_prayer_notification_sqs_configured() -> bool:
+    return bool(get_prayer_notification_sqs_queue_url())
+
+
 def build_chat_notification_event_body(*, message_id: str) -> Dict[str, Any]:
     return {
         "event_type": CHAT_MESSAGE_CREATED_EVENT,

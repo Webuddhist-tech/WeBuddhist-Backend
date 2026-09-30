@@ -738,7 +738,7 @@ class TestPrayerNotificationGate:
 class TestNotifyPrayersForRequest:
 
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=False)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=False)
     def test_no_queue_records_no_push(self, _configured, mock_gate):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
@@ -749,7 +749,7 @@ class TestNotifyPrayersForRequest:
     @patch(f"{DISPATCH}.SessionLocal")
     @patch(f"{DISPATCH}.send_prayer_notification_message", return_value="sqs-1")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_sends_the_notification_id_as_prayer_id(
         self, _configured, mock_gate, mock_send, mock_session, mock_mark
     ):
@@ -769,7 +769,7 @@ class TestNotifyPrayersForRequest:
 
     @patch(f"{DISPATCH}.send_prayer_notification_message")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", return_value=None)
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_held_by_the_interval_sends_nothing(self, _configured, _gate, mock_send):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
@@ -777,7 +777,7 @@ class TestNotifyPrayersForRequest:
         mock_send.assert_not_called()
 
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", side_effect=RuntimeError)
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_never_raises(self, _configured, _gate):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
@@ -786,7 +786,7 @@ class TestNotifyPrayersForRequest:
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
     @patch(f"{DISPATCH}.send_prayer_notification_message", side_effect=RuntimeError)
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_a_failed_send_leaves_the_row_for_reconcile(
         self, _configured, mock_gate, _send, mock_mark
     ):
@@ -804,7 +804,7 @@ class TestReconcilePrayerNotifications:
     @patch(f"{DISPATCH}.list_undispatched_prayer_notifications")
     @patch(f"{DISPATCH}.get_int", return_value=60)
     @patch(f"{DISPATCH}.SessionLocal")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_resends_unsent_pushes_without_re_gating(
         self, _configured, mock_session, _get_int, mock_list, mock_send
     ):
@@ -822,7 +822,7 @@ class TestReconcilePrayerNotifications:
         ]
 
     @patch(f"{DISPATCH}.list_undispatched_prayer_notifications")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=False)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=False)
     def test_no_queue_does_nothing(self, _configured, mock_list):
         from pecha_api.chat.notification_dispatch_service import (
             reconcile_undispatched_prayer_notifications,

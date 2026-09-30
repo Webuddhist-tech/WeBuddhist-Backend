@@ -24,6 +24,7 @@ from pecha_api.chat.sqs_client import (
     build_chat_notification_event_body,
     build_prayer_notification_event_body,
     is_chat_notification_sqs_configured,
+    is_prayer_notification_sqs_configured,
     send_chat_notification_message,
     send_prayer_notification_message,
 )
@@ -102,14 +103,21 @@ def enqueue_chat_message_notification(
     both, so an ordinary TEXT message costs no extra read to find out it is
     not a prayer request.
     """
-    if not is_chat_notification_sqs_configured():
+    is_prayer_request = message_type == ChatMessageType.PRAYER.value
+    # Prayer requests only need the prayer queue, which may be set on its own.
+    queue_configured = (
+        is_prayer_notification_sqs_configured()
+        if is_prayer_request
+        else is_chat_notification_sqs_configured()
+    )
+    if not queue_configured:
         logger.debug(
             "Skipping chat notification enqueue for %s; SQS queue not configured",
             message_id,
         )
         return None
 
-    if message_type == ChatMessageType.PRAYER.value and not _should_notify_prayer_request(
+    if is_prayer_request and not _should_notify_prayer_request(
         message_id=message_id, room_id=room_id
     ):
         try:
@@ -131,7 +139,7 @@ def enqueue_chat_message_notification(
     # holds up ordinary chat pushes.
     send = (
         send_prayer_notification_message
-        if message_type == ChatMessageType.PRAYER.value
+        if is_prayer_request
         else send_chat_notification_message
     )
     try:
@@ -164,7 +172,13 @@ def reconcile_undispatched_chat_notifications() -> int:
     Covers the commit-before-send crash window. Worker-side per-device
     idempotency makes duplicate queue events safe.
     """
-    if not is_chat_notification_sqs_configured():
+    if is_chat_notification_sqs_configured():
+        message_type = None
+    elif is_prayer_notification_sqs_configured():
+        # Only the prayer queue is set: retry just prayer requests, so TEXT
+        # messages that can never be sent don't fill every batch.
+        message_type = ChatMessageType.PRAYER.value
+    else:
         return 0
 
     grace_seconds = max(get_int("CHAT_NOTIFICATION_DISPATCH_RECONCILE_GRACE_SECONDS"), 1)
@@ -176,6 +190,7 @@ def reconcile_undispatched_chat_notifications() -> int:
             db=db,
             older_than=older_than,
             limit=batch_size,
+            message_type=message_type,
         )
         # Read inside the session: a prayer request is re-checked against the
         # room's interval on retry, so a retry inside the window is held rather
@@ -285,7 +300,7 @@ def notify_prayers_for_request(message_id: UUID, prayer_user_id: UUID) -> str | 
     own prayers. Returns the SQS MessageId when a push was sent, otherwise
     None. The prayers themselves are already persisted either way.
     """
-    if not is_chat_notification_sqs_configured():
+    if not is_prayer_notification_sqs_configured():
         logger.debug(
             "Skipping prayer notification for %s; SQS queue not configured",
             message_id,
@@ -311,7 +326,7 @@ def reconcile_undispatched_prayer_notifications() -> int:
     Covers the same commit-before-send crash window as chat messages. The gate
     is not re-run: the row is the push that was already decided.
     """
-    if not is_chat_notification_sqs_configured():
+    if not is_prayer_notification_sqs_configured():
         return 0
 
     grace_seconds = max(get_int("CHAT_NOTIFICATION_DISPATCH_RECONCILE_GRACE_SECONDS"), 1)

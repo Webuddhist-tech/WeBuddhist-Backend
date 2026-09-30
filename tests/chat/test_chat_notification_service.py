@@ -384,6 +384,24 @@ class TestEnqueueChatMessageNotification:
     def test_returns_none_on_enqueue_failure(self, _configured, _send):
         assert enqueue_chat_message_notification(uuid4()) is None
 
+    @patch("pecha_api.chat.notification_dispatch_service.mark_message_notification_dispatched")
+    @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message", return_value="sqs-p")
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=0)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=False)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_prayer_request_sends_with_only_the_prayer_queue_set(
+        self, mock_session, _chat_configured, _prayer_configured, _get_int, mock_send, _mark
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = enqueue_chat_message_notification(
+            uuid4(), message_type="PRAYER", room_id=uuid4()
+        )
+
+        assert result == "sqs-p"
+        mock_send.assert_called_once()
+
 
 class TestPrayerRequestNotificationInterval:
     """A prayer request goes to every member of the room, so ten requests in a
@@ -394,7 +412,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message", return_value="sqs-1")
     @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_first_request_in_a_quiet_room_sends(
         self, mock_session, _configured, _get_int, _last_sent, mock_send, mock_mark
@@ -413,7 +431,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message")
     @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_request_inside_the_interval_is_held(
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, mock_mark
@@ -438,7 +456,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message", return_value="sqs-2")
     @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_request_after_the_interval_sends(
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
@@ -460,7 +478,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message", return_value="sqs-3")
     @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request")
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=0)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_zero_disables_the_interval(
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark
@@ -506,7 +524,7 @@ class TestPrayerRequestNotificationInterval:
         side_effect=RuntimeError("boom"),
     )
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_a_failed_check_lets_the_push_through(
         self, mock_session, _configured, _get_int, _last_sent, mock_send, _mark
@@ -526,7 +544,7 @@ class TestPrayerRequestNotificationInterval:
     @patch("pecha_api.chat.notification_dispatch_service.send_prayer_notification_message", return_value="sqs-6")
     @patch("pecha_api.chat.notification_dispatch_service.last_dispatched_prayer_request", return_value=None)
     @patch("pecha_api.chat.notification_dispatch_service.get_int", return_value=1140)
-    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
     @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
     def test_a_missing_room_id_is_looked_up_rather_than_skipping_the_gate(
         self, mock_session, _configured, _get_int, mock_last_sent, mock_send, _mark, mock_get_message
@@ -564,6 +582,29 @@ class TestReconcileUndispatched:
         mock_enqueue.assert_called_once_with(
             message.id, message_type="TEXT", room_id=message.room_id
         )
+
+    @patch("pecha_api.chat.notification_dispatch_service.enqueue_chat_message_notification", return_value="sqs-p")
+    @patch("pecha_api.chat.notification_dispatch_service.list_undispatched_chat_notification_messages")
+    @patch("pecha_api.chat.notification_dispatch_service.get_int", side_effect=lambda key: 60)
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=True)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=False)
+    @patch("pecha_api.chat.notification_dispatch_service.SessionLocal")
+    def test_retries_only_prayer_requests_with_only_the_prayer_queue_set(
+        self, mock_session, _chat_configured, _prayer_configured, _get_int, mock_list, mock_enqueue
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        message = MockMessage(message_type="PRAYER")
+        mock_list.return_value = [message]
+
+        assert reconcile_undispatched_chat_notifications() == 1
+        assert mock_list.call_args.kwargs["message_type"] == "PRAYER"
+
+    @patch("pecha_api.chat.notification_dispatch_service.list_undispatched_chat_notification_messages")
+    @patch("pecha_api.chat.notification_dispatch_service.is_prayer_notification_sqs_configured", return_value=False)
+    @patch("pecha_api.chat.notification_dispatch_service.is_chat_notification_sqs_configured", return_value=False)
+    def test_no_queue_does_nothing(self, _chat_configured, _prayer_configured, mock_list):
+        assert reconcile_undispatched_chat_notifications() == 0
+        mock_list.assert_not_called()
 
 
 class TestPersistMessageEnqueues:
@@ -1149,3 +1190,19 @@ class TestPrayerNotificationQueue:
 
         send_prayer_notification_message({"event_type": "PRAYER_RECEIVED"})
         assert mock_send.call_args.args[0] == "https://sqs/chat"
+
+    @patch(
+        "pecha_api.chat.sqs_client.get",
+        side_effect=lambda key: {
+            "PRAYER_NOTIFICATION_SQS_QUEUE_URL": "https://sqs/prayer",
+            "CHAT_NOTIFICATION_SQS_QUEUE_URL": "",
+        }[key],
+    )
+    def test_prayer_queue_alone_counts_as_configured(self, _get):
+        from pecha_api.chat.sqs_client import (
+            is_chat_notification_sqs_configured,
+            is_prayer_notification_sqs_configured,
+        )
+
+        assert is_prayer_notification_sqs_configured()
+        assert not is_chat_notification_sqs_configured()
