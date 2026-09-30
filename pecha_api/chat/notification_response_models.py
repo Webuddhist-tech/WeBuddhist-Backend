@@ -22,8 +22,9 @@ class ChatNotificationTargetsResponse(BaseModel):
     chat_kind: str
     group_id: Optional[UUID] = None
     message_type: str = "TEXT"
-    # Set for a prayer request only, where it stands in for the room name the
-    # copy leaves out. Presigned, so it is short-lived by design.
+    # A prayer request carries the room's image, standing in for the room name
+    # the copy leaves out; a group or event chat message carries the owning
+    # group's avatar. None for private chat. Presigned, so short-lived.
     image_url: Optional[str] = None
     title: str
     body: str

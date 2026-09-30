@@ -99,15 +99,15 @@ class TestPreviewAndCopy:
         assert body == "Hello there"
 
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
-    def test_group_copy_uses_room_and_sender_preview(self, _get_int):
+    def test_group_copy_is_titled_with_the_sender_and_carries_the_message(self, _get_int):
         title, body = _build_notification_copy(
             chat_kind="GROUP",
             room_name="Sangha",
-            sender_name="Alice Doe",
+            sender_name="Doe",
             message_body="Hello group",
         )
-        assert title == "Sangha"
-        assert body == "Alice Doe: Hello group"
+        assert title == "Doe"
+        assert body == "Hello group"
 
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_prayer_copy_names_the_requester_and_drops_the_room(self, _get_int):
@@ -350,7 +350,7 @@ class TestHeldPrayerRequestCopy:
             message_body="Hello group",
             held_count=5,
         )
-        assert body == "Alice Doe: Hello group"
+        assert body == "Hello group"
 
 
 class TestBuildEventBody:
@@ -669,10 +669,12 @@ class TestGetChatNotificationTargets:
         assert result.total == 1
         assert result.has_more is False
 
+    @patch("pecha_api.chat.notification_service._generate_presigned_url", return_value=None)
+    @patch("pecha_api.chat.notification_service.get_group_avatar_key", return_value=None)
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
     @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
-    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Alice Doe")
+    @patch("pecha_api.chat.notification_service.get_sender_short_name", return_value="Doe")
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
     @patch("pecha_api.chat.notification_service.SessionLocal")
     def test_group_targets_use_joiners_and_skip_users_without_devices(
@@ -683,6 +685,8 @@ class TestGetChatNotificationTargets:
         mock_recipients,
         mock_devices,
         _get_int,
+        _avatar_key,
+        _presign,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
         sender_id = uuid4()
@@ -700,8 +704,8 @@ class TestGetChatNotificationTargets:
 
         assert result.chat_kind == "GROUP"
         assert result.group_id == group_id
-        assert result.title == "Sangha"
-        assert result.body == "Alice Doe: Hello group"
+        assert result.title == "Doe"
+        assert result.body == "Hello group"
         assert len(result.recipients) == 1
         assert result.recipients[0].user_id == joiner_with_device
         assert result.total == 2
@@ -756,14 +760,58 @@ class TestGetChatNotificationTargets:
         assert result.image_url == "https://example.com/event.png"
         mock_presign.assert_called_once_with("groups/avatar.png")
 
-    @patch("pecha_api.chat.notification_service._generate_presigned_url")
+    @patch(
+        "pecha_api.chat.notification_service._generate_presigned_url",
+        return_value="https://example.com/group-avatar.png",
+    )
+    @patch(
+        "pecha_api.chat.notification_service.get_group_avatar_key",
+        return_value="groups/current-avatar.png",
+    )
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
     @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_short_name", return_value="Doe")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_group_message_carries_the_group_avatar(
+        self,
+        mock_session,
+        mock_get_message,
+        mock_sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        mock_avatar_key,
+        mock_presign,
+    ):
+        """The group's current avatar, not the room image copied at creation."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        joiner = uuid4()
+        group_id = uuid4()
+        room = MockRoom(group_id=group_id, name="Sangha", img_url="groups/old-avatar.png")
+        message = MockMessage(sender_id=uuid4(), room=room, body="Hello group")
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.message_type == "TEXT"
+        assert result.title == "Doe"
+        assert result.body == "Hello group"
+        assert result.image_url == "https://example.com/group-avatar.png"
+        assert mock_avatar_key.call_args.kwargs["group_id"] == group_id
+        mock_presign.assert_called_once_with("groups/current-avatar.png")
+
+    @patch("pecha_api.chat.notification_service._generate_presigned_url")
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_private_chat_recipient_user_ids")
     @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Alice Doe")
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
     @patch("pecha_api.chat.notification_service.SessionLocal")
-    def test_ordinary_message_carries_no_image(
+    def test_private_message_carries_no_image(
         self,
         mock_session,
         mock_get_message,
@@ -774,18 +822,16 @@ class TestGetChatNotificationTargets:
         mock_presign,
     ):
         mock_session.return_value.__enter__.return_value = MagicMock()
-        joiner = uuid4()
-        room = MockRoom(group_id=uuid4(), name="Sangha", img_url="groups/avatar.png")
-        message = MockMessage(sender_id=uuid4(), room=room, body="Hello group")
+        peer_id = uuid4()
+        room = MockRoom(sender_id=uuid4(), receiver_id=peer_id, name="DM")
+        message = MockMessage(room=room, body="Hello")
         mock_get_message.return_value = message
-        mock_recipients.return_value = ([joiner], 1)
-        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+        mock_recipients.return_value = [peer_id]
+        mock_devices.return_value = {peer_id: [MockDevice(user_id=peer_id)]}
 
         result = get_chat_notification_targets(message_id=message.id)
 
-        assert result.message_type == "TEXT"
         assert result.image_url is None
-        assert result.title == "Sangha"
         mock_presign.assert_not_called()
 
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room", return_value=None)
@@ -1023,3 +1069,25 @@ class TestDeactivatePushDeviceService:
         with pytest.raises(HTTPException) as exc_info:
             deactivate_push_device_service(push_device_id=uuid4())
         assert exc_info.value.status_code == 404
+
+
+class TestSenderShortName:
+    @staticmethod
+    def _db_returning(user):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = user
+        return db
+
+    def test_prefers_last_name(self):
+        from pecha_api.chat.notification_repository import get_sender_short_name
+        user = SimpleNamespace(lastname="Youdon", username="tyoudon")
+        assert get_sender_short_name(self._db_returning(user), uuid4()) == "Youdon"
+
+    def test_falls_back_to_username_without_last_name(self):
+        from pecha_api.chat.notification_repository import get_sender_short_name
+        user = SimpleNamespace(lastname="  ", username="tyoudon")
+        assert get_sender_short_name(self._db_returning(user), uuid4()) == "tyoudon"
+
+    def test_unknown_sender(self):
+        from pecha_api.chat.notification_repository import get_sender_short_name
+        assert get_sender_short_name(self._db_returning(None), uuid4()) == "Someone"

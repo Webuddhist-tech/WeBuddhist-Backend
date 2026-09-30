@@ -15,7 +15,7 @@ from pecha_api.notification.notification_preference_enums import (
 from pecha_api.notification.notification_preference_models import (
     UserNotificationPreference,
 )
-from pecha_api.plans.groups.groups_models import author_group_joins
+from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_joins
 from pecha_api.push_devices.push_device_models import PushDeviceToken
 from pecha_api.users.users_models import Users
 
@@ -303,6 +303,25 @@ def get_sender_display_name(db: Session, sender_id: UUID) -> str:
     if not user:
         return "Someone"
     return f"{user.firstname} {user.lastname or ''}".strip() or user.email or "Unknown"
+
+
+def get_sender_short_name(db: Session, sender_id: UUID) -> str:
+    """The name a group chat push is titled with: the sender's last name, or
+    their username when they have none."""
+    user = db.query(Users).filter(Users.id == sender_id).first()
+    if not user:
+        return "Someone"
+    return (user.lastname or "").strip() or (user.username or "").strip() or "Someone"
+
+
+def get_group_avatar_key(db: Session, group_id: Optional[UUID]) -> Optional[str]:
+    if group_id is None:
+        return None
+    return (
+        db.query(AuthorGroup.avatar_key)
+        .filter(AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None))
+        .scalar()
+    )
 
 
 def normalize_platform(value) -> str:
