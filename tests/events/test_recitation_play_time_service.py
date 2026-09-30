@@ -38,7 +38,7 @@ class TestRecordSegmentPlayTime:
 
     @pytest.mark.asyncio
     async def test_the_next_line_measures_the_one_before_it(self):
-        broadcaster = _broadcaster(previous="8|6000|3|1|seg-a")
+        broadcaster = _broadcaster(previous="8|6000|0|3|1|seg-a")
         with patch(f"{MODULE}._save_sample") as save:
             await _record(broadcaster)
 
@@ -53,7 +53,7 @@ class TestRecordSegmentPlayTime:
         broadcaster.swap_segment_mark.assert_awaited_once_with(
             event_id=values["event_id"],
             text_id="text-7",
-            mark="9|10000|4|1|seg-b",
+            mark="9|10000|0|4|1|seg-b",
             revision=9,
             line="4|1|seg-b",
         )
@@ -62,11 +62,28 @@ class TestRecordSegmentPlayTime:
     async def test_an_autoplayed_move_is_marked_but_not_measured(self):
         """Autoplay is timed by the play times; measuring it would only echo
         them back."""
-        broadcaster = _broadcaster(previous="8|6000|3|1|seg-a")
+        broadcaster = _broadcaster(previous="8|6000|0|3|1|seg-a")
         with patch(f"{MODULE}._save_sample") as save:
             await _record(broadcaster, autoplay=True)
 
         broadcaster.swap_segment_mark.assert_awaited_once()
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_autoplayed_move_is_flagged_in_its_mark(self):
+        broadcaster = _broadcaster()
+        with patch(f"{MODULE}._save_sample"):
+            await _record(broadcaster, autoplay=True)
+
+        assert broadcaster.swap_segment_mark.await_args.kwargs["mark"] == "9|10000|1|4|1|seg-b"
+
+    @pytest.mark.asyncio
+    async def test_a_line_autoplay_moved_onto_is_not_measured(self):
+        """The operator's move off it ends a line the controller started, on the
+        controller's clock: feeding that back would echo the play times."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(_broadcaster(previous="8|6000|1|3|1|seg-a"))
+
         save.assert_not_called()
 
     @pytest.mark.asyncio
@@ -82,14 +99,14 @@ class TestRecordSegmentPlayTime:
         """Repeating a passage or skipping ahead says nothing about how long the
         line left behind takes."""
         with patch(f"{MODULE}._save_sample") as save:
-            await _record(_broadcaster(previous="8|6000|3|1|seg-a"), index=index)
+            await _record(_broadcaster(previous="8|6000|0|3|1|seg-a"), index=index)
 
         save.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_index_no_measurement(self):
         with patch(f"{MODULE}._save_sample") as save:
-            await _record(_broadcaster(previous="8|6000||1|seg-a"), index=None)
+            await _record(_broadcaster(previous="8|6000|0||1|seg-a"), index=None)
 
         save.assert_not_called()
 
@@ -100,7 +117,7 @@ class TestRecordSegmentPlayTime:
     )
     async def test_skips_and_pauses_are_not_measurements(self, started_at_ms):
         with patch(f"{MODULE}._save_sample") as save:
-            await _record(_broadcaster(previous=f"8|{started_at_ms}|3|1|seg-a"))
+            await _record(_broadcaster(previous=f"8|{started_at_ms}|0|3|1|seg-a"))
 
         save.assert_not_called()
 
@@ -121,14 +138,14 @@ class TestRecordSegmentPlayTime:
     @pytest.mark.asyncio
     async def test_a_failure_never_escapes(self):
         """It runs after the response; nothing is left to report it to."""
-        broadcaster = _broadcaster(previous="8|6000|3|1|seg-a")
+        broadcaster = _broadcaster(previous="8|6000|0|3|1|seg-a")
         with patch(f"{MODULE}._save_sample", side_effect=Exception("db down")):
             await _record(broadcaster)
 
     @pytest.mark.asyncio
     async def test_segment_ids_may_carry_the_separator(self):
         with patch(f"{MODULE}._save_sample") as save:
-            await _record(_broadcaster(previous="8|6000|3|1|seg|a"))
+            await _record(_broadcaster(previous="8|6000|0|3|1|seg|a"))
 
         save.assert_called_once_with("text-7", "seg|a", 4000)
 

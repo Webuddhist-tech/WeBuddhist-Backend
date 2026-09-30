@@ -47,12 +47,14 @@ def presence_key(event_id: UUID) -> str:
 
 def segment_mark_key(event_id: UUID) -> str:
     """Per text, the line the room last landed on and when - what a segment's
-    play time is measured from once the next line arrives.
-
-    Only the text the room is actually on is kept: moving to another text drops
-    the one left behind, so returning to it later measures from the return and
-    not across the excursion."""
+    play time is measured from once the next line arrives."""
     return f"recitation:event:{event_id}:marks"
+
+
+def segment_moves_key(event_id: UUID, back: int) -> str:
+    """Per text, the revision of its mark `back` moves before the current one
+    (1 or 2) - how far every other text has moved since a text last did."""
+    return f"recitation:event:{event_id}:marks:{back}"
 
 
 def segment_boundary_key(event_id: UUID) -> str:
@@ -177,17 +179,24 @@ return revision
 """
 
 # Swaps a text's mark for the newer one and hands back the old, in one step.
-# Marks lead with the revision they were accepted under, so a mark that arrives
-# late - background work is not ordered - never overwrites a newer one and is
-# never measured against it.
+# Marks are `<revision>|<accepted at ms>|<autoplay 0/1>|<line>` and lead with the
+# revision they were accepted under, so a mark that arrives late - background
+# work is not ordered - never overwrites a newer one and is never measured
+# against it.
 #
 # The same line sent twice - the controller re-sends the edition on screen
 # behind its followers - keeps the first mark: the line started when the room
 # first reached it, not when it was repeated.
 #
-# The room shows one text at a time, so writing a mark drops every other text's:
-# an operator who leaves a text and comes back to its next line must not be
-# billed the excursion as that line's recitation time.
+# A text left for another one must not be billed the excursion when the
+# operator comes back to its next line. Several texts move together, though:
+# every move publishes each followed edition and then the one on screen, so
+# another text's mark changing says nothing on its own. What does is how far it
+# moved. In step, another text is at most two marks past this text's last - one
+# from the move this text's mark belongs to, one from the move being made. A
+# third means moves were made without this text, so the old mark is not handed
+# back. That is judged from revisions alone, never by deleting other texts'
+# marks, so no order the background work runs in can take a newer mark away.
 #
 # The session boundary is a revision, not a deletion, because ending a session
 # and writing a mark are both background work and cannot be ordered against
@@ -201,26 +210,42 @@ if revision <= boundary then
     return false
 end
 local previous = redis.call('HGET', KEYS[1], ARGV[1])
+local previous_revision = false
 if previous then
-    local previous_revision, previous_line = string.match(previous, '^(%d+)|%d+|(.*)$')
-    if previous_revision and tonumber(previous_revision) >= revision then
+    local stored_revision, stored_line = string.match(previous, '^(%d+)|%d+|%d|(.*)$')
+    previous_revision = tonumber(stored_revision)
+    if previous_revision and previous_revision >= revision then
         return false
     end
-    if previous_line == ARGV[5] then
+    if stored_line == ARGV[5] then
         return false
     end
-    if previous_revision and tonumber(previous_revision) <= boundary then
+    local second = redis.call('HGET', KEYS[3], ARGV[1])
+    if second then
+        redis.call('HSET', KEYS[4], ARGV[1], second)
+    end
+    if previous_revision then
+        redis.call('HSET', KEYS[3], ARGV[1], previous_revision)
+    end
+    if not previous_revision or previous_revision <= boundary then
         previous = false
     end
 end
-local marked = redis.call('HKEYS', KEYS[1])
-for i = 1, #marked do
-    if marked[i] ~= ARGV[1] then
-        redis.call('HDEL', KEYS[1], marked[i])
+if previous then
+    local others = redis.call('HKEYS', KEYS[4])
+    for i = 1, #others do
+        if others[i] ~= ARGV[1] then
+            local third = tonumber(redis.call('HGET', KEYS[4], others[i]))
+            if third and third > previous_revision then
+                previous = false
+            end
+        end
     end
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
 redis.call('EXPIRE', KEYS[1], ARGV[4])
+redis.call('EXPIRE', KEYS[3], ARGV[4])
+redis.call('EXPIRE', KEYS[4], ARGV[4])
 return previous
 """
 
@@ -516,19 +541,22 @@ class RecitationBroadcaster:
         """Record `mark` as where `text_id` now stands and return the mark it
         replaced.
 
-        `mark` is `"<revision>|<accepted at ms>|<line>"`, where `line` names the
-        line itself. None when there was nothing before it, when a newer mark is
-        already stored, when the same line is already marked, when the mark or
-        the one before it belongs to a session that has ended, or when Redis
+        `mark` is `"<revision>|<accepted at ms>|<autoplay 0/1>|<line>"`, where
+        `line` names the line itself. None when there was nothing before it,
+        when a newer mark is already stored, when the same line is already
+        marked, when the mark or the one before it belongs to a session that has
+        ended, when other texts moved on without this one since, or when Redis
         could not be reached - in every case there is nothing to measure, and
         play times are never worth failing over.
         """
         try:
             previous = await self.redis.eval(
                 _SWAP_SEGMENT_MARK_SCRIPT,
-                2,
+                4,
                 segment_mark_key(event_id),
                 segment_boundary_key(event_id),
+                segment_moves_key(event_id, 1),
+                segment_moves_key(event_id, 2),
                 text_id,
                 str(revision),
                 mark,

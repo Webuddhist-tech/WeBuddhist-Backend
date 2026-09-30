@@ -28,14 +28,20 @@ def _line(index: Optional[int], round_number: Optional[int], segment_id: str) ->
 
 
 def _parse_mark(mark: str) -> Optional[tuple]:
-    """`<revision>|<accepted at ms>|<index>|<round>|<segment id>` back into
-    (accepted at ms, index, segment id); None for anything unreadable."""
-    parts = mark.split("|", 4)
-    if len(parts) != 5:
+    """`<revision>|<accepted at ms>|<autoplay 0/1>|<index>|<round>|<segment id>`
+    back into (accepted at ms, autoplay, index, segment id); None for anything
+    unreadable."""
+    parts = mark.split("|", 5)
+    if len(parts) != 6:
         return None
-    _, accepted_at, index, _, segment_id = parts
+    _, accepted_at, autoplay, index, _, segment_id = parts
     try:
-        return int(accepted_at), (int(index) if index else None), segment_id
+        return (
+            int(accepted_at),
+            autoplay == "1",
+            (int(index) if index else None),
+            segment_id,
+        )
     except ValueError:
         return None
 
@@ -65,16 +71,16 @@ async def record_segment_play_time(
 
     Only a step to the very next line is a measurement. A jump - back to repeat
     a passage, forward past a skipped section - says nothing about how long the
-    line left behind takes to recite. Neither is a move the controller's
-    autoplay made: its timing came from these figures, and feeding it back would
-    only drown out the operator's real ones. It still marks where the room is,
-    so the operator's next move is measured from the right line.
+    line left behind takes to recite. Nor is a line autoplay had any hand in -
+    moved onto by it, or moved off by it: its timing came from these figures,
+    and feeding it back would only drown out the operator's real ones. Such a
+    move still marks where the room is, flagged, so the next move knows.
 
-    A move onto another text, and the gap between two sessions, are ruled out by
-    the mark store itself: it keeps only the text the room is on, and marks from
-    a session that has ended are never handed back. Both have to be settled
-    there, because this runs as unordered background work and cannot tell how
-    much happened between two marks.
+    Time spent on another text, and the gap between two sessions, are ruled out
+    by the mark store itself: it does not hand back a mark other texts have
+    moved on from without this one, nor one from a session that has ended. Both
+    have to be settled there, because this runs as unordered background work
+    and cannot tell how much happened between two marks.
     """
     try:
         if revision is None:
@@ -84,7 +90,7 @@ async def record_segment_play_time(
         previous = await broadcaster.swap_segment_mark(
             event_id=event_id,
             text_id=text_id,
-            mark=f"{revision}|{accepted_at_ms}|{line}",
+            mark=f"{revision}|{accepted_at_ms}|{1 if autoplay else 0}|{line}",
             revision=revision,
             line=line,
         )
@@ -93,7 +99,9 @@ async def record_segment_play_time(
         parsed = _parse_mark(previous)
         if parsed is None:
             return
-        started_at_ms, previous_index, previous_segment_id = parsed
+        started_at_ms, started_by_autoplay, previous_index, previous_segment_id = parsed
+        if started_by_autoplay:
+            return
         if index is None or previous_index is None or index != previous_index + 1:
             return
         duration_ms = accepted_at_ms - started_at_ms
