@@ -1167,6 +1167,37 @@ def create_report(db: Session, report: ChatMessageReport) -> ChatMessageReport:
     return report
 
 
+def get_report_by_id(db: Session, report_id: UUID) -> Optional[ChatMessageReport]:
+    """One report with the same context the queue DTOs read."""
+    return (
+        db.query(ChatMessageReport)
+        .options(
+            selectinload(ChatMessageReport.reporter),
+            selectinload(ChatMessageReport.reported_user),
+            selectinload(ChatMessageReport.room),
+            selectinload(ChatMessageReport.message).selectinload(ChatMessage.sender),
+            selectinload(ChatMessageReport.message).selectinload(ChatMessage.room),
+        )
+        .filter(ChatMessageReport.id == report_id)
+        .first()
+    )
+
+
+def resolve_open_reports_for_message(
+    db: Session, message_id: UUID, resolved_at: datetime
+) -> None:
+    """Close every open report against a message. Does not commit, so it lands
+    in the same transaction as the moderator's delete."""
+    db.execute(
+        update(ChatMessageReport)
+        .where(
+            ChatMessageReport.message_id == message_id,
+            ChatMessageReport.resolved_at.is_(None),
+        )
+        .values(resolved_at=resolved_at)
+    )
+
+
 def count_unread_messages(
     db: Session,
     room_id: UUID,

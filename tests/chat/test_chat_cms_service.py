@@ -37,7 +37,7 @@ def _room():
 
 class TestCmsDeleteGroupChatMessageService:
 
-    @patch('pecha_api.chat.cms_service.soft_delete_message')
+    @patch('pecha_api.chat.cms_service.moderator_delete_message')
     @patch('pecha_api.chat.cms_service.get_message_by_id')
     @patch('pecha_api.chat.cms_service.require_can_create_content')
     @patch('pecha_api.chat.cms_service.get_room_by_group_id')
@@ -79,7 +79,7 @@ class TestCmsDeleteGroupChatMessageService:
             "source": "CMS",
         }
 
-    @patch('pecha_api.chat.cms_service.soft_delete_message')
+    @patch('pecha_api.chat.cms_service.moderator_delete_message')
     @patch('pecha_api.chat.cms_service.get_message_by_id')
     @patch('pecha_api.chat.cms_service.require_can_create_content')
     @patch('pecha_api.chat.cms_service.get_room_by_group_id')
@@ -109,7 +109,7 @@ class TestCmsDeleteGroupChatMessageService:
         mock_get_message.assert_not_called()
         mock_soft_delete.assert_not_called()
 
-    @patch('pecha_api.chat.cms_service.soft_delete_message')
+    @patch('pecha_api.chat.cms_service.moderator_delete_message')
     @patch('pecha_api.chat.cms_service.get_message_by_id')
     @patch('pecha_api.chat.cms_service.require_can_create_content')
     @patch('pecha_api.chat.cms_service.get_room_by_group_id')
@@ -180,7 +180,7 @@ class TestCmsDeleteGroupChatMessageService:
         # in the group cannot probe whether its chat room exists.
         mock_require.assert_called_once()
 
-    @patch('pecha_api.chat.cms_service.soft_delete_message')
+    @patch('pecha_api.chat.cms_service.moderator_delete_message')
     @patch('pecha_api.chat.cms_service.get_message_by_id')
     @patch('pecha_api.chat.cms_service.require_can_create_content')
     @patch('pecha_api.chat.cms_service.get_room_by_group_id')

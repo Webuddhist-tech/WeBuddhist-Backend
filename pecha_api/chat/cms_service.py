@@ -12,11 +12,11 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
 
+from pecha_api.chat.message_service import moderator_delete_message
 from pecha_api.chat.models import ChatRoom
 from pecha_api.chat.repository import (
     get_message_by_id,
     get_room_by_group_id,
-    soft_delete_message,
 )
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_model import Author
@@ -97,7 +97,8 @@ def cms_delete_group_chat_message_service(
         if not message:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
-        deleted_at = soft_delete_message(db=db, message=message)
+        # Also resolves the message's open reports, in the same commit.
+        deleted_at = moderator_delete_message(db=db, message=message)
         return CmsMessageDeletion(
             room_id=room.id,
             deleted_at=deleted_at.isoformat(),

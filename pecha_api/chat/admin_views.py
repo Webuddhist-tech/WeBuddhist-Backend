@@ -4,9 +4,15 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from starlette import status
 
-from pecha_api.chat.admin_service import list_chat_message_reports_service
+from pecha_api.chat.admin_service import (
+    list_chat_message_reports_service,
+    resolve_chat_message_report_service,
+)
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageReportSource
-from pecha_api.chat.response_models import AdminChatMessageReportsResponse
+from pecha_api.chat.response_models import (
+    AdminChatMessageReportDTO,
+    AdminChatMessageReportsResponse,
+)
 from pecha_api.plans.auth.cms_auth_deps import get_cms_author_token
 
 cms_chat_reports_router = APIRouter(
@@ -44,3 +50,18 @@ def get_cms_chat_message_reports(
         resolved=resolved,
         group_id=group_id,
     )
+
+
+@cms_chat_reports_router.patch(
+    "/{report_id}/resolve",
+    status_code=status.HTTP_200_OK,
+    response_model=AdminChatMessageReportDTO,
+)
+def resolve_cms_chat_message_report(
+    report_id: UUID,
+    token: Annotated[str, Depends(get_cms_author_token)] = "",
+) -> AdminChatMessageReportDTO:
+    """Resolve (soft-delete) a chat report from the platform queue, including
+    event and direct-chat reports. Super admin only. Resolving an already
+    resolved report returns it unchanged."""
+    return resolve_chat_message_report_service(token=token, report_id=report_id)

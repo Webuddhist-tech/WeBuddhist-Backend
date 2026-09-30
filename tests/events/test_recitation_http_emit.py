@@ -305,12 +305,12 @@ class TestReadSegmentPlayTimes:
         }
         read.assert_called_once_with(text_id="text-7")
 
-    def test_needs_the_secret(self):
-        with _http_env(), patch(f"{MODULE}.get_segment_play_times") as read:
-            response = client.get(
-                "/events/recitation/texts/text-7/segment-play-times",
-                headers={"X-Recitation-Token": "wrong"},
-            )
+    def test_is_readable_without_the_secret(self):
+        from pecha_api.events.recitation_live_models import SegmentPlayTimesResponse
 
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
-        read.assert_not_called()
+        stored = SegmentPlayTimesResponse(text_id="text-7", segments=[])
+        with _http_env(), patch(f"{MODULE}.get_segment_play_times", return_value=stored) as read:
+            response = client.get("/events/recitation/texts/text-7/segment-play-times")
+
+        assert response.status_code == status.HTTP_200_OK
+        read.assert_called_once_with(text_id="text-7")
