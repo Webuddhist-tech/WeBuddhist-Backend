@@ -185,13 +185,15 @@ def get_chat_notification_targets(
         # the copy drops. Resolved before the copy is built, because whether
         # the image is actually there decides whether the copy can afford to
         # drop the name. A group or event chat message carries the owning
-        # group's current avatar, so the push says which group it came from.
-        # Private chat has no image.
+        # group's current avatar, so the push says which group it came from,
+        # falling back to the room's own image (what the chat list shows) when
+        # the group has none. Private chat has no image.
         if is_prayer:
             image_url = _generate_presigned_url(room.img_url)
         elif is_group_text:
             image_url = _generate_presigned_url(
                 get_group_avatar_key(db=db, group_id=_owning_group_id(db=db, room=room))
+                or room.img_url
             )
         else:
             image_url = None

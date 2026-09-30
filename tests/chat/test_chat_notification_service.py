@@ -804,6 +804,41 @@ class TestGetChatNotificationTargets:
         assert mock_avatar_key.call_args.kwargs["group_id"] == group_id
         mock_presign.assert_called_once_with("groups/current-avatar.png")
 
+    @patch(
+        "pecha_api.chat.notification_service._generate_presigned_url",
+        return_value="https://example.com/room.png",
+    )
+    @patch("pecha_api.chat.notification_service.get_group_avatar_key", return_value=None)
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_short_name", return_value="Doe")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_group_without_an_avatar_falls_back_to_the_room_image(
+        self,
+        mock_session,
+        mock_get_message,
+        _sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        _avatar_key,
+        mock_presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        joiner = uuid4()
+        room = MockRoom(group_id=uuid4(), name="Sangha", img_url="groups/room.png")
+        message = MockMessage(sender_id=uuid4(), room=room, body="Hello group")
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([joiner], 1)
+        mock_devices.return_value = {joiner: [MockDevice(user_id=joiner)]}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.image_url == "https://example.com/room.png"
+        mock_presign.assert_called_once_with("groups/room.png")
+
     @patch("pecha_api.chat.notification_service._generate_presigned_url")
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
