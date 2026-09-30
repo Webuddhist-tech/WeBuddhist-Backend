@@ -209,9 +209,12 @@ class AccumulatorGroupDTO(BaseModel):
     group_accumulator_id: UUID
     group_id: UUID
     title: Optional[str] = None
+    group_name: Optional[str] = Field(None, description="Name of the group that owns this group accumulator")
+    event_title: Optional[str] = Field(None, description="Title of the event this group accumulator is linked to, if any")
     image: Optional[ImageUrlModel] = None
     target_count: Optional[int] = None
     user_total_count: int = Field(..., description="Authenticated user's total count for this group accumulator")
+    group_total_count: int = Field(0, description="Total count from all users for this group accumulator")
     is_joined: bool = Field(
         ...,
         description="Whether the authenticated user has joined this group accumulator",

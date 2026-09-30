@@ -1,7 +1,7 @@
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Header, Query
 from starlette import status
 
 from pecha_api.plans.plans_enums import LanguageCode
@@ -34,14 +34,30 @@ def list_poems(
         Optional[LanguageCode],
         Query(description="Filter by language code"),
     ] = None,
+    seed: Annotated[
+        Optional[str],
+        Query(
+            max_length=64,
+            description=(
+                "Shuffle seed. Defaults to today's date, so the order "
+                "changes once a day."
+            ),
+        ),
+    ] = None,
+    x_timezone: Annotated[
+        Optional[str],
+        Header(alias="X-Timezone", description="IANA timezone for determining today's date."),
+    ] = None,
 ) -> PoemsResponse:
-    """List published poems, newest first."""
+    """List published poems in shuffled order."""
     return list_poems_service(
         skip=skip,
         limit=limit,
         chapter_name=chapter_name,
         author_name=author_name,
         language=language,
+        seed=seed,
+        timezone=x_timezone,
     )
 
 
