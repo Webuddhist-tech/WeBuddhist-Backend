@@ -58,6 +58,47 @@ class TestVerseOfDayLikeViews:
 
     @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
     @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_get_likes_valid_token_passes_user_id(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        user_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=user_id)
+        mock_service.return_value = VerseOfDayLikesResponse(
+            verse_id=verse_id,
+            like_count=2,
+            liked_by_me=True,
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/likes",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_called_once_with(verse_id=verse_id, user_id=user_id)
+
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_get_likes_non_401_http_exception_propagates(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        mock_threadpool.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/likes",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        mock_service.assert_not_called()
+
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
     def test_get_likes_invalid_token_treated_as_anonymous(
         self, mock_threadpool: AsyncMock, mock_service: AsyncMock
     ) -> None:

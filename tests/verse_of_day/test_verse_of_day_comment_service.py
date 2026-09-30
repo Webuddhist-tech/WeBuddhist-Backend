@@ -8,7 +8,9 @@ import pytest
 from fastapi import HTTPException
 from starlette import status
 
+from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.verse_of_day.comment_service import (
+    _require_verse,
     build_comment_dto,
     create_verse_comment_service,
     delete_verse_comment_service,
@@ -270,3 +272,42 @@ class TestDeleteVerseCommentService:
             await delete_verse_comment_service(comment_id=comment.id, user_id=user_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestCommentRequireVerse:
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
+    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
+    async def test_require_verse_raises_when_missing(
+        self,
+        mock_session_local: MagicMock,
+        mock_get_verse: MagicMock,
+    ) -> None:
+        db = MagicMock()
+        mock_session_local.return_value.__enter__.return_value = db
+        mock_get_verse.return_value = None
+        verse_id = uuid4()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _require_verse(verse_id)
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert exc_info.value.detail == NOT_FOUND
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
+    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
+    async def test_require_verse_ok_when_found(
+        self,
+        mock_session_local: MagicMock,
+        mock_get_verse: MagicMock,
+    ) -> None:
+        db = MagicMock()
+        mock_session_local.return_value.__enter__.return_value = db
+        mock_get_verse.return_value = MagicMock()
+        verse_id = uuid4()
+
+        await _require_verse(verse_id)
+
+        mock_get_verse.assert_called_once_with(db=db, verse_id=verse_id)
