@@ -1,3 +1,4 @@
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -19,7 +20,7 @@ def _broadcaster(previous=None):
     return broadcaster
 
 
-async def _record(broadcaster, **overrides):
+async def _record(broadcaster: AsyncMock, **overrides: Any) -> Dict[str, Any]:
     values = {
         "event_id": uuid4(),
         "text_id": "text-7",
@@ -57,6 +58,7 @@ class TestRecordSegmentPlayTime:
             mark="9|10000|0|r1|4|1|seg-b",
             revision=9,
             line="4|1|seg-b",
+            run="r1",
         )
 
     @pytest.mark.asyncio

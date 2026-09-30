@@ -96,6 +96,7 @@ async def record_segment_play_time(
             mark=f"{revision}|{accepted_at_ms}|{1 if autoplay else 0}|{run or ''}|{line}",
             revision=revision,
             line=line,
+            run=run,
         )
         if previous is None or autoplay:
             return

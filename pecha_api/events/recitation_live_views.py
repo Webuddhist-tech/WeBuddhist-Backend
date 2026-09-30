@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Coroutine, Optional
 from uuid import UUID
 
 from fastapi import (
@@ -62,7 +62,7 @@ def _epoch_ms(moment: datetime) -> int:
 _background_tasks: set = set()
 
 
-def _in_background(coroutine) -> None:
+def _in_background(coroutine: Coroutine[Any, Any, Any]) -> None:
     task = asyncio.create_task(coroutine)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)

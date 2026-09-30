@@ -525,6 +525,7 @@ class TestRecitationPositionSnapshot:
             mark="9|10000|0|r1|4|1|seg-b",
             revision=9,
             line="4|1|seg-b",
+            run="r1",
         )
 
         assert previous == "8|6000|0|3|1|seg-a"
@@ -538,6 +539,7 @@ class TestRecitationPositionSnapshot:
             "9|10000|0|r1|4|1|seg-b",
             str(POSITION_TTL_SECONDS),
             "4|1|seg-b",
+            "r1",
         )
 
     @pytest.mark.asyncio
@@ -1047,6 +1049,7 @@ class TestSwapSegmentMarkScript:
         revision: int,
         line: str,
         at_ms: int = 0,
+        run: str = "r1",
     ) -> Any:
         # Marks and the boundary are numbered by the same counter in production,
         # so a mark has to leave it standing at its own revision.
@@ -1058,9 +1061,10 @@ class TestSwapSegmentMarkScript:
             self.BOUNDARY,
             text_id,
             str(revision),
-            _mark(revision, at_ms, line),
+            _mark(revision, at_ms, line, run=run),
             self.TTL,
             line,
+            run,
         )
 
     async def _end(self, redis: _MarkScriptRedis) -> int:
@@ -1114,6 +1118,20 @@ class TestSwapSegmentMarkScript:
 
         assert await self._swap(redis, "text-1", 6, "3|1|seg-c", at_ms=4000) is False
         assert redis.hashes[self.KEY] == {"text-1": "5|1000|0|r1|3|1|seg-c"}
+
+    @pytest.mark.asyncio
+    async def test_the_same_line_in_a_new_run_is_a_new_mark(self):
+        """The room came back to the text on the line it left: the line starts
+        again now, so the next one measures from here, not from the old run."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000, run="r1")
+
+        previous = await self._swap(redis, "text-1", 8, "3|1|seg-c", at_ms=50000, run="r2")
+
+        assert previous == "5|1000|0|r1|3|1|seg-c"
+        assert redis.hashes[self.KEY] == {"text-1": "8|50000|0|r2|3|1|seg-c"}
+        previous = await self._swap(redis, "text-1", 9, "4|1|seg-d", at_ms=53000, run="r2")
+        assert previous == "8|50000|0|r2|3|1|seg-c"
 
     @pytest.mark.asyncio
     async def test_the_same_segment_in_a_new_round_is_a_new_line(self):

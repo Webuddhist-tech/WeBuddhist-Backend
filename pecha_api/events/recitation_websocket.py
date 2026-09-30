@@ -178,9 +178,10 @@ return revision
 # background work is not ordered - never overwrites a newer one and is never
 # measured against it.
 #
-# The same line sent twice - the controller re-sends the edition on screen
-# behind its followers - keeps the first mark: the line started when the room
-# first reached it, not when it was repeated.
+# The same line sent twice in the same run - the controller re-sends the
+# edition on screen behind its followers - keeps the first mark: the line
+# started when the room first reached it, not when it was repeated. The same
+# line under a new run is the room coming back to the text, and starts afresh.
 #
 # Whether the text stayed with the room between two marks is not judged here:
 # the run each mark carries says so, and the caller compares them.
@@ -198,12 +199,12 @@ if revision <= boundary then
 end
 local previous = redis.call('HGET', KEYS[1], ARGV[1])
 if previous then
-    local stored_revision, stored_line = string.match(previous, '^(%d+)|%d+|%d|[^|]*|(.*)$')
+    local stored_revision, stored_run, stored_line = string.match(previous, '^(%d+)|%d+|%d|([^|]*)|(.*)$')
     stored_revision = tonumber(stored_revision)
     if stored_revision and stored_revision >= revision then
         return false
     end
-    if stored_line == ARGV[5] then
+    if stored_line == ARGV[5] and stored_run == ARGV[6] then
         return false
     end
     if not stored_revision or stored_revision <= boundary then
@@ -503,6 +504,7 @@ class RecitationBroadcaster:
         mark: str,
         revision: int,
         line: str,
+        run: Optional[str] = None,
     ) -> Optional[str]:
         """Record `mark` as where `text_id` now stands and return the mark it
         replaced.
@@ -510,7 +512,7 @@ class RecitationBroadcaster:
         `mark` is `"<revision>|<accepted at ms>|<autoplay 0/1>|<run>|<line>"`,
         where `line` names the line itself. None when there was nothing before
         it, when a newer mark is already stored, when the same line is already
-        marked, when the mark or the one before it belongs to a session that has
+        marked under the same `run`, when the mark or the one before it belongs to a session that has
         ended, or when Redis could not be reached - in every case there is nothing to measure, and
         play times are never worth failing over.
         """
@@ -525,6 +527,7 @@ class RecitationBroadcaster:
                 mark,
                 str(POSITION_TTL_SECONDS),
                 line,
+                run or "",
             )
         except Exception as e:
             logger.exception("Failed to swap recitation segment mark in Redis: %s", e)
