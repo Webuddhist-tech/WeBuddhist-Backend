@@ -25,6 +25,7 @@ from pecha_api.chat.sqs_client import (
     build_prayer_notification_event_body,
     is_chat_notification_sqs_configured,
     send_chat_notification_message,
+    send_prayer_notification_message,
 )
 from pecha_api.config import get_int
 from pecha_api.db.database import SessionLocal
@@ -126,8 +127,15 @@ def enqueue_chat_message_notification(
             )
         return None
 
+    # Prayer requests go to the prayer queue so their room-wide fan-out never
+    # holds up ordinary chat pushes.
+    send = (
+        send_prayer_notification_message
+        if message_type == ChatMessageType.PRAYER.value
+        else send_chat_notification_message
+    )
     try:
-        sqs_message_id = send_chat_notification_message(
+        sqs_message_id = send(
             build_chat_notification_event_body(message_id=str(message_id))
         )
     except Exception:
@@ -244,7 +252,7 @@ def _send_prayer_notification(notification_id: UUID) -> str | None:
 
     A send failure leaves the row without an SQS id for reconcile to retry."""
     try:
-        sqs_message_id = send_chat_notification_message(
+        sqs_message_id = send_prayer_notification_message(
             build_prayer_notification_event_body(prayer_id=str(notification_id))
         )
     except Exception:

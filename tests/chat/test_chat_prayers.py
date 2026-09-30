@@ -747,7 +747,7 @@ class TestNotifyPrayersForRequest:
 
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
     @patch(f"{DISPATCH}.SessionLocal")
-    @patch(f"{DISPATCH}.send_chat_notification_message", return_value="sqs-1")
+    @patch(f"{DISPATCH}.send_prayer_notification_message", return_value="sqs-1")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
     @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
     def test_sends_the_notification_id_as_prayer_id(
@@ -767,7 +767,7 @@ class TestNotifyPrayersForRequest:
         assert mock_mark.call_args.kwargs["notification_id"] == notification_id
         assert mock_mark.call_args.kwargs["sqs_message_id"] == "sqs-1"
 
-    @patch(f"{DISPATCH}.send_chat_notification_message")
+    @patch(f"{DISPATCH}.send_prayer_notification_message")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", return_value=None)
     @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
     def test_held_by_the_interval_sends_nothing(self, _configured, _gate, mock_send):
@@ -784,7 +784,7 @@ class TestNotifyPrayersForRequest:
         assert notify_prayers_for_request(uuid4(), uuid4()) is None
 
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
-    @patch(f"{DISPATCH}.send_chat_notification_message", side_effect=RuntimeError)
+    @patch(f"{DISPATCH}.send_prayer_notification_message", side_effect=RuntimeError)
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
     @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
     def test_a_failed_send_leaves_the_row_for_reconcile(
