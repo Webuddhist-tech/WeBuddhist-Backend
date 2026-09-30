@@ -531,11 +531,10 @@ class TestRecitationPositionSnapshot:
         assert previous == "8|6000|0|3|1|seg-a"
         broadcaster.redis.eval.assert_awaited_once_with(
             _SWAP_SEGMENT_MARK_SCRIPT,
-            4,
+            3,
             segment_mark_key(event_id),
             segment_boundary_key(event_id),
-            segment_moves_key(event_id, 1),
-            segment_moves_key(event_id, 2),
+            segment_moves_key(event_id),
             "text-7",
             "9",
             "9|10000|0|4|1|seg-b",
@@ -924,11 +923,19 @@ class _LuaTable(List[str]):
         return super().__getitem__(index - 1)
 
 
+class _LuaMap(Dict[str, Any]):
+    """A Lua table used as a map: a missing key reads as nil."""
+
+    def __missing__(self, key: str) -> Any:
+        return False
+
+
 def _translate_mark_script(script: str) -> str:
     """Turn the segment-mark Lua into Python so a test can run the script itself.
 
     The same mechanical translation as `_translate_allow_set_script`, plus the
-    numeric for-loop, `~=`, `#t` and `string.match` the mark scripts use. The
+    numeric for-loop, `~=`, `#t`, `..`, `{}` and `string.match` the mark
+    scripts use. The
     guards themselves - the revision comparisons, the repeated line, the session
     boundary, dropping the text the room left - are executed, not restated, so a
     mistake in any of them fails these tests.
@@ -946,6 +953,8 @@ def _translate_mark_script(script: str) -> str:
         line = re.sub(r"ARGV\[(\d+)\]", lambda m: f"argv[{int(m.group(1)) - 1}]", line)
         line = re.sub(r"#(\w+)", r"len(\1)", line)
         line = line.replace("~=", "!=")
+        line = line.replace(" .. ", " + ")
+        line = line.replace("{}", "lua_map()")
         line = re.sub(r"\bfalse\b", "False", line)
         loop = re.match(r"^for (\w+) = 1, (.+) do$", line)
         if loop:
@@ -964,13 +973,19 @@ def _translate_mark_script(script: str) -> str:
 
 
 class _MarkScriptRedis:
-    """GET / SET / INCR / HGET / HSET / HKEYS / HDEL / EXPIRE, enough for
+    """GET / SET / INCR / HGET / HSET / HKEYS / HDEL / ZADD / ZCARD / ZRANGE /
+    ZRANGEBYSCORE / ZREMRANGEBYRANK / EXPIRE, enough for
     `_SWAP_SEGMENT_MARK_SCRIPT` and `_END_SEGMENT_MARKS_SCRIPT`."""
 
     def __init__(self) -> None:
         self.strings: Dict[str, str] = {}
         self.hashes: Dict[str, Dict[str, str]] = {}
+        self.zsets: Dict[str, Dict[str, int]] = {}
         self.ttl: Dict[str, int] = {}
+
+    def _ranked(self, key: str) -> List[str]:
+        members = self.zsets.get(key, {})
+        return sorted(members, key=lambda member: (members[member], member))
 
     def redis_call(self, command: str, *args: Any) -> Any:
         command = command.upper()
@@ -994,8 +1009,28 @@ class _MarkScriptRedis:
             return _LuaTable(self.hashes.get(key, {}).keys())
         if command == "HDEL":
             return int(self.hashes.get(key, {}).pop(args[1], None) is not None)
+        if command == "ZADD":
+            self.zsets.setdefault(key, {})[args[2]] = int(args[1])
+            return 1
+        if command == "ZCARD":
+            return len(self.zsets.get(key, {}))
+        if command == "ZRANGE":
+            ranked = self._ranked(key)
+            stop = int(args[2])
+            return _LuaTable(ranked[int(args[1]): (stop + 1) or None])
+        if command == "ZRANGEBYSCORE":
+            members = self.zsets.get(key, {})
+            low, high = int(args[1]), int(args[2])
+            return _LuaTable(m for m in self._ranked(key) if low <= members[m] <= high)
+        if command == "ZREMRANGEBYRANK":
+            ranked = self._ranked(key)
+            stop = int(args[2])
+            doomed = ranked[int(args[1]): (stop + 1) or None]
+            for member in doomed:
+                del self.zsets[key][member]
+            return len(doomed)
         if command == "EXPIRE":
-            if key not in self.hashes and key not in self.strings:
+            if key not in self.hashes and key not in self.strings and key not in self.zsets:
                 return 0
             self.ttl[key] = int(args[1])
             return 1
@@ -1024,6 +1059,7 @@ class _MarkScriptRedis:
             "redis_call": self.redis_call,
             "tonumber": tonumber,
             "string_match": string_match,
+            "lua_map": _LuaMap,
         }
         body = _translate_mark_script(script)
         exec(f"def _run():\n{textwrap_indent(body)}\n", namespace)
@@ -1039,8 +1075,7 @@ class TestSwapSegmentMarkScript:
     teaches the controller wrong play times."""
 
     KEY = "recitation:event:demo:marks"
-    MOVED_1 = "recitation:event:demo:marks:1"
-    MOVED_2 = "recitation:event:demo:marks:2"
+    MOVES = "recitation:event:demo:moves"
     BOUNDARY = "recitation:event:demo:mark-boundary"
     REVISION = "recitation:event:demo:rev"
     TTL = str(POSITION_TTL_SECONDS)
@@ -1058,11 +1093,10 @@ class TestSwapSegmentMarkScript:
         redis.strings[self.REVISION] = str(revision)
         return await redis.eval(
             _SWAP_SEGMENT_MARK_SCRIPT,
-            4,
+            3,
             self.KEY,
             self.BOUNDARY,
-            self.MOVED_1,
-            self.MOVED_2,
+            self.MOVES,
             text_id,
             str(revision),
             _mark(revision, at_ms, line),
@@ -1165,6 +1199,28 @@ class TestSwapSegmentMarkScript:
         # The mark is still written: the return is measured from on the next move.
         assert redis.hashes[self.KEY]["text-1"] == "5|500000|0|4|1|seg-d"
         assert await self._swap(redis, "text-1", 6, "5|1|seg-e", at_ms=503000) == "5|500000|0|4|1|seg-d"
+
+    @pytest.mark.asyncio
+    async def test_a_late_mark_is_not_charged_for_moves_made_after_it(self):
+        """Text A stepped to its next line before the room moved to text B, but
+        A's background work ran after B's. B's later moves say nothing about
+        whether the room left A between A's two lines."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-a", 1, "3|1|a-c", at_ms=1000)
+        for revision, line in [(3, "0|1|b-a"), (4, "1|1|b-b"), (5, "2|1|b-c")]:
+            await self._swap(redis, "text-b", revision, line, at_ms=revision * 1000)
+
+        assert await self._swap(redis, "text-a", 2, "4|1|a-d", at_ms=4000) == "1|1000|0|3|1|a-c"
+
+    @pytest.mark.asyncio
+    async def test_a_text_whose_last_mark_fell_out_of_the_kept_moves_measures_nothing(self):
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 1, "3|1|seg-c", at_ms=1000)
+        for revision in range(2, 2 + 256):
+            await self._swap(redis, "text-2", revision, f"{revision}|1|x", at_ms=revision * 1000)
+
+        assert len(redis.zsets[self.MOVES]) == 256
+        assert await self._swap(redis, "text-1", 300, "4|1|seg-d", at_ms=2000) is False
 
     @pytest.mark.asyncio
     async def test_a_late_mark_never_takes_another_texts_newer_one(self):
