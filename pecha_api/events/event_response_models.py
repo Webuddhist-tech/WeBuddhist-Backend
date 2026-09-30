@@ -210,6 +210,14 @@ class EventDTO(BaseModel):
     start_date: datetime
     end_date: datetime
     timezone: Optional[str] = None
+    start_time: Optional[str] = Field(
+        None,
+        description="Start as local HH:MM in the event's timezone",
+    )
+    end_time: Optional[str] = Field(
+        None,
+        description="End as local HH:MM in the event's timezone",
+    )
     is_one_day: bool
     featured: bool
     is_recurring: bool = False

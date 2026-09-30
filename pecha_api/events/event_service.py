@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -550,6 +551,8 @@ def _event_to_dto(
         start_date=dto_start,
         end_date=dto_end,
         timezone=getattr(event, "timezone", None),
+        start_time=_local_hhmm(dto_start, getattr(event, "timezone", None)),
+        end_time=_local_hhmm(dto_end, getattr(event, "timezone", None)),
         is_one_day=dto_end.date() == dto_start.date(),
         featured=event.featured,
         is_recurring=event.is_recurring,
@@ -799,6 +802,19 @@ def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _local_hhmm(value: datetime, timezone_name: Optional[str]) -> str:
+    """Wall-clock HH:MM of `value` in the event's zone.
+
+    Legacy rows with no stored zone use the default event zone, as Studio
+    does. An unknown zone falls back to UTC so one bad row cannot fail a
+    whole listing."""
+    try:
+        tz = ZoneInfo(timezone_name or get("DEFAULT_EVENT_TIMEZONE"))
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = timezone.utc
+    return _as_aware_utc(value).astimezone(tz).strftime("%H:%M")
 
 
 _CMS_RECURRENCE_LOOKBACK_DAYS = 365 * 5
