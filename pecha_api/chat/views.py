@@ -507,7 +507,8 @@ async def pray_for_messages(
     # Charged up front, before any write, then trimmed to what was written:
     # checking the ids first would cost a database read on every call.
     charged = request.count * len(request.message_ids)
-    if not await allow_pray(user.id, charged):
+    charge = await allow_pray(user.id, charged)
+    if not charge.allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"At most {MAX_PRAYERS_PER_SECOND} prayers per second",
@@ -523,10 +524,12 @@ async def pray_for_messages(
     except HTTPException:
         # Refused before anything was written (not a member, room gone,
         # nothing prayable), so none of the charge was used.
-        await release_pray(user.id, charged)
+        await release_pray(user.id, charged, charge.window)
         raise
     await release_pray(
-        user.id, charged - request.count * len(result.response.prayers)
+        user.id,
+        charged - request.count * len(result.response.prayers),
+        charge.window,
     )
     await _broadcast_prayers_safe(room_id=room_id, prayers=result.broadcast)
     return result.response
