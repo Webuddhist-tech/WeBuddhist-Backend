@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from pecha_api.verse_of_day.like_models import VerseOfDayLike
-from pecha_api.verse_of_day.like_repository import _create_like
+from pecha_api.verse_of_day.like_repository_sync import _create_like
 
 
 def test_create_like_reraises_non_duplicate_integrity_error() -> None:
