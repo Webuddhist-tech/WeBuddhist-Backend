@@ -100,7 +100,9 @@ async def get_events_endpoint(
     )
 
 
-@events_router.get("/today", status_code=status.HTTP_200_OK, response_model=EventsResponse, response_model_exclude_none=True)
+# Unlike the other event routes, /today sends every EventDTO field, with
+# null for empty ones, so clients always get the same set of keys.
+@events_router.get("/today", status_code=status.HTTP_200_OK, response_model=EventsResponse)
 async def get_events_today_endpoint(
     group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = None,

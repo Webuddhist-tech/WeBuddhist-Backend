@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -525,7 +526,8 @@ def _event_to_dto(
 
     dto_start = start_date if start_date is not None else event.start_date
     dto_end = end_date if end_date is not None else event.end_date
-    
+    event_timezone = _effective_event_timezone(getattr(event, "timezone", None))
+
     return EventDTO(
         id=event.id,
         plan_id=event.plan_id,
@@ -549,7 +551,9 @@ def _event_to_dto(
         location=_location_to_dto(event, language=language),
         start_date=dto_start,
         end_date=dto_end,
-        timezone=getattr(event, "timezone", None),
+        timezone=event_timezone,
+        start_time=_local_hhmm(dto_start, event_timezone),
+        end_time=_local_hhmm(dto_end, event_timezone),
         is_one_day=dto_end.date() == dto_start.date(),
         featured=event.featured,
         is_recurring=event.is_recurring,
@@ -799,6 +803,26 @@ def _as_aware_utc(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _effective_event_timezone(timezone_name: Optional[str]) -> str:
+    """The zone an event's local times are given in.
+
+    Legacy rows with no stored zone use the default event zone, as Studio
+    does. An unknown zone becomes UTC so one bad row cannot fail a whole
+    listing. The DTO sends this name, so clients always know which zone
+    start_time/end_time are in."""
+    name = timezone_name or get("DEFAULT_EVENT_TIMEZONE")
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return "UTC"
+    return name
+
+
+def _local_hhmm(value: datetime, timezone_name: str) -> str:
+    """Wall-clock HH:MM of `value` in a zone from _effective_event_timezone."""
+    return _as_aware_utc(value).astimezone(ZoneInfo(timezone_name)).strftime("%H:%M")
 
 
 _CMS_RECURRENCE_LOOKBACK_DAYS = 365 * 5

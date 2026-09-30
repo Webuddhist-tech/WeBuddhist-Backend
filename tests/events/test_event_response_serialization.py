@@ -10,7 +10,23 @@ from pecha_api.events.event_response_models import EventDTO, EventsResponse
 client = TestClient(api)
 
 
-def test_event_response_omits_null_fields():
+NULLABLE_EVENT_FIELDS = (
+    "plan_id",
+    "accumulator_id",
+    "mantra_id",
+    "timer_id",
+    "image",
+    "image_url",
+    "updated_at",
+    "is_joined",
+    "recurrence",
+    "occurrence_date",
+    "start_time",
+    "end_time",
+)
+
+
+def _minimal_events_payload() -> EventsResponse:
     now = datetime.now(timezone.utc)
     event = EventDTO(
         id=uuid4(),
@@ -23,24 +39,35 @@ def test_event_response_omits_null_fields():
         created_at=now,
         created_by="author@example.com",
     )
-    payload = EventsResponse(events=[event], total=1, skip=0, limit=20)
+    return EventsResponse(events=[event], total=1, skip=0, limit=20)
 
+
+def test_events_today_response_includes_null_fields():
     with patch(
         "pecha_api.events.event_views.get_events_today_service_cached",
         new_callable=AsyncMock,
-        return_value=payload,
+        return_value=_minimal_events_payload(),
     ):
         response = client.get("/events/today")
 
     event_body = response.json()["events"][0]
-    assert "plan_id" not in event_body
-    assert "accumulator_id" not in event_body
-    assert "mantra_id" not in event_body
-    assert "timer_id" not in event_body
-    assert "image" not in event_body
-    assert "image_url" not in event_body
-    assert "updated_at" not in event_body
-    assert "is_joined" not in event_body
+    for field in NULLABLE_EVENT_FIELDS:
+        assert field in event_body
+        assert event_body[field] is None
+    assert event_body["event_format"] == "hybrid"
+
+
+def test_events_list_response_omits_null_fields():
+    with patch(
+        "pecha_api.events.event_views.get_events_service_cached",
+        new_callable=AsyncMock,
+        return_value=_minimal_events_payload(),
+    ):
+        response = client.get("/events")
+
+    event_body = response.json()["events"][0]
+    for field in NULLABLE_EVENT_FIELDS:
+        assert field not in event_body
     assert event_body["event_format"] == "hybrid"
 
 
