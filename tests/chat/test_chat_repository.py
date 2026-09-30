@@ -25,8 +25,12 @@ from pecha_api.chat.repository import (
     get_room_by_id,
     get_room_by_pair,
     get_room_messages,
-    has_dispatched_prayer_since,
+    add_prayers,
+    get_my_prayer_counts_map,
     leave_member,
+    lock_prayer_request,
+    remove_prayer_and_count,
+    summarize_prayers_since,
     list_active_members,
     list_my_active_rooms,
     mark_read,
@@ -426,60 +430,143 @@ class TestBulkMessageDeletion:
         db.commit.assert_called_once()
 
 
-class TestHasDispatchedPrayerSince:
-    """A suppressed prayer (self-pray, or one coalesced away) must not itself
-    count as a dispatched notification - otherwise it would keep suppressing
-    every later prayer for the same request."""
+class TestAddPrayers:
+    """The "is praying" row and the running total are written together."""
 
-    def test_excludes_suppressed_dispatches_from_the_filter(self):
+    def test_inserts_both_rows_and_commits_once(self):
         db = MagicMock()
-        query = _query_chain(db)
-        query.scalar.return_value = False
+        first, second = uuid4(), uuid4()
+        prayers_result = MagicMock()
+        prayers_result.all.return_value = [(first,)]
+        counts_result = MagicMock()
+        counts_result.all.return_value = [(first, 10), (second, 25)]
+        db.execute.side_effect = [prayers_result, counts_result]
 
-        has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
+        result = add_prayers(
+            db=db, message_ids=[first, second], user_id=uuid4(), count=10
         )
 
-        conditions = [str(arg) for arg in query.filter.call_args.args]
-        assert any(
-            "notification_sqs_message_id IS NOT NULL" in condition
-            for condition in conditions
+        assert db.execute.call_count == 2
+        db.commit.assert_called_once()
+        assert result.created_message_ids == {first}
+        assert result.my_prayer_counts == {first: 10, second: 25}
+
+    def test_counter_upsert_adds_to_the_existing_total(self):
+        db = MagicMock()
+        db.execute.return_value.all.return_value = []
+
+        add_prayers(db=db, message_ids=[uuid4()], user_id=uuid4(), count=3)
+
+        counts_sql = str(db.execute.call_args_list[1].args[0])
+        assert "ON CONFLICT ON CONSTRAINT uq_chat_message_prayer_counts_message_user" in counts_sql
+        assert "prayer_count = (chat_message_prayer_counts.prayer_count + excluded.prayer_count)" in counts_sql
+        prayers_sql = str(db.execute.call_args_list[0].args[0])
+        assert "DO NOTHING" in prayers_sql
+
+    def test_no_ids_writes_nothing(self):
+        db = MagicMock()
+
+        result = add_prayers(db=db, message_ids=[], user_id=uuid4())
+
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()
+        assert result.created_message_ids == set()
+        assert result.my_prayer_counts == {}
+
+
+class TestRemovePrayerAndCount:
+
+    def test_deletes_both_rows_in_one_commit(self):
+        db = MagicMock()
+        query = _query_chain(db)
+
+        remove_prayer_and_count(db=db, message_id=uuid4(), user_id=uuid4())
+
+        assert query.delete.call_count == 2
+        db.commit.assert_called_once()
+
+
+class TestMyPrayerCountsMap:
+
+    def test_keys_counts_by_message(self):
+        db = MagicMock()
+        message_id = uuid4()
+        _query_chain(db, results=[(message_id, 30)])
+
+        assert get_my_prayer_counts_map(
+            db=db, message_ids=[message_id], user_id=uuid4()
+        ) == {message_id: 30}
+
+    def test_no_ids_skips_the_query(self):
+        db = MagicMock()
+
+        assert get_my_prayer_counts_map(db=db, message_ids=[], user_id=uuid4()) == {}
+        db.query.assert_not_called()
+
+
+class TestPrayerNotificationGateQueries:
+
+    def test_lock_prayer_request_locks_the_row(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.with_for_update.return_value = query
+        message = MagicMock()
+        query.first.return_value = message
+
+        assert lock_prayer_request(db=db, message_id=uuid4()) is message
+        query.with_for_update.assert_called_once()
+
+    def test_summary_without_a_previous_push_counts_everyone(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.with_entities.return_value = query
+        latest = uuid4()
+        query.scalar.side_effect = [100, 10]
+        query.first.return_value = (latest,)
+
+        summary = summarize_prayers_since(
+            db=db, message_id=uuid4(), requester_id=uuid4(), since=None
         )
-        assert any(
-            "notification_sqs_message_id !=" in condition for condition in conditions
-        )
 
-    def test_returns_true_when_a_real_dispatch_is_recent(self):
+        assert summary.current_sum == 100
+        assert summary.people_count == 10
+        assert summary.latest_user_id == latest
+        # Only the base filter (request, not the requester); no time bound.
+        assert query.filter.call_count == 1
+
+    def test_summary_since_a_push_bounds_people_by_last_prayed_at(self):
         db = MagicMock()
         query = _query_chain(db)
-        query.scalar.return_value = True
+        query.with_entities.return_value = query
+        query.scalar.side_effect = [110, 1]
+        query.first.return_value = None
 
-        assert has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
-        ) is True
-
-    def test_returns_false_when_none_found(self):
-        db = MagicMock()
-        query = _query_chain(db)
-        query.scalar.return_value = None
-
-        assert has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
-        ) is False
-
-    def test_exclude_prayer_id_adds_a_second_filter(self):
-        db = MagicMock()
-        query = _query_chain(db)
-        query.scalar.return_value = False
-
-        has_dispatched_prayer_since(
+        summary = summarize_prayers_since(
             db=db,
             message_id=uuid4(),
+            requester_id=uuid4(),
             since=datetime.now(tz.utc),
-            exclude_prayer_id=uuid4(),
         )
 
         assert query.filter.call_count == 2
+        assert "last_prayed_at >" in str(query.filter.call_args_list[1].args[0])
+        assert summary.latest_user_id is None
+
+    def test_summary_excludes_the_requester(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.with_entities.return_value = query
+        query.scalar.side_effect = [0, 0]
+
+        summarize_prayers_since(
+            db=db, message_id=uuid4(), requester_id=uuid4(), since=None
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args_list[0].args]
+        assert any("user_id !=" in condition for condition in conditions)
+
+
+class TestSuppressedSentinel:
 
     def test_suppressed_sentinel_matches_what_the_dispatch_service_writes(self):
         # Guards against the sentinel drifting out of sync between the two

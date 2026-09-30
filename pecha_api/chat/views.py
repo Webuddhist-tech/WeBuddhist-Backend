@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.chat.chat_websocket import get_broadcaster
+from pecha_api.chat.prayer_rate_limit import MAX_PRAYERS_PER_SECOND, allow_pray
 from pecha_api.chat.member_service import (
     add_room_members_service,
     list_room_members_service,
@@ -492,14 +493,25 @@ async def pray_for_messages(
     request: PrayForMessagesRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
-    """Pray for one or several selected prayer requests in one action.
+    """Pray `count` times (1-10, default 1) for each selected prayer request.
 
-    Idempotent: praying again for the same request changes nothing but still
-    reports its current state. Ids that are no longer live prayer requests in
-    this room are skipped."""
+    Praying again for the same request adds to the caller's total and reports
+    it as my_prayer_count. A user may add at most 10 prayers a second, counted
+    as count x number of ids; over that the call is refused with 429 and
+    nothing is written. Ids that are no longer live prayer requests in this
+    room are skipped."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    if not await allow_pray(user.id, request.count * len(request.message_ids)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"At most {MAX_PRAYERS_PER_SECOND} prayers per second",
+            headers={"Retry-After": "1"},
+        )
     result = pray_for_messages_service(
-        room_id=room_id, user=user, message_ids=request.message_ids
+        room_id=room_id,
+        user=user,
+        message_ids=request.message_ids,
+        count=request.count,
     )
     await _broadcast_prayers_safe(room_id=room_id, prayers=result.broadcast)
     return result.response
@@ -514,7 +526,7 @@ async def unpray_message(
     message_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
-    """Take back the caller's prayer for a request (idempotent)."""
+    """Take back all of the caller's prayers for a request (idempotent)."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
     result = unpray_message_service(message_id=message_id, user=user)
     await _broadcast_prayers_safe(room_id=result.room_id, prayers=result.broadcast)
@@ -532,7 +544,8 @@ def list_message_prayers(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
-    """Who prayed for this request, newest first. Active member only."""
+    """Who is praying for this request and how many times each, most recently
+    prayed first. Only the member who posted the request; anyone else gets 403."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
     return list_message_prayers_service(
         message_id=message_id, user=user, skip=skip, limit=limit

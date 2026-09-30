@@ -14,10 +14,12 @@ from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatR
 from pecha_api.chat.models import (
     ChatMessage,
     ChatMessagePrayer,
+    ChatMessagePrayerCount,
     ChatMessageReaction,
     ChatMessageReport,
     ChatRoom,
     ChatRoomMember,
+    ChatPrayerNotification,
 )
 from pecha_api.users.users_models import Users
 
@@ -571,49 +573,30 @@ def get_reactions_map(
     return result
 
 
-def get_prayer(
-    db: Session,
-    message_id: UUID,
-    user_id: UUID,
-) -> Optional[ChatMessagePrayer]:
-    return (
-        db.query(ChatMessagePrayer)
-        .filter(
-            ChatMessagePrayer.message_id == message_id,
-            ChatMessagePrayer.user_id == user_id,
-        )
-        .first()
-    )
+class PrayResult(NamedTuple):
+    """What one pray call wrote: the requests the caller prayed for the first
+    time, and the caller's running total for every request in the call."""
+
+    created_message_ids: Set[UUID]
+    my_prayer_counts: Dict[UUID, int]
 
 
-def get_prayer_by_id(db: Session, prayer_id: UUID) -> Optional[ChatMessagePrayer]:
-    return (
-        db.query(ChatMessagePrayer)
-        .filter(ChatMessagePrayer.id == prayer_id)
-        .first()
-    )
-
-
-def add_prayer(db: Session, prayer: ChatMessagePrayer) -> ChatMessagePrayer:
-    db.add(prayer)
-    db.commit()
-    db.refresh(prayer)
-    return prayer
-
-
-def add_prayers_ignoring_duplicates(
+def add_prayers(
     db: Session,
     message_ids: Sequence[UUID],
     user_id: UUID,
-) -> List[Tuple[UUID, UUID]]:
-    """Pray for several messages at once, in one statement and one commit.
+    count: int = 1,
+) -> PrayResult:
+    """Add `count` prayers to each of these requests, in one commit.
 
-    Rows the user already has are left alone (the uniqueness constraint is what
-    makes the batch endpoint idempotent). Returns (message_id, prayer_id) for
-    the prayers actually created, so only those raise a notification."""
+    The "is praying" row is written on the first prayer only (the uniqueness
+    constraint leaves an existing one alone); the counter row is upserted on
+    every call. Both land in the same transaction, so a request is never left
+    with a count and no prayer, or the other way round."""
     if not message_ids:
-        return []
-    statement = (
+        return PrayResult(created_message_ids=set(), my_prayer_counts={})
+
+    prayers_statement = (
         pg_insert(ChatMessagePrayer.__table__)
         .values(
             [
@@ -622,18 +605,50 @@ def add_prayers_ignoring_duplicates(
             ]
         )
         .on_conflict_do_nothing(constraint="uq_chat_message_prayers_message_user")
-        .returning(
-            ChatMessagePrayer.__table__.c.message_id,
-            ChatMessagePrayer.__table__.c.id,
-        )
+        .returning(ChatMessagePrayer.__table__.c.message_id)
     )
-    created = [(row[0], row[1]) for row in db.execute(statement).all()]
+    created = {row[0] for row in db.execute(prayers_statement).all()}
+
+    counts_table = ChatMessagePrayerCount.__table__
+    now = func.now()
+    counts_insert = pg_insert(counts_table).values(
+        [
+            {
+                "id": uuid4(),
+                "message_id": message_id,
+                "user_id": user_id,
+                "prayer_count": count,
+                "first_prayed_at": now,
+                "last_prayed_at": now,
+            }
+            for message_id in message_ids
+        ]
+    )
+    counts_statement = counts_insert.on_conflict_do_update(
+        constraint="uq_chat_message_prayer_counts_message_user",
+        set_={
+            "prayer_count": counts_table.c.prayer_count
+            + counts_insert.excluded.prayer_count,
+            "last_prayed_at": now,
+        },
+    ).returning(counts_table.c.message_id, counts_table.c.prayer_count)
+    my_counts = {row[0]: int(row[1]) for row in db.execute(counts_statement).all()}
+
     db.commit()
-    return created
+    return PrayResult(created_message_ids=created, my_prayer_counts=my_counts)
 
 
-def remove_prayer(db: Session, prayer: ChatMessagePrayer) -> None:
-    db.delete(prayer)
+def remove_prayer_and_count(db: Session, message_id: UUID, user_id: UUID) -> None:
+    """Take back one person's prayers for a request: both the "is praying" row
+    and the running total, in one commit. A no-op when there are none."""
+    db.query(ChatMessagePrayer).filter(
+        ChatMessagePrayer.message_id == message_id,
+        ChatMessagePrayer.user_id == user_id,
+    ).delete(synchronize_session=False)
+    db.query(ChatMessagePrayerCount).filter(
+        ChatMessagePrayerCount.message_id == message_id,
+        ChatMessagePrayerCount.user_id == user_id,
+    ).delete(synchronize_session=False)
     db.commit()
 
 
@@ -682,6 +697,26 @@ def get_prayed_message_ids(
         .all()
     )
     return {row[0] for row in rows}
+
+
+def get_my_prayer_counts_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+) -> Dict[UUID, int]:
+    """How many times the viewer has prayed for each of these messages.
+    Messages they have not prayed for are absent."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayerCount.message_id, ChatMessagePrayerCount.prayer_count)
+        .filter(
+            ChatMessagePrayerCount.message_id.in_(message_ids),
+            ChatMessagePrayerCount.user_id == user_id,
+        )
+        .all()
+    )
+    return {message_id: int(prayer_count) for message_id, prayer_count in rows}
 
 
 def get_prayer_user_ids_map(
@@ -749,26 +784,28 @@ def list_message_prayers(
     message_id: UUID,
     skip: int = 0,
     limit: int = 20,
-) -> Tuple[List[ChatMessagePrayer], int]:
-    """Who prayed for one request, newest first."""
-    query = db.query(ChatMessagePrayer).filter(
-        ChatMessagePrayer.message_id == message_id
+) -> Tuple[List[ChatMessagePrayerCount], int]:
+    """Who is praying for one request and how many times each, most recently
+    prayed first. `total` counts people, not prayers."""
+    query = db.query(ChatMessagePrayerCount).filter(
+        ChatMessagePrayerCount.message_id == message_id
     )
-    total = query.with_entities(func.count(ChatMessagePrayer.id)).scalar() or 0
-    prayers = (
-        query.options(selectinload(ChatMessagePrayer.user))
-        .order_by(ChatMessagePrayer.created_at.desc())
+    total = query.with_entities(func.count(ChatMessagePrayerCount.id)).scalar() or 0
+    rows = (
+        query.options(selectinload(ChatMessagePrayerCount.user))
+        .order_by(
+            ChatMessagePrayerCount.last_prayed_at.desc(),
+            ChatMessagePrayerCount.id,
+        )
         .offset(skip)
         .limit(limit)
         .all()
     )
-    return prayers, total
+    return rows, total
 
 
 # Written to notification_sqs_message_id for a notification that deliberately
-# did not go out: a prayer that raised none (self-pray, or one already covered
-# by a recent notification for the same request), or a prayer request held by
-# the room's notification interval. Excluded from the "was one actually sent"
+# did not go out: a prayer request held by the room's notification interval. Excluded from the "was one actually sent"
 # queries below, so a suppressed row never extends a window it did not notify
 # anybody about. Non-null, so reconcile - which only retries rows that never
 # recorded an SQS id at all - leaves these alone.
@@ -887,42 +924,128 @@ def count_suppressed_prayer_requests(
     return int(query.scalar() or 0)
 
 
-def has_dispatched_prayer_since(
+def lock_prayer_request(db: Session, message_id: UUID) -> Optional[ChatMessage]:
+    """The prayer request, locked for the rest of the transaction.
+
+    Serialises the prayer-received gate per request: two pray calls landing
+    together cannot both find the interval open and both push. The request row
+    is locked rather than the last push, because before a request's first push
+    there is no push row to lock."""
+    return (
+        db.query(ChatMessage)
+        .filter(ChatMessage.id == message_id)
+        .with_for_update()
+        .first()
+    )
+
+
+def get_last_prayer_notification(
+    db: Session, message_id: UUID
+) -> Optional[ChatPrayerNotification]:
+    """The request's most recent prayer-received push, which starts the interval."""
+    return (
+        db.query(ChatPrayerNotification)
+        .filter(ChatPrayerNotification.message_id == message_id)
+        .order_by(ChatPrayerNotification.created_at.desc())
+        .first()
+    )
+
+
+class PrayerSummary(NamedTuple):
+    """Prayers for one request since its previous push, requester excluded.
+
+    `people_count` and `latest_user_id` cover only people who prayed after
+    `since`; `current_sum` is the request's whole running total, which the
+    caller differences against the previous push's `total_at_push`."""
+
+    people_count: int
+    current_sum: int
+    latest_user_id: Optional[UUID]
+
+
+def summarize_prayers_since(
     db: Session,
     *,
     message_id: UUID,
-    since: datetime,
-    exclude_prayer_id: Optional[UUID] = None,
-) -> bool:
-    """Whether this request already had a prayer notification actually sent
-    (not merely suppressed) recently.
-
-    Backs coalescing: ten people praying in the same window is one push, not ten."""
-    query = db.query(ChatMessagePrayer.id).filter(
-        ChatMessagePrayer.message_id == message_id,
-        ChatMessagePrayer.notification_dispatched_at.isnot(None),
-        ChatMessagePrayer.notification_dispatched_at >= since,
-        ChatMessagePrayer.notification_sqs_message_id.isnot(None),
-        ChatMessagePrayer.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+    requester_id: UUID,
+    since: Optional[datetime],
+) -> PrayerSummary:
+    """Who prayed for this request since `since` (everyone when None), and the
+    request's running total. The requester's own prayers count in neither."""
+    base = db.query(ChatMessagePrayerCount).filter(
+        ChatMessagePrayerCount.message_id == message_id,
+        ChatMessagePrayerCount.user_id != requester_id,
     )
-    if exclude_prayer_id is not None:
-        query = query.filter(ChatMessagePrayer.id != exclude_prayer_id)
-    return db.query(query.exists()).scalar() or False
+    current_sum = int(
+        base.with_entities(func.coalesce(func.sum(ChatMessagePrayerCount.prayer_count), 0))
+        .scalar()
+        or 0
+    )
+    recent = base
+    if since is not None:
+        recent = recent.filter(ChatMessagePrayerCount.last_prayed_at > since)
+    people_count = int(
+        recent.with_entities(func.count(ChatMessagePrayerCount.id)).scalar() or 0
+    )
+    latest = (
+        recent.with_entities(ChatMessagePrayerCount.user_id)
+        .order_by(ChatMessagePrayerCount.last_prayed_at.desc())
+        .first()
+    )
+    return PrayerSummary(
+        people_count=people_count,
+        current_sum=current_sum,
+        latest_user_id=latest[0] if latest else None,
+    )
+
+
+def create_prayer_notification(
+    db: Session,
+    *,
+    message_id: UUID,
+    people_count: int,
+    prayer_total: int,
+    latest_user_id: Optional[UUID],
+    total_at_push: int,
+) -> ChatPrayerNotification:
+    """Record a prayer-received push and commit, which also releases the lock
+    taken by lock_prayer_request."""
+    notification = ChatPrayerNotification(
+        message_id=message_id,
+        people_count=people_count,
+        prayer_total=prayer_total,
+        latest_user_id=latest_user_id,
+        total_at_push=total_at_push,
+    )
+    db.add(notification)
+    db.commit()
+    db.refresh(notification)
+    return notification
+
+
+def get_prayer_notification_by_id(
+    db: Session, notification_id: UUID
+) -> Optional[ChatPrayerNotification]:
+    return (
+        db.query(ChatPrayerNotification)
+        .filter(ChatPrayerNotification.id == notification_id)
+        .first()
+    )
 
 
 def mark_prayer_notification_dispatched(
     db: Session,
-    prayer_id: UUID,
+    notification_id: UUID,
     sqs_message_id: str,
-) -> Optional[ChatMessagePrayer]:
-    prayer = get_prayer_by_id(db=db, prayer_id=prayer_id)
-    if not prayer:
+) -> Optional[ChatPrayerNotification]:
+    notification = get_prayer_notification_by_id(db=db, notification_id=notification_id)
+    if not notification:
         return None
-    prayer.notification_sqs_message_id = sqs_message_id
-    prayer.notification_dispatched_at = datetime.now(timezone.utc)
+    notification.notification_sqs_message_id = sqs_message_id
+    notification.notification_dispatched_at = datetime.now(timezone.utc)
     db.commit()
-    db.refresh(prayer)
-    return prayer
+    db.refresh(notification)
+    return notification
 
 
 def list_undispatched_prayer_notifications(
@@ -930,14 +1053,14 @@ def list_undispatched_prayer_notifications(
     *,
     older_than: datetime,
     limit: int,
-) -> List[ChatMessagePrayer]:
+) -> List[ChatPrayerNotification]:
     return (
-        db.query(ChatMessagePrayer)
+        db.query(ChatPrayerNotification)
         .filter(
-            ChatMessagePrayer.notification_sqs_message_id.is_(None),
-            ChatMessagePrayer.created_at <= older_than,
+            ChatPrayerNotification.notification_sqs_message_id.is_(None),
+            ChatPrayerNotification.created_at <= older_than,
         )
-        .order_by(ChatMessagePrayer.created_at.asc())
+        .order_by(ChatPrayerNotification.created_at.asc())
         .limit(limit)
         .all()
     )

@@ -29,7 +29,7 @@ from pecha_api.chat.repository import (
     count_message_prayers,
     count_suppressed_prayer_requests,
     get_message_by_id_any_room,
-    get_prayer_by_id,
+    get_prayer_notification_by_id,
     last_dispatched_prayer_request,
 )
 from pecha_api.chat.service import (
@@ -288,14 +288,22 @@ def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDev
 def _build_prayer_notification_copy(
     *,
     room_name: str,
-    prayer_count: int,
+    people_count: int,
+    prayer_total: int,
     latest_prayer_name: str,
 ) -> tuple[str, str]:
-    """Copy reads from the live count, not from one prayer, because prayers
-    inside the coalesce window are deliberately folded into a single push."""
-    if prayer_count <= 1:
-        return room_name, f"{latest_prayer_name} prayed for your request"
-    return room_name, f"{prayer_count} people are praying for your request"
+    """Copy reads from the push's stored summary: everyone who prayed since
+    the previous push for this request, and how many prayers they added."""
+    if people_count <= 1:
+        if prayer_total <= 1:
+            return room_name, f"{latest_prayer_name} prayed for you"
+        return room_name, f"{latest_prayer_name} prayed for you {prayer_total} times"
+    others = people_count - 1
+    others_label = "1 other" if others == 1 else f"{others} others"
+    return (
+        room_name,
+        f"{latest_prayer_name} with {others_label} prayed for you {prayer_total} times",
+    )
 
 
 def get_prayer_notification_targets(
@@ -311,12 +319,14 @@ def get_prayer_notification_targets(
     if limit > 500:
         limit = 500
 
+    """`prayer_id` is a chat_prayer_notifications id: one summarised push, not
+    one prayer. The name is kept so the worker's contract does not change."""
     with SessionLocal() as db:
-        prayer = get_prayer_by_id(db=db, prayer_id=prayer_id)
-        if not prayer:
+        notification = get_prayer_notification_by_id(db=db, notification_id=prayer_id)
+        if not notification:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
-        message = get_message_by_id_any_room(db=db, message_id=prayer.message_id)
+        message = get_message_by_id_any_room(db=db, message_id=notification.message_id)
         if not message or not message.room:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
@@ -327,14 +337,18 @@ def get_prayer_notification_targets(
         prayer_count = count_message_prayers(db=db, message_id=message.id)
         title, body = _build_prayer_notification_copy(
             room_name=room.name,
-            prayer_count=prayer_count,
-            latest_prayer_name=get_sender_display_name(db=db, sender_id=prayer.user_id),
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
+            latest_prayer_name=(
+                get_sender_display_name(db=db, sender_id=notification.latest_user_id)
+                if notification.latest_user_id
+                else "Someone"
+            ),
         )
 
-        # The requester alone, and never for their own prayer.
-        recipient_ids = (
-            [] if message.sender_id == prayer.user_id else [message.sender_id]
-        )
+        # The requester alone. The gate never records a push for the
+        # requester's own prayers, so there is nobody else to exclude.
+        recipient_ids = [message.sender_id]
         recipient_ids = filter_users_by_notification_preference(
             db=db,
             user_ids=recipient_ids,
@@ -365,7 +379,7 @@ def get_prayer_notification_targets(
             )
 
         return PrayerNotificationTargetsResponse(
-            prayer_id=prayer.id,
+            prayer_id=notification.id,
             message_id=message.id,
             room_id=room.id,
             chat_kind=chat_kind,
@@ -373,6 +387,8 @@ def get_prayer_notification_targets(
             event_id=room.event_id,
             requester_id=message.sender_id,
             prayer_count=prayer_count,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
             title=title,
             body=body,
             recipients=recipients,
