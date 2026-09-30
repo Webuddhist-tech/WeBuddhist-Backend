@@ -128,23 +128,8 @@ def upgrade() -> None:
             postgresql_where=sa.text("notification_sqs_message_id IS NULL"),
         )
 
-    # New prayer rows no longer record a dispatch, so every one of them would
-    # land in this partial index; reconcile now reads chat_prayer_notifications.
-    op.drop_index(
-        "idx_chat_message_prayers_undispatched",
-        table_name="chat_message_prayers",
-        if_exists=True,
-    )
-
 
 def downgrade() -> None:
-    op.create_index(
-        "idx_chat_message_prayers_undispatched",
-        "chat_message_prayers",
-        ["created_at"],
-        postgresql_where=sa.text("notification_sqs_message_id IS NULL"),
-        if_not_exists=True,
-    )
     if table_exists("chat_prayer_notifications"):
         op.drop_table("chat_prayer_notifications")
     if table_exists("chat_message_prayer_counts"):
