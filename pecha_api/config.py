@@ -211,12 +211,12 @@ DEFAULTS = dict(
     SHARE_EVENT_PHOTO_CACHE_SIZE=32,
     # How long a crawler may reuse a rendered share image.
     SHARE_IMAGE_CACHE_SECONDS=86400,
-    # Prayers for the same request inside this window raise one push, not one each
-    PRAYER_NOTIFICATION_COALESCE_SECONDS=900,
     # At most one prayer-request push per room per this many seconds. Prayer
     # requests posted inside it are held: the room shows them at once, and the
     # next push that goes out carries them as "+N other prayer requests".
     # 0 sends a push for every prayer request. TEXT messages are unaffected.
+    # Also paces prayer-received pushes: at most one per request per interval,
+    # summarising every prayer since the previous one. 0 pushes on every pray.
     PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
 
     # Group join request notification SQS queue (backend producer → worker consumer)

@@ -17,10 +17,12 @@ from pecha_api.chat.notification_dispatch_service import (
 )
 from pecha_api.chat.notification_service import (
     _build_notification_copy,
+    _build_prayer_notification_copy,
     _count_held_prayer_requests,
     _preview_body,
     deactivate_push_device_service,
     get_chat_notification_targets,
+    get_prayer_notification_targets,
 )
 from pecha_api.chat.sqs_client import (
     CHAT_MESSAGE_CREATED_EVENT,
@@ -793,6 +795,211 @@ class TestGetChatNotificationTargets:
         with pytest.raises(HTTPException) as exc_info:
             get_chat_notification_targets(message_id=uuid4())
         assert exc_info.value.status_code == 404
+
+
+class TestPrayerNotificationCopy:
+
+    def test_one_person_one_prayer(self):
+        title, body = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=1, prayer_total=1, latest_prayer_name="Kunsang"
+        )
+
+        assert title == "Sangha"
+        assert body == "Kunsang prayed for you"
+
+    def test_one_person_many_prayers(self):
+        _, body = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=1, prayer_total=10, latest_prayer_name="Kunsang"
+        )
+
+        assert body == "Kunsang prayed for you 10 times"
+
+    def test_many_people_many_prayers(self):
+        _, body = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=10, prayer_total=100, latest_prayer_name="Kunsang"
+        )
+
+        assert body == "Kunsang with 9 others prayed for you 100 times"
+
+    def test_two_people_reads_one_other(self):
+        _, body = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=2, prayer_total=2, latest_prayer_name="Dolma"
+        )
+
+        assert body == "Dolma with 1 other prayed for you 2 times"
+
+
+PRAYER_TARGETS = "pecha_api.chat.notification_service"
+
+
+def _prayer_notification(message_id, people_count=10, prayer_total=100, latest_user_id=None):
+    return SimpleNamespace(
+        id=uuid4(),
+        message_id=message_id,
+        people_count=people_count,
+        prayer_total=prayer_total,
+        latest_user_id=latest_user_id or uuid4(),
+    )
+
+
+@patch(f"{PRAYER_TARGETS}.get_active_push_devices_by_user_ids")
+@patch(f"{PRAYER_TARGETS}.filter_users_by_notification_preference")
+@patch(f"{PRAYER_TARGETS}.count_message_prayers", return_value=12)
+@patch(f"{PRAYER_TARGETS}.get_sender_display_name", return_value="Kunsang")
+@patch(f"{PRAYER_TARGETS}._owning_group_id")
+@patch(f"{PRAYER_TARGETS}.get_message_by_id_any_room")
+@patch(f"{PRAYER_TARGETS}.get_prayer_notification_by_id")
+@patch(f"{PRAYER_TARGETS}.SessionLocal")
+class TestGetPrayerNotificationTargets:
+
+    def _message(self, group_id):
+        room = MockRoom(group_id=group_id, name="Sangha")
+        room.event_id = None
+        return MockMessage(room=room, message_type="PRAYER")
+
+    def test_resolves_a_push_row_and_builds_its_summary_copy(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        notification = _prayer_notification(message.id)
+        mock_get_notification.return_value = notification
+        mock_get_message.return_value = message
+        mock_group.return_value = group_id
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        device = MockDevice(user_id=message.sender_id)
+        mock_devices.return_value = {message.sender_id: [device]}
+
+        result = get_prayer_notification_targets(prayer_id=notification.id)
+
+        assert mock_get_notification.call_args.kwargs["notification_id"] == notification.id
+        assert result.prayer_id == notification.id
+        assert result.requester_id == message.sender_id
+        assert result.title == "Sangha"
+        assert result.body == "Kunsang with 9 others prayed for you 100 times"
+        assert result.prayer_count == 12
+        assert result.people_count == 10
+        assert result.prayer_total == 100
+        assert [r.user_id for r in result.recipients] == [message.sender_id]
+
+    def test_honours_the_requesters_preference(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        mock_get_notification.return_value = _prayer_notification(message.id)
+        mock_get_message.return_value = message
+        mock_group.return_value = group_id
+        mock_filter.return_value = []
+        mock_devices.return_value = {}
+
+        result = get_prayer_notification_targets(prayer_id=uuid4())
+
+        from pecha_api.notification.notification_preference_enums import NotificationType
+
+        assert mock_filter.call_args.kwargs["notification_type"] == NotificationType.PRAYER_RECEIVED
+        assert mock_filter.call_args.kwargs["scope_id"] == group_id
+        assert result.recipients == []
+        assert result.total == 0
+
+    def test_unknown_id_is_404(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        _group,
+        _name,
+        _count,
+        _filter,
+        _devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_notification.return_value = None
+
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=None), \
+                pytest.raises(HTTPException) as exc_info:
+            get_prayer_notification_targets(prayer_id=uuid4())
+
+        assert exc_info.value.status_code == 404
+        mock_get_message.assert_not_called()
+
+    def test_an_event_queued_before_deploy_still_resolves(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        """Its prayer_id is a chat_message_prayers id: read as one person
+        praying once."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        mock_group.return_value = group_id
+        mock_get_notification.return_value = None
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {message.sender_id: [MockDevice(user_id=message.sender_id)]}
+        legacy = SimpleNamespace(id=uuid4(), message_id=message.id, user_id=uuid4())
+
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=legacy):
+            result = get_prayer_notification_targets(prayer_id=legacy.id)
+
+        assert mock_get_message.call_args.kwargs["message_id"] == message.id
+        assert result.prayer_id == legacy.id
+        assert result.body == "Kunsang prayed for you"
+        assert result.people_count == 1
+        assert result.prayer_total == 1
+        assert [r.user_id for r in result.recipients] == [message.sender_id]
+
+    def test_a_legacy_self_prayer_notifies_nobody(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        mock_group.return_value = group_id
+        mock_get_notification.return_value = None
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {}
+        legacy = SimpleNamespace(id=uuid4(), message_id=message.id, user_id=message.sender_id)
+
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=legacy):
+            result = get_prayer_notification_targets(prayer_id=legacy.id)
+
+        assert result.recipients == []
+        assert result.total == 0
 
 
 class TestDeactivatePushDeviceService:

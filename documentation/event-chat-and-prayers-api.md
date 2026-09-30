@@ -88,8 +88,9 @@ at 4000.
 Prayer requests are ordinary messages otherwise: they can be replied to,
 reacted to, reported and deleted exactly like any other.
 
-On a `PRAYER` message the DTO carries prayer fields and a nested `intention`
-object, **omitted entirely** on a `TEXT` message:
+On a `PRAYER` message the DTO carries prayer fields (including
+`my_prayer_count`) and a nested `intention` object, **omitted entirely** on a
+`TEXT` message:
 
 ```json
 {
@@ -103,13 +104,16 @@ object, **omitted entirely** on a `TEXT` message:
     "display_order": 1
   },
   "prayer_count": 12,
-  "prayed_by_me": false,
+  "prayed_by_me": true,
+  "my_prayer_count": 30,
   "recent_prayers": [ { "user_id": "…", "name": "Tenzin", "avatar_url": "…" } ]
 }
 ```
 
-`recent_prayers` holds at most 3 people, for an avatar stack; the full roster
-comes from the who-prayed endpoint.
+`prayer_count` counts **people**; `my_prayer_count` is how many times the
+viewer has prayed for it. `recent_prayers` holds at most 3 people, for an
+avatar stack; the full roster (requester only) comes from the who-prayed
+endpoint.
 
 **Filter a room to its prayer requests:**
 
@@ -125,33 +129,44 @@ GET /chat/rooms/{room_id}/messages?message_type=PRAYER
 
 ```http
 POST /chat/rooms/{room_id}/prayers
-{ "message_ids": ["a1…", "b2…", "c3…"] }     // 1-50 ids
+{ "message_ids": ["a1…", "b2…", "c3…"], "count": 1 }   // 1-10 ids, count 1-10 (default 1)
 ```
 
 ```json
 { "prayers": [
-    { "message_id": "a1…", "prayer_count": 12, "prayed_by_me": true, "created": true },
-    { "message_id": "b2…", "prayer_count": 4,  "prayed_by_me": true, "created": false }
+    { "message_id": "a1…", "prayer_count": 12, "prayed_by_me": true, "my_prayer_count": 1,  "created": true },
+    { "message_id": "b2…", "prayer_count": 4,  "prayed_by_me": true, "my_prayer_count": 21, "created": false }
 ] }
 ```
 
-This is the multi-select action: send the ids the user ticked. It is
-**idempotent** — `created: false` means the caller had already prayed for that
-request, and nothing changed. Ids that are no longer live prayer requests in
-this room are skipped and simply absent from the response, so a request deleted
-between rendering and confirming does not cost the user the rest of their
-selection. If none of the ids is prayable, the call 404s with
+This is the multi-select action: send the ids the user ticked. `count` prayers
+are added to **each** id. Praying again adds to `my_prayer_count`;
+`created: false` means the caller was already praying for that request, so
+`prayer_count` (people) did not move. Ids that are no longer live prayer
+requests in this room are skipped and simply absent from the response, so a
+request deleted between rendering and confirming does not cost the user the
+rest of their selection. If none of the ids is prayable, the call 404s with
 `NOT_A_PRAYER_REQUEST`.
 
-### Take a prayer back
+**Rate limit: 10 prayers per second per user**, counted as
+`count × len(message_ids)`. Over it, the call returns `429` with
+`Retry-After: 1` and nothing is written. Ids that are skipped (no longer live
+prayer requests) and calls that fail with `403`/`404` are not charged. Clients
+should batch taps (about
+300 ms) into one call with `count`; a "+100" action is 10 calls of `count: 10`,
+one per second.
+
+### Take prayers back
 
 ```http
 DELETE /chat/messages/{message_id}/prayers/me
 ```
 
-Returns the same shape with `prayed_by_me: false`. Idempotent.
+Removes all of the caller's prayers for the request. Returns the same shape
+with `prayed_by_me: false` and `my_prayer_count: 0`. Idempotent, not
+rate-limited, and sends no push.
 
-### Who prayed
+### Who is praying ("Praying together")
 
 ```http
 GET /chat/messages/{message_id}/prayers?skip=0&limit=20
@@ -161,11 +176,16 @@ GET /chat/messages/{message_id}/prayers?skip=0&limit=20
 { "message_id": "a1…", "total": 12, "skip": 0, "limit": 20,
   "prayers": [
     { "user_id": "…", "email": "…", "name": "Tenzin", "avatar_url": "…",
-      "created_at": "2026-09-11T10:04:00+00:00" }
+      "prayer_count": 10,
+      "created_at": "2026-09-11T10:04:00+00:00",
+      "last_prayed_at": "2026-09-11T10:25:00+00:00" }
 ] }
 ```
 
-Newest first. Active room members only.
+**Only the member who posted the request** may read it; anyone else gets `403`
+("Only the requester can see who is praying"). Ordered by `last_prayed_at`,
+most recent first. `created_at` is the person's first prayer. `total` counts
+people.
 
 ---
 
@@ -205,11 +225,20 @@ The requester is notified when someone prays for their request:
 `prayer_id`, `prayer_count` and (for an event room) `event_id` in the data
 payload, so the tap can deep-link to the request itself.
 
-- Never fires for praying for your own request.
-- **Coalesced:** prayers for the same request inside
-  `PRAYER_NOTIFICATION_COALESCE_SECONDS` (default 900) raise one notification,
-  whose copy reads from the live count — "12 people are praying for your
-  request" — rather than one push per prayer.
+- Never fires for praying for your own request, and your own prayers are not
+  counted in it.
+- **One push per request per interval:**
+  `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140). Each push
+  summarises every prayer since the previous one for that request:
+
+  | People | Prayers | Body |
+  |--------|---------|------|
+  | 1 | 1 | `Kunsang prayed for you` |
+  | 1 | > 1 | `Kunsang prayed for you 10 times` |
+  | > 1 | any | `Kunsang with 9 others prayed for you 100 times` |
+
+- Prayers inside the interval are carried by the next push. The interval does
+  not tick by itself: if nobody prays afterwards, no push goes out for them.
 
 Posting a prayer request is the other notification, and a separate rule. It is
 an ordinary `CHAT_MESSAGE` with `message_type: "PRAYER"`, so it goes to every
@@ -244,5 +273,7 @@ member of the room.
 | 400 | `INTENTION_NOT_ALLOWED_ON_TEXT` | `intention` sent with a `TEXT` message |
 | 400 | `NOT_A_PRAYER_REQUEST` | The message exists but is a `TEXT` message |
 | 403 | — | Not an active member of the room |
+| 403 | `Only the requester can see who is praying` | Roster read by someone other than the request's author |
+| 429 | — | More than 10 prayers in a second; retry after `Retry-After` |
 | 404 | `NOT_A_PRAYER_REQUEST` | Nothing in the batch was a live prayer request |
 | 404 | — | Room, event or message gone; chat switched off; group unpublished |

@@ -25,8 +25,12 @@ from pecha_api.chat.repository import (
     get_room_by_id,
     get_room_by_pair,
     get_room_messages,
-    has_dispatched_prayer_since,
+    add_prayers,
+    claim_unreported_prayers,
+    get_my_prayer_counts_map,
     leave_member,
+    lock_prayer_request,
+    remove_prayer_and_count,
     list_active_members,
     list_my_active_rooms,
     mark_read,
@@ -426,60 +430,113 @@ class TestBulkMessageDeletion:
         db.commit.assert_called_once()
 
 
-class TestHasDispatchedPrayerSince:
-    """A suppressed prayer (self-pray, or one coalesced away) must not itself
-    count as a dispatched notification - otherwise it would keep suppressing
-    every later prayer for the same request."""
+class TestAddPrayers:
+    """The "is praying" row and the running total are written together."""
 
-    def test_excludes_suppressed_dispatches_from_the_filter(self):
+    def test_inserts_both_rows_and_commits_once(self):
         db = MagicMock()
-        query = _query_chain(db)
-        query.scalar.return_value = False
+        first, second = uuid4(), uuid4()
+        prayers_result = MagicMock()
+        prayers_result.all.return_value = [(first,)]
+        counts_result = MagicMock()
+        counts_result.all.return_value = [(first, 10), (second, 25)]
+        db.execute.side_effect = [prayers_result, counts_result]
 
-        has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
+        result = add_prayers(
+            db=db, message_ids=[first, second], user_id=uuid4(), count=10
         )
 
-        conditions = [str(arg) for arg in query.filter.call_args.args]
-        assert any(
-            "notification_sqs_message_id IS NOT NULL" in condition
-            for condition in conditions
-        )
-        assert any(
-            "notification_sqs_message_id !=" in condition for condition in conditions
-        )
+        assert db.execute.call_count == 2
+        db.commit.assert_called_once()
+        assert result.created_message_ids == {first}
+        assert result.my_prayer_counts == {first: 10, second: 25}
 
-    def test_returns_true_when_a_real_dispatch_is_recent(self):
+    def test_counter_upsert_adds_to_the_existing_total(self):
+        db = MagicMock()
+        db.execute.return_value.all.return_value = []
+
+        add_prayers(db=db, message_ids=[uuid4()], user_id=uuid4(), count=3)
+
+        counts_sql = str(db.execute.call_args_list[1].args[0])
+        assert "ON CONFLICT ON CONSTRAINT uq_chat_message_prayer_counts_message_user" in counts_sql
+        assert "prayer_count = (chat_message_prayer_counts.prayer_count + excluded.prayer_count)" in counts_sql
+        assert "unreported_count = (chat_message_prayer_counts.unreported_count + excluded.unreported_count)" in counts_sql
+        prayers_sql = str(db.execute.call_args_list[0].args[0])
+        assert "DO NOTHING" in prayers_sql
+
+    def test_no_ids_writes_nothing(self):
+        db = MagicMock()
+
+        result = add_prayers(db=db, message_ids=[], user_id=uuid4())
+
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()
+        assert result.created_message_ids == set()
+        assert result.my_prayer_counts == {}
+
+
+class TestRemovePrayerAndCount:
+
+    def test_deletes_both_rows_in_one_commit(self):
         db = MagicMock()
         query = _query_chain(db)
-        query.scalar.return_value = True
 
-        assert has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
-        ) is True
+        remove_prayer_and_count(db=db, message_id=uuid4(), user_id=uuid4())
 
-    def test_returns_false_when_none_found(self):
+        assert query.delete.call_count == 2
+        db.commit.assert_called_once()
+
+
+class TestMyPrayerCountsMap:
+
+    def test_keys_counts_by_message(self):
+        db = MagicMock()
+        message_id = uuid4()
+        _query_chain(db, results=[(message_id, 30)])
+
+        assert get_my_prayer_counts_map(
+            db=db, message_ids=[message_id], user_id=uuid4()
+        ) == {message_id: 30}
+
+    def test_no_ids_skips_the_query(self):
+        db = MagicMock()
+
+        assert get_my_prayer_counts_map(db=db, message_ids=[], user_id=uuid4()) == {}
+        db.query.assert_not_called()
+
+
+class TestPrayerNotificationGateQueries:
+
+    def test_lock_prayer_request_locks_the_row(self):
         db = MagicMock()
         query = _query_chain(db)
-        query.scalar.return_value = None
+        query.with_for_update.return_value = query
+        message = MagicMock()
+        query.first.return_value = message
 
-        assert has_dispatched_prayer_since(
-            db=db, message_id=uuid4(), since=datetime.now(tz.utc)
-        ) is False
+        assert lock_prayer_request(db=db, message_id=uuid4()) is message
+        query.with_for_update.assert_called_once()
 
-    def test_exclude_prayer_id_adds_a_second_filter(self):
+    def test_claim_locks_reads_and_zeroes_unreported_counts(self):
         db = MagicMock()
-        query = _query_chain(db)
-        query.scalar.return_value = False
+        tenzin, dolma = uuid4(), uuid4()
+        earlier = datetime(2026, 9, 30, 10, 0, tzinfo=tz.utc)
+        later = datetime(2026, 9, 30, 10, 5)  # naive, as SQLite hands it back
+        db.execute.return_value.all.return_value = [(tenzin, 3, earlier), (dolma, 10, later)]
 
-        has_dispatched_prayer_since(
-            db=db,
-            message_id=uuid4(),
-            since=datetime.now(tz.utc),
-            exclude_prayer_id=uuid4(),
-        )
+        claimed = claim_unreported_prayers(db=db, message_id=uuid4())
 
-        assert query.filter.call_count == 2
+        assert [(row.user_id, row.count) for row in claimed] == [(tenzin, 3), (dolma, 10)]
+        assert claimed[1].last_prayed_at.tzinfo is not None
+        sql = str(db.execute.call_args.args[0])
+        assert "FOR UPDATE" in sql
+        assert "unreported_count > " in sql
+        assert "SET unreported_count=" in sql
+        # The caller commits together with the push row.
+        db.commit.assert_not_called()
+
+
+class TestSuppressedSentinel:
 
     def test_suppressed_sentinel_matches_what_the_dispatch_service_writes(self):
         # Guards against the sentinel drifting out of sync between the two
