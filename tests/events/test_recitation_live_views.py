@@ -104,6 +104,13 @@ def _ws_env(
         stack.enter_context(
             patch("pecha_api.events.recitation_live_views.get_broadcaster", return_value=broadcaster)
         )
+        # Play times are measured in the background and have their own tests.
+        stack.enter_context(
+            patch(
+                "pecha_api.events.recitation_live_views.record_segment_play_time",
+                new=AsyncMock(),
+            )
+        )
         mock_access = stack.enter_context(
             patch("pecha_api.events.recitation_live_views.resolve_recitation_access")
         )
@@ -458,6 +465,33 @@ class TestOperatorPublishing:
         assert kwargs["index"] == 12
         assert kwargs["round_number"] == 3
         assert kwargs["server_time"].endswith("Z")
+
+    def test_operator_set_measures_play_time_in_the_background(self):
+        event_id = uuid4()
+        record = AsyncMock()
+        with _ws_env(is_operator=True) as (broadcaster, _):
+            broadcaster.broadcast_position.return_value = 57
+            with patch("pecha_api.events.recitation_live_views.record_segment_play_time", new=record):
+                with client.websocket_connect(_ws_url(event_id)) as websocket:
+                    websocket.receive_json()
+                    websocket.send_json({
+                        "type": "set",
+                        "text_id": "text-7",
+                        "segment_id": "seg-42",
+                        "index": 12,
+                        "round_number": 3,
+                    })
+                    _sync(websocket)
+
+        kwargs = record.await_args.kwargs
+        assert kwargs["broadcaster"] is broadcaster
+        assert kwargs["event_id"] == event_id
+        assert kwargs["text_id"] == "text-7"
+        assert kwargs["segment_id"] == "seg-42"
+        assert kwargs["index"] == 12
+        assert kwargs["round_number"] == 3
+        assert kwargs["revision"] == 57
+        assert isinstance(kwargs["accepted_at_ms"], int)
 
     def test_set_without_optional_fields_is_accepted(self):
         with _ws_env(is_operator=True) as (broadcaster, _):

@@ -45,6 +45,12 @@ def presence_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:presence"
 
 
+def segment_mark_key(event_id: UUID) -> str:
+    """Per text, the line the room last landed on and when - what a segment's
+    play time is measured from once the next line arrives."""
+    return f"recitation:event:{event_id}:marks"
+
+
 # Shared with the presence script, which rebuilds lease keys itself from the
 # instance id stamped on each roster entry.
 INSTANCE_LEASE_PREFIX = "recitation:instance:"
@@ -158,6 +164,30 @@ redis.call('HSET', KEYS[1],
 redis.call('EXPIRE', KEYS[1], ARGV[6])
 redis.call('EXPIRE', KEYS[2], ARGV[6])
 return revision
+"""
+
+# Swaps a text's mark for the newer one and hands back the old, in one step.
+# Marks lead with the revision they were accepted under, so a mark that arrives
+# late - background work is not ordered - never overwrites a newer one and is
+# never measured against it.
+#
+# The same line sent twice - the controller re-sends the edition on screen
+# behind its followers - keeps the first mark: the line started when the room
+# first reached it, not when it was repeated.
+_SWAP_SEGMENT_MARK_SCRIPT = """
+local previous = redis.call('HGET', KEYS[1], ARGV[1])
+if previous then
+    local previous_revision, previous_line = string.match(previous, '^(%d+)|%d+|(.*)$')
+    if previous_revision and tonumber(previous_revision) >= tonumber(ARGV[2]) then
+        return false
+    end
+    if previous_line == ARGV[5] then
+        return false
+    end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return previous
 """
 
 # Counting the window and stamping its expiry have to be one step. As two round
@@ -431,6 +461,47 @@ class RecitationBroadcaster:
             raise
 
         return revision
+
+    async def swap_segment_mark(
+        self,
+        event_id: UUID,
+        text_id: str,
+        mark: str,
+        revision: int,
+        line: str,
+    ) -> Optional[str]:
+        """Record `mark` as where `text_id` now stands and return the mark it
+        replaced.
+
+        `mark` is `"<revision>|<accepted at ms>|<line>"`, where `line` names the
+        line itself. None when there was nothing before it, when a newer mark is
+        already stored, when the same line is already marked, or when Redis
+        could not be reached - in every case there is nothing to measure, and
+        play times are never worth failing over.
+        """
+        try:
+            previous = await self.redis.eval(
+                _SWAP_SEGMENT_MARK_SCRIPT,
+                1,
+                segment_mark_key(event_id),
+                text_id,
+                str(revision),
+                mark,
+                str(POSITION_TTL_SECONDS),
+                line,
+            )
+        except Exception as e:
+            logger.exception("Failed to swap recitation segment mark in Redis: %s", e)
+            return None
+        return previous or None
+
+    async def clear_segment_marks(self, event_id: UUID) -> None:
+        """Forget every text's mark when a session ends, so the gap before the
+        next session is not taken for a line that took hours to recite."""
+        try:
+            await self.redis.delete(segment_mark_key(event_id))
+        except Exception as e:
+            logger.exception("Failed to clear recitation segment marks in Redis: %s", e)
 
     async def broadcast_session_ended(self, event_id: UUID) -> bool:
         """Tell every server holding a socket for this event that the operator

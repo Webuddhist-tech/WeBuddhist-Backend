@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -22,6 +22,9 @@ class SetPositionFrame(BaseModel):
     segment_id: str = Field(..., max_length=128)
     index: Optional[int] = Field(None, ge=0)
     round_number: Optional[int] = Field(None, ge=1)
+    # Set by the controller's autoplay. Such a move is timed by the play times
+    # themselves, so it is not measured back into them.
+    autoplay: bool = False
 
     @field_validator("text_id", "segment_id")
     @classmethod
@@ -44,3 +47,17 @@ class PositionAcceptedResponse(BaseModel):
         None,
         description="Ordering key the position was stored under; None when the snapshot could not be written",
     )
+
+
+class SegmentPlayTime(BaseModel):
+    """How long one line takes to recite, as learned from past pujas."""
+
+    segment_id: str
+    average_duration_ms: int
+    last_duration_ms: int
+    sample_count: int
+
+
+class SegmentPlayTimesResponse(BaseModel):
+    text_id: str
+    segments: List[SegmentPlayTime]

@@ -42,6 +42,7 @@ from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_participant_model import GroupEventParticipant
 from pecha_api.events.event_link_model import EventLink
 from pecha_api.events.event_reminder_model import EventReminder
+from pecha_api.events.recitation_play_time_model import RecitationSegmentPlayTime
 from pecha_api.events.location_model import Location
 from pecha_api.events.location_metadata_model import LocationMetadata
 from pecha_api.group_posts.models import GroupPost, GroupPostMedia, GroupPostLink

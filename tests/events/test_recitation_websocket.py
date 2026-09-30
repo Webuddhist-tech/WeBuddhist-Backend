@@ -18,6 +18,7 @@ from pecha_api.events.recitation_websocket import (
     _PRESENCE_BROADCAST_SCRIPT,
     _PRESENCE_COUNT_SCRIPT,
     _RATE_KEY_PATTERN,
+    _SWAP_SEGMENT_MARK_SCRIPT,
     get_broadcaster,
     init_broadcaster,
     instance_lease_key,
@@ -27,6 +28,7 @@ from pecha_api.events.recitation_websocket import (
     position_state_key,
     presence_field,
     presence_key,
+    segment_mark_key,
 )
 
 
@@ -508,6 +510,66 @@ class TestRecitationPositionSnapshot:
         assert await broadcaster.clear_position(event_id) is True
 
         broadcaster.redis.delete.assert_awaited_once_with(position_state_key(event_id))
+
+    @pytest.mark.asyncio
+    async def test_swap_segment_mark_hands_back_the_old_mark(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = "8|6000|3|1|seg-a"
+        event_id = uuid4()
+
+        previous = await broadcaster.swap_segment_mark(
+            event_id=event_id,
+            text_id="text-7",
+            mark="9|10000|4|1|seg-b",
+            revision=9,
+            line="4|1|seg-b",
+        )
+
+        assert previous == "8|6000|3|1|seg-a"
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _SWAP_SEGMENT_MARK_SCRIPT,
+            1,
+            segment_mark_key(event_id),
+            "text-7",
+            "9",
+            "9|10000|4|1|seg-b",
+            str(POSITION_TTL_SECONDS),
+            "4|1|seg-b",
+        )
+
+    @pytest.mark.asyncio
+    async def test_swap_segment_mark_without_a_previous_mark(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = None
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=uuid4(), text_id="t", mark="1|1|1|1|s", revision=1, line="1|1|s"
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_swap_segment_mark_swallows_redis_errors(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.side_effect = Exception("redis down")
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=uuid4(), text_id="t", mark="1|1|1|1|s", revision=1, line="1|1|s"
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_clear_segment_marks_deletes_them(self):
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+
+        await broadcaster.clear_segment_marks(event_id)
+
+        broadcaster.redis.delete.assert_awaited_once_with(segment_mark_key(event_id))
+
+    @pytest.mark.asyncio
+    async def test_clear_segment_marks_swallows_redis_errors(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.delete.side_effect = Exception("redis down")
+
+        await broadcaster.clear_segment_marks(uuid4())
 
     @pytest.mark.asyncio
     async def test_clear_position_reports_failure(self):
