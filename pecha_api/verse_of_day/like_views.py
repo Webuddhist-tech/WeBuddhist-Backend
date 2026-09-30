@@ -1,7 +1,7 @@
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
 
@@ -44,8 +44,10 @@ def get_verse_likes(
                 token=authentication_credential.credentials
             )
             user_id = user.id
-        except Exception:
-            pass
+        except HTTPException as exc:
+            # Optional auth: invalid or expired tokens are treated as anonymous.
+            if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
     return get_verse_likes_service(verse_id=verse_id, user_id=user_id)
 
 

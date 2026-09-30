@@ -1,7 +1,8 @@
 """Tests for verse of the day comment service."""
 from datetime import datetime, timezone as tz
+from typing import Optional
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -16,8 +17,14 @@ from pecha_api.verse_of_day.comment_service import (
 
 
 class MockUser:
-    def __init__(self, firstname=None, lastname=None, email=None, avatar_url=None):
-        self.id = uuid4()
+    def __init__(
+        self,
+        firstname: Optional[str] = None,
+        lastname: Optional[str] = None,
+        email: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+    ) -> None:
+        self.id: UUID = uuid4()
         self.firstname = firstname
         self.lastname = lastname
         self.email = email
@@ -25,38 +32,44 @@ class MockUser:
 
 
 class MockComment:
-    def __init__(self, user=None, user_id=None, verse_id=None, text="Hello"):
-        self.id = uuid4()
-        self.verse_id = verse_id or uuid4()
-        self.user_id = user_id or (user.id if user else uuid4())
+    def __init__(
+        self,
+        user: Optional[MockUser] = None,
+        user_id: Optional[UUID] = None,
+        verse_id: Optional[UUID] = None,
+        text: str = "Hello",
+    ) -> None:
+        self.id: UUID = uuid4()
+        self.verse_id: UUID = verse_id or uuid4()
+        self.user_id: UUID = user_id or (user.id if user else uuid4())
         self.user = user
         self.text = text
-        self.created_at = datetime.now(tz.utc)
-        self.updated_at = None
+        self.created_at: datetime = datetime.now(tz.utc)
+        self.updated_at: Optional[datetime] = None
 
 
 class MockVerse:
-    def __init__(self, verse_id=None):
-        self.id = verse_id or uuid4()
+    def __init__(self, verse_id: Optional[UUID] = None) -> None:
+        self.id: UUID = verse_id or uuid4()
 
 
 class TestBuildCommentDto:
 
-    def test_omits_email_for_phone_user(self):
+    def test_omits_email_for_phone_user(self) -> None:
         user = MockUser(firstname="Sam", lastname=None, email=None)
         dto = build_comment_dto(MockComment(user=user))
 
         assert dto.user.first_name == "Sam"
         assert "email" not in dto.user.model_dump()
 
-    def test_uses_placeholder_when_user_missing(self):
+    def test_uses_placeholder_when_user_missing(self) -> None:
         comment = MockComment(user=None)
         dto = build_comment_dto(comment)
 
         assert dto.user.first_name == "Unknown"
         assert dto.user.avatar_url is None
 
-    def test_default_first_name_when_blank(self):
+    def test_default_first_name_when_blank(self) -> None:
         user = MockUser(firstname="   ", lastname="Lee")
         dto = build_comment_dto(MockComment(user=user))
 
@@ -67,7 +80,7 @@ class TestBuildCommentDto:
         "pecha_api.verse_of_day.comment_service.generate_presigned_access_url",
         return_value="https://example.com/avatar.jpg",
     )
-    def test_includes_presigned_avatar(self, mock_generate_url):
+    def test_includes_presigned_avatar(self, mock_generate_url: MagicMock) -> None:
         user = MockUser(
             firstname="Tenzin",
             lastname="Kunsang",
@@ -82,13 +95,15 @@ class TestBuildCommentDto:
         "pecha_api.verse_of_day.comment_service.generate_presigned_access_url",
         side_effect=RuntimeError("s3 down"),
     )
-    def test_avatar_generation_failure_returns_none(self, _mock_generate_url):
+    def test_avatar_generation_failure_returns_none(
+        self, _mock_generate_url: MagicMock
+    ) -> None:
         user = MockUser(firstname="Tenzin", avatar_url="avatars/tenzin.jpg")
         dto = build_comment_dto(MockComment(user=user))
 
         assert dto.user.avatar_url is None
 
-    def test_updated_at_null_when_never_edited(self):
+    def test_updated_at_null_when_never_edited(self) -> None:
         comment = MockComment(user=MockUser(firstname="A"))
         comment.updated_at = None
 
@@ -103,7 +118,12 @@ class TestListVerseCommentsService:
     @patch("pecha_api.verse_of_day.comment_service.get_verse_comments")
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_list_comments_success(self, mock_session, mock_get_verse, mock_get_comments):
+    def test_list_comments_success(
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_get_comments: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_verse.return_value = MockVerse(verse_id)
@@ -119,7 +139,9 @@ class TestListVerseCommentsService:
 
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_list_comments_verse_not_found(self, mock_session, mock_get_verse):
+    def test_list_comments_verse_not_found(
+        self, mock_session: MagicMock, mock_get_verse: MagicMock
+    ) -> None:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_verse.return_value = None
 
@@ -136,8 +158,12 @@ class TestCreateVerseCommentService:
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
     def test_create_comment_success(
-        self, mock_session, mock_get_verse, mock_create, mock_comment_model
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_create: MagicMock,
+        mock_comment_model: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
         mock_session.return_value.__enter__.return_value = MagicMock()
@@ -157,7 +183,9 @@ class TestCreateVerseCommentService:
 
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_create_comment_verse_not_found(self, mock_session, mock_get_verse):
+    def test_create_comment_verse_not_found(
+        self, mock_session: MagicMock, mock_get_verse: MagicMock
+    ) -> None:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_verse.return_value = None
 
@@ -178,8 +206,12 @@ class TestDeleteVerseCommentService:
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
     def test_delete_comment_success(
-        self, mock_session, mock_get_verse, mock_get_comment, mock_delete
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_get_comment: MagicMock,
+        mock_delete: MagicMock,
+    ) -> None:
         user_id = uuid4()
         verse_id = uuid4()
         comment = MockComment(user_id=user_id, verse_id=verse_id)
@@ -194,7 +226,9 @@ class TestDeleteVerseCommentService:
 
     @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_delete_comment_not_found(self, mock_session, mock_get_comment):
+    def test_delete_comment_not_found(
+        self, mock_session: MagicMock, mock_get_comment: MagicMock
+    ) -> None:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_comment.return_value = None
 
@@ -207,8 +241,11 @@ class TestDeleteVerseCommentService:
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
     def test_delete_comment_forbidden_for_non_author(
-        self, mock_session, mock_get_verse, mock_get_comment
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_get_comment: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         comment = MockComment(user_id=uuid4(), verse_id=verse_id)
         mock_session.return_value.__enter__.return_value = MagicMock()
@@ -224,8 +261,11 @@ class TestDeleteVerseCommentService:
     @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
     def test_delete_comment_verse_not_found(
-        self, mock_session, mock_get_verse, mock_get_comment
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_get_comment: MagicMock,
+    ) -> None:
         user_id = uuid4()
         comment = MockComment(user_id=user_id)
         mock_session.return_value.__enter__.return_value = MagicMock()

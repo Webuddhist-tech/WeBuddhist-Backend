@@ -1,6 +1,8 @@
 """Tests for verse of the day like service."""
+from datetime import datetime
+from typing import Optional
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -15,13 +17,13 @@ from pecha_api.verse_of_day.like_service import (
 
 
 class MockVerse:
-    def __init__(self, verse_id=None):
-        self.id = verse_id or uuid4()
+    def __init__(self, verse_id: Optional[UUID] = None) -> None:
+        self.id: UUID = verse_id or uuid4()
 
 
 class MockLike:
-    def __init__(self, created_at=None):
-        self.created_at = created_at or "2024-01-01T00:00:00"
+    def __init__(self, created_at: Optional[str | datetime] = None) -> None:
+        self.created_at: Optional[str | datetime] = created_at or "2024-01-01T00:00:00"
 
 
 class TestLikeVerseOfDayService:
@@ -33,12 +35,12 @@ class TestLikeVerseOfDayService:
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
     def test_like_creates_new(
         self,
-        mock_session,
-        mock_get_verse,
-        mock_create_like,
-        mock_count,
-        mock_like_model,
-    ):
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_create_like: MagicMock,
+        mock_count: MagicMock,
+        mock_like_model: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
         mock_db = MagicMock()
@@ -62,12 +64,12 @@ class TestLikeVerseOfDayService:
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
     def test_like_already_liked(
         self,
-        mock_session,
-        mock_get_verse,
-        mock_create_like,
-        mock_count,
-        mock_like_model,
-    ):
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_create_like: MagicMock,
+        mock_count: MagicMock,
+        mock_like_model: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
         mock_session.return_value.__enter__.return_value = MagicMock()
@@ -82,7 +84,9 @@ class TestLikeVerseOfDayService:
 
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_like_verse_not_found(self, mock_session, mock_get_verse):
+    def test_like_verse_not_found(
+        self, mock_session: MagicMock, mock_get_verse: MagicMock
+    ) -> None:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_verse.return_value = None
 
@@ -97,7 +101,12 @@ class TestUnlikeVerseOfDayService:
     @patch("pecha_api.verse_of_day.like_service.delete_like")
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_unlike_success(self, mock_session, mock_get_verse, mock_delete):
+    def test_unlike_success(
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_delete: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
         mock_db = MagicMock()
@@ -116,8 +125,12 @@ class TestGetVerseLikesService:
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
     def test_get_likes_anonymous(
-        self, mock_session, mock_get_verse, mock_count, mock_exists
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_count: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_verse.return_value = MockVerse(verse_id)
@@ -134,8 +147,12 @@ class TestGetVerseLikesService:
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
     @patch("pecha_api.verse_of_day.like_service.SessionLocal")
     def test_get_likes_authenticated(
-        self, mock_session, mock_get_verse, mock_count, mock_exists
-    ):
+        self,
+        mock_session: MagicMock,
+        mock_get_verse: MagicMock,
+        mock_count: MagicMock,
+        mock_exists: MagicMock,
+    ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
         mock_session.return_value.__enter__.return_value = MagicMock()
@@ -151,5 +168,8 @@ class TestGetVerseLikesService:
 
 class TestLikeServiceHelpers:
 
-    def test_isoformat_none(self):
+    def test_isoformat_none(self) -> None:
         assert _isoformat(None) is None
+
+    def test_isoformat_non_datetime_value(self) -> None:
+        assert _isoformat(123) == "123"
