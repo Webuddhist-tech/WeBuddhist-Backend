@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette import status
 
@@ -92,7 +93,7 @@ def test_cms_detail_invalid_uuid_returns_422():
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
-def test_deleting_an_event_stops_its_autoplay_first():
+def test_deleting_an_event_stops_its_autoplay_once_deleted():
     event_id = uuid4()
     order = []
     engine = AsyncMock()
@@ -114,7 +115,23 @@ def test_deleting_an_event_stops_its_autoplay_first():
         response = client.delete(f"/cms/events/{event_id}", headers=AUTH)
 
     assert response.status_code == status.HTTP_204_NO_CONTENT
-    assert order == [("stop", event_id, "ended"), ("delete", event_id)]
+    assert order == [("delete", event_id), ("stop", event_id, "ended")]
+
+
+def test_a_delete_that_is_refused_does_not_stop_autoplay():
+    event_id = uuid4()
+    engine = AsyncMock()
+    with patch(
+        "pecha_api.events.recitation_autoplay_service.get_autoplay_engine",
+        return_value=engine,
+    ), patch(
+        "pecha_api.events.cms_event_views.delete_event_service",
+        side_effect=HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no"),
+    ):
+        response = client.delete(f"/cms/events/{event_id}", headers=AUTH)
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    engine.stop.assert_not_awaited()
 
 
 def test_deleting_an_event_still_deletes_when_autoplay_cannot_be_stopped():
