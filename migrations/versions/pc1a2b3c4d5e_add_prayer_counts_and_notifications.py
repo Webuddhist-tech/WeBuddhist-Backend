@@ -79,6 +79,7 @@ def upgrade() -> None:
             (id, message_id, user_id, prayer_count, first_prayed_at, last_prayed_at)
         SELECT gen_random_uuid(), message_id, user_id, 1, created_at, created_at
         FROM chat_message_prayers
+        WHERE true
         ON CONFLICT (message_id, user_id) DO NOTHING
         """
     )

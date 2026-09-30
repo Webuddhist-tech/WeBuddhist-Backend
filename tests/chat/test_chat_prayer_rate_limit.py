@@ -10,8 +10,9 @@ from pecha_api.chat.prayer_rate_limit import (
     RATE_WINDOW_SECONDS,
     allow_pray,
     pray_rate_key,
+    release_pray,
 )
-from pecha_api.chat.response_models import PrayerBatchResponse
+from pecha_api.chat.response_models import ChatMessagePrayerStateDTO, PrayerBatchResponse
 
 MODULE = "pecha_api.chat.prayer_rate_limit"
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
@@ -72,6 +73,50 @@ class TestAllowPray:
         assert pray_rate_key(user_id) == f"chat:pray-rate:{user_id}"
 
 
+class TestReleasePray:
+
+    @pytest.mark.asyncio
+    async def test_gives_prayers_back_to_the_window(self):
+        broadcaster = _broadcaster(eval_result=5)
+        user_id = uuid4()
+
+        with patch(f"{MODULE}.get_broadcaster", return_value=broadcaster):
+            await release_pray(user_id, 5)
+
+        assert broadcaster.redis.eval.call_args.args[1:] == (
+            1,
+            pray_rate_key(user_id),
+            "5",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prayers", [0, -1])
+    async def test_nothing_to_release_skips_redis(self, prayers):
+        broadcaster = _broadcaster()
+
+        with patch(f"{MODULE}.get_broadcaster", return_value=broadcaster):
+            await release_pray(uuid4(), prayers)
+
+        broadcaster.redis.eval.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_redis_error_is_swallowed(self):
+        broadcaster = _broadcaster(eval_side_effect=ConnectionError("down"))
+
+        with patch(f"{MODULE}.get_broadcaster", return_value=broadcaster):
+            await release_pray(uuid4(), 5)
+
+
+def _state(message_id):
+    return ChatMessagePrayerStateDTO(
+        message_id=message_id,
+        prayer_count=1,
+        prayed_by_me=True,
+        my_prayer_count=1,
+        created=True,
+    )
+
+
 def _client():
     from fastapi.testclient import TestClient
     from pecha_api.app import api
@@ -81,12 +126,13 @@ def _client():
 
 class TestPrayEndpointRateLimit:
 
+    @patch("pecha_api.chat.views.release_pray", new_callable=AsyncMock)
     @patch("pecha_api.chat.views._broadcast_prayers_safe", new_callable=AsyncMock)
     @patch("pecha_api.chat.views.pray_for_messages_service")
     @patch("pecha_api.chat.views.allow_pray", new_callable=AsyncMock, return_value=False)
     @patch("pecha_api.chat.views.validate_and_extract_user_details")
     def test_over_the_limit_is_429_and_writes_nothing(
-        self, mock_user, mock_allow, mock_service, _broadcast
+        self, mock_user, mock_allow, mock_service, _broadcast, mock_release
     ):
         user = MagicMock(id=uuid4())
         mock_user.return_value = user
@@ -102,19 +148,25 @@ class TestPrayEndpointRateLimit:
         # count x number of ids is what the window is charged.
         assert mock_allow.call_args.args == (user.id, 10)
         mock_service.assert_not_called()
+        # Nothing was reserved, so there is nothing to give back.
+        mock_release.assert_not_called()
 
+    @patch("pecha_api.chat.views.release_pray", new_callable=AsyncMock)
     @patch("pecha_api.chat.views._broadcast_prayers_safe", new_callable=AsyncMock)
     @patch("pecha_api.chat.views.pray_for_messages_service")
     @patch("pecha_api.chat.views.allow_pray", new_callable=AsyncMock, return_value=True)
     @patch("pecha_api.chat.views.validate_and_extract_user_details")
     def test_within_the_limit_passes_count_through(
-        self, mock_user, _allow, mock_service, _broadcast
+        self, mock_user, _allow, mock_service, _broadcast, mock_release
     ):
-        mock_user.return_value = MagicMock(id=uuid4())
-        mock_service.return_value = MagicMock(
-            room_id=uuid4(), response=PrayerBatchResponse(prayers=[]), broadcast=[]
-        )
+        user = MagicMock(id=uuid4())
+        mock_user.return_value = user
         message_id = uuid4()
+        mock_service.return_value = MagicMock(
+            room_id=uuid4(),
+            response=PrayerBatchResponse(prayers=[_state(message_id)]),
+            broadcast=[],
+        )
 
         response = _client().post(
             f"/chat/rooms/{uuid4()}/prayers",
@@ -125,6 +177,63 @@ class TestPrayEndpointRateLimit:
         assert response.status_code == 200
         assert mock_service.call_args.kwargs["count"] == 10
         assert mock_service.call_args.kwargs["message_ids"] == [message_id]
+        # Every charged prayer was written: nothing to give back.
+        assert mock_release.call_args.args == (user.id, 0)
+
+    @patch("pecha_api.chat.views.release_pray", new_callable=AsyncMock)
+    @patch("pecha_api.chat.views._broadcast_prayers_safe", new_callable=AsyncMock)
+    @patch("pecha_api.chat.views.pray_for_messages_service")
+    @patch("pecha_api.chat.views.allow_pray", new_callable=AsyncMock, return_value=True)
+    @patch("pecha_api.chat.views.validate_and_extract_user_details")
+    def test_skipped_ids_are_given_back(
+        self, mock_user, mock_allow, mock_service, _broadcast, mock_release
+    ):
+        """Three ids at count 3 charge 9; one was deleted meanwhile, so the 3
+        prayers it would have taken go back to the window."""
+        user = MagicMock(id=uuid4())
+        mock_user.return_value = user
+        live = [uuid4(), uuid4()]
+        mock_service.return_value = MagicMock(
+            room_id=uuid4(),
+            response=PrayerBatchResponse(prayers=[_state(i) for i in live]),
+            broadcast=[],
+        )
+
+        response = _client().post(
+            f"/chat/rooms/{uuid4()}/prayers",
+            json={"message_ids": [str(i) for i in live + [uuid4()]], "count": 3},
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == 200
+        assert mock_allow.call_args.args == (user.id, 9)
+        assert mock_release.call_args.args == (user.id, 3)
+
+    @patch("pecha_api.chat.views.release_pray", new_callable=AsyncMock)
+    @patch("pecha_api.chat.views._broadcast_prayers_safe", new_callable=AsyncMock)
+    @patch("pecha_api.chat.views.pray_for_messages_service")
+    @patch("pecha_api.chat.views.allow_pray", new_callable=AsyncMock, return_value=True)
+    @patch("pecha_api.chat.views.validate_and_extract_user_details")
+    def test_a_refused_call_gives_the_whole_charge_back(
+        self, mock_user, _allow, mock_service, mock_broadcast, mock_release
+    ):
+        from fastapi import HTTPException
+
+        user = MagicMock(id=uuid4())
+        mock_user.return_value = user
+        mock_service.side_effect = HTTPException(
+            status_code=404, detail="NOT_A_PRAYER_REQUEST"
+        )
+
+        response = _client().post(
+            f"/chat/rooms/{uuid4()}/prayers",
+            json={"message_ids": [str(uuid4()), str(uuid4())], "count": 5},
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == 404
+        assert mock_release.call_args.args == (user.id, 10)
+        mock_broadcast.assert_not_called()
 
     @patch("pecha_api.chat.views.allow_pray", new_callable=AsyncMock)
     @patch("pecha_api.chat.views.validate_and_extract_user_details")

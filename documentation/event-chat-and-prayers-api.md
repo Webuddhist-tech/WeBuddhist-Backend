@@ -150,7 +150,9 @@ rest of their selection. If none of the ids is prayable, the call 404s with
 
 **Rate limit: 10 prayers per second per user**, counted as
 `count × len(message_ids)`. Over it, the call returns `429` with
-`Retry-After: 1` and nothing is written. Clients should batch taps (about
+`Retry-After: 1` and nothing is written. Ids that are skipped (no longer live
+prayer requests) and calls that fail with `403`/`404` are not charged. Clients
+should batch taps (about
 300 ms) into one call with `count`; a "+100" action is 10 calls of `count: 10`,
 one per second.
 

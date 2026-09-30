@@ -14,7 +14,11 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.chat.chat_websocket import get_broadcaster
-from pecha_api.chat.prayer_rate_limit import MAX_PRAYERS_PER_SECOND, allow_pray
+from pecha_api.chat.prayer_rate_limit import (
+    MAX_PRAYERS_PER_SECOND,
+    allow_pray,
+    release_pray,
+)
 from pecha_api.chat.member_service import (
     add_room_members_service,
     list_room_members_service,
@@ -496,22 +500,33 @@ async def pray_for_messages(
     """Pray `count` times (1-10, default 1) for each selected prayer request.
 
     Praying again for the same request adds to the caller's total and reports
-    it as my_prayer_count. A user may add at most 10 prayers a second, counted
-    as count x number of ids; over that the call is refused with 429 and
-    nothing is written. Ids that are no longer live prayer requests in this
-    room are skipped."""
+    it as my_prayer_count. A user may add at most 10 prayers a second; over
+    that the call is refused with 429 and nothing is written. Ids that are no
+    longer live prayer requests in this room are skipped and not charged."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    if not await allow_pray(user.id, request.count * len(request.message_ids)):
+    # Charged up front, before any write, then trimmed to what was written:
+    # checking the ids first would cost a database read on every call.
+    charged = request.count * len(request.message_ids)
+    if not await allow_pray(user.id, charged):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"At most {MAX_PRAYERS_PER_SECOND} prayers per second",
             headers={"Retry-After": "1"},
         )
-    result = pray_for_messages_service(
-        room_id=room_id,
-        user=user,
-        message_ids=request.message_ids,
-        count=request.count,
+    try:
+        result = pray_for_messages_service(
+            room_id=room_id,
+            user=user,
+            message_ids=request.message_ids,
+            count=request.count,
+        )
+    except HTTPException:
+        # Refused before anything was written (not a member, room gone,
+        # nothing prayable), so none of the charge was used.
+        await release_pray(user.id, charged)
+        raise
+    await release_pray(
+        user.id, charged - request.count * len(result.response.prayers)
     )
     await _broadcast_prayers_safe(room_id=room_id, prayers=result.broadcast)
     return result.response

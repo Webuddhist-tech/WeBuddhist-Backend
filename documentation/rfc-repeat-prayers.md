@@ -89,6 +89,7 @@ After the commit, **every** call runs the notification gate (below), not only a 
 - **When it is checked:** before any database write.
 - **What passes:** a call is allowed only if the window stays at or below **10**. So one call of `count: 10` for one request uses the whole second.
 - **Over the limit:** `429`, `Retry-After: 1`, and nothing is written — neither the prayers nor the rate counter.
+- **Only written prayers are kept:** after the call, the charge for ids that were skipped (no longer live prayer requests) is released back to the window, and a call the service refuses (`403`, `404`) releases its whole charge (§7).
 - **If Redis is down:** calls are allowed.
 
 To offer 100 prayers, the client sends `count: 10` once a second for 10 seconds.
@@ -185,4 +186,4 @@ Deletes both rows. The response returns `my_prayer_count: 0`. This call is not r
 5. **`idx_chat_message_prayers_undispatched` is dropped.** New prayer rows never record a dispatch, so every one of them would land in that partial index, and nothing reads it once reconcile moves to the new table.
 6. **One transaction for all ids** rather than one per id, matching the existing batch insert. The ids are already de-duplicated.
 7. **Events queued at deploy still resolve.** They carry old `chat_message_prayers` ids, so the targets endpoint falls back to that table and reads one as one person praying once. The fallback can be removed one release later. Old prayer rows that never reached the queue (the commit-before-send crash window) are no longer retried.
-8. **The rate limit counts every submitted id.** A call is charged `count × len(message_ids)` before the ids are checked, as specified. A selection that includes a just-deleted request can be refused a little early. The window resets every second, so the cost is one retry, which is not worth a database read before the limiter.
+8. **Unused allowance is released.** A call is still charged `count × len(message_ids)` before any write, so the limit holds without a database read in front of it. Afterwards the charge for skipped ids is given back, and a call the service refuses gives back all of it, so a just-deleted request in a selection or a `404` does not use up the second. The release never takes the window below zero and never recreates an expired window.

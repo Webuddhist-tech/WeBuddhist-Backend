@@ -62,3 +62,40 @@ async def allow_pray(user_id: UUID, prayers: int) -> bool:
     except Exception as e:
         logger.exception("Failed to check prayer rate limit in Redis: %s", e)
         return True
+
+
+# Give ARGV[1] prayers back to the caller's window, never taking it below zero.
+# A window that has already expired has nothing to give back, so a missing key
+# is left alone rather than recreated without a TTL. DECRBY keeps the TTL.
+_RELEASE_PRAY_SCRIPT = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current <= 0 then
+    return 0
+end
+local released = math.min(current, tonumber(ARGV[1]))
+redis.call('DECRBY', KEYS[1], released)
+return released
+"""
+
+
+async def release_pray(user_id: UUID, prayers: int) -> None:
+    """Hand back allowance that allow_pray charged for prayers that were not
+    written: ids that turned out not to be live prayer requests, or a call
+    the service refused outright.
+
+    Best-effort - if Redis cannot answer, the window simply expires as usual.
+    """
+    if prayers <= 0:
+        return
+    try:
+        redis = get_broadcaster().redis
+        if redis is None:
+            return
+        await redis.eval(
+            _RELEASE_PRAY_SCRIPT,
+            1,
+            pray_rate_key(user_id),
+            str(prayers),
+        )
+    except Exception as e:
+        logger.exception("Failed to release prayer rate allowance in Redis: %s", e)
