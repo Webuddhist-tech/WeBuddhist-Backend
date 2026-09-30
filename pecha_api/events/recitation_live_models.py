@@ -39,6 +39,14 @@ class SetPositionFrame(BaseModel):
     # a figure that is meant to be speech alone. Advisory: whether this move is
     # measured at all is still settled here, and the duration is clamped.
     elapsed_ms: Optional[int] = Field(None, ge=0)
+    # The line (by index in this text) this move follows on from in recitation
+    # order, when that is not simply the line before it: Next stepping over
+    # yigchung, which is never recited, or a Return taken from the end of a
+    # passage back to its start. Either way the line left behind was recited
+    # through, so it may be timed - but only if the room's last line for this
+    # text is that very line, so a move whose predecessor never arrived is still
+    # not timed.
+    from_index: Optional[int] = Field(None, ge=0)
 
     @field_validator("text_id", "segment_id")
     @classmethod

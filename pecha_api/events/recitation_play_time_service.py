@@ -65,6 +65,7 @@ async def record_segment_play_time(
     autoplay: bool = False,
     run: Optional[str] = None,
     elapsed_ms: Optional[int] = None,
+    from_index: Optional[int] = None,
 ) -> None:
     """Measure the line the room just left, now that it has moved on.
 
@@ -72,9 +73,12 @@ async def record_segment_play_time(
     swallows every failure: a lost sample costs nothing, a delayed position
     costs the whole room its place.
 
-    Only a step to the very next line is a measurement. A jump - back to repeat
-    a passage, forward past a skipped section - says nothing about how long the
-    line left behind takes to recite. Nor is a line autoplay had any hand in -
+    Only a step on from the line the room was on is a measurement: to the very
+    next line, or - when the controller says the move follows on from that line
+    with `from_index` - over yigchung, which is never recited, or back to a
+    passage's start by its Return. Any other jump - back to look at a line,
+    forward past a skipped section - says nothing about how long the line left
+    behind takes to recite. Nor is a line autoplay had any hand in -
     moved onto by it, or moved off by it: its timing came from these figures,
     and feeding it back would only drown out the operator's real ones. Such a
     move still marks where the room is, flagged, so the next move knows.
@@ -124,7 +128,13 @@ async def record_segment_play_time(
             return
         if not run or previous_run != run:
             return
-        if index is None or previous_index is None or index != previous_index + 1:
+        if previous_index is None:
+            return
+        steps_on = index is not None and index == previous_index + 1
+        # Taken on the controller's word only when the room's last line for this
+        # text is the one it says it left.
+        follows_on = from_index is not None and from_index == previous_index
+        if not (steps_on or follows_on):
             return
         duration_ms = elapsed_ms if elapsed_ms is not None else accepted_at_ms - started_at_ms
         # Clamped whichever it came from: the controller is authorised by a

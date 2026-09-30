@@ -152,6 +152,7 @@ async def publish_recitation_position(
         autoplay=frame.autoplay,
         run=frame.run,
         elapsed_ms=frame.elapsed_ms,
+        from_index=frame.from_index,
     )
 
     return PositionAcceptedResponse(
@@ -469,6 +470,7 @@ async def websocket_recitation_live(
                         autoplay=frame.autoplay,
                         run=frame.run,
                         elapsed_ms=frame.elapsed_ms,
+                        from_index=frame.from_index,
                     ))
                 except Exception as e:
                     logger.exception("Failed to broadcast recitation position: %s", e)
