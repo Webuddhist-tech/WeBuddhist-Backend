@@ -13,6 +13,7 @@ from pecha_api.events.recitation_autoplay_service import (
     AutoplayStore,
 )
 from pecha_api.events.recitation_live_models import AutoplayStep, SetPositionFrame
+from pecha_api.events.recitation_websocket import POSITION_TTL_SECONDS
 
 
 class Clock:
@@ -75,9 +76,25 @@ class FakeStore:
         state.update(fields)
         return True
 
-    async def stop(self, event_id, reason, plan_id=None):
+    async def may_send(self, event_id, owner, plan_id, step, step_started_ms):
+        state = self.states.get(event_id)
+        if (
+            self._holder(event_id) != owner
+            or not state
+            or state["plan_id"] != plan_id
+            or state["status"] != "running"
+            or state["step"] != str(step)
+            or state["step_started_ms"] != step_started_ms
+        ):
+            return False
+        self.leases[event_id] = (owner, self.clock() + LEASE_MS)
+        return True
+
+    async def stop(self, event_id, reason, plan_id=None, owner=None):
         state = self.states.get(event_id)
         if not state or (plan_id and state["plan_id"] != plan_id):
+            return False
+        if owner and self._holder(event_id) != owner:
             return False
         state.update({"status": "stopped", "reason": reason})
         self.leases.pop(event_id, None)
@@ -344,6 +361,75 @@ class TestChangingCourse:
         assert state.reason == "failed"
         assert calls["n"] == 2
 
+    @pytest.mark.asyncio
+    async def test_a_replaced_plan_sends_nothing_more_even_on_the_same_instance(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        old = await h.engine.start(event_id, _steps(1000, 1000))
+        old_plan = h.engine._plans[event_id][1]
+        await h.engine.start(event_id, _steps(1000, 1000))
+        sent = len(h.sent)
+
+        # The old runner, resuming with the same lease owner, tries its next line.
+        assert not await h.engine._send_step(
+            event_id, old.plan_id, old_plan, 1, "", h.clock()
+        )
+        assert len(h.sent) == sent
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_start_stops_only_its_own_plan(self):
+        clock = Clock()
+        store = FakeStore(clock)
+        release = asyncio.Event()
+
+        async def fail(event_id, frames):
+            await release.wait()
+            raise RuntimeError("redis down")
+
+        a = Harness(clock=clock, store=store, owner="A", emit=AsyncMock(side_effect=fail))
+        b = Harness(clock=clock, store=store, owner="B")
+        b.gate = asyncio.Event()
+        event_id = uuid4()
+
+        failing = asyncio.create_task(a.engine.start(event_id, _steps(1000, 1000)))
+        while not a.emit.await_count:
+            await asyncio.sleep(0)
+        newer = await b.engine.start(event_id, _steps(1000, 1000))
+        release.set()
+        with pytest.raises(RuntimeError):
+            await failing
+
+        state = store.states[event_id]
+        assert (state["plan_id"], state["status"]) == (newer.plan_id, "running")
+        b.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_start_that_fails_is_stopped_and_says_so(self):
+        h = Harness(emit=AsyncMock(side_effect=RuntimeError("redis down")))
+        event_id = uuid4()
+
+        with pytest.raises(RuntimeError):
+            await h.engine.start(event_id, _steps(1000, 1000))
+
+        state = await h.engine.state(event_id)
+        assert (state.status, state.reason) == ("stopped", "failed")
+        assert event_id not in h.engine._runners
+
+    @pytest.mark.asyncio
+    async def test_a_stop_redis_refused_still_stops_the_runner_here_and_raises(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        h.store.stop = AsyncMock(side_effect=RuntimeError("redis down"))
+
+        with pytest.raises(RuntimeError):
+            await h.engine.stop(event_id)
+
+        assert event_id not in h.engine._runners
+
 
 class TestTakingOver:
 
@@ -421,6 +507,23 @@ class TestTakingOver:
         assert len(h.sent) == 1
 
     @pytest.mark.asyncio
+    async def test_a_stalled_runner_finishing_does_not_stop_the_one_that_took_over(self):
+        clock = Clock()
+        store = FakeStore(clock)
+        a = Harness(clock=clock, store=store, owner="A")
+        a.gate = asyncio.Event()
+        event_id = uuid4()
+        started = await a.engine.start(event_id, _steps(1000))
+        a.engine._forget_runner(event_id)
+        # A stalls past its lease and B takes the plan over.
+        clock.now += LEASE_MS + 1
+        assert await store.claim(event_id, "B")
+
+        await a.engine._finish(event_id, started.plan_id, "finished", owner="A")
+
+        assert store.states[event_id]["status"] == "running"
+
+    @pytest.mark.asyncio
     async def test_leaving_hands_the_lease_back(self):
         h = Harness()
         h.gate = asyncio.Event()
@@ -471,6 +574,22 @@ class TestAutoplayStore:
         assert args[2] == f"recitation:event:{event_id}:autoplay"
         assert args[3] == f"recitation:event:{event_id}:autoplay-lease"
         assert list(args[4:]) == ["A", "plan-1", "3", "1234", "step", "4", "step_started_ms", ""]
+
+    @pytest.mark.asyncio
+    async def test_renewing_the_lease_keeps_the_plan_and_state_alive(self):
+        redis = self._redis()
+        event_id = uuid4()
+
+        await AutoplayStore(redis).renew(event_id, "A")
+
+        args = redis.eval.await_args.args
+        assert args[1] == 3
+        assert list(args[2:5]) == [
+            f"recitation:event:{event_id}:autoplay-lease",
+            f"recitation:event:{event_id}:autoplay",
+            f"recitation:event:{event_id}:autoplay-plan",
+        ]
+        assert list(args[5:]) == ["A", str(LEASE_MS), str(POSITION_TTL_SECONDS)]
 
     @pytest.mark.asyncio
     async def test_claim_only_takes_a_free_lease(self):

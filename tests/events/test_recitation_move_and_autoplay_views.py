@@ -226,7 +226,7 @@ class TestAutoplayRoutes:
         assert response.status_code == status.HTTP_404_NOT_FOUND
         engine.start.assert_not_awaited()
 
-    def test_a_failed_start_is_stopped_and_reported(self):
+    def test_a_failed_start_is_reported_without_stopping_a_newer_plan(self):
         event_id = uuid4()
         engine = _engine(event_id)
         engine.start.side_effect = RuntimeError("redis down")
@@ -236,7 +236,9 @@ class TestAutoplayRoutes:
             )
 
         assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-        engine.stop.assert_awaited_once_with(event_id, reason="failed")
+        # The engine stops the failed plan itself; a blanket stop here would
+        # stop whatever plan replaced it.
+        engine.stop.assert_not_awaited()
 
     def test_unavailable_without_the_engine(self):
         with _env():
@@ -279,6 +281,19 @@ class TestAutoplayRoutes:
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
         engine.stop.assert_awaited_once_with(event_id, reason="ended")
+
+    def test_a_session_does_not_end_while_its_autoplay_could_not_be_stopped(self):
+        event_id = uuid4()
+        engine = _engine(event_id)
+        engine.stop.side_effect = RuntimeError("redis down")
+        with _env(engine=engine) as broadcaster:
+            broadcaster.clear_position.return_value = True
+            broadcaster.broadcast_session_ended.return_value = True
+            response = client.post(f"/events/{event_id}/recitation/end", headers=AUTH)
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        broadcaster.clear_position.assert_not_awaited()
+        broadcaster.broadcast_session_ended.assert_not_awaited()
 
     def test_a_session_still_ends_if_autoplay_cannot_be_reached(self):
         with _env() as broadcaster:

@@ -107,6 +107,42 @@ class TestScripts:
         assert await redis.get(f"recitation:event:{event_id}:autoplay-lease") is None
 
     @pytest.mark.asyncio
+    async def test_a_stop_naming_an_owner_needs_that_owner_to_hold_the_lease(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(), total=2, owner="B")
+
+        assert not await store.stop(event_id, "finished", plan_id="p1", owner="A")
+        assert (await store.read(event_id))["status"] == "running"
+        assert await store.stop(event_id, "finished", plan_id="p1", owner="B")
+
+    @pytest.mark.asyncio
+    async def test_may_send_only_for_the_holder_of_the_current_plan_at_its_step(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p2", _plan_json(), total=2, owner="A")
+
+        assert not await store.may_send(event_id, "A", "p1", 0, "")
+        assert not await store.may_send(event_id, "B", "p2", 0, "")
+        assert not await store.may_send(event_id, "A", "p2", 1, "")
+        assert await store.may_send(event_id, "A", "p2", 0, "")
+        await store.stop(event_id, "stopped")
+        assert not await store.may_send(event_id, "A", "p2", 0, "")
+
+    @pytest.mark.asyncio
+    async def test_renewing_keeps_the_plan_and_state_alive(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(), total=2, owner="A")
+        for key in ("autoplay", "autoplay-plan"):
+            await redis.expire(f"recitation:event:{event_id}:{key}", 5)
+
+        assert await store.renew(event_id, "A")
+
+        for key in ("autoplay", "autoplay-plan"):
+            assert await redis.ttl(f"recitation:event:{event_id}:{key}") > 5
+
+    @pytest.mark.asyncio
     async def test_the_lease_is_claimed_renewed_and_released_by_its_holder_only(self, redis):
         store = AutoplayStore(redis)
         event_id = uuid4()

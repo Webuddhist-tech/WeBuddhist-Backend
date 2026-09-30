@@ -108,13 +108,21 @@ def _require_autoplay():
         )
 
 
-async def _stop_autoplay_quietly(event_id: UUID, reason: str) -> None:
-    """Ending a session ends its autoplay too; a failure here must not stop the
-    session from ending."""
+async def _stop_autoplay_quietly(event_id: UUID, reason: str) -> bool:
+    """Ending a session ends its autoplay too. False if the stop could not be
+    recorded: a runner may still be sending, so the session is not over and
+    the caller is told to retry."""
     try:
-        await get_autoplay_engine().stop(event_id, reason=reason)
+        engine = get_autoplay_engine()
+    except RuntimeError:
+        # No engine here, so no autoplay was started from here to stop.
+        return True
+    try:
+        await engine.stop(event_id, reason=reason)
+        return True
     except Exception as e:
         logger.exception("Failed to stop autoplay for event %s: %s", event_id, e)
+        return False
 
 
 async def emit_positions(
@@ -342,8 +350,8 @@ async def start_recitation_autoplay(
             event_id, request.steps, first_step_elapsed_ms=request.first_step_elapsed_ms
         )
     except Exception as e:
+        # The engine has already stopped the plan that failed, and only it.
         logger.exception("Failed to start autoplay for event %s: %s", event_id, e)
-        await _stop_autoplay_quietly(event_id, "failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to start autoplay",
@@ -404,7 +412,11 @@ async def end_recitation_session(
     await run_in_threadpool(assert_live_event, event_id=event_id)
 
     # First, so no step of it goes out after the room is told it is over.
-    await _stop_autoplay_quietly(event_id, "ended")
+    if not await _stop_autoplay_quietly(event_id, "ended"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to end the recitation session; retry",
+        )
     cleared = await broadcaster.clear_position(event_id)
     announced = await broadcaster.broadcast_session_ended(event_id)
 
@@ -713,7 +725,11 @@ async def websocket_recitation_live(
                     continue
 
                 if frame_type == "end":
-                    await _stop_autoplay_quietly(event_id, "ended")
+                    if not await _stop_autoplay_quietly(event_id, "ended"):
+                        await websocket.send_json(
+                            _error("SERVER_ERROR", "Failed to end the session; try again")
+                        )
+                        continue
                     cleared = await broadcaster.clear_position(event_id)
                     announced = await broadcaster.broadcast_session_ended(event_id)
                     if not (cleared and announced):

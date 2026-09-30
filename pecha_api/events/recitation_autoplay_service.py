@@ -77,19 +77,42 @@ end
 return 1
 """
 
+# Renewing the lease keeps the plan and its state alive with it: a plan may
+# run longer than their TTL, and losing them mid-run would stop the room with
+# nobody told and nobody able to take over.
 _RENEW_SCRIPT = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[3])
+    redis.call('EXPIRE', KEYS[3], ARGV[3])
     return 1
 end
 return 0
 """
 
+# Asked just before a step goes out: the runner still holds the lease and its
+# plan is still at the step, unsent, as it last saw it. Renews the lease and
+# the plan's TTL on success, as _RENEW_SCRIPT does.
+_MAY_SEND_SCRIPT = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[2] then return 0 end
+if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return 0 end
+if redis.call('HGET', KEYS[1], 'step') ~= ARGV[3] then return 0 end
+if redis.call('HGET', KEYS[1], 'step_started_ms') ~= ARGV[4] then return 0 end
+redis.call('PEXPIRE', KEYS[2], ARGV[5])
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+redis.call('EXPIRE', KEYS[3], ARGV[6])
+return 1
+"""
+
 # Stopping is conditional on the plan too when a plan is named: a runner that
-# finishes an old plan must not stop the new one that replaced it.
+# finishes an old plan must not stop the new one that replaced it. When an
+# owner is named it must still hold the lease: a runner that stalled past its
+# lease must not stop the instance that took the plan over.
 _STOP_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
 if ARGV[1] ~= '' and redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[1] then return 0 end
+if ARGV[3] ~= '' and redis.call('GET', KEYS[2]) ~= ARGV[3] then return 0 end
 redis.call('HSET', KEYS[1], 'status', 'stopped', 'reason', ARGV[2])
 redis.call('DEL', KEYS[2])
 return 1
@@ -165,7 +188,39 @@ class AutoplayStore:
         )
         return bool(done)
 
-    async def stop(self, event_id: UUID, reason: str, plan_id: Optional[str] = None) -> bool:
+    async def may_send(
+        self,
+        event_id: UUID,
+        owner: str,
+        plan_id: str,
+        step: int,
+        step_started_ms: str,
+    ) -> bool:
+        """Whether `owner` may send `step` of `plan_id` now; renews its lease
+        if so."""
+        return bool(
+            await self.redis.eval(
+                _MAY_SEND_SCRIPT,
+                3,
+                autoplay_state_key(event_id),
+                autoplay_lease_key(event_id),
+                autoplay_plan_key(event_id),
+                owner,
+                plan_id,
+                str(step),
+                step_started_ms,
+                str(LEASE_MS),
+                str(POSITION_TTL_SECONDS),
+            )
+        )
+
+    async def stop(
+        self,
+        event_id: UUID,
+        reason: str,
+        plan_id: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> bool:
         done = await self.redis.eval(
             _STOP_SCRIPT,
             2,
@@ -173,6 +228,7 @@ class AutoplayStore:
             autoplay_lease_key(event_id),
             plan_id or "",
             reason,
+            owner or "",
         )
         return bool(done)
 
@@ -185,7 +241,14 @@ class AutoplayStore:
     async def renew(self, event_id: UUID, owner: str) -> bool:
         return bool(
             await self.redis.eval(
-                _RENEW_SCRIPT, 1, autoplay_lease_key(event_id), owner, str(LEASE_MS)
+                _RENEW_SCRIPT,
+                3,
+                autoplay_lease_key(event_id),
+                autoplay_state_key(event_id),
+                autoplay_plan_key(event_id),
+                owner,
+                str(LEASE_MS),
+                str(POSITION_TTL_SECONDS),
             )
         )
 
@@ -276,25 +339,37 @@ class AutoplayEngine:
             for step in steps
         ]
         plan_id = uuid4().hex
+        # The old runner goes before the new plan is in place, so no line of
+        # the old plan can go out after the first of the new one.
+        self._forget_runner(event_id)
         await self.store.begin(
             event_id, plan_id, json.dumps(plan), total=len(plan), owner=self.owner
         )
-        self._forget_runner(event_id)
-        self._plans[event_id] = (plan_id, plan)
-        if first_step_elapsed_ms is None:
-            await self._send_step(event_id, plan_id, plan, 0, "", self.clock())
-        else:
-            started = self.clock() - first_step_elapsed_ms
-            if await self.store.advance(
-                event_id, self.owner, plan_id, 0, "", {"step_started_ms": str(started)}
-            ):
-                await self._announce(event_id, await self.state(event_id))
-        self._spawn(event_id, plan_id)
-        return await self.state(event_id)
+        try:
+            self._plans[event_id] = (plan_id, plan)
+            if first_step_elapsed_ms is None:
+                await self._send_step(event_id, plan_id, plan, 0, "", self.clock())
+            else:
+                started = self.clock() - first_step_elapsed_ms
+                if await self.store.advance(
+                    event_id, self.owner, plan_id, 0, "", {"step_started_ms": str(started)}
+                ):
+                    await self._announce(event_id, await self.state(event_id))
+            self._spawn(event_id, plan_id)
+            return await self.state(event_id)
+        except Exception:
+            # Only this plan: another request may already have replaced it,
+            # and that one succeeded.
+            await self._finish(event_id, plan_id, "failed")
+            raise
 
     async def stop(self, event_id: UUID, reason: str = "stopped") -> AutoplayStateResponse:
-        await self.store.stop(event_id, reason)
-        self._forget_runner(event_id)
+        """Stop the plan wherever it runs. Raises if the stop could not be
+        recorded: a runner on another instance may then still be sending."""
+        try:
+            await self.store.stop(event_id, reason)
+        finally:
+            self._forget_runner(event_id)
         state = await self.state(event_id)
         await self._announce(event_id, state)
         return state
@@ -394,7 +469,7 @@ class AutoplayEngine:
             raise
         except Exception as e:
             logger.exception("Autoplay for event %s failed: %s", event_id, e)
-            await self._finish(event_id, plan_id, "failed")
+            await self._finish(event_id, plan_id, "failed", owner=self.owner)
 
     async def _run_plan(self, event_id: UUID, plan_id: str) -> None:
         while True:
@@ -403,7 +478,7 @@ class AutoplayEngine:
                 return
             plan = await self._plan_for(event_id, plan_id)
             if not plan:
-                await self._finish(event_id, plan_id, "failed")
+                await self._finish(event_id, plan_id, "failed", owner=self.owner)
                 return
             step = int(state.get("step") or 0)
             started = state.get("step_started_ms") or ""
@@ -430,7 +505,7 @@ class AutoplayEngine:
 
             following = step + 1
             if following >= len(plan):
-                await self._finish(event_id, plan_id, "finished")
+                await self._finish(event_id, plan_id, "finished", owner=self.owner)
                 return
             # Where this step ended, unless far late: see LATE_CATCH_UP_MS.
             due = deadline if now - deadline < LATE_CATCH_UP_MS else now
@@ -458,10 +533,14 @@ class AutoplayEngine:
 
         Sent first, marked after: an instance that dies in between leaves the
         step unmarked, and whoever takes over sends it again - the room shown
-        the same line twice, never a line skipped. The lease is renewed just
-        before sending, so a runner that has lost it does not send at all.
+        the same line twice, never a line skipped. Just before sending, the
+        runner checks it still holds the lease and its plan is still at this
+        step, unsent, so a runner whose plan was replaced or stopped does not
+        send at all.
         """
-        if not await self.store.renew(event_id, self.owner):
+        if not await self.store.may_send(
+            event_id, self.owner, plan_id, step, expected_started
+        ):
             return False
         positions = [SetPositionFrame.model_validate(p) for p in plan[step]["positions"]]
         await self.emit(event_id, positions)
@@ -477,9 +556,11 @@ class AutoplayEngine:
             await self._announce(event_id, await self.state(event_id))
         return marked
 
-    async def _finish(self, event_id: UUID, plan_id: str, reason: str) -> None:
+    async def _finish(
+        self, event_id: UUID, plan_id: str, reason: str, owner: Optional[str] = None
+    ) -> None:
         try:
-            if await self.store.stop(event_id, reason, plan_id=plan_id):
+            if await self.store.stop(event_id, reason, plan_id=plan_id, owner=owner):
                 await self._announce(event_id, await self.state(event_id))
         except Exception as e:
             logger.exception("Failed to stop autoplay for event %s: %s", event_id, e)
