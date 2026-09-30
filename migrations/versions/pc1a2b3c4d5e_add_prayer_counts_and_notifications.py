@@ -6,13 +6,11 @@ Create Date: 2026-09-30 00:00:00.000000
 
 Lets a member pray for the same request more than once. Per-person totals live
 in `chat_message_prayer_counts`; `chat_message_prayers` stays the "is praying"
-record. Every existing prayer is backfilled as a count of one, with nothing
-unreported: those prayers were already covered by the old notifications, so
-the first push after deploy must not present them as new.
+record. Every existing prayer is backfilled as a count of one.
 
 Prayer-received pushes move off the per-prayer dispatch columns and onto
 `chat_prayer_notifications`, one row per push, each carrying a summary of the
-prayers not yet reported to the requester.
+prayers since the previous push for that request.
 
 """
 from typing import Sequence, Union
@@ -43,12 +41,6 @@ def upgrade() -> None:
             sa.Column("message_id", sa.UUID(), nullable=False),
             sa.Column("user_id", sa.UUID(), nullable=False),
             sa.Column("prayer_count", sa.BigInteger(), nullable=False),
-            sa.Column(
-                "unreported_count",
-                sa.BigInteger(),
-                nullable=False,
-                server_default=sa.text("0"),
-            ),
             sa.Column(
                 "first_prayed_at",
                 sa.DateTime(timezone=True),
@@ -84,9 +76,8 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO chat_message_prayer_counts
-            (id, message_id, user_id, prayer_count, unreported_count,
-             first_prayed_at, last_prayed_at)
-        SELECT gen_random_uuid(), message_id, user_id, 1, 0, created_at, created_at
+            (id, message_id, user_id, prayer_count, first_prayed_at, last_prayed_at)
+        SELECT gen_random_uuid(), message_id, user_id, 1, created_at, created_at
         FROM chat_message_prayers
         ON CONFLICT (message_id, user_id) DO NOTHING
         """
@@ -106,6 +97,7 @@ def upgrade() -> None:
             sa.Column("people_count", sa.Integer(), nullable=False),
             sa.Column("prayer_total", sa.BigInteger(), nullable=False),
             sa.Column("latest_user_id", sa.UUID(), nullable=True),
+            sa.Column("total_at_push", sa.BigInteger(), nullable=False),
             sa.Column(
                 "created_at",
                 sa.DateTime(timezone=True),
@@ -136,23 +128,8 @@ def upgrade() -> None:
             postgresql_where=sa.text("notification_sqs_message_id IS NULL"),
         )
 
-    # New prayer rows no longer record a dispatch, so every one of them would
-    # land in this partial index; reconcile now reads chat_prayer_notifications.
-    op.drop_index(
-        "idx_chat_message_prayers_undispatched",
-        table_name="chat_message_prayers",
-        if_exists=True,
-    )
-
 
 def downgrade() -> None:
-    op.create_index(
-        "idx_chat_message_prayers_undispatched",
-        "chat_message_prayers",
-        ["created_at"],
-        postgresql_where=sa.text("notification_sqs_message_id IS NULL"),
-        if_not_exists=True,
-    )
     if table_exists("chat_prayer_notifications"):
         op.drop_table("chat_prayer_notifications")
     if table_exists("chat_message_prayer_counts"):
