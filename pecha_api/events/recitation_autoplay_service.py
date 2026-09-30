@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import time
+from contextvars import ContextVar
 from typing import Awaitable, Callable, Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -32,6 +33,7 @@ from pecha_api.events.recitation_live_models import (
 )
 from pecha_api.events.recitation_websocket import (
     POSITION_TTL_SECONDS,
+    AutoplayGuard,
     autoplay_channel,
     autoplay_lease_key,
     autoplay_plan_key,
@@ -54,7 +56,27 @@ LATE_CATCH_UP_MS = 1000
 
 _STATE_KEY_PATTERN = "recitation:event:*:autoplay"
 
-Emitter = Callable[[UUID, List[SetPositionFrame]], Awaitable[None]]
+# False: the step went out only in part, or not at all, because its plan stopped
+# being current while it was sending. Anything else: the step was published.
+Emitter = Callable[[UUID, List[SetPositionFrame]], Awaitable[Optional[bool]]]
+# Whether the event this plan is for still exists. None in tests, which have no
+# database; production checks before every step.
+LiveCheck = Callable[[UUID], Awaitable[bool]]
+
+
+_send_permit: ContextVar[Optional[AutoplayGuard]] = ContextVar(
+    "autoplay_send_permit", default=None
+)
+
+
+def current_autoplay_send_permit() -> Optional[AutoplayGuard]:
+    """The plan this task is allowed to publish, while it is sending a step.
+
+    `may_send` returning is not enough: the publish is its own await, and a
+    new plan or a stopped session can land while it is in flight. The publish
+    checks this again, in the same Redis step as the write.
+    """
+    return _send_permit.get()
 
 
 def _now_ms() -> int:
@@ -306,12 +328,14 @@ class AutoplayEngine:
         owner: Optional[str] = None,
         clock: Callable[[], int] = _now_ms,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        is_live: Optional[LiveCheck] = None,
     ) -> None:
         self.store = store
         self.emit = emit
         self.owner = owner or str(uuid4())
         self.clock = clock
         self.sleep = sleep
+        self.is_live = is_live
         self._runners: Dict[UUID, asyncio.Task] = {}
         # The plan each of those runners is running.
         self._runner_plans: Dict[UUID, str] = {}
@@ -341,10 +365,11 @@ class AutoplayEngine:
             for step in steps
         ]
         plan_id = uuid4().hex
-        # The old runner goes before the new plan is in place, so no line of
-        # the old plan can go out after the first of the new one. If the new
-        # plan is not saved, the old one is still the plan: its runner comes
-        # back rather than leaving it stalled until the lease lapses.
+        # The old runner goes before the new plan is in place. A step already
+        # inside its send is not that runner's next line: the publish itself
+        # refuses it once this plan is no longer current. If the new plan is
+        # not saved, the old one is still the plan: its runner comes back
+        # rather than leaving it stalled until the lease lapses.
         replaced = self._runner_plans.get(event_id) if self._running_here(event_id) else None
         self._forget_runner(event_id)
         try:
@@ -367,7 +392,9 @@ class AutoplayEngine:
                     event_id, self.owner, plan_id, 0, "", {"step_started_ms": str(started)}
                 ):
                     await self._announce(event_id, await self.state(event_id))
-            self._spawn(event_id, plan_id)
+            # A newer plan may have taken the runner while the first step was
+            # still sending. Spawning over it would drop that plan's runner.
+            await self._spawn_if_current(event_id, plan_id)
             return await self.state(event_id)
         except Exception:
             # Only this plan: another request may already have replaced it,
@@ -443,6 +470,28 @@ class AutoplayEngine:
         task = self._runners.get(event_id)
         return task is not None and not task.done()
 
+    async def _spawn_if_current(self, event_id: UUID, plan_id: str) -> None:
+        """Start this plan's runner unless a newer one is already running here."""
+        if self._running_here(event_id):
+            return
+        state = await self.store.read(event_id)
+        if self._running_here(event_id):
+            return
+        if not state or state.get("plan_id") != plan_id or state.get("status") != "running":
+            return
+        self._spawn(event_id, plan_id)
+
+    async def _still_live(self, event_id: UUID) -> bool:
+        """True when no check was given, or the event is still there.
+
+        A deleted event would otherwise be recited through to the end of the
+        plan: the runner only looks at the plan it saved, and that plan does
+        not know the event is gone.
+        """
+        if self.is_live is None:
+            return True
+        return await self.is_live(event_id)
+
     def _spawn(self, event_id: UUID, plan_id: str) -> None:
         task = asyncio.create_task(self._run(event_id, plan_id))
         self._runners[event_id] = task
@@ -500,7 +549,11 @@ class AutoplayEngine:
 
             if not started:
                 # Moved on to, but not sent yet: this runner advanced to it, or
-                # took over from one that stopped in between.
+                # took over from one that stopped in between. A deleted event
+                # stops here, before another line goes out.
+                if not await self._still_live(event_id):
+                    await self._finish(event_id, plan_id, "ended", owner=self.owner)
+                    return
                 due = state.get("due_ms") or ""
                 start_at = int(due) if due else self.clock()
                 if not await self._send_step(event_id, plan_id, plan, step, "", start_at):
@@ -518,6 +571,9 @@ class AutoplayEngine:
                     return
                 continue
 
+            if not await self._still_live(event_id):
+                await self._finish(event_id, plan_id, "ended", owner=self.owner)
+                return
             following = step + 1
             if following >= len(plan):
                 await self._finish(event_id, plan_id, "finished", owner=self.owner)
@@ -550,15 +606,30 @@ class AutoplayEngine:
         step unmarked, and whoever takes over sends it again - the room shown
         the same line twice, never a line skipped. Just before sending, the
         runner checks it still holds the lease and its plan is still at this
-        step, unsent, so a runner whose plan was replaced or stopped does not
-        send at all.
+        step, unsent. That check does not cover the send itself, which is its
+        own await: the permit goes with the positions, and the publish lands
+        only while the same plan is still current. A send that lost its plan
+        on the way reports False and is not marked sent.
         """
         if not await self.store.may_send(
             event_id, self.owner, plan_id, step, expected_started
         ):
             return False
         positions = [SetPositionFrame.model_validate(p) for p in plan[step]["positions"]]
-        await self.emit(event_id, positions)
+        token = _send_permit.set(
+            AutoplayGuard(
+                owner=self.owner,
+                plan_id=plan_id,
+                step=step,
+                step_started_ms=expected_started,
+            )
+        )
+        try:
+            emitted = await self.emit(event_id, positions)
+        finally:
+            _send_permit.reset(token)
+        if emitted is False:
+            return False
         marked = await self.store.advance(
             event_id,
             self.owner,
@@ -597,9 +668,33 @@ def get_autoplay_engine() -> AutoplayEngine:
     return engine
 
 
+async def _event_is_live(event_id: UUID) -> bool:
+    """False only when the event is gone.
+
+    A database hiccup is not a deletion: stopping the room over one would end
+    a puja that is still on.
+    """
+    from fastapi import HTTPException
+    from starlette.concurrency import run_in_threadpool
+
+    from pecha_api.events.recitation_live_service import assert_live_event
+
+    try:
+        await run_in_threadpool(assert_live_event, event_id=event_id)
+    except HTTPException as error:
+        if error.status_code == 404:
+            return False
+        logger.exception("Could not confirm event %s is still live: %s", event_id, error)
+        return True
+    except Exception as error:
+        logger.exception("Could not confirm event %s is still live: %s", event_id, error)
+        return True
+    return True
+
+
 async def init_autoplay(redis: object, emit: Emitter) -> AutoplayEngine:
     global engine
-    engine = AutoplayEngine(AutoplayStore(redis), emit)
+    engine = AutoplayEngine(AutoplayStore(redis), emit, is_live=_event_is_live)
     engine.start_supervisor()
     return engine
 

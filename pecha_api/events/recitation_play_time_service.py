@@ -132,8 +132,10 @@ async def record_segment_play_time(
             return
         steps_on = index is not None and index == previous_index + 1
         # Taken on the controller's word only when the room's last line for this
-        # text is the one it says it left.
-        follows_on = from_index is not None and from_index == previous_index
+        # text is the one it says it left, and it names the line it went to.
+        follows_on = (
+            index is not None and from_index is not None and from_index == previous_index
+        )
         if not (steps_on or follows_on):
             return
         duration_ms = elapsed_ms if elapsed_ms is not None else accepted_at_ms - started_at_ms

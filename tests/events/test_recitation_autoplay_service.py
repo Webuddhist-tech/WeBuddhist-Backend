@@ -1,16 +1,20 @@
 import asyncio
 import json
 from typing import Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+
+from fastapi import HTTPException
 
 from pecha_api.events.recitation_autoplay_service import (
     LATE_CATCH_UP_MS,
     LEASE_MS,
     AutoplayEngine,
     AutoplayStore,
+    _event_is_live,
+    current_autoplay_send_permit,
 )
 from pecha_api.events.recitation_live_models import AutoplayStep, SetPositionFrame
 from pecha_api.events.recitation_websocket import POSITION_TTL_SECONDS
@@ -362,6 +366,83 @@ class TestChangingCourse:
         assert calls["n"] == 2
 
     @pytest.mark.asyncio
+    async def test_a_step_being_sent_names_the_plan_it_may_publish_for(self):
+        """The check before the send does not cover the send. The permit is
+        what the publish re-checks, and it is gone once the send returns."""
+        seen = {}
+
+        async def capture(event_id, frames):
+            seen["permit"] = current_autoplay_send_permit()
+
+        h = Harness(emit=AsyncMock(side_effect=capture))
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        state = await h.engine.start(event_id, _steps(1000))
+
+        assert seen["permit"].plan_id == state.plan_id
+        assert seen["permit"].step == 0
+        assert seen["permit"].step_started_ms == ""
+        assert current_autoplay_send_permit() is None
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_step_that_loses_its_plan_while_sending_is_not_marked_sent(self):
+        async def superseded(event_id, frames):
+            return False
+
+        h = Harness(emit=AsyncMock(side_effect=superseded))
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000))
+
+        assert h.store.states[event_id]["step_started_ms"] == ""
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_start_does_not_replace_the_newer_runner(self):
+        release = asyncio.Event()
+        sent = []
+
+        async def emit(event_id, frames):
+            if not sent:
+                sent.append("blocked")
+                await release.wait()
+                return False
+            sent.append(frames[0].segment_id)
+
+        h = Harness(emit=AsyncMock(side_effect=emit))
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        first = asyncio.create_task(h.engine.start(event_id, _steps(1000, 1000)))
+        while not h.emit.await_count:
+            await asyncio.sleep(0)
+        newer = await h.engine.start(event_id, _steps(700))
+        release.set()
+        await first
+
+        assert h.engine._runner_plans[event_id] == newer.plan_id
+        assert h.engine._running_here(event_id)
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_event_is_not_played_on(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+
+        async def gone(event_id):
+            return False
+
+        h.engine.is_live = gone
+        h.gate.set()
+        await h.settle(event_id)
+
+        assert [segments[1] for _, segments, _ in h.sent] == ["bo-0"]
+        state = await h.engine.state(event_id)
+        assert (state.status, state.reason) == ("stopped", "ended")
+
+    @pytest.mark.asyncio
     async def test_a_replaced_plan_sends_nothing_more_even_on_the_same_instance(self):
         h = Harness()
         h.gate = asyncio.Event()
@@ -579,6 +660,25 @@ class TestTakingOver:
         assert event_id not in h.store.leases
         # Still running: another instance takes it from here.
         assert h.store.states[event_id]["status"] == "running"
+
+
+class TestEventStillLive:
+
+    @pytest.mark.asyncio
+    async def test_a_missing_event_is_not_live(self):
+        with patch(
+            "pecha_api.events.recitation_live_service.assert_live_event",
+            side_effect=HTTPException(status_code=404),
+        ):
+            assert await _event_is_live(uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_does_not_look_like_a_deleted_event(self):
+        with patch(
+            "pecha_api.events.recitation_live_service.assert_live_event",
+            side_effect=RuntimeError("db down"),
+        ):
+            assert await _event_is_live(uuid4()) is True
 
 
 class TestState:

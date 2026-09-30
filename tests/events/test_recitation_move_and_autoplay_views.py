@@ -6,12 +6,16 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette import status
 
 from pecha_api.app import api
-from pecha_api.events.recitation_live_models import AutoplayStateResponse
+from pecha_api.events.recitation_autoplay_service import _send_permit
+from pecha_api.events.recitation_live_models import AutoplayStateResponse, SetPositionFrame
+from pecha_api.events.recitation_live_views import emit_autoplay_positions
+from pecha_api.events.recitation_websocket import AutoplayGuard, AutoplayRefused
 
 client = TestClient(api)
 
@@ -427,3 +431,27 @@ class TestControllerSocket:
                 _sync(websocket)
 
         engine.stop.assert_awaited_once_with(event_id, reason="ended")
+
+
+@pytest.mark.asyncio
+async def test_an_in_flight_autoplay_step_is_not_published_once_its_plan_is_gone():
+    event_id = uuid4()
+    frames = [
+        SetPositionFrame(text_id="bo", segment_id="bo-0", index=0, round_number=1),
+        SetPositionFrame(text_id="en", segment_id="en-0", index=0, round_number=1),
+    ]
+    broadcaster = AsyncMock()
+    broadcaster.broadcast_position.side_effect = [11, AutoplayRefused()]
+    token = _send_permit.set(AutoplayGuard(owner="A", plan_id="old", step=0, step_started_ms=""))
+    try:
+        with patch(f"{MODULE}.get_broadcaster", return_value=broadcaster), patch(
+            f"{MODULE}.record_segment_play_time", new=AsyncMock()
+        ):
+            published = await emit_autoplay_positions(event_id, frames)
+    finally:
+        _send_permit.reset(token)
+
+    assert published is False
+    assert broadcaster.broadcast_position.await_count == 2
+    assert broadcaster.broadcast_position.await_args_list[0].kwargs["guard"].plan_id == "old"
+    assert broadcaster.broadcast_position.await_args_list[1].kwargs["guard"].plan_id == "old"

@@ -20,7 +20,10 @@ from starlette import status
 from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from pecha_api.events.recitation_autoplay_service import get_autoplay_engine
+from pecha_api.events.recitation_autoplay_service import (
+    current_autoplay_send_permit,
+    get_autoplay_engine,
+)
 from pecha_api.events.recitation_dependencies import (
     is_recitation_emit_secret,
     verify_recitation_emit_token,
@@ -44,6 +47,8 @@ from pecha_api.events.recitation_play_time_service import (
     record_segment_play_time,
 )
 from pecha_api.events.recitation_websocket import (
+    AutoplayGuard,
+    AutoplayRefused,
     RecitationBroadcaster,
     get_broadcaster,
 )
@@ -129,6 +134,7 @@ async def emit_positions(
     broadcaster: RecitationBroadcaster,
     event_id: UUID,
     frames: List[SetPositionFrame],
+    guard: Optional[AutoplayGuard] = None,
 ) -> List[PositionAcceptedResponse]:
     """Send one move's positions to the room, in the order given, and time each
     in the background once it is out.
@@ -136,7 +142,8 @@ async def emit_positions(
     One throttle slot has already been spent on the whole move by the caller,
     or none at all for autoplay, whose pace is its own plan. A failure part way
     raises: the positions before it are already with the room, and the caller
-    reports the move as not taken, so it is sent again.
+    reports the move as not taken, so it is sent again. Autoplay's `guard`
+    goes with every position, so none goes out once its plan has stopped.
     """
     accepted: List[PositionAcceptedResponse] = []
     for frame in frames:
@@ -149,6 +156,7 @@ async def emit_positions(
             index=frame.index,
             round_number=frame.round_number,
             server_time=server_time,
+            guard=guard,
         )
         _in_background(record_segment_play_time(
             broadcaster=broadcaster,
@@ -176,9 +184,24 @@ async def emit_positions(
     return accepted
 
 
-async def emit_autoplay_positions(event_id: UUID, frames: List[SetPositionFrame]) -> None:
-    """What the autoplay engine sends each step through."""
-    await emit_positions(get_broadcaster(), event_id, frames)
+async def emit_autoplay_positions(event_id: UUID, frames: List[SetPositionFrame]) -> bool:
+    """What the autoplay engine sends each step through.
+
+    False when the plan stopped being the one running before the whole step
+    was out: those positions are not published, and the step is not marked sent.
+    """
+    guard = current_autoplay_send_permit()
+    if guard is None:
+        logger.error("Refusing autoplay positions with no send permit for event %s", event_id)
+        return False
+    try:
+        await emit_positions(get_broadcaster(), event_id, frames, guard=guard)
+    except AutoplayRefused:
+        logger.info(
+            "Dropped an autoplay step for event %s; its plan is no longer current", event_id
+        )
+        return False
+    return True
 
 
 async def _socket_move(

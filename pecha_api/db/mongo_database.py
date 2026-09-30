@@ -52,8 +52,15 @@ async def lifespan(api: FastAPI):
             recitation_broadcaster = await init_recitation_broadcaster(redis_url=redis_url)
             logging.info("✅ Recitation broadcaster initialized with Redis")
             from ..events.recitation_autoplay_service import init_autoplay
-            from ..events.recitation_live_views import emit_autoplay_positions
-            await init_autoplay(recitation_broadcaster.redis, emit_autoplay_positions)
+            from ..events.recitation_live_views import (
+                autoplay_event_is_live,
+                emit_autoplay_positions,
+            )
+            await init_autoplay(
+                recitation_broadcaster.redis,
+                emit_autoplay_positions,
+                is_live=autoplay_event_is_live,
+            )
             logging.info("✅ Recitation autoplay initialized")
         except ConnectionRefusedError as e:
             error_msg = (

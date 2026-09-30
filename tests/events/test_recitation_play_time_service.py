@@ -233,6 +233,21 @@ class TestRecordSegmentPlayTime:
         save.assert_called_once_with("text-7", "seg-a", 2_500)
 
     @pytest.mark.asyncio
+    async def test_following_on_without_a_destination_is_not_a_measurement(self):
+        """`from_index` matching the room's last line is not a move until it
+        names the line it landed on. Both fields are optional, so a request
+        can omit `index` and still be accepted."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|12|1|seg-last"),
+                index=None,
+                from_index=12,
+                elapsed_ms=5_200,
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_following_on_from_a_line_the_room_never_took_is_not_a_measurement(self):
         """The controller's word counts only when the room's last line is the one
         it says it left: otherwise the hold spans a line the store never saw."""
