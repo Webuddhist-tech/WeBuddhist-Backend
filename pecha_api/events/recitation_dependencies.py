@@ -6,6 +6,16 @@ from starlette import status
 from pecha_api.config import get
 
 
+def is_recitation_emit_secret(token: str) -> bool:
+    """Whether `token` is the emit secret - for the socket, which takes its
+    token in the query string rather than the header. False when no secret is
+    configured, so an unconfigured server never opens that door."""
+    expected = get("RECITATION_EMIT_SECRET_TOKEN")
+    if not expected or not token:
+        return False
+    return secrets.compare_digest(token, expected)
+
+
 async def verify_recitation_emit_token(
     x_recitation_token: str = Header(..., alias="X-Recitation-Token"),
 ) -> None:

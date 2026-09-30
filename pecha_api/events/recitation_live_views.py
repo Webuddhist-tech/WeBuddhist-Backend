@@ -2,8 +2,8 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Coroutine, Optional
-from uuid import UUID
+from typing import Any, Coroutine, List, Optional
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -20,9 +20,17 @@ from starlette import status
 from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
-from pecha_api.events.recitation_dependencies import verify_recitation_emit_token
+from pecha_api.events.recitation_autoplay_service import get_autoplay_engine
+from pecha_api.events.recitation_dependencies import (
+    is_recitation_emit_secret,
+    verify_recitation_emit_token,
+)
 from pecha_api.events.recitation_live_models import (
+    AutoplayStartRequest,
+    AutoplayStateResponse,
+    MoveAcceptedResponse,
     PositionAcceptedResponse,
+    PublishMoveRequest,
     SegmentPlayTimesResponse,
     SetPositionFrame,
 )
@@ -86,6 +94,124 @@ def _require_broadcaster() -> RecitationBroadcaster:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Live recitation is unavailable",
         )
+
+
+def _require_autoplay():
+    """The autoplay engine, or 503."""
+    try:
+        return get_autoplay_engine()
+    except RuntimeError as e:
+        logger.exception("Recitation autoplay not initialized: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Autoplay is unavailable",
+        )
+
+
+async def _stop_autoplay_quietly(event_id: UUID, reason: str) -> bool:
+    """Ending a session ends its autoplay too. False if the stop could not be
+    recorded: a runner may still be sending, so the session is not over and
+    the caller is told to retry."""
+    try:
+        engine = get_autoplay_engine()
+    except RuntimeError:
+        # No engine here, so no autoplay was started from here to stop.
+        return True
+    try:
+        await engine.stop(event_id, reason=reason)
+        return True
+    except Exception as e:
+        logger.exception("Failed to stop autoplay for event %s: %s", event_id, e)
+        return False
+
+
+async def emit_positions(
+    broadcaster: RecitationBroadcaster,
+    event_id: UUID,
+    frames: List[SetPositionFrame],
+) -> List[PositionAcceptedResponse]:
+    """Send one move's positions to the room, in the order given, and time each
+    in the background once it is out.
+
+    One throttle slot has already been spent on the whole move by the caller,
+    or none at all for autoplay, whose pace is its own plan. A failure part way
+    raises: the positions before it are already with the room, and the caller
+    reports the move as not taken, so it is sent again.
+    """
+    accepted: List[PositionAcceptedResponse] = []
+    for frame in frames:
+        accepted_at = datetime.now(timezone.utc)
+        server_time = _iso(accepted_at)
+        revision = await broadcaster.broadcast_position(
+            event_id=event_id,
+            text_id=frame.text_id,
+            segment_id=frame.segment_id,
+            index=frame.index,
+            round_number=frame.round_number,
+            server_time=server_time,
+        )
+        _in_background(record_segment_play_time(
+            broadcaster=broadcaster,
+            event_id=event_id,
+            text_id=frame.text_id,
+            segment_id=frame.segment_id,
+            index=frame.index,
+            round_number=frame.round_number,
+            revision=revision,
+            accepted_at_ms=_epoch_ms(accepted_at),
+            autoplay=frame.autoplay,
+            run=frame.run,
+            elapsed_ms=frame.elapsed_ms,
+            from_index=frame.from_index,
+        ))
+        accepted.append(PositionAcceptedResponse(
+            event_id=event_id,
+            text_id=frame.text_id,
+            segment_id=frame.segment_id,
+            index=frame.index,
+            round_number=frame.round_number,
+            server_time=server_time,
+            revision=revision,
+        ))
+    return accepted
+
+
+async def emit_autoplay_positions(event_id: UUID, frames: List[SetPositionFrame]) -> None:
+    """What the autoplay engine sends each step through."""
+    await emit_positions(get_broadcaster(), event_id, frames)
+
+
+async def _socket_move(
+    broadcaster: RecitationBroadcaster, event_id: UUID, data: dict
+) -> dict:
+    """A `move` frame: one move, every edition, answered with a `move_ack`
+    naming the move - the socket's twin of `POST .../recitation/move`, so the
+    controller learns the room took it without a request of its own."""
+    move_id = data.get("move_id")
+    move_id = move_id if isinstance(move_id, str) and len(move_id) <= 64 else None
+
+    def refused(code: str, message: str) -> dict:
+        return {"type": "move_ack", "move_id": move_id, "ok": False, "code": code, "message": message}
+
+    try:
+        move = PublishMoveRequest.model_validate({"positions": data.get("positions")})
+    except ValidationError as e:
+        return refused("VALIDATION_ERROR", str(e.errors()[0].get("msg", "Invalid move")))
+
+    if not await broadcaster.allow_set(event_id):
+        return refused("THROTTLED", "Too many positions for this event; slow down")
+
+    try:
+        accepted = await emit_positions(broadcaster, event_id, move.positions)
+    except Exception as e:
+        logger.exception("Failed to broadcast recitation move: %s", e)
+        return refused("SERVER_ERROR", "Failed to broadcast move")
+    return {
+        "type": "move_ack",
+        "move_id": move_id,
+        "ok": True,
+        "revisions": [position.revision for position in accepted],
+    }
 
 
 @recitation_live_router.post(
@@ -167,6 +293,107 @@ async def publish_recitation_position(
 
 
 @recitation_live_router.post(
+    "/{event_id}/recitation/move",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Publish one move - every edition's position - in one request",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def publish_recitation_move(
+    event_id: UUID,
+    move: PublishMoveRequest,
+) -> MoveAcceptedResponse:
+    """The same line in every edition the room follows, in one request.
+
+    Posting each edition on its own cost the edition on screen a whole round
+    trip: the controller had to hear the others were taken before sending it
+    last, so the event is left holding the line actually being read. Here the
+    order is kept by sending the positions to the room in the order given, and
+    the whole move spends one slot of the event's throttle, not one an edition.
+    """
+    broadcaster = _require_broadcaster()
+    await run_in_threadpool(assert_live_event, event_id=event_id)
+
+    if not await broadcaster.allow_set(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many positions for this event; slow down",
+        )
+
+    try:
+        accepted = await emit_positions(broadcaster, event_id, move.positions)
+    except Exception as e:
+        logger.exception("Failed to broadcast recitation move: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to broadcast move",
+        )
+    return MoveAcceptedResponse(positions=accepted)
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay",
+    summary="Start autoplay on a plan, or replace the plan it is running",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def start_recitation_autoplay(
+    event_id: UUID,
+    request: AutoplayStartRequest,
+) -> AutoplayStateResponse:
+    """The backend becomes the clock: it sends each step of the plan to the
+    room and holds it for its time, whatever the controller's phone does. The
+    first step is with the room by the time this answers."""
+    _require_broadcaster()
+    autoplay = _require_autoplay()
+    await run_in_threadpool(assert_live_event, event_id=event_id)
+    try:
+        return await autoplay.start(
+            event_id, request.steps, first_step_elapsed_ms=request.first_step_elapsed_ms
+        )
+    except Exception as e:
+        # The engine has already stopped the plan that failed, and only it.
+        logger.exception("Failed to start autoplay for event %s: %s", event_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to start autoplay",
+        )
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay/stop",
+    summary="Stop autoplay where it is",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def stop_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
+    autoplay = _require_autoplay()
+    try:
+        return await autoplay.stop(event_id)
+    except Exception as e:
+        logger.exception("Failed to stop autoplay for event %s: %s", event_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to stop autoplay; retry",
+        )
+
+
+@recitation_live_router.get(
+    "/{event_id}/recitation/autoplay",
+    summary="Where autoplay is",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def read_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
+    """For a controller that has no socket open, or has just reopened one."""
+    autoplay = _require_autoplay()
+    try:
+        return await autoplay.state(event_id)
+    except Exception as e:
+        logger.exception("Failed to read autoplay for event %s: %s", event_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to read autoplay",
+        )
+
+
+@recitation_live_router.post(
     "/{event_id}/recitation/end",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="End a recitation session over HTTP",
@@ -184,6 +411,12 @@ async def end_recitation_session(
     broadcaster = _require_broadcaster()
     await run_in_threadpool(assert_live_event, event_id=event_id)
 
+    # First, so no step of it goes out after the room is told it is over.
+    if not await _stop_autoplay_quietly(event_id, "ended"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to end the recitation session; retry",
+        )
     cleared = await broadcaster.clear_position(event_id)
     announced = await broadcaster.broadcast_session_ended(event_id)
 
@@ -229,8 +462,14 @@ async def websocket_recitation_live(
     language through the segment's existing mappings, and follow `text_id` when
     the operator moves on to the next liturgy in the event's collection.
 
+    `token` is a user's session token, or the emit secret - the live controller
+    has no session. A socket opened with the secret is the operator, and is not
+    counted among the people in the room.
+
     Client -> server messages:
       {"type": "set", "text_id": "...", "segment_id": "...", "index": 12, "round_number": 3}  (operator only)
+      {"type": "move", "move_id": "...", "positions": [<set fields>, ...]}   (operator only;
+          every edition of one move, sent to the room in that order, answered by a move_ack)
       {"type": "end"}                                                       (operator only)
       {"type": "ping"}
 
@@ -243,6 +482,10 @@ async def websocket_recitation_live(
        "index": 12, "round_number": 3, "server_time": "...", "revision": 57}
           (on connect when a position exists, then on every change)
       {"type": "session_ended", "event_id": "..."}
+      {"type": "move_ack", "move_id": "...", "ok": true, "revisions": [...]}
+          (operator only; or "ok": false with "code" and "message")
+      {"type": "autoplay", "status": "running|stopped", "step": 4, ...}
+          (operator only: on connect, then whenever autoplay moves on or stops)
       {"type": "pong"}
       {"type": "error", "code": "...", "message": "..."}
     """
@@ -256,43 +499,67 @@ async def websocket_recitation_live(
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
-    try:
-        try:
-            caller = await run_in_threadpool(resolve_recitation_caller, token=token)
-        except HTTPException as auth_error:
-            logger.warning("Recitation WebSocket auth failed: %s", auth_error.detail)
-            await websocket.accept()
-            await websocket.send_json(_error("UNAUTHORIZED", str(auth_error.detail)))
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
-            return
+    # The live controller holds the emit secret and no user session, the same as
+    # it does for the HTTP routes. Such a socket drives the room but is nobody
+    # in it: it is not counted among the people present.
+    by_emit_secret = is_recitation_emit_secret(token)
+    presence_id: Optional[UUID] = None
+    autoplay_subscriber = None
 
-        # Synchronous SQLAlchemy: offloaded so a slow event lookup cannot stall
-        # every other socket sharing this event loop.
-        try:
-            is_operator = await run_in_threadpool(
-                resolve_recitation_access,
-                event_id=event_id,
-                user_id=caller.user_id,
-                token=token,
-            )
-        except HTTPException as access_error:
-            await websocket.accept()
-            await websocket.send_json(
-                _error(_detail_code(access_error.detail), str(access_error.detail))
-            )
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
+    try:
+        if by_emit_secret:
+            try:
+                await run_in_threadpool(assert_live_event, event_id=event_id)
+            except HTTPException as access_error:
+                await websocket.accept()
+                await websocket.send_json(
+                    _error(_detail_code(access_error.detail), str(access_error.detail))
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            is_operator = True
+            presence_id = uuid4()
+        else:
+            try:
+                caller = await run_in_threadpool(resolve_recitation_caller, token=token)
+            except HTTPException as auth_error:
+                logger.warning("Recitation WebSocket auth failed: %s", auth_error.detail)
+                await websocket.accept()
+                await websocket.send_json(_error("UNAUTHORIZED", str(auth_error.detail)))
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized")
+                return
+
+            # Synchronous SQLAlchemy: offloaded so a slow event lookup cannot stall
+            # every other socket sharing this event loop.
+            try:
+                is_operator = await run_in_threadpool(
+                    resolve_recitation_access,
+                    event_id=event_id,
+                    user_id=caller.user_id,
+                    token=token,
+                )
+            except HTTPException as access_error:
+                await websocket.accept()
+                await websocket.send_json(
+                    _error(_detail_code(access_error.detail), str(access_error.detail))
+                )
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            presence_id = caller.presence_id
 
         await websocket.accept()
 
         subscriber = await broadcaster.subscribe_to_event(event_id)
-        broadcaster.add_connection(event_id, caller.presence_id, websocket)
-        # Count this socket before telling anyone, so the number includes them.
-        presence_token = await broadcaster.mark_present(event_id, caller.presence_id)
-        # Announce and count in one step, and quote what was announced: a
-        # separate reading can disagree with the number the rest of the room was
-        # just given.
-        joined = await broadcaster.broadcast_presence(event_id)
+        broadcaster.add_connection(event_id, presence_id, websocket)
+        if by_emit_secret:
+            joined = await broadcaster.presence_count(event_id)
+        else:
+            # Count this socket before telling anyone, so the number includes them.
+            presence_token = await broadcaster.mark_present(event_id, presence_id)
+            # Announce and count in one step, and quote what was announced: a
+            # separate reading can disagree with the number the rest of the room
+            # was just given.
+            joined = await broadcaster.broadcast_presence(event_id)
         await websocket.send_json({
             "type": "session_info",
             "event_id": str(event_id),
@@ -314,6 +581,17 @@ async def websocket_recitation_live(
         if current_position is not None:
             await websocket.send_json(current_position)
             last_revision = current_position.get("revision")
+
+        # The operator is also told where autoplay is, and every change to it;
+        # nobody else ever sees these frames.
+        if is_operator:
+            try:
+                autoplay = get_autoplay_engine()
+                autoplay_subscriber = await broadcaster.subscribe_to_autoplay(event_id)
+                autoplay_state = await autoplay.state(event_id)
+                await websocket.send_text(autoplay_state.model_dump_json())
+            except Exception as e:
+                logger.exception("Failed to attach autoplay state to the operator: %s", e)
 
         ended_remotely = asyncio.Event()
         # Set when the session ends from elsewhere (the operator's `end`, on
@@ -379,6 +657,25 @@ async def websocket_recitation_live(
 
         redis_task = asyncio.create_task(listen_redis())
 
+        async def listen_autoplay() -> None:
+            # State, not a stream: a frame evicted for a slow socket is
+            # superseded by the one after it, so nothing is re-read.
+            try:
+                while True:
+                    payload = await autoplay_subscriber.get()
+                    if payload is None:
+                        break
+                    try:
+                        await websocket.send_text(payload)
+                    except (ConnectionClosedOK, ConnectionClosedError):
+                        break
+            except Exception as e:
+                logger.exception("Error relaying autoplay state: %s", e)
+
+        autoplay_task = (
+            asyncio.create_task(listen_autoplay()) if autoplay_subscriber is not None else None
+        )
+
         try:
             while True:
                 # Race the next frame against the session ending, so idle
@@ -413,7 +710,7 @@ async def websocket_recitation_live(
                     await websocket.send_json({"type": "pong"})
                     continue
 
-                if frame_type not in ("set", "end"):
+                if frame_type not in ("set", "end", "move"):
                     # Unknown types are ignored, matching the other endpoints.
                     continue
 
@@ -423,7 +720,16 @@ async def websocket_recitation_live(
                     )
                     continue
 
+                if frame_type == "move":
+                    await websocket.send_json(await _socket_move(broadcaster, event_id, data))
+                    continue
+
                 if frame_type == "end":
+                    if not await _stop_autoplay_quietly(event_id, "ended"):
+                        await websocket.send_json(
+                            _error("SERVER_ERROR", "Failed to end the session; try again")
+                        )
+                        continue
                     cleared = await broadcaster.clear_position(event_id)
                     announced = await broadcaster.broadcast_session_ended(event_id)
                     if not (cleared and announced):
@@ -480,10 +786,17 @@ async def websocket_recitation_live(
 
         finally:
             redis_task.cancel()
+            if autoplay_task is not None:
+                autoplay_task.cancel()
             try:
                 await broadcaster.unsubscribe_from_event(event_id, subscriber)
             except Exception as e:
                 logger.exception("Error unsubscribing from Redis: %s", e)
+            if autoplay_subscriber is not None:
+                try:
+                    await broadcaster.unsubscribe_from_autoplay(event_id, autoplay_subscriber)
+                except Exception as e:
+                    logger.exception("Error unsubscribing from autoplay state: %s", e)
             if session_over:
                 # Ended by the operator, not by the client, so close it here.
                 try:
@@ -502,10 +815,8 @@ async def websocket_recitation_live(
             pass
 
     finally:
-        if caller is not None:
-            broadcaster.remove_connection(event_id, caller.presence_id)
+        if presence_id is not None:
+            broadcaster.remove_connection(event_id, presence_id)
             if presence_token is not None:
-                await broadcaster.mark_absent(
-                    event_id, caller.presence_id, presence_token
-                )
+                await broadcaster.mark_absent(event_id, presence_id, presence_token)
                 await broadcaster.broadcast_presence(event_id)

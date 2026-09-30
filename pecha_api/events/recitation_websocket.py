@@ -51,6 +51,28 @@ def segment_mark_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:marks"
 
 
+def autoplay_state_key(event_id: UUID) -> str:
+    """Where autoplay is: its plan, status, step and when the step went out."""
+    return f"recitation:event:{event_id}:autoplay"
+
+
+def autoplay_plan_key(event_id: UUID) -> str:
+    """The steps autoplay is running, as the controller laid them out."""
+    return f"recitation:event:{event_id}:autoplay-plan"
+
+
+def autoplay_lease_key(event_id: UUID) -> str:
+    """The instance running this event's autoplay. Exactly one does, and another
+    takes over once the lease lapses - a deploy or a crash does not end it."""
+    return f"recitation:event:{event_id}:autoplay-lease"
+
+
+def autoplay_channel(event_id: UUID) -> str:
+    """Autoplay's state as it changes, for the operator's socket only. Kept off
+    the position channel so the room's phones only ever see positions."""
+    return f"recitation:event:{event_id}:autoplay-state"
+
+
 def segment_boundary_key(event_id: UUID) -> str:
     """The revision a session ended on. Marks at or below it belong to that
     session, so nothing is measured across the gap between two pujas."""
@@ -364,6 +386,13 @@ class RecitationBroadcaster:
     async def unsubscribe_from_event(self, event_id: UUID, subscriber: Subscriber) -> None:
         """Detach a socket; the last one out closes the Redis subscription."""
         await self.fanout.unsubscribe(position_channel(event_id), subscriber)
+
+    async def subscribe_to_autoplay(self, event_id: UUID) -> Subscriber:
+        """Attach the operator's socket to autoplay's state as it changes."""
+        return await self.fanout.subscribe(autoplay_channel(event_id))
+
+    async def unsubscribe_from_autoplay(self, event_id: UUID, subscriber: Subscriber) -> None:
+        await self.fanout.unsubscribe(autoplay_channel(event_id), subscriber)
 
     async def save_position(
         self,
