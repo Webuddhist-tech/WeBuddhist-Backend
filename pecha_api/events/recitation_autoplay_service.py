@@ -352,7 +352,9 @@ class AutoplayEngine:
                 event_id, plan_id, json.dumps(plan), total=len(plan), owner=self.owner
             )
         except Exception:
-            if replaced is not None:
+            # Unless another start got in while this one waited: its runner
+            # is the one to keep, and it must stay the one tracked here.
+            if replaced is not None and not self._running_here(event_id):
                 self._spawn(event_id, replaced)
             raise
         try:

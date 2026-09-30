@@ -436,6 +436,32 @@ class TestChangingCourse:
         assert (await h.engine.state(event_id)).reason == "finished"
 
     @pytest.mark.asyncio
+    async def test_a_failed_save_does_not_restore_the_old_runner_over_a_newer_one(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        real_begin = h.store.begin
+        release = asyncio.Event()
+
+        async def slow_then_fail(*args, **kwargs):
+            await release.wait()
+            raise RuntimeError("redis down")
+
+        h.store.begin = AsyncMock(side_effect=slow_then_fail)
+        failing = asyncio.create_task(h.engine.start(event_id, _steps(1000, 1000)))
+        while not h.store.begin.await_count:
+            await asyncio.sleep(0)
+        h.store.begin = real_begin
+        newer = await h.engine.start(event_id, _steps(1000, 1000))
+        release.set()
+        with pytest.raises(RuntimeError):
+            await failing
+
+        assert h.engine._runner_plans[event_id] == newer.plan_id
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
     async def test_a_stop_redis_refused_still_stops_the_runner_here_and_raises(self):
         h = Harness()
         h.gate = asyncio.Event()
