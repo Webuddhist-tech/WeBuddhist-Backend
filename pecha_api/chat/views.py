@@ -562,8 +562,9 @@ def list_message_prayers(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
-    """Who is praying for this request and how many times each, most recently
-    prayed first. Only the member who posted the request; anyone else gets 403."""
+    """Who is praying for this request, most recently prayed first. Any member
+    of the room may read it; `prayer_count` per person is only filled in for
+    the member who posted the request (null for everyone else)."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
     return list_message_prayers_service(
         message_id=message_id, user=user, skip=skip, limit=limit

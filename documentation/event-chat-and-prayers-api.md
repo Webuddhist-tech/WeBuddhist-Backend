@@ -112,7 +112,7 @@ On a `PRAYER` message the DTO carries prayer fields (including
 
 `prayer_count` counts **people**; `my_prayer_count` is how many times the
 viewer has prayed for it. `recent_prayers` holds at most 3 people, for an
-avatar stack; the full roster (requester only) comes from the who-prayed
+avatar stack; the full roster comes from the who-prayed
 endpoint.
 
 **Filter a room to its prayer requests:**
@@ -182,8 +182,9 @@ GET /chat/messages/{message_id}/prayers?skip=0&limit=20
 ] }
 ```
 
-**Only the member who posted the request** may read it; anyone else gets `403`
-("Only the requester can see who is praying"). Ordered by `last_prayed_at`,
+Any active member of the room may read it. `prayer_count` (how many times
+that person prayed) is **only filled in for the member who posted the
+request**; for everyone else it is `null`. Ordered by `last_prayed_at`,
 most recent first. `created_at` is the person's first prayer. `total` counts
 people.
 
@@ -273,7 +274,6 @@ member of the room.
 | 400 | `INTENTION_NOT_ALLOWED_ON_TEXT` | `intention` sent with a `TEXT` message |
 | 400 | `NOT_A_PRAYER_REQUEST` | The message exists but is a `TEXT` message |
 | 403 | — | Not an active member of the room |
-| 403 | `Only the requester can see who is praying` | Roster read by someone other than the request's author |
 | 429 | — | More than 10 prayers in a second; retry after `Retry-After` |
 | 404 | `NOT_A_PRAYER_REQUEST` | Nothing in the batch was a live prayer request |
 | 404 | — | Room, event or message gone; chat switched off; group unpublished |

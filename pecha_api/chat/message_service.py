@@ -91,7 +91,6 @@ _ALREADY_REPORTED = "ALREADY_REPORTED"
 _CANNOT_REPORT_OWN_MESSAGE = "CANNOT_REPORT_OWN_MESSAGE"
 _PRAYER_NOT_ALLOWED_IN_DM = "PRAYER_NOT_ALLOWED_IN_DM"
 _NOT_A_PRAYER_REQUEST = "NOT_A_PRAYER_REQUEST"
-_ONLY_REQUESTER_SEES_ROSTER = "Only the requester can see who is praying"
 _NOT_OWN_MESSAGES = "message_ids include other users' messages"
 _NOTHING_TO_EDIT = "Provide body or intention to edit"
 _RECENT_PRAYERS_LIMIT = 3
@@ -780,14 +779,11 @@ def list_message_prayers_service(
     limit: int = 20,
 ) -> ChatMessagePrayersResponse:
     """Who is praying for this request and how many times each, most recently
-    prayed first. Only the person who posted the request may see it."""
+    prayed first. Any member may see who is praying; only the person who
+    posted the request sees how many times each prayed."""
     with SessionLocal() as db:
         message = _resolve_prayer_request(db=db, message_id=message_id, user=user)
-        if message.sender_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=_ONLY_REQUESTER_SEES_ROSTER,
-            )
+        is_requester = message.sender_id == user.id
         prayers, total = list_message_prayers(
             db=db, message_id=message.id, skip=skip, limit=limit
         )
@@ -801,7 +797,7 @@ def list_message_prayers_service(
                     avatar_url=_generate_presigned_url(
                         prayer.user.avatar_url if prayer.user else None
                     ),
-                    prayer_count=int(prayer.prayer_count),
+                    prayer_count=int(prayer.prayer_count) if is_requester else None,
                     created_at=prayer.first_prayed_at.isoformat(),
                     last_prayed_at=prayer.last_prayed_at.isoformat(),
                 )

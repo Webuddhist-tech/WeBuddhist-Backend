@@ -442,7 +442,7 @@ class TestListMessagePrayersService:
     @patch(f"{MODULE}._require_active_member")
     @patch(f"{MODULE}._get_room_or_404")
     @patch(f"{MODULE}.SessionLocal")
-    def test_another_member_gets_403_and_no_roster(
+    def test_another_member_sees_who_is_praying_but_not_how_often(
         self,
         mock_session,
         _mock_room,
@@ -451,14 +451,21 @@ class TestListMessagePrayersService:
         mock_list,
     ):
         _session(mock_session)
-        mock_get_message.return_value = MockMessage()
+        message = MockMessage()
+        mock_get_message.return_value = message
+        bob = MockUser(email="bob@example.com", firstname="Bob")
+        mock_list.return_value = (
+            [MockPrayerCount(message.id, bob, prayer_count=3)],
+            1,
+        )
 
-        with pytest.raises(HTTPException) as exc_info:
-            list_message_prayers_service(message_id=uuid4(), user=MockUser())
+        response = list_message_prayers_service(
+            message_id=message.id, user=MockUser()
+        )
 
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
-        assert exc_info.value.detail == "Only the requester can see who is praying"
-        mock_list.assert_not_called()
+        assert response.total == 1
+        assert [p.name for p in response.prayers] == ["Bob"]
+        assert response.prayers[0].prayer_count is None
 
     @patch(f"{MODULE}.list_message_prayers")
     @patch(f"{MODULE}.get_message_by_id_any_room")
