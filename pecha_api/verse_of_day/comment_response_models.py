@@ -7,7 +7,6 @@ from pydantic import BaseModel, field_validator
 class VerseOfDayCommentUserDTO(BaseModel):
     first_name: str
     last_name: Optional[str] = None
-    email: str
     avatar_url: Optional[str] = None
 
 

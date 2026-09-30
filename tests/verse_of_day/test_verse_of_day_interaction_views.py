@@ -11,7 +11,10 @@ from pecha_api.verse_of_day.comment_response_models import (
     VerseOfDayCommentDTO,
     VerseOfDayCommentsResponse,
 )
-from pecha_api.verse_of_day.like_response_models import LikeVerseOfDayResponse
+from pecha_api.verse_of_day.like_response_models import (
+    LikeVerseOfDayResponse,
+    VerseOfDayLikesResponse,
+)
 
 client = TestClient(api)
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
@@ -25,7 +28,6 @@ def _comment_dto(verse_id=None) -> VerseOfDayCommentDTO:
         user={
             "first_name": "First",
             "last_name": "Last",
-            "email": "user@example.com",
             "avatar_url": None,
         },
         text="Lovely verse.",
@@ -35,6 +37,22 @@ def _comment_dto(verse_id=None) -> VerseOfDayCommentDTO:
 
 
 class TestVerseOfDayLikeViews:
+
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service")
+    def test_get_likes(self, mock_service):
+        verse_id = uuid4()
+        mock_service.return_value = VerseOfDayLikesResponse(
+            verse_id=verse_id,
+            like_count=5,
+            liked_by_me=False,
+        )
+
+        response = client.get(f"/verse-of-day/{verse_id}/likes")
+
+        assert response.status_code == status.HTTP_200_OK
+        body = response.json()
+        assert body["like_count"] == 5
+        assert body["liked_by_me"] is False
 
     @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
     @patch("pecha_api.verse_of_day.like_views.like_verse_of_day_service")
@@ -114,6 +132,7 @@ class TestVerseOfDayCommentViews:
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 1
         assert response.json()["comments"][0]["text"] == "Lovely verse."
+        assert "email" not in response.json()["comments"][0]["user"]
 
     @patch("pecha_api.verse_of_day.comment_views.validate_and_extract_user_details")
     @patch("pecha_api.verse_of_day.comment_views.create_verse_comment_service")
@@ -136,3 +155,17 @@ class TestVerseOfDayCommentViews:
             user_id=user.id,
             text="Lovely verse.",
         )
+
+    @patch("pecha_api.verse_of_day.comment_views.validate_and_extract_user_details")
+    @patch("pecha_api.verse_of_day.comment_views.delete_verse_comment_service")
+    def test_delete_comment(self, mock_service, mock_validate):
+        comment_id = uuid4()
+        mock_validate.return_value = MagicMock(id=uuid4())
+
+        response = client.delete(
+            f"/verse-of-day/comments/{comment_id}",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        mock_service.assert_called_once()

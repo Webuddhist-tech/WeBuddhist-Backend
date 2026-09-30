@@ -1,7 +1,8 @@
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.db.database import SessionLocal
@@ -11,18 +12,22 @@ from pecha_api.verse_of_day.like_repository import (
     count_verse_likes,
     create_like,
     delete_like,
+    like_exists,
 )
-from pecha_api.verse_of_day.like_response_models import LikeVerseOfDayResponse
+from pecha_api.verse_of_day.like_response_models import (
+    LikeVerseOfDayResponse,
+    VerseOfDayLikesResponse,
+)
 from pecha_api.verse_of_day.verse_of_day_repository import get_verse_of_day_by_id
 
 
-def _isoformat(value) -> Optional[str]:
+def _isoformat(value: Any) -> Optional[str]:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _require_verse(db, verse_id: UUID) -> None:
+def _require_verse(db: Session, verse_id: UUID) -> None:
     verse = get_verse_of_day_by_id(db=db, verse_id=verse_id)
     if not verse:
         raise HTTPException(
@@ -53,3 +58,22 @@ def unlike_verse_of_day_service(verse_id: UUID, user_id: UUID) -> None:
     with SessionLocal() as db:
         _require_verse(db, verse_id)
         delete_like(db=db, verse_id=verse_id, user_id=user_id)
+
+
+def get_verse_likes_service(
+    verse_id: UUID,
+    user_id: Optional[UUID] = None,
+) -> VerseOfDayLikesResponse:
+    with SessionLocal() as db:
+        _require_verse(db, verse_id)
+        like_count = count_verse_likes(db=db, verse_id=verse_id)
+        liked_by_me = (
+            like_exists(db=db, verse_id=verse_id, user_id=user_id)
+            if user_id
+            else False
+        )
+        return VerseOfDayLikesResponse(
+            verse_id=verse_id,
+            like_count=like_count,
+            liked_by_me=liked_by_me,
+        )

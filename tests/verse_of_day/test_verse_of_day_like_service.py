@@ -7,6 +7,8 @@ from fastapi import HTTPException
 from starlette import status
 
 from pecha_api.verse_of_day.like_service import (
+    _isoformat,
+    get_verse_likes_service,
     like_verse_of_day_service,
     unlike_verse_of_day_service,
 )
@@ -24,6 +26,7 @@ class MockLike:
 
 class TestLikeVerseOfDayService:
 
+    @patch("pecha_api.verse_of_day.like_service.VerseOfDayLike")
     @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
     @patch("pecha_api.verse_of_day.like_service.create_like")
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
@@ -34,6 +37,7 @@ class TestLikeVerseOfDayService:
         mock_get_verse,
         mock_create_like,
         mock_count,
+        mock_like_model,
     ):
         verse_id = uuid4()
         user_id = uuid4()
@@ -51,6 +55,7 @@ class TestLikeVerseOfDayService:
         assert result.like_count == 1
         assert result.is_new is True
 
+    @patch("pecha_api.verse_of_day.like_service.VerseOfDayLike")
     @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
     @patch("pecha_api.verse_of_day.like_service.create_like")
     @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
@@ -61,6 +66,7 @@ class TestLikeVerseOfDayService:
         mock_get_verse,
         mock_create_like,
         mock_count,
+        mock_like_model,
     ):
         verse_id = uuid4()
         user_id = uuid4()
@@ -101,3 +107,49 @@ class TestUnlikeVerseOfDayService:
         unlike_verse_of_day_service(verse_id=verse_id, user_id=user_id)
 
         mock_delete.assert_called_once_with(db=mock_db, verse_id=verse_id, user_id=user_id)
+
+
+class TestGetVerseLikesService:
+
+    @patch("pecha_api.verse_of_day.like_service.like_exists")
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
+    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
+    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
+    def test_get_likes_anonymous(
+        self, mock_session, mock_get_verse, mock_count, mock_exists
+    ):
+        verse_id = uuid4()
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_verse.return_value = MockVerse(verse_id)
+        mock_count.return_value = 10
+
+        result = get_verse_likes_service(verse_id=verse_id, user_id=None)
+
+        assert result.like_count == 10
+        assert result.liked_by_me is False
+        mock_exists.assert_not_called()
+
+    @patch("pecha_api.verse_of_day.like_service.like_exists")
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
+    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
+    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
+    def test_get_likes_authenticated(
+        self, mock_session, mock_get_verse, mock_count, mock_exists
+    ):
+        verse_id = uuid4()
+        user_id = uuid4()
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_verse.return_value = MockVerse(verse_id)
+        mock_count.return_value = 2
+        mock_exists.return_value = True
+
+        result = get_verse_likes_service(verse_id=verse_id, user_id=user_id)
+
+        assert result.liked_by_me is True
+        mock_exists.assert_called_once()
+
+
+class TestLikeServiceHelpers:
+
+    def test_isoformat_none(self):
+        assert _isoformat(None) is None

@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session, selectinload
@@ -38,3 +38,16 @@ def create_comment(db: Session, comment: VerseOfDayComment) -> VerseOfDayComment
         .filter(VerseOfDayComment.id == comment.id)
         .one()
     )
+
+
+def get_comment_by_id(db: Session, comment_id: UUID) -> Optional[VerseOfDayComment]:
+    return (
+        db.query(VerseOfDayComment)
+        .filter(VerseOfDayComment.id == comment_id)
+        .first()
+    )
+
+
+def delete_comment(db: Session, comment: VerseOfDayComment) -> None:
+    db.delete(comment)
+    db.commit()

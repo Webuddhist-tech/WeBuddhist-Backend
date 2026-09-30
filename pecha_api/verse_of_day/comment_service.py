@@ -1,8 +1,9 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.config import get
@@ -13,6 +14,8 @@ from pecha_api.users.users_models import Users
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
 from pecha_api.verse_of_day.comment_repository import (
     create_comment,
+    delete_comment,
+    get_comment_by_id,
     get_verse_comments,
 )
 from pecha_api.verse_of_day.comment_response_models import (
@@ -25,7 +28,7 @@ from pecha_api.verse_of_day.verse_of_day_repository import get_verse_of_day_by_i
 logger = logging.getLogger(__name__)
 
 
-def _isoformat(value) -> Optional[str]:
+def _isoformat(value: Any) -> Optional[str]:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
@@ -46,14 +49,11 @@ def _generate_avatar_url(avatar_key: Optional[str]) -> Optional[str]:
 
 def _build_comment_user(user: Optional[Users]) -> VerseOfDayCommentUserDTO:
     if not user:
-        return VerseOfDayCommentUserDTO(
-            first_name="Unknown",
-            email="unknown@example.com",
-        )
+        return VerseOfDayCommentUserDTO(first_name="Unknown")
+    first_name = (user.firstname or "").strip() or "User"
     return VerseOfDayCommentUserDTO(
-        first_name=user.firstname,
+        first_name=first_name,
         last_name=user.lastname,
-        email=user.email,
         avatar_url=_generate_avatar_url(user.avatar_url),
     )
 
@@ -69,7 +69,7 @@ def build_comment_dto(comment: VerseOfDayComment) -> VerseOfDayCommentDTO:
     )
 
 
-def _require_verse(db, verse_id: UUID) -> None:
+def _require_verse(db: Session, verse_id: UUID) -> None:
     verse = get_verse_of_day_by_id(db=db, verse_id=verse_id)
     if not verse:
         raise HTTPException(
@@ -113,3 +113,20 @@ def create_verse_comment_service(
         )
         created = create_comment(db=db, comment=comment)
         return build_comment_dto(created)
+
+
+def delete_verse_comment_service(comment_id: UUID, user_id: UUID) -> None:
+    with SessionLocal() as db:
+        comment = get_comment_by_id(db=db, comment_id=comment_id)
+        if not comment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=NOT_FOUND,
+            )
+        _require_verse(db, comment.verse_id)
+        if comment.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own comments",
+            )
+        delete_comment(db=db, comment=comment)

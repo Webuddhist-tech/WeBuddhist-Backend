@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response
@@ -6,18 +6,47 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
 
 from pecha_api.users.users_service import validate_and_extract_user_details
-from pecha_api.verse_of_day.like_response_models import LikeVerseOfDayResponse
+from pecha_api.verse_of_day.like_response_models import (
+    LikeVerseOfDayResponse,
+    VerseOfDayLikesResponse,
+)
 from pecha_api.verse_of_day.like_service import (
+    get_verse_likes_service,
     like_verse_of_day_service,
     unlike_verse_of_day_service,
 )
 
 oauth2_scheme = HTTPBearer()
+oauth2_scheme_optional = HTTPBearer(auto_error=False)
 
 verse_of_day_likes_router = APIRouter(
     prefix="/verse-of-day/{verse_id}/likes",
     tags=["Verse of Day"],
 )
+
+
+@verse_of_day_likes_router.get(
+    "",
+    status_code=status.HTTP_200_OK,
+    response_model=VerseOfDayLikesResponse,
+)
+def get_verse_likes(
+    verse_id: UUID,
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(oauth2_scheme_optional)
+    ] = None,
+) -> VerseOfDayLikesResponse:
+    """Read like count and whether the caller liked this verse (optional auth)."""
+    user_id = None
+    if authentication_credential:
+        try:
+            user = validate_and_extract_user_details(
+                token=authentication_credential.credentials
+            )
+            user_id = user.id
+        except Exception:
+            pass
+    return get_verse_likes_service(verse_id=verse_id, user_id=user_id)
 
 
 @verse_of_day_likes_router.post(

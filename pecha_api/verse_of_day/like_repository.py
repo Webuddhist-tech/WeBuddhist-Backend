@@ -13,7 +13,7 @@ def create_like(db: Session, like: VerseOfDayLike) -> Tuple[VerseOfDayLike, bool
         db.commit()
         db.refresh(like)
         return like, True
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
         existing = (
             db.query(VerseOfDayLike)
@@ -23,6 +23,8 @@ def create_like(db: Session, like: VerseOfDayLike) -> Tuple[VerseOfDayLike, bool
             )
             .first()
         )
+        if existing is None:
+            raise exc
         return existing, False
 
 
@@ -41,3 +43,15 @@ def delete_like(db: Session, verse_id: UUID, user_id: UUID) -> bool:
 
 def count_verse_likes(db: Session, verse_id: UUID) -> int:
     return db.query(VerseOfDayLike).filter(VerseOfDayLike.verse_id == verse_id).count()
+
+
+def like_exists(db: Session, verse_id: UUID, user_id: UUID) -> bool:
+    return (
+        db.query(VerseOfDayLike)
+        .filter(
+            VerseOfDayLike.verse_id == verse_id,
+            VerseOfDayLike.user_id == user_id,
+        )
+        .count()
+        > 0
+    )

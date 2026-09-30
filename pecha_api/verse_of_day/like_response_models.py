@@ -10,3 +10,9 @@ class LikeVerseOfDayResponse(BaseModel):
     like_count: int
     created_at: str
     is_new: bool
+
+
+class VerseOfDayLikesResponse(BaseModel):
+    verse_id: UUID
+    like_count: int
+    liked_by_me: bool
