@@ -644,7 +644,7 @@ class TestGetAccumulatorGroups:
             accumulator_id=accumulator_id,
             skip=0,
             limit=20,
-            joined_only=False,
+            joined_only=False,            language=None,
         )
 
     @patch('pecha_api.accumulator.accumulator_views.get_accumulator_groups_service')
@@ -753,7 +753,7 @@ class TestGetAccumulatorGroups:
             accumulator_id=accumulator_id,
             skip=5,
             limit=1,
-            joined_only=False,
+            joined_only=False,            language=None,
         )
 
     @patch('pecha_api.accumulator.accumulator_views.get_accumulator_groups_service')
@@ -783,7 +783,7 @@ class TestGetAccumulatorGroups:
             accumulator_id=accumulator_id,
             skip=0,
             limit=20,
-            joined_only=True,
+            joined_only=True,            language=None,
         )
 
     @patch('pecha_api.accumulator.accumulator_views.get_accumulator_groups_service')
