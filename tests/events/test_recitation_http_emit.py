@@ -37,6 +37,9 @@ def _http_env(event_error=None, broadcaster=None, allow_set=True, secret=SECRET)
         if event_error is not None:
             mock_event.side_effect = event_error
         stack.enter_context(patch(f"{MODULE}.get_broadcaster", return_value=broadcaster))
+        broadcaster.record = stack.enter_context(
+            patch(f"{MODULE}.record_segment_play_time", new=AsyncMock())
+        )
         yield broadcaster
 
 
@@ -61,6 +64,49 @@ class TestPublishPositionOverHttp:
         assert kwargs["event_id"] == event_id
         assert kwargs["text_id"] == "text-7"
         assert kwargs["segment_id"] == "seg-42"
+
+    def test_play_time_is_measured_after_the_position_goes_out(self):
+        event_id = uuid4()
+        with _http_env() as broadcaster:
+            response = client.post(_url(event_id), json=_body(), headers=AUTH)
+
+        assert response.status_code == status.HTTP_202_ACCEPTED
+        kwargs = broadcaster.record.await_args.kwargs
+        assert kwargs["broadcaster"] is broadcaster
+        assert kwargs["event_id"] == event_id
+        assert kwargs["text_id"] == "text-7"
+        assert kwargs["segment_id"] == "seg-42"
+        assert kwargs["index"] == 12
+        assert kwargs["round_number"] == 3
+        assert kwargs["revision"] == 58
+        assert isinstance(kwargs["accepted_at_ms"], int)
+        assert kwargs["autoplay"] is False
+        assert kwargs["run"] is None
+
+    def test_the_run_is_passed_on(self):
+        with _http_env() as broadcaster:
+            client.post(_url(uuid4()), json=_body(run="run-7"), headers=AUTH)
+
+        assert broadcaster.record.await_args.kwargs["run"] == "run-7"
+
+    def test_a_run_that_could_break_the_mark_is_refused(self):
+        with _http_env():
+            response = client.post(_url(uuid4()), json=_body(run="a|b"), headers=AUTH)
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_an_autoplayed_move_says_so(self):
+        with _http_env() as broadcaster:
+            client.post(_url(uuid4()), json=_body(autoplay=True), headers=AUTH)
+
+        assert broadcaster.record.await_args.kwargs["autoplay"] is True
+
+    def test_no_play_time_when_the_broadcast_fails(self):
+        with _http_env() as broadcaster:
+            broadcaster.broadcast_position.side_effect = Exception("redis down")
+            client.post(_url(uuid4()), json=_body(), headers=AUTH)
+
+        broadcaster.record.assert_not_awaited()
 
     def test_http_and_socket_share_one_fan_out(self):
         """A phone cannot tell which route a position arrived by: same channel,
@@ -182,6 +228,16 @@ class TestEndSessionOverHttp:
         broadcaster.clear_position.assert_awaited_once_with(event_id)
         broadcaster.broadcast_session_ended.assert_awaited_once_with(event_id)
 
+    def test_ending_forgets_the_segment_marks(self):
+        """The gap until the next session is not a line's recitation time."""
+        event_id = uuid4()
+        with _http_env() as broadcaster:
+            broadcaster.clear_position.return_value = True
+            broadcaster.broadcast_session_ended.return_value = True
+            client.post(_url(event_id, "end"), headers=AUTH)
+
+        broadcaster.close_segment_marks.assert_awaited_once_with(event_id)
+
     def test_failing_to_clear_the_snapshot_is_reported(self):
         """204 would tell the controller the puja ended while a stale position
         sits in Redis waiting for the next joiner."""
@@ -217,3 +273,44 @@ class TestEndSessionOverHttp:
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
         broadcaster.broadcast_session_ended.assert_not_awaited()
+
+
+class TestReadSegmentPlayTimes:
+
+    def test_returns_the_texts_play_times(self):
+        from pecha_api.events.recitation_live_models import SegmentPlayTime, SegmentPlayTimesResponse
+
+        stored = SegmentPlayTimesResponse(
+            text_id="text-7",
+            segments=[
+                SegmentPlayTime(
+                    segment_id="seg-1", average_duration_ms=4200, last_duration_ms=4000, sample_count=3
+                )
+            ],
+        )
+        with _http_env(), patch(f"{MODULE}.get_segment_play_times", return_value=stored) as read:
+            response = client.get("/events/recitation/texts/text-7/segment-play-times", headers=AUTH)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "text_id": "text-7",
+            "segments": [
+                {
+                    "segment_id": "seg-1",
+                    "average_duration_ms": 4200,
+                    "last_duration_ms": 4000,
+                    "sample_count": 3,
+                }
+            ],
+        }
+        read.assert_called_once_with(text_id="text-7")
+
+    def test_needs_the_secret(self):
+        with _http_env(), patch(f"{MODULE}.get_segment_play_times") as read:
+            response = client.get(
+                "/events/recitation/texts/text-7/segment-play-times",
+                headers={"X-Recitation-Token": "wrong"},
+            )
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        read.assert_not_called()

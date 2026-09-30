@@ -14,10 +14,12 @@ from pecha_api.events.recitation_websocket import (
     RATE_WINDOW_SECONDS,
     RecitationBroadcaster,
     _ALLOW_SET_SCRIPT,
+    _END_SEGMENT_MARKS_SCRIPT,
     _INSTANCE_ID,
     _PRESENCE_BROADCAST_SCRIPT,
     _PRESENCE_COUNT_SCRIPT,
     _RATE_KEY_PATTERN,
+    _SWAP_SEGMENT_MARK_SCRIPT,
     get_broadcaster,
     init_broadcaster,
     instance_lease_key,
@@ -27,6 +29,8 @@ from pecha_api.events.recitation_websocket import (
     position_state_key,
     presence_field,
     presence_key,
+    segment_boundary_key,
+    segment_mark_key,
 )
 
 
@@ -510,6 +514,78 @@ class TestRecitationPositionSnapshot:
         broadcaster.redis.delete.assert_awaited_once_with(position_state_key(event_id))
 
     @pytest.mark.asyncio
+    async def test_swap_segment_mark_hands_back_the_old_mark(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = "8|6000|0|3|1|seg-a"
+        event_id = uuid4()
+
+        previous = await broadcaster.swap_segment_mark(
+            event_id=event_id,
+            text_id="text-7",
+            mark="9|10000|0|r1|4|1|seg-b",
+            revision=9,
+            line="4|1|seg-b",
+            run="r1",
+        )
+
+        assert previous == "8|6000|0|3|1|seg-a"
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _SWAP_SEGMENT_MARK_SCRIPT,
+            2,
+            segment_mark_key(event_id),
+            segment_boundary_key(event_id),
+            "text-7",
+            "9",
+            "9|10000|0|r1|4|1|seg-b",
+            str(POSITION_TTL_SECONDS),
+            "4|1|seg-b",
+            "r1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_swap_segment_mark_without_a_previous_mark(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = None
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=uuid4(), text_id="t", mark="1|1|1|1|s", revision=1, line="1|1|s"
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_swap_segment_mark_swallows_redis_errors(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.side_effect = Exception("redis down")
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=uuid4(), text_id="t", mark="1|1|1|1|s", revision=1, line="1|1|s"
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_close_segment_marks_records_the_boundary_revision(self):
+        """Deleting the marks would race the writes it has to shut out, so the
+        session's end is recorded as a revision instead."""
+        broadcaster = _broadcaster()
+        event_id = uuid4()
+
+        await broadcaster.close_segment_marks(event_id)
+
+        broadcaster.redis.eval.assert_awaited_once_with(
+            _END_SEGMENT_MARKS_SCRIPT,
+            2,
+            position_revision_key(event_id),
+            segment_boundary_key(event_id),
+            str(POSITION_TTL_SECONDS),
+        )
+        broadcaster.redis.delete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_close_segment_marks_swallows_redis_errors(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.side_effect = Exception("redis down")
+
+        await broadcaster.close_segment_marks(uuid4())
+
+    @pytest.mark.asyncio
     async def test_clear_position_reports_failure(self):
         """The caller has to be able to tell a cleared snapshot from a stale one
         still waiting to greet the next joiner."""
@@ -825,3 +901,330 @@ class TestAllowSetScript:
         for _ in range(MAX_SETS_PER_SECOND):
             assert await broadcaster.allow_set(event_id) is True
         assert await broadcaster.allow_set(event_id) is False
+
+
+def _lua_pattern_to_regex(pattern: str) -> str:
+    """The Lua patterns the mark script matches with, as Python regex.
+
+    Only `%d` and a literal `|` appear; anchors, groups, `+` and `.*` already
+    mean the same thing in both. Anything else raises rather than quietly
+    matching something the real script would not.
+    """
+    unsupported = set(re.findall(r"%(.)", pattern)) - {"d"}
+    if unsupported:
+        raise AssertionError(f"unhandled Lua pattern class(es): {sorted(unsupported)}")
+    return pattern.replace("|", r"\|").replace("%d", r"\d")
+
+
+class _LuaTable(List[str]):
+    """Lua indexes from 1, so `marked[i]` in a translated loop must too."""
+
+    def __getitem__(self, index: Any) -> Any:
+        return super().__getitem__(index - 1)
+
+
+def _translate_mark_script(script: str) -> str:
+    """Turn the segment-mark Lua into Python so a test can run the script itself.
+
+    The same mechanical translation as `_translate_allow_set_script`, plus the
+    numeric for-loop, `~=`, `#t` and `string.match` the mark scripts use. The
+    guards themselves - the revision comparisons, the repeated line, the session
+    boundary, dropping the text the room left - are executed, not restated, so a
+    mistake in any of them fails these tests.
+    """
+    indent = 0
+    lines: List[str] = []
+    for raw in script.strip().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("--"):
+            continue
+        line = line.replace("local ", "")
+        line = line.replace("redis.call(", "redis_call(")
+        line = line.replace("string.match(", "string_match(")
+        line = re.sub(r"KEYS\[(\d+)\]", lambda m: f"keys[{int(m.group(1)) - 1}]", line)
+        line = re.sub(r"ARGV\[(\d+)\]", lambda m: f"argv[{int(m.group(1)) - 1}]", line)
+        line = re.sub(r"#(\w+)", r"len(\1)", line)
+        line = line.replace("~=", "!=")
+        line = re.sub(r"\bfalse\b", "False", line)
+        loop = re.match(r"^for (\w+) = 1, (.+) do$", line)
+        if loop:
+            line = f"for {loop.group(1)} in range(1, {loop.group(2)} + 1):"
+        elif line.endswith(" then"):
+            line = line[: -len(" then")] + ":"
+        if line == "end":
+            indent -= 1
+            continue
+        lines.append("    " * indent + line)
+        if line.endswith(":"):
+            indent += 1
+    if indent != 0:
+        raise AssertionError(f"script translation left indent {indent}")
+    return "\n".join(lines)
+
+
+class _MarkScriptRedis:
+    """GET / SET / INCR / HGET / HSET / HKEYS / HDEL / EXPIRE, enough for
+    `_SWAP_SEGMENT_MARK_SCRIPT` and `_END_SEGMENT_MARKS_SCRIPT`."""
+
+    def __init__(self) -> None:
+        self.strings: Dict[str, str] = {}
+        self.hashes: Dict[str, Dict[str, str]] = {}
+        self.ttl: Dict[str, int] = {}
+
+    def redis_call(self, command: str, *args: Any) -> Any:
+        command = command.upper()
+        key = args[0]
+        if command == "GET":
+            return self.strings.get(key, False)
+        if command == "SET":
+            self.strings[key] = str(args[1])
+            if len(args) >= 4 and str(args[2]).upper() == "EX":
+                self.ttl[key] = int(args[3])
+            return "OK"
+        if command == "INCR":
+            self.strings[key] = str(int(self.strings.get(key, 0)) + 1)
+            return int(self.strings[key])
+        if command == "HGET":
+            return self.hashes.get(key, {}).get(args[1], False)
+        if command == "HSET":
+            self.hashes.setdefault(key, {})[args[1]] = args[2]
+            return 1
+        if command == "HKEYS":
+            return _LuaTable(self.hashes.get(key, {}).keys())
+        if command == "HDEL":
+            return int(self.hashes.get(key, {}).pop(args[1], None) is not None)
+        if command == "EXPIRE":
+            if key not in self.hashes and key not in self.strings:
+                return 0
+            self.ttl[key] = int(args[1])
+            return 1
+        raise AssertionError(f"unexpected redis command {command}")
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any:
+        keys = list(keys_and_args[:numkeys])
+        argv = list(keys_and_args[numkeys:])
+
+        def tonumber(value: Any) -> Optional[int]:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def string_match(value: str, pattern: str) -> Any:
+            found = re.match(_lua_pattern_to_regex(pattern), value)
+            if not found:
+                return (None,) * (pattern.count("(") or 1)
+            groups = found.groups()
+            return groups if len(groups) != 1 else groups[0]
+
+        namespace: Dict[str, Any] = {
+            "keys": keys,
+            "argv": argv,
+            "redis_call": self.redis_call,
+            "tonumber": tonumber,
+            "string_match": string_match,
+        }
+        body = _translate_mark_script(script)
+        exec(f"def _run():\n{textwrap_indent(body)}\n", namespace)
+        return namespace["_run"]()
+
+
+def _mark(revision: int, at_ms: int, line: str, autoplay: bool = False, run: str = "r1") -> str:
+    return f"{revision}|{at_ms}|{1 if autoplay else 0}|{run}|{line}"
+
+
+class TestSwapSegmentMarkScript:
+    """The script's own branches, run rather than stubbed: a broken guard here
+    teaches the controller wrong play times."""
+
+    KEY = "recitation:event:demo:marks"
+    BOUNDARY = "recitation:event:demo:mark-boundary"
+    REVISION = "recitation:event:demo:rev"
+    TTL = str(POSITION_TTL_SECONDS)
+
+    async def _swap(
+        self,
+        redis: _MarkScriptRedis,
+        text_id: str,
+        revision: int,
+        line: str,
+        at_ms: int = 0,
+        run: str = "r1",
+    ) -> Any:
+        # Marks and the boundary are numbered by the same counter in production,
+        # so a mark has to leave it standing at its own revision.
+        redis.strings[self.REVISION] = str(revision)
+        return await redis.eval(
+            _SWAP_SEGMENT_MARK_SCRIPT,
+            2,
+            self.KEY,
+            self.BOUNDARY,
+            text_id,
+            str(revision),
+            _mark(revision, at_ms, line, run=run),
+            self.TTL,
+            line,
+            run,
+        )
+
+    async def _end(self, redis: _MarkScriptRedis) -> int:
+        await redis.eval(
+            _END_SEGMENT_MARKS_SCRIPT, 2, self.REVISION, self.BOUNDARY, self.TTL
+        )
+        return int(redis.strings[self.BOUNDARY])
+
+    @pytest.mark.asyncio
+    async def test_the_first_mark_has_nothing_to_measure_against(self):
+        redis = _MarkScriptRedis()
+
+        assert await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000) is False
+        assert redis.hashes[self.KEY] == {"text-1": "5|1000|0|r1|3|1|seg-c"}
+        assert redis.ttl[self.KEY] == POSITION_TTL_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_the_next_line_hands_back_the_mark_it_replaced(self):
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000)
+
+        previous = await self._swap(redis, "text-1", 6, "4|1|seg-d", at_ms=4000)
+
+        assert previous == "5|1000|0|r1|3|1|seg-c"
+        assert redis.hashes[self.KEY] == {"text-1": "6|4000|0|r1|4|1|seg-d"}
+
+    @pytest.mark.asyncio
+    async def test_a_mark_that_arrives_late_is_refused(self):
+        """Background work is not ordered; an older mark must not overwrite a
+        newer one, nor be measured against it."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 6, "4|1|seg-d", at_ms=4000)
+
+        assert await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000) is False
+        assert redis.hashes[self.KEY] == {"text-1": "6|4000|0|r1|4|1|seg-d"}
+
+    @pytest.mark.asyncio
+    async def test_the_same_revision_is_refused(self):
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 6, "4|1|seg-d", at_ms=4000)
+
+        assert await self._swap(redis, "text-1", 6, "9|1|seg-z", at_ms=9000) is False
+        assert redis.hashes[self.KEY] == {"text-1": "6|4000|0|r1|4|1|seg-d"}
+
+    @pytest.mark.asyncio
+    async def test_a_line_sent_twice_keeps_the_first_mark(self):
+        """The line started when the room reached it, not when the controller
+        re-sent the edition on screen."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000)
+
+        assert await self._swap(redis, "text-1", 6, "3|1|seg-c", at_ms=4000) is False
+        assert redis.hashes[self.KEY] == {"text-1": "5|1000|0|r1|3|1|seg-c"}
+
+    @pytest.mark.asyncio
+    async def test_the_same_line_in_a_new_run_is_a_new_mark(self):
+        """The room came back to the text on the line it left: the line starts
+        again now, so the next one measures from here, not from the old run."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000, run="r1")
+
+        previous = await self._swap(redis, "text-1", 8, "3|1|seg-c", at_ms=50000, run="r2")
+
+        assert previous == "5|1000|0|r1|3|1|seg-c"
+        assert redis.hashes[self.KEY] == {"text-1": "8|50000|0|r2|3|1|seg-c"}
+        previous = await self._swap(redis, "text-1", 9, "4|1|seg-d", at_ms=53000, run="r2")
+        assert previous == "8|50000|0|r2|3|1|seg-c"
+
+    @pytest.mark.asyncio
+    async def test_the_same_segment_in_a_new_round_is_a_new_line(self):
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000)
+
+        previous = await self._swap(redis, "text-1", 6, "3|2|seg-c", at_ms=4000)
+
+        assert previous == "5|1000|0|r1|3|1|seg-c"
+
+    @pytest.mark.asyncio
+    async def test_a_late_mark_never_takes_another_texts_newer_one(self):
+        """Background work runs in any order; one text's mark is only ever
+        written, never deleted, by another's."""
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 1, "0|1|a-a")
+        await self._swap(redis, "text-2", 3, "0|1|b-a")
+
+        await self._swap(redis, "text-1", 2, "1|1|a-b")
+
+        assert redis.hashes[self.KEY]["text-2"] == "3|0|0|r1|0|1|b-a"
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_measured_across_a_session_that_ended(self):
+        redis = _MarkScriptRedis()
+        await self._swap(redis, "text-1", 5, "3|1|seg-c", at_ms=1000)
+
+        boundary = await self._end(redis)
+
+        # The next session's first line writes, but measures nothing.
+        assert await self._swap(
+            redis, "text-1", boundary + 1, "4|1|seg-d", at_ms=900000
+        ) is False
+        # Its second line measures from the first, not from the old session.
+        previous = await self._swap(
+            redis, "text-1", boundary + 2, "5|1|seg-e", at_ms=903000
+        )
+        assert previous == f"{boundary + 1}|900000|0|r1|4|1|seg-d"
+
+    @pytest.mark.asyncio
+    async def test_a_mark_from_before_the_boundary_is_never_written(self):
+        """The end frame and the set frames before it are both background work.
+        Whichever lands last, the ended session's mark must not survive."""
+        redis = _MarkScriptRedis()
+        boundary = await self._end(redis)
+
+        assert await self._swap(redis, "text-1", boundary, "3|1|seg-c") is False
+        assert await self._swap(redis, "text-1", boundary - 1, "2|1|seg-b") is False
+        assert redis.hashes.get(self.KEY, {}) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_boundary_is_taken_from_the_shared_revision_counter(self):
+        """A revision no position can ever be given: every later one is above."""
+        redis = _MarkScriptRedis()
+        redis.strings[self.REVISION] = "11"
+
+        returned = await redis.eval(
+            _END_SEGMENT_MARKS_SCRIPT, 2, self.REVISION, self.BOUNDARY, self.TTL
+        )
+
+        assert returned == 12
+        assert redis.strings[self.BOUNDARY] == "12"
+        assert redis.ttl[self.BOUNDARY] == POSITION_TTL_SECONDS
+
+
+class TestSegmentMarksAgainstThatRedis:
+    """The broadcaster's own calls, driven through the real scripts."""
+
+    @staticmethod
+    def _broadcaster_on_script_redis() -> RecitationBroadcaster:
+        broadcaster = RecitationBroadcaster("redis://localhost:6379/0")
+        broadcaster.redis = _MarkScriptRedis()
+        return broadcaster
+
+    @pytest.mark.asyncio
+    async def test_a_closed_session_leaves_nothing_to_measure(self):
+        broadcaster = self._broadcaster_on_script_redis()
+        event_id = uuid4()
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=event_id,
+            text_id="text-1",
+            mark=_mark(1, 1000, "3|1|seg-c"),
+            revision=1,
+            line="3|1|seg-c",
+        ) is None
+
+        await broadcaster.close_segment_marks(event_id)
+
+        assert await broadcaster.swap_segment_mark(
+            event_id=event_id,
+            text_id="text-1",
+            mark=_mark(9, 900000, "4|1|seg-d"),
+            revision=9,
+            line="4|1|seg-d",
+        ) is None

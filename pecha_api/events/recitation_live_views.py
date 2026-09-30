@@ -2,21 +2,38 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Coroutine, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import ValidationError
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.events.recitation_dependencies import verify_recitation_emit_token
-from pecha_api.events.recitation_live_models import PositionAcceptedResponse, SetPositionFrame
+from pecha_api.events.recitation_live_models import (
+    PositionAcceptedResponse,
+    SegmentPlayTimesResponse,
+    SetPositionFrame,
+)
 from pecha_api.events.recitation_live_service import (
     assert_live_event,
     resolve_recitation_access,
     resolve_recitation_caller,
+)
+from pecha_api.events.recitation_play_time_service import (
+    get_segment_play_times,
+    record_segment_play_time,
 )
 from pecha_api.events.recitation_websocket import (
     RecitationBroadcaster,
@@ -31,8 +48,24 @@ recitation_live_router = APIRouter(
 )
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def _iso(moment: datetime) -> str:
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def _epoch_ms(moment: datetime) -> int:
+    return int(moment.timestamp() * 1000)
+
+
+# Background work started from a socket has no request to hang off, so it is
+# held here until it finishes - the event loop keeps only weak references to
+# tasks, and one collected mid-flight would vanish without a trace.
+_background_tasks: set = set()
+
+
+def _in_background(coroutine: Coroutine[Any, Any, Any]) -> None:
+    task = asyncio.create_task(coroutine)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _error(code: str, message: str) -> dict:
@@ -64,6 +97,7 @@ def _require_broadcaster() -> RecitationBroadcaster:
 async def publish_recitation_position(
     event_id: UUID,
     frame: SetPositionFrame,
+    background_tasks: BackgroundTasks,
 ) -> PositionAcceptedResponse:
     """Emit a position without holding a socket.
 
@@ -85,7 +119,8 @@ async def publish_recitation_position(
             detail="Too many positions for this event; slow down",
         )
 
-    server_time = _utc_now_iso()
+    accepted_at = datetime.now(timezone.utc)
+    server_time = _iso(accepted_at)
     try:
         revision = await broadcaster.broadcast_position(
             event_id=event_id,
@@ -101,6 +136,22 @@ async def publish_recitation_position(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to broadcast position",
         )
+
+    # After the response: the room has its position before a play time is
+    # worked out or written.
+    background_tasks.add_task(
+        record_segment_play_time,
+        broadcaster=broadcaster,
+        event_id=event_id,
+        text_id=frame.text_id,
+        segment_id=frame.segment_id,
+        index=frame.index,
+        round_number=frame.round_number,
+        revision=revision,
+        accepted_at_ms=_epoch_ms(accepted_at),
+        autoplay=frame.autoplay,
+        run=frame.run,
+    )
 
     return PositionAcceptedResponse(
         event_id=event_id,
@@ -119,7 +170,10 @@ async def publish_recitation_position(
     summary="End a recitation session over HTTP",
     dependencies=[Depends(verify_recitation_emit_token)],
 )
-async def end_recitation_session(event_id: UUID) -> Response:
+async def end_recitation_session(
+    event_id: UUID,
+    background_tasks: BackgroundTasks,
+) -> Response:
     """The `end` frame's HTTP twin.
 
     A socket-less controller needs this: without it a session it started would
@@ -141,7 +195,20 @@ async def end_recitation_session(event_id: UUID) -> Response:
             detail="Failed to end the recitation session; retry",
         )
 
+    background_tasks.add_task(broadcaster.close_segment_marks, event_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@recitation_live_router.get(
+    "/recitation/texts/{text_id}/segment-play-times",
+    summary="How long each line of a text takes to recite",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def read_segment_play_times(text_id: str) -> SegmentPlayTimesResponse:
+    """What the controller plays a text back from: each segment's recitation
+    time, learned from the positions published during earlier pujas. Segments
+    never yet recited through to the next line are absent."""
+    return await run_in_threadpool(get_segment_play_times, text_id=text_id)
 
 
 @recitation_live_router.websocket("/{event_id}/recitation/live")
@@ -359,6 +426,8 @@ async def websocket_recitation_live(
                         await websocket.send_json(
                             _error("SERVER_ERROR", "Failed to end the session; try again")
                         )
+                    else:
+                        _in_background(broadcaster.close_segment_marks(event_id))
                     continue
 
                 try:
@@ -375,15 +444,28 @@ async def websocket_recitation_live(
                     logger.warning("Recitation set throttled for event %s", event_id)
                     continue
 
+                accepted_at = datetime.now(timezone.utc)
                 try:
-                    await broadcaster.broadcast_position(
+                    revision = await broadcaster.broadcast_position(
                         event_id=event_id,
                         text_id=frame.text_id,
                         segment_id=frame.segment_id,
                         index=frame.index,
                         round_number=frame.round_number,
-                        server_time=_utc_now_iso(),
+                        server_time=_iso(accepted_at),
                     )
+                    _in_background(record_segment_play_time(
+                        broadcaster=broadcaster,
+                        event_id=event_id,
+                        text_id=frame.text_id,
+                        segment_id=frame.segment_id,
+                        index=frame.index,
+                        round_number=frame.round_number,
+                        revision=revision,
+                        accepted_at_ms=_epoch_ms(accepted_at),
+                        autoplay=frame.autoplay,
+                        run=frame.run,
+                    ))
                 except Exception as e:
                     logger.exception("Failed to broadcast recitation position: %s", e)
                     await websocket.send_json(
