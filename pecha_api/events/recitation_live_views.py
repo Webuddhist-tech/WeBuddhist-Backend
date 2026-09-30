@@ -202,12 +202,14 @@ async def end_recitation_session(
 @recitation_live_router.get(
     "/recitation/texts/{text_id}/segment-play-times",
     summary="How long each line of a text takes to recite",
-    dependencies=[Depends(verify_recitation_emit_token)],
 )
 async def read_segment_play_times(text_id: str) -> SegmentPlayTimesResponse:
     """What the controller plays a text back from: each segment's recitation
     time, learned from the positions published during earlier pujas. Segments
-    never yet recited through to the next line are absent."""
+    never yet recited through to the next line are absent.
+
+    Public on purpose: these are durations of a public text, nothing that moves
+    a room, so signed-out pages such as the autoplay test can read them."""
     return await run_in_threadpool(get_segment_play_times, text_id=text_id)
 
 

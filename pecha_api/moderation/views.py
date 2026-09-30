@@ -5,8 +5,11 @@ from fastapi import APIRouter, Depends, Query
 from starlette import status
 
 from pecha_api.moderation.enums import GroupReportKind
-from pecha_api.moderation.response_models import GroupReportsResponse
-from pecha_api.moderation.service import list_group_reports_service
+from pecha_api.moderation.response_models import GroupReportDTO, GroupReportsResponse
+from pecha_api.moderation.service import (
+    list_group_reports_service,
+    resolve_group_report_service,
+)
 from pecha_api.plans.auth.cms_auth_deps import get_cms_author_token
 
 group_reports_router = APIRouter(
@@ -42,4 +45,23 @@ def get_group_reports(
         kind=kind,
         reason=reason,
         resolved=resolved,
+    )
+
+
+@group_reports_router.patch(
+    "/{report_id}/resolve",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupReportDTO,
+)
+def resolve_group_report(
+    group_id: UUID,
+    report_id: UUID,
+    token: Annotated[str, Depends(get_cms_author_token)] = "",
+) -> GroupReportDTO:
+    """Resolve (soft-delete) a report in the group's queue: it gets a
+    resolved_at and drops out of `resolved=false`, but the row is kept. Works
+    for chat, post and comment reports alike. Group owner/admin or super admin.
+    Resolving an already resolved report returns it unchanged."""
+    return resolve_group_report_service(
+        token=token, group_id=group_id, report_id=report_id
     )

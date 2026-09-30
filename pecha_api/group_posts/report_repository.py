@@ -1,8 +1,9 @@
 """Persistence for group post and comment moderation reports."""
+from datetime import datetime
 from typing import Any, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session, selectinload
 
 from pecha_api.group_posts.models import GroupPost
@@ -85,3 +86,30 @@ def list_group_post_reports(
         .all()
     )
     return reports, total
+
+
+def get_group_post_report_by_id(
+    db: Session, report_id: UUID
+) -> Optional[GroupPostReport]:
+    """One report, with its post loaded so the caller can check the group."""
+    return (
+        db.query(GroupPostReport)
+        .options(*_display_options())
+        .filter(GroupPostReport.id == report_id)
+        .first()
+    )
+
+
+def resolve_open_reports_for_comment(
+    db: Session, comment_id: UUID, resolved_at: datetime
+) -> None:
+    """Close every open report against a comment. Does not commit, so it lands
+    in the same transaction as the moderator's delete."""
+    db.execute(
+        update(GroupPostReport)
+        .where(
+            GroupPostReport.comment_id == comment_id,
+            GroupPostReport.resolved_at.is_(None),
+        )
+        .values(resolved_at=resolved_at)
+    )

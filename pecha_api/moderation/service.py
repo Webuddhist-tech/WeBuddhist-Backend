@@ -1,10 +1,14 @@
-"""A group's combined moderation queue.
+"""A group's combined moderation queue, and the actions taken on it.
 
 Chat message reports and post/comment reports live in separate tables, so the
 two are queried independently and merged here. `kind` narrows to one of them,
 which skips the other query entirely.
+
+Resolving a report is its soft delete: `resolved_at` is set and the row stays
+for the record. The CMS content deletes resolve the open reports on what
+they delete.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
@@ -12,11 +16,17 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from starlette import status
 
-from pecha_api.chat.models import ChatMessageReport
-from pecha_api.chat.repository import list_reports as list_chat_reports
+from pecha_api.chat.models import ChatMessageReport, ChatRoom
+from pecha_api.chat.repository import (
+    get_report_by_id as get_chat_report_by_id,
+    list_reports as list_chat_reports,
+)
 from pecha_api.db.database import SessionLocal
 from pecha_api.group_posts.report_models import GroupPostReport
-from pecha_api.group_posts.report_repository import list_group_post_reports
+from pecha_api.group_posts.report_repository import (
+    get_group_post_report_by_id,
+    list_group_post_reports,
+)
 from pecha_api.moderation.enums import GroupReportKind
 from pecha_api.moderation.response_models import (
     GroupReportDTO,
@@ -26,9 +36,11 @@ from pecha_api.moderation.response_models import (
 from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details
 from pecha_api.plans.groups.groups_enums import AuthorGroupMemberRole
+from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.plans.shared.permissions import (
     is_reviewer,
     is_super_admin,
+    require_cms_write_access,
     require_group_member,
 )
 from pecha_api.users.users_models import Users
@@ -44,6 +56,22 @@ def _require_group_moderator(db: Session, group_id: UUID, author: Author) -> Non
     require_group_member(
         db=db, group_id=group_id, author=author, allowed_roles=_MODERATOR_ROLES
     )
+
+
+def _require_group_moderator_write(
+    db: Session, group_id: UUID, author: Author
+) -> None:
+    """As _require_group_moderator, minus reviewers: their platform role is
+    read-only, so they can see the queue but not act on it - even in a group
+    they own or admin."""
+    require_cms_write_access(author)
+    require_group_member(
+        db=db, group_id=group_id, author=author, allowed_roles=_MODERATOR_ROLES
+    )
+
+
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
 
 def _user_dto(user: Optional[Users]) -> Optional[GroupReportUserDTO]:
@@ -163,3 +191,40 @@ def list_group_reports_service(
         limit=limit,
         total=total,
     )
+
+
+def _chat_report_room(report: ChatMessageReport) -> Optional[ChatRoom]:
+    # Older manual reports carry no room_id and reach their room through the
+    # message, as in list_reports.
+    if report.room is not None:
+        return report.room
+    return report.message.room if report.message else None
+
+
+def resolve_group_report_service(
+    token: str, group_id: UUID, report_id: UUID
+) -> GroupReportDTO:
+    """Mark one of the group's reports resolved. Report ids are UUIDs across
+    both tables, so the id alone says which one it is. Resolving an already
+    resolved report returns it unchanged."""
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        _require_group_moderator_write(db=db, group_id=group_id, author=author)
+
+        chat_report = get_chat_report_by_id(db=db, report_id=report_id)
+        if chat_report is not None:
+            room = _chat_report_room(chat_report)
+            if room is None or room.group_id != group_id:
+                raise _not_found()
+            if chat_report.resolved_at is None:
+                chat_report.resolved_at = datetime.now(timezone.utc)
+                db.commit()
+            return _chat_dto(chat_report)
+
+        post_report = get_group_post_report_by_id(db=db, report_id=report_id)
+        if post_report is None or post_report.post.group_id != group_id:
+            raise _not_found()
+        if post_report.resolved_at is None:
+            post_report.resolved_at = datetime.now(timezone.utc)
+            db.commit()
+        return _post_dto(post_report)

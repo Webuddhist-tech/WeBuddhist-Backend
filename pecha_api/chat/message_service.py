@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence
 from uuid import UUID
 
@@ -46,6 +47,7 @@ from pecha_api.chat.repository import (
     list_message_reactions,
     remove_prayer_and_count,
     remove_reaction,
+    resolve_open_reports_for_message,
     soft_delete_message,
     soft_delete_messages,
     touch_room,
@@ -386,6 +388,25 @@ def delete_message_service(room_id: UUID, message_id: UUID, user: Users) -> str:
                 room=room, message_type=message_type
             )
         return deleted_at.isoformat()
+
+
+def moderator_delete_message(db: Session, message: ChatMessage) -> datetime:
+    """Soft-delete any member's message on a moderator's behalf and close the
+    open reports against it in the same commit. The caller has already checked
+    the moderator may act on this message's room."""
+    room = message.room
+    message_type = _message_type_value(message)
+    deleted_at = datetime.now(timezone.utc)
+    message.deleted_at = deleted_at
+    resolve_open_reports_for_message(
+        db=db, message_id=message.id, resolved_at=deleted_at
+    )
+    db.commit()
+    if room is not None:
+        _schedule_event_prayer_count_cache_refresh(
+            room=room, message_type=message_type
+        )
+    return deleted_at
 
 
 def edit_message_service(

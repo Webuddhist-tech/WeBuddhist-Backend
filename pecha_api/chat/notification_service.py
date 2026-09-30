@@ -11,7 +11,9 @@ from pecha_api.chat.notification_repository import (
     deactivate_push_device_token_by_id,
     filter_users_by_notification_preference,
     get_active_push_devices_by_user_ids,
+    get_group_avatar_key,
     get_sender_display_name,
+    get_sender_short_name,
     list_event_chat_recipient_user_ids,
     list_group_chat_recipient_user_ids,
     list_private_chat_recipient_user_ids,
@@ -143,9 +145,9 @@ def _build_notification_copy(
         # After the preview was truncated, so the cap applies to the request
         # text and never to the count. A long request is what gets the ellipsis.
         return title, f"{body}{_held_prayer_request_suffix(held_count)}"
-    if chat_kind == "PRIVATE":
-        return sender_name, preview
-    return room_name, f"{sender_name}: {preview}"
+    # Private and group chat alike read as a message from the sender; in a
+    # group the group's avatar, sent alongside, says where it was posted.
+    return sender_name, preview
 
 
 def get_chat_notification_targets(
@@ -169,16 +171,30 @@ def get_chat_notification_targets(
         room = message.room
         chat_kind = room_kind(room)
         message_type = _message_type_value(message)
-        sender_name = get_sender_display_name(db=db, sender_id=message.sender_id)
-        # Only a prayer request carries the room's image: it replaces the room
-        # name the copy drops. Ordinary chat keeps its unchanged look. Resolved
-        # before the copy is built, because whether the image is actually there
-        # decides whether the copy can afford to drop the name.
-        image_url = (
-            _generate_presigned_url(room.img_url)
-            if message_type == ChatMessageType.PRAYER.value
-            else None
+        is_prayer = message_type == ChatMessageType.PRAYER.value
+        is_group_text = not is_prayer and chat_kind != ChatRoomKind.PRIVATE.value
+        # A group or event chat message is titled with the sender's last name
+        # (username without one); prayer requests and private chat keep the
+        # full display name.
+        sender_name = (
+            get_sender_short_name(db=db, sender_id=message.sender_id)
+            if is_group_text
+            else get_sender_display_name(db=db, sender_id=message.sender_id)
         )
+        # A prayer request carries the room's image: it replaces the room name
+        # the copy drops. Resolved before the copy is built, because whether
+        # the image is actually there decides whether the copy can afford to
+        # drop the name. A group or event chat message carries the owning
+        # group's current avatar, so the push says which group it came from.
+        # Private chat has no image.
+        if is_prayer:
+            image_url = _generate_presigned_url(room.img_url)
+        elif is_group_text:
+            image_url = _generate_presigned_url(
+                get_group_avatar_key(db=db, group_id=_owning_group_id(db=db, room=room))
+            )
+        else:
+            image_url = None
         # Counted at read time, so the number matches the rows that exist when
         # the worker asks for targets rather than when the event was enqueued.
         held_count = (
@@ -188,7 +204,7 @@ def get_chat_notification_targets(
                 message_id=message.id,
                 dispatched_at=message.notification_dispatched_at,
             )
-            if message_type == ChatMessageType.PRAYER.value
+            if is_prayer
             else 0
         )
         title, body = _build_notification_copy(

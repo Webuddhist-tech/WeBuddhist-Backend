@@ -9,6 +9,7 @@ from starlette import status
 
 from pecha_api.group_posts.cms_service import (
     cms_create_group_post_service,
+    cms_delete_group_post_comment_service,
     cms_delete_group_post_service,
     cms_get_group_post_detail_service,
     cms_list_group_posts_service,
@@ -171,5 +172,29 @@ def cms_delete_group_post(
         token=authentication_credential.credentials,
         group_id=group_id,
         post_id=post_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@cms_group_posts_router.delete(
+    "/{post_id}/comments/{comment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def cms_delete_group_post_comment(
+    group_id: UUID,
+    post_id: UUID,
+    comment_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    """Soft-delete any member's comment on a group post (moderation).
+
+    Unlike the member-facing DELETE /groups/author/comments/{comment_id},
+    which only deletes the caller's own comment, this deletes a comment
+    regardless of who wrote it. Open reports on the comment are resolved."""
+    cms_delete_group_post_comment_service(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        post_id=post_id,
+        comment_id=comment_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
