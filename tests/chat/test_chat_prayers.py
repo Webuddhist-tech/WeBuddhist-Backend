@@ -291,11 +291,10 @@ class TestPrayForMessagesService:
         self, mock_session, _mock_room, _mock_member, _mock_get_message
     ):
         _session(mock_session)
+        room_id, user, message_ids = uuid4(), MockUser(), [uuid4()]
 
         with pytest.raises(HTTPException) as exc_info:
-            pray_for_messages_service(
-                room_id=uuid4(), user=MockUser(), message_ids=[uuid4()]
-            )
+            pray_for_messages_service(room_id=room_id, user=user, message_ids=message_ids)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -385,9 +384,10 @@ class TestUnprayMessageService:
     ):
         _session(mock_session)
         mock_get_message.return_value = MockMessage(message_type="TEXT")
+        message_id, user = uuid4(), MockUser()
 
         with pytest.raises(HTTPException) as exc_info:
-            unpray_message_service(message_id=uuid4(), user=MockUser())
+            unpray_message_service(message_id=message_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail == "NOT_A_PRAYER_REQUEST"

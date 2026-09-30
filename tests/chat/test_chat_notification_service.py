@@ -90,7 +90,6 @@ class TestPreviewAndCopy:
 
     def test_private_copy_uses_sender_name(self):
         title, body = _build_notification_copy(
-            chat_kind="PRIVATE",
             room_name="Alice & Bob",
             sender_name="Alice Doe",
             message_body="Hello there",
@@ -101,7 +100,6 @@ class TestPreviewAndCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_group_copy_is_titled_with_the_sender_and_carries_the_message(self, _get_int):
         title, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Doe",
             message_body="Hello group",
@@ -113,7 +111,6 @@ class TestPreviewAndCopy:
     def test_prayer_copy_names_the_requester_and_drops_the_room(self, _get_int):
         """With the room's image attached, the name is redundant."""
         title, body = _build_notification_copy(
-            chat_kind="EVENT",
             room_name="Dzongsar Drolma Bumtshok",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah, that her treatment is swift.",
@@ -122,13 +119,13 @@ class TestPreviewAndCopy:
         )
         assert title == "Tenzin Youdon is requesting a prayer 🙏"
         assert body == "For my niece Sarah, that her treatment is swift."
-        assert "Dzongsar" not in title and "Dzongsar" not in body
+        assert "Dzongsar" not in title
+        assert "Dzongsar" not in body
 
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_prayer_without_an_image_keeps_the_room_name(self, _get_int):
         """Nothing else would say which sangha the prayer came from."""
         title, body = _build_notification_copy(
-            chat_kind="EVENT",
             room_name="Dzongsar Drolma Bumtshok",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah, that her treatment is swift.",
@@ -143,7 +140,6 @@ class TestPreviewAndCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=20)
     def test_prayer_body_still_truncates(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Alice Doe",
             message_body="A prayer request far longer than the preview allows",
@@ -158,7 +154,6 @@ class TestPreviewAndCopy:
         """The limit governs the excerpt; the room prefix sits outside it, the
         way the group-chat sender prefix already does."""
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Alice Doe",
             message_body="A prayer request far longer than the preview allows",
@@ -276,7 +271,6 @@ class TestHeldPrayerRequestCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_no_suffix_when_nothing_was_held(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah.",
@@ -289,7 +283,6 @@ class TestHeldPrayerRequestCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_one_held_request_reads_singular(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah.",
@@ -302,7 +295,6 @@ class TestHeldPrayerRequestCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_several_held_requests_read_plural(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah.",
@@ -315,7 +307,6 @@ class TestHeldPrayerRequestCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_suffix_sits_after_the_room_name_prefix(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Tenzin Youdon",
             message_body="For my niece Sarah.",
@@ -330,7 +321,6 @@ class TestHeldPrayerRequestCopy:
         """The cap governs the request text. The count is the part that must
         survive - a long request is what gets the ellipsis."""
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Tenzin Youdon",
             message_body="A prayer request far longer than the preview allows",
@@ -344,7 +334,6 @@ class TestHeldPrayerRequestCopy:
     @patch("pecha_api.chat.notification_service.get_int", return_value=120)
     def test_ordinary_chat_never_gets_the_suffix(self, _get_int):
         _, body = _build_notification_copy(
-            chat_kind="GROUP",
             room_name="Sangha",
             sender_name="Alice Doe",
             message_body="Hello group",

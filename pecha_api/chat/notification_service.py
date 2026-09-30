@@ -122,7 +122,6 @@ def _held_prayer_request_suffix(held_count: int) -> str:
 
 def _build_notification_copy(
     *,
-    chat_kind: str,
     room_name: str,
     sender_name: str,
     message_body: str,
@@ -148,6 +147,89 @@ def _build_notification_copy(
     # Private and group chat alike read as a message from the sender; in a
     # group the group's avatar, sent alongside, says where it was posted.
     return sender_name, preview
+
+
+def _notification_image_url(*, db, room, is_prayer: bool, is_group_text: bool) -> str | None:
+    """A prayer request carries the room's image. A group or event chat message
+    carries the owning group's current avatar, falling back to the room's own
+    image (what the chat list shows) when the group has none. Private chat has
+    no image."""
+    if is_prayer:
+        return _generate_presigned_url(room.img_url)
+    if is_group_text:
+        return _generate_presigned_url(
+            get_group_avatar_key(db=db, group_id=_owning_group_id(db=db, room=room))
+            or room.img_url
+        )
+    return None
+
+
+def _list_notification_recipient_ids(
+    *,
+    db,
+    room,
+    chat_kind: str,
+    sender_id: UUID,
+    skip: int,
+    limit: int,
+) -> tuple[list[UUID], int]:
+    if chat_kind == ChatRoomKind.PRIVATE.value:
+        all_recipient_ids = list_private_chat_recipient_user_ids(
+            room=room,
+            sender_id=sender_id,
+        )
+        # Private chat has no group scope, so only GLOBAL rows can apply.
+        all_recipient_ids = filter_users_by_notification_preference(
+            db=db,
+            user_ids=all_recipient_ids,
+            notification_type=NotificationType.CHAT_MESSAGE,
+        )
+        return all_recipient_ids[skip : skip + limit], len(all_recipient_ids)
+    if chat_kind == ChatRoomKind.EVENT.value:
+        # An event room's audience is its own membership, not the whole
+        # group; preferences still scope to the group that owns the event.
+        return list_event_chat_recipient_user_ids(
+            db=db,
+            room_id=room.id,
+            sender_id=sender_id,
+            group_id=_owning_group_id(db=db, room=room),
+            skip=skip,
+            limit=limit,
+            notification_type=NotificationType.CHAT_MESSAGE,
+        )
+    return list_group_chat_recipient_user_ids(
+        db=db,
+        group_id=room.group_id,
+        sender_id=sender_id,
+        skip=skip,
+        limit=limit,
+        notification_type=NotificationType.CHAT_MESSAGE,
+    )
+
+
+def _build_notification_recipients(
+    *, db, user_ids: list[UUID]
+) -> list[ChatNotificationRecipientDTO]:
+    devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=user_ids)
+    recipients: list[ChatNotificationRecipientDTO] = []
+    for user_id in user_ids:
+        devices = devices_by_user.get(user_id) or []
+        if not devices:
+            continue
+        recipients.append(
+            ChatNotificationRecipientDTO(
+                user_id=user_id,
+                push_devices=[
+                    ChatPushDeviceTargetDTO(
+                        id=device.id,
+                        token=device.token,
+                        platform=normalize_platform(device.platform),
+                    )
+                    for device in devices
+                ],
+            )
+        )
+    return recipients
 
 
 def get_chat_notification_targets(
@@ -188,15 +270,9 @@ def get_chat_notification_targets(
         # group's current avatar, so the push says which group it came from,
         # falling back to the room's own image (what the chat list shows) when
         # the group has none. Private chat has no image.
-        if is_prayer:
-            image_url = _generate_presigned_url(room.img_url)
-        elif is_group_text:
-            image_url = _generate_presigned_url(
-                get_group_avatar_key(db=db, group_id=_owning_group_id(db=db, room=room))
-                or room.img_url
-            )
-        else:
-            image_url = None
+        image_url = _notification_image_url(
+            db=db, room=room, is_prayer=is_prayer, is_group_text=is_group_text
+        )
         # Counted at read time, so the number matches the rows that exist when
         # the worker asks for targets rather than when the event was enqueued.
         held_count = (
@@ -210,7 +286,6 @@ def get_chat_notification_targets(
             else 0
         )
         title, body = _build_notification_copy(
-            chat_kind=chat_kind,
             room_name=room.name,
             sender_name=sender_name,
             message_body=message.body,
@@ -220,60 +295,15 @@ def get_chat_notification_targets(
             has_image=bool(image_url),
         )
 
-        if chat_kind == ChatRoomKind.PRIVATE.value:
-            all_recipient_ids = list_private_chat_recipient_user_ids(
-                room=room,
-                sender_id=message.sender_id,
-            )
-            # Private chat has no group scope, so only GLOBAL rows can apply.
-            all_recipient_ids = filter_users_by_notification_preference(
-                db=db,
-                user_ids=all_recipient_ids,
-                notification_type=NotificationType.CHAT_MESSAGE,
-            )
-            total = len(all_recipient_ids)
-            recipient_ids = all_recipient_ids[skip : skip + limit]
-        elif chat_kind == ChatRoomKind.EVENT.value:
-            # An event room's audience is its own membership, not the whole
-            # group; preferences still scope to the group that owns the event.
-            recipient_ids, total = list_event_chat_recipient_user_ids(
-                db=db,
-                room_id=room.id,
-                sender_id=message.sender_id,
-                group_id=_owning_group_id(db=db, room=room),
-                skip=skip,
-                limit=limit,
-                notification_type=NotificationType.CHAT_MESSAGE,
-            )
-        else:
-            recipient_ids, total = list_group_chat_recipient_user_ids(
-                db=db,
-                group_id=room.group_id,
-                sender_id=message.sender_id,
-                skip=skip,
-                limit=limit,
-                notification_type=NotificationType.CHAT_MESSAGE,
-            )
-
-        devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)
-        recipients: list[ChatNotificationRecipientDTO] = []
-        for user_id in recipient_ids:
-            devices = devices_by_user.get(user_id) or []
-            if not devices:
-                continue
-            recipients.append(
-                ChatNotificationRecipientDTO(
-                    user_id=user_id,
-                    push_devices=[
-                        ChatPushDeviceTargetDTO(
-                            id=device.id,
-                            token=device.token,
-                            platform=normalize_platform(device.platform),
-                        )
-                        for device in devices
-                    ],
-                )
-            )
+        recipient_ids, total = _list_notification_recipient_ids(
+            db=db,
+            room=room,
+            chat_kind=chat_kind,
+            sender_id=message.sender_id,
+            skip=skip,
+            limit=limit,
+        )
+        recipients = _build_notification_recipients(db=db, user_ids=recipient_ids)
 
         return ChatNotificationTargetsResponse(
             message_id=message.id,

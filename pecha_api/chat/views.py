@@ -244,7 +244,6 @@ async def _broadcast_message_updated_safe(room_id: UUID, message: ChatMessageDTO
 @chat_router.patch(
     "/chat/rooms/{room_id}/messages/{message_id}",
     status_code=status.HTTP_200_OK,
-    response_model=ChatMessageDTO,
 )
 async def edit_room_message(
     room_id: UUID,
