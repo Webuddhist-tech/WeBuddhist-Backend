@@ -71,6 +71,86 @@ class PositionAcceptedResponse(BaseModel):
     )
 
 
+# A move is one line in every edition being followed: a handful, never dozens.
+MAX_POSITIONS_PER_MOVE = 20
+
+
+class PublishMoveRequest(BaseModel):
+    """One move: the same line in every edition the room follows.
+
+    Sent as one request rather than one per edition, so the edition on screen
+    is not held back a whole round trip behind the others. The positions go
+    out to the room in the order given, and the event keeps the last one, so
+    the controller puts the edition it is reading last.
+    """
+
+    positions: List[SetPositionFrame] = Field(
+        ..., min_length=1, max_length=MAX_POSITIONS_PER_MOVE
+    )
+
+
+class MoveAcceptedResponse(BaseModel):
+    """Each position of a move as the room received it, in the order sent."""
+
+    positions: List[PositionAcceptedResponse]
+
+
+# Autoplay runs a whole puja from one plan, repeated passages laid out in full.
+MAX_AUTOPLAY_STEPS = 5000
+# Anything shorter is not a line recited; it would race the room through the
+# plan. Matches the shortest play time the recorder keeps.
+MIN_AUTOPLAY_STEP_MS = 300
+# Anything longer is a pause, not a line - again the recorder's own ceiling.
+MAX_AUTOPLAY_STEP_MS = 3 * 60 * 1000
+
+
+class AutoplayStep(BaseModel):
+    """One line of the plan: every edition's position for it, and how long the
+    room is held on it before the next step."""
+
+    positions: List[SetPositionFrame] = Field(
+        ..., min_length=1, max_length=MAX_POSITIONS_PER_MOVE
+    )
+    duration_ms: int = Field(..., ge=MIN_AUTOPLAY_STEP_MS, le=MAX_AUTOPLAY_STEP_MS)
+
+
+class AutoplayStartRequest(BaseModel):
+    """Start autoplay, or replace the plan it is running.
+
+    The controller lays the plan out itself - which lines, which rounds, where
+    the Returns go - so the backend never needs to know what a Return is: it
+    holds each step for its time and moves on. The first step goes out at once.
+    """
+
+    steps: List[AutoplayStep] = Field(..., min_length=1, max_length=MAX_AUTOPLAY_STEPS)
+    # Set when the first step is the line the room is already on and has been
+    # for this long - a plan changed mid-line, say a round count altered. It is
+    # then not sent again, only held for whatever is left of its time.
+    first_step_elapsed_ms: Optional[int] = Field(None, ge=0, le=MAX_AUTOPLAY_STEP_MS)
+
+
+class AutoplayStateResponse(BaseModel):
+    """Where autoplay is: sent back by every command, and pushed to the
+    operator's socket as a `type: "autoplay"` frame whenever it changes."""
+
+    type: str = "autoplay"
+    event_id: UUID
+    plan_id: Optional[str] = None
+    status: str = Field(..., description="running | stopped")
+    reason: Optional[str] = Field(
+        None, description="Why it stopped: finished | stopped | ended | failed"
+    )
+    step: int = 0
+    total_steps: int = 0
+    step_started_at_ms: Optional[int] = Field(
+        None, description="When the current step went out, epoch ms on the server"
+    )
+    step_duration_ms: Optional[int] = None
+    server_time_ms: int = Field(
+        ..., description="The server's clock when this was sent, to line the two clocks up"
+    )
+
+
 class SegmentPlayTime(BaseModel):
     """How long one line takes to recite, as learned from past pujas."""
 

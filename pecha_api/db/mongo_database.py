@@ -49,8 +49,12 @@ async def lifespan(api: FastAPI):
             logging.info("✅ Comment broadcaster initialized with Redis")
             await init_chat_broadcaster(redis_url=redis_url)
             logging.info("✅ Chat broadcaster initialized with Redis")
-            await init_recitation_broadcaster(redis_url=redis_url)
+            recitation_broadcaster = await init_recitation_broadcaster(redis_url=redis_url)
             logging.info("✅ Recitation broadcaster initialized with Redis")
+            from ..events.recitation_autoplay_service import init_autoplay
+            from ..events.recitation_live_views import emit_autoplay_positions
+            await init_autoplay(recitation_broadcaster.redis, emit_autoplay_positions)
+            logging.info("✅ Recitation autoplay initialized")
         except ConnectionRefusedError as e:
             error_msg = (
                 f"❌ REDIS CONNECTION FAILED: Cannot connect to Redis at {get('REDIS_URL')}\n"
@@ -132,6 +136,10 @@ async def lifespan(api: FastAPI):
         if chat_broadcaster:
             await chat_broadcaster.disconnect()
             logging.info("Chat broadcaster disconnected")
+        # Before the broadcaster: autoplay hands its leases back through it, so
+        # another instance carries the room on at once.
+        from ..events.recitation_autoplay_service import shutdown_autoplay
+        await shutdown_autoplay()
         from ..events.recitation_websocket import broadcaster as recitation_broadcaster
         if recitation_broadcaster:
             await recitation_broadcaster.disconnect()
