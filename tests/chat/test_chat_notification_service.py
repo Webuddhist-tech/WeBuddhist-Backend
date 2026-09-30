@@ -934,11 +934,72 @@ class TestGetPrayerNotificationTargets:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_notification.return_value = None
 
-        with pytest.raises(HTTPException) as exc_info:
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=None), \
+                pytest.raises(HTTPException) as exc_info:
             get_prayer_notification_targets(prayer_id=uuid4())
 
         assert exc_info.value.status_code == 404
         mock_get_message.assert_not_called()
+
+    def test_an_event_queued_before_deploy_still_resolves(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        """Its prayer_id is a chat_message_prayers id: read as one person
+        praying once."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        mock_group.return_value = group_id
+        mock_get_notification.return_value = None
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {message.sender_id: [MockDevice(user_id=message.sender_id)]}
+        legacy = SimpleNamespace(id=uuid4(), message_id=message.id, user_id=uuid4())
+
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=legacy):
+            result = get_prayer_notification_targets(prayer_id=legacy.id)
+
+        assert mock_get_message.call_args.kwargs["message_id"] == message.id
+        assert result.prayer_id == legacy.id
+        assert result.body == "Kunsang prayed for you"
+        assert result.people_count == 1
+        assert result.prayer_total == 1
+        assert [r.user_id for r in result.recipients] == [message.sender_id]
+
+    def test_a_legacy_self_prayer_notifies_nobody(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        message = self._message(group_id)
+        mock_group.return_value = group_id
+        mock_get_notification.return_value = None
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {}
+        legacy = SimpleNamespace(id=uuid4(), message_id=message.id, user_id=message.sender_id)
+
+        with patch(f"{PRAYER_TARGETS}.get_prayer_by_id", return_value=legacy):
+            result = get_prayer_notification_targets(prayer_id=legacy.id)
+
+        assert result.recipients == []
+        assert result.total == 0
 
 
 class TestDeactivatePushDeviceService:

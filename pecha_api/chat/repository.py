@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
@@ -573,6 +573,14 @@ def get_reactions_map(
     return result
 
 
+def get_prayer_by_id(db: Session, prayer_id: UUID) -> Optional[ChatMessagePrayer]:
+    return (
+        db.query(ChatMessagePrayer)
+        .filter(ChatMessagePrayer.id == prayer_id)
+        .first()
+    )
+
+
 class PrayResult(NamedTuple):
     """What one pray call wrote: the requests the caller prayed for the first
     time, and the caller's running total for every request in the call."""
@@ -618,6 +626,7 @@ def add_prayers(
                 "message_id": message_id,
                 "user_id": user_id,
                 "prayer_count": count,
+                "unreported_count": count,
                 "first_prayed_at": now,
                 "last_prayed_at": now,
             }
@@ -629,6 +638,8 @@ def add_prayers(
         set_={
             "prayer_count": counts_table.c.prayer_count
             + counts_insert.excluded.prayer_count,
+            "unreported_count": counts_table.c.unreported_count
+            + counts_insert.excluded.unreported_count,
             "last_prayed_at": now,
         },
     ).returning(counts_table.c.message_id, counts_table.c.prayer_count)
@@ -951,52 +962,43 @@ def get_last_prayer_notification(
     )
 
 
-class PrayerSummary(NamedTuple):
-    """Prayers for one request since its previous push, requester excluded.
+class UnreportedPrayers(NamedTuple):
+    """One person's prayers for a request that no push has reported yet."""
 
-    `people_count` and `latest_user_id` cover only people who prayed after
-    `since`; `current_sum` is the request's whole running total, which the
-    caller differences against the previous push's `total_at_push`."""
-
-    people_count: int
-    current_sum: int
-    latest_user_id: Optional[UUID]
+    user_id: UUID
+    count: int
+    last_prayed_at: datetime
 
 
-def summarize_prayers_since(
-    db: Session,
-    *,
-    message_id: UUID,
-    requester_id: UUID,
-    since: Optional[datetime],
-) -> PrayerSummary:
-    """Who prayed for this request since `since` (everyone when None), and the
-    request's running total. The requester's own prayers count in neither."""
-    base = db.query(ChatMessagePrayerCount).filter(
-        ChatMessagePrayerCount.message_id == message_id,
-        ChatMessagePrayerCount.user_id != requester_id,
+def claim_unreported_prayers(
+    db: Session, message_id: UUID
+) -> List[UnreportedPrayers]:
+    """Read and zero every unreported prayer count for this request, in one
+    statement. Nothing is committed: the caller commits together with the
+    push row, or rolls back to leave the counts for the next push.
+
+    The rows are locked (FOR UPDATE) before they are read, so a pray landing
+    at the same moment either lands first and is claimed here, or waits and
+    adds to a zeroed count for the next push - never lost in between."""
+    counts = ChatMessagePrayerCount.__table__
+    pending = (
+        select(counts.c.id, counts.c.unreported_count.label("claimed"))
+        .where(counts.c.message_id == message_id, counts.c.unreported_count > 0)
+        .with_for_update()
+        .cte("pending")
     )
-    current_sum = int(
-        base.with_entities(func.coalesce(func.sum(ChatMessagePrayerCount.prayer_count), 0))
-        .scalar()
-        or 0
+    statement = (
+        update(counts)
+        .where(counts.c.id == pending.c.id)
+        .values(unreported_count=0)
+        .returning(counts.c.user_id, pending.c.claimed, counts.c.last_prayed_at)
     )
-    recent = base
-    if since is not None:
-        recent = recent.filter(ChatMessagePrayerCount.last_prayed_at > since)
-    people_count = int(
-        recent.with_entities(func.count(ChatMessagePrayerCount.id)).scalar() or 0
-    )
-    latest = (
-        recent.with_entities(ChatMessagePrayerCount.user_id)
-        .order_by(ChatMessagePrayerCount.last_prayed_at.desc())
-        .first()
-    )
-    return PrayerSummary(
-        people_count=people_count,
-        current_sum=current_sum,
-        latest_user_id=latest[0] if latest else None,
-    )
+    return [
+        UnreportedPrayers(
+            user_id=row[0], count=int(row[1]), last_prayed_at=_as_utc(row[2])
+        )
+        for row in db.execute(statement).all()
+    ]
 
 
 def create_prayer_notification(
@@ -1006,16 +1008,15 @@ def create_prayer_notification(
     people_count: int,
     prayer_total: int,
     latest_user_id: Optional[UUID],
-    total_at_push: int,
 ) -> ChatPrayerNotification:
-    """Record a prayer-received push and commit, which also releases the lock
-    taken by lock_prayer_request."""
+    """Record a prayer-received push and commit - together with the counts
+    claimed by claim_unreported_prayers - which also releases the lock taken
+    by lock_prayer_request."""
     notification = ChatPrayerNotification(
         message_id=message_id,
         people_count=people_count,
         prayer_total=prayer_total,
         latest_user_id=latest_user_id,
-        total_at_push=total_at_push,
     )
     db.add(notification)
     db.commit()

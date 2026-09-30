@@ -448,6 +448,9 @@ def edit_message_service(
                 ).get(message.id, 0),
                 "prayed_by_me": message.id
                 in get_prayed_message_ids(db=db, message_ids=prayer_ids, user_id=user.id),
+                "my_prayer_count": get_my_prayer_counts_map(
+                    db=db, message_ids=prayer_ids, user_id=user.id
+                ).get(message.id, 0),
                 "recent_prayers": get_recent_prayers_map(
                     db=db, message_ids=prayer_ids, per_message=_RECENT_PRAYERS_LIMIT
                 ).get(message.id),

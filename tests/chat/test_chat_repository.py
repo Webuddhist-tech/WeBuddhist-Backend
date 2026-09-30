@@ -26,11 +26,11 @@ from pecha_api.chat.repository import (
     get_room_by_pair,
     get_room_messages,
     add_prayers,
+    claim_unreported_prayers,
     get_my_prayer_counts_map,
     leave_member,
     lock_prayer_request,
     remove_prayer_and_count,
-    summarize_prayers_since,
     list_active_members,
     list_my_active_rooms,
     mark_read,
@@ -460,6 +460,7 @@ class TestAddPrayers:
         counts_sql = str(db.execute.call_args_list[1].args[0])
         assert "ON CONFLICT ON CONSTRAINT uq_chat_message_prayer_counts_message_user" in counts_sql
         assert "prayer_count = (chat_message_prayer_counts.prayer_count + excluded.prayer_count)" in counts_sql
+        assert "unreported_count = (chat_message_prayer_counts.unreported_count + excluded.unreported_count)" in counts_sql
         prayers_sql = str(db.execute.call_args_list[0].args[0])
         assert "DO NOTHING" in prayers_sql
 
@@ -516,54 +517,23 @@ class TestPrayerNotificationGateQueries:
         assert lock_prayer_request(db=db, message_id=uuid4()) is message
         query.with_for_update.assert_called_once()
 
-    def test_summary_without_a_previous_push_counts_everyone(self):
+    def test_claim_locks_reads_and_zeroes_unreported_counts(self):
         db = MagicMock()
-        query = _query_chain(db)
-        query.with_entities.return_value = query
-        latest = uuid4()
-        query.scalar.side_effect = [100, 10]
-        query.first.return_value = (latest,)
+        tenzin, dolma = uuid4(), uuid4()
+        earlier = datetime(2026, 9, 30, 10, 0, tzinfo=tz.utc)
+        later = datetime(2026, 9, 30, 10, 5)  # naive, as SQLite hands it back
+        db.execute.return_value.all.return_value = [(tenzin, 3, earlier), (dolma, 10, later)]
 
-        summary = summarize_prayers_since(
-            db=db, message_id=uuid4(), requester_id=uuid4(), since=None
-        )
+        claimed = claim_unreported_prayers(db=db, message_id=uuid4())
 
-        assert summary.current_sum == 100
-        assert summary.people_count == 10
-        assert summary.latest_user_id == latest
-        # Only the base filter (request, not the requester); no time bound.
-        assert query.filter.call_count == 1
-
-    def test_summary_since_a_push_bounds_people_by_last_prayed_at(self):
-        db = MagicMock()
-        query = _query_chain(db)
-        query.with_entities.return_value = query
-        query.scalar.side_effect = [110, 1]
-        query.first.return_value = None
-
-        summary = summarize_prayers_since(
-            db=db,
-            message_id=uuid4(),
-            requester_id=uuid4(),
-            since=datetime.now(tz.utc),
-        )
-
-        assert query.filter.call_count == 2
-        assert "last_prayed_at >" in str(query.filter.call_args_list[1].args[0])
-        assert summary.latest_user_id is None
-
-    def test_summary_excludes_the_requester(self):
-        db = MagicMock()
-        query = _query_chain(db)
-        query.with_entities.return_value = query
-        query.scalar.side_effect = [0, 0]
-
-        summarize_prayers_since(
-            db=db, message_id=uuid4(), requester_id=uuid4(), since=None
-        )
-
-        conditions = [str(arg) for arg in query.filter.call_args_list[0].args]
-        assert any("user_id !=" in condition for condition in conditions)
+        assert [(row.user_id, row.count) for row in claimed] == [(tenzin, 3), (dolma, 10)]
+        assert claimed[1].last_prayed_at.tzinfo is not None
+        sql = str(db.execute.call_args.args[0])
+        assert "FOR UPDATE" in sql
+        assert "unreported_count > " in sql
+        assert "SET unreported_count=" in sql
+        # The caller commits together with the push row.
+        db.commit.assert_not_called()
 
 
 class TestSuppressedSentinel:

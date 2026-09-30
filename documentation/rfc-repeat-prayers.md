@@ -33,11 +33,12 @@
 | `message_id` | UUID FK → `chat_messages.id` ON DELETE CASCADE | |
 | `user_id` | UUID FK → `users.id` ON DELETE CASCADE | |
 | `prayer_count` | BIGINT NOT NULL | CHECK `>= 1` |
+| `unreported_count` | BIGINT NOT NULL DEFAULT 0 | Prayers not yet reported to the requester. Each pray adds to it; a push reads and zeroes it (§7) |
 | `first_prayed_at`, `last_prayed_at` | TIMESTAMPTZ NOT NULL | |
 
 - UNIQUE `(message_id, user_id)` is the upsert target.
 - The index `(message_id, last_prayed_at DESC)` backs the roster.
-- The migration backfills one row (`prayer_count = 1`) per existing `chat_message_prayers` row.
+- The migration backfills one row (`prayer_count = 1`, `unreported_count = 0`) per existing `chat_message_prayers` row. Those prayers were covered by the old notifications, so they are never reported again.
 
 ### `chat_prayer_notifications` (new)
 
@@ -47,10 +48,9 @@ This table holds one row per prayer push sent (or queued) to a requester. It rep
 |--------|------|-------|
 | `id` | UUID PK | Sent to the worker (§4) |
 | `message_id` | UUID FK → `chat_messages.id` ON DELETE CASCADE | The prayer request |
-| `people_count` | INTEGER NOT NULL | Distinct people who prayed since the previous push |
-| `prayer_total` | BIGINT NOT NULL | Prayers added since the previous push |
+| `people_count` | INTEGER NOT NULL | Distinct people whose prayers this push reports |
+| `prayer_total` | BIGINT NOT NULL | Prayers this push reports |
 | `latest_user_id` | UUID FK → `users.id` ON DELETE SET NULL | The name shown in the push |
-| `total_at_push` | BIGINT NOT NULL | `SUM(prayer_count)` for the request at this push, excluding the requester. The next push subtracts it |
 | `created_at` | TIMESTAMPTZ NOT NULL | Starts the interval |
 | `notification_sqs_message_id`, `notification_dispatched_at` | | As on other notification rows; `NULL` means reconcile retries it |
 
@@ -99,11 +99,10 @@ To offer 100 prayers, the client sends `count: 10` once a second for 10 seconds.
 - **Gate:** it runs for each prayed-for request after the pray commit, and does nothing if the caller is the requester.
   1. Lock the prayer request's `chat_messages` row (`SELECT … FOR UPDATE`). The lock stops two concurrent calls from both deciding to push (§7).
   2. Read the request's last `chat_prayer_notifications` row. If its `created_at` is inside the interval, stop. These prayers are counted in the next push.
-  3. Otherwise, compute the summary since the previous push, excluding the requester's own prayers:
-     - `people_count` = rows in `chat_message_prayer_counts` with `last_prayed_at >` the previous push's `created_at`, or all rows if there was no push yet. If it is 0, stop.
-     - `prayer_total` = the current `SUM(prayer_count)` minus the previous row's `total_at_push` (or 0 if there was no push yet), and never less than `people_count` (§7).
-     - `latest_user_id` = the row with the newest `last_prayed_at`.
-  4. Insert the new row, commit, and send `PRAYER_RECEIVED` to SQS. Then record the SQS id.
+  3. Otherwise, work out what is new, leaving out the requester's own prayers:
+     - Claim the request's unreported prayers: in one statement, lock every counts row with `unreported_count > 0`, read the counts and set them to 0.
+     - `people_count` = claimed rows, `prayer_total` = the sum of their counts, `latest_user_id` = the one with the newest `last_prayed_at`. If there are none, stop and roll back.
+  4. Insert the new row and commit it together with the zeroed counts. Then send `PRAYER_RECEIVED` to SQS and record the SQS id.
 - **Copy:** the title is the room name, as today. The body depends on the numbers:
 
 | People | Prayers | Body |
@@ -112,7 +111,7 @@ To offer 100 prayers, the client sends `count: 10` once a second for 10 seconds.
 | 1 | > 1 | `Kunsang prayed for you 10 times` |
 | > 1 | any | `Kunsang with 9 others prayed for you 100 times` |
 
-- **Worker:** unchanged. The event keeps `event_type: PRAYER_RECEIVED` and its `prayer_id` field, which now carries the `chat_prayer_notifications.id`. `GET /internal/prayer-notification-targets/{id}` resolves that id from the new table and builds the copy from the stored row. The response keeps every existing field and adds `people_count` and `prayer_total`.
+- **Worker:** unchanged. The event keeps `event_type: PRAYER_RECEIVED` and its `prayer_id` field, which now carries the `chat_prayer_notifications.id`. `GET /internal/prayer-notification-targets/{id}` resolves that id from the new table and builds the copy from the stored row. An id from an event queued before deploy is still a `chat_message_prayers` id; it is read as one person praying once (§7). The response keeps every existing field and adds `people_count` and `prayer_total`.
 - **Reconcile:** `reconcile_undispatched_prayer_notifications` now reads `chat_prayer_notifications` rows with no SQS id and resends them without re-running the gate.
 - **No queue configured:** no row is written, so the interval does not tick without a push.
 - **Unchanged:** the notification preference check (`PRAYER_RECEIVED`, per group).
@@ -153,7 +152,7 @@ Deletes both rows. The response returns `my_prayer_count: 0`. This call is not r
 |------|--------|
 | `migrations/versions/pc1a2b3c4d5e_add_prayer_counts_and_notifications.py` | Both tables, the counts backfill, and dropping `idx_chat_message_prayers_undispatched` |
 | `pecha_api/chat/models.py` | `ChatMessagePrayerCount`, `ChatPrayerNotification` |
-| `pecha_api/chat/repository.py` | `add_prayers` (prayer insert + counter upsert, one commit); `remove_prayer_and_count`; `get_my_prayer_counts_map`; roster query; `lock_prayer_request`, `get_last_prayer_notification`, `summarize_prayers_since`, `create_prayer_notification` and the dispatch helpers |
+| `pecha_api/chat/repository.py` | `add_prayers` (prayer insert + counter upsert, one commit); `remove_prayer_and_count`; `get_my_prayer_counts_map`; roster query; `lock_prayer_request`, `get_last_prayer_notification`, `claim_unreported_prayers`, `create_prayer_notification` and the dispatch helpers |
 | `pecha_api/chat/message_service.py` | Pass `count`, return `my_prayer_count`, map roster fields; roster `403` unless the caller is the author; run the gate on every pray |
 | `pecha_api/chat/notification_dispatch_service.py` | `notify_prayers_for_request` gate keyed on the request; reconcile reads the new table |
 | `pecha_api/chat/notification_service.py` | `get_prayer_notification_targets` resolves a `chat_prayer_notifications` id; new `_build_prayer_notification_copy` |
@@ -182,7 +181,8 @@ Deletes both rows. The response returns `my_prayer_count: 0`. This call is not r
 1. **Batch cap lowered from 50 to 10.** A call charges `count × len(message_ids)`, so a multi-select of 11 or more requests could never pass the 10-per-second limit even at `count: 1`. The cap now matches the limit, and larger selections get a `422` instead of a permanent `429`.
 2. **The gate locks the request row, not the last push.** Before a request's first push there is no `chat_prayer_notifications` row to lock, so locking it would let two concurrent first prayers both push.
 3. **A rejected call writes nothing to Redis either.** The script only increments when the new total fits, so a rejected `count: 10` does not use up the second for a `count: 1` right behind it. It also repairs a key that has lost its TTL.
-4. **`prayer_total` has a floor of `people_count`.** An unpray between two pushes lowers the running total, which would otherwise make the difference negative.
+4. **Pushes count unreported prayers, not the difference between totals.** The RFC's `total_at_push` design subtracted the previous total from the current one. An unpray lowers that total, so new prayers were undercounted, and on a request with no push yet every backfilled prayer looked new. Each counts row now carries `unreported_count`, which a push claims under row locks and commits together with its own row. It reports exactly the prayers added since the last push, a pray racing a push waits for its lock and is reported by the next push, and backfilled rows start at 0.
 5. **`idx_chat_message_prayers_undispatched` is dropped.** New prayer rows never record a dispatch, so every one of them would land in that partial index, and nothing reads it once reconcile moves to the new table.
 6. **One transaction for all ids** rather than one per id, matching the existing batch insert. The ids are already de-duplicated.
-7. **Deploy note:** `PRAYER_RECEIVED` events already queued at deploy carry old `chat_message_prayers` ids, which the targets endpoint now answers with `404`.
+7. **Events queued at deploy still resolve.** They carry old `chat_message_prayers` ids, so the targets endpoint falls back to that table and reads one as one person praying once. The fallback can be removed one release later. Old prayer rows that never reached the queue (the commit-before-send crash window) are no longer retried.
+8. **The rate limit counts every submitted id.** A call is charged `count × len(message_ids)` before the ids are checked, as specified. A selection that includes a just-deleted request can be refused a little early. The window resets every second, so the cost is one retry, which is not worth a database read before the limiter.

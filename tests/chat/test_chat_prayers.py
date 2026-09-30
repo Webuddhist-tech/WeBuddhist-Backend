@@ -17,7 +17,7 @@ from pecha_api.chat.message_service import (
     pray_for_messages_service,
     unpray_message_service,
 )
-from pecha_api.chat.repository import PrayerSummary, PrayResult
+from pecha_api.chat.repository import PrayResult, UnreportedPrayers
 from pecha_api.chat.response_models import PrayForMessagesRequest
 from pecha_api.chat.service import build_message_dto
 from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
@@ -555,19 +555,27 @@ class TestPrayerFieldsOnMessageDTO:
         assert dto.message_type == "TEXT"
 
 
-def _previous_push(created_at, total_at_push):
-    return MagicMock(created_at=created_at, total_at_push=total_at_push)
+def _previous_push(created_at):
+    return MagicMock(created_at=created_at)
+
+
+def _unreported(user_id=None, count=1, minutes_ago=0):
+    return UnreportedPrayers(
+        user_id=user_id or uuid4(),
+        count=count,
+        last_prayed_at=datetime.now(tz.utc) - timedelta(minutes=minutes_ago),
+    )
 
 
 @patch(f"{DISPATCH}.get_int", return_value=1140)
 @patch(f"{DISPATCH}.create_prayer_notification")
-@patch(f"{DISPATCH}.summarize_prayers_since")
+@patch(f"{DISPATCH}.claim_unreported_prayers")
 @patch(f"{DISPATCH}.get_last_prayer_notification")
 @patch(f"{DISPATCH}.lock_prayer_request")
 @patch(f"{DISPATCH}.SessionLocal")
 class TestPrayerNotificationGate:
-    """At most one prayer-received push per request per interval, summarising
-    every prayer since the previous push."""
+    """At most one prayer-received push per request per interval, reporting
+    exactly the prayers no earlier push has reported."""
 
     def _run(self, mock_session, prayer_user_id):
         from pecha_api.chat.notification_dispatch_service import (
@@ -579,81 +587,90 @@ class TestPrayerNotificationGate:
             message_id=uuid4(), prayer_user_id=prayer_user_id
         )
 
-    def test_first_push_summarises_everyone(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
+    def test_first_push_reports_the_first_prayer(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
+    ):
+        mock_lock.return_value = MockMessage()
+        mock_last.return_value = None
+        kunsang = _unreported(count=1)
+        mock_claim.return_value = [kunsang]
+        notification_id = uuid4()
+        mock_create.return_value = MagicMock(id=notification_id)
+
+        assert self._run(mock_session, kunsang.user_id) == notification_id
+
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["people_count"] == 1
+        assert kwargs["prayer_total"] == 1
+        assert kwargs["latest_user_id"] == kunsang.user_id
+
+    def test_inside_the_interval_nothing_is_claimed_or_recorded(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
+    ):
+        mock_lock.return_value = MockMessage()
+        mock_last.return_value = _previous_push(datetime.now(tz.utc) - timedelta(minutes=5))
+
+        assert self._run(mock_session, uuid4()) is None
+
+        mock_claim.assert_not_called()
+        mock_create.assert_not_called()
+
+    def test_after_the_interval_reports_everything_unreported(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
+    ):
+        """The RFC example: 9 others and Kunsang add 100 inside the interval,
+        then Dolma prays 10 at 10:25 - 11 people, 110 prayers."""
+        mock_lock.return_value = MockMessage()
+        mock_last.return_value = _previous_push(datetime.now(tz.utc) - timedelta(minutes=25))
+        dolma = _unreported(count=10, minutes_ago=0)
+        others = [_unreported(count=10, minutes_ago=10) for _ in range(10)]
+        mock_claim.return_value = others + [dolma]
+        mock_create.return_value = MagicMock(id=uuid4())
+
+        self._run(mock_session, dolma.user_id)
+
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["people_count"] == 11
+        assert kwargs["prayer_total"] == 110
+        assert kwargs["latest_user_id"] == dolma.user_id
+
+    def test_an_unpray_does_not_hide_new_prayers(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
+    ):
+        """Someone reported earlier unprays (their row is gone); another person
+        prays three times. The push says three, not a difference of totals."""
+        mock_lock.return_value = MockMessage()
+        mock_last.return_value = _previous_push(datetime.now(tz.utc) - timedelta(hours=1))
+        mock_claim.return_value = [_unreported(count=3)]
+        mock_create.return_value = MagicMock(id=uuid4())
+
+        self._run(mock_session, uuid4())
+
+        assert mock_create.call_args.kwargs["people_count"] == 1
+        assert mock_create.call_args.kwargs["prayer_total"] == 3
+
+    def test_the_requesters_own_unreported_prayers_are_not_counted(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
         message = MockMessage()
         mock_lock.return_value = message
         mock_last.return_value = None
-        latest = uuid4()
-        mock_summary.return_value = PrayerSummary(
-            people_count=1, current_sum=1, latest_user_id=latest
-        )
-        notification_id = uuid4()
-        mock_create.return_value = MagicMock(id=notification_id)
+        tenzin = _unreported(count=2, minutes_ago=5)
+        mock_claim.return_value = [
+            tenzin,
+            _unreported(user_id=message.sender_id, count=10, minutes_ago=0),
+        ]
+        mock_create.return_value = MagicMock(id=uuid4())
 
-        assert self._run(mock_session, uuid4()) == notification_id
+        self._run(mock_session, tenzin.user_id)
 
-        assert mock_summary.call_args.kwargs["since"] is None
-        assert mock_summary.call_args.kwargs["requester_id"] == message.sender_id
         kwargs = mock_create.call_args.kwargs
         assert kwargs["people_count"] == 1
-        assert kwargs["prayer_total"] == 1
-        assert kwargs["latest_user_id"] == latest
-        assert kwargs["total_at_push"] == 1
+        assert kwargs["prayer_total"] == 2
+        assert kwargs["latest_user_id"] == tenzin.user_id
 
-    def test_inside_the_interval_nothing_is_recorded(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
-    ):
-        mock_lock.return_value = MockMessage()
-        mock_last.return_value = _previous_push(
-            datetime.now(tz.utc) - timedelta(minutes=5), total_at_push=1
-        )
-
-        assert self._run(mock_session, uuid4()) is None
-
-        mock_summary.assert_not_called()
-        mock_create.assert_not_called()
-
-    def test_after_the_interval_counts_only_whats_new(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
-    ):
-        """The RFC example: 101 prayed by 10:19, then Dolma prays 10 at 10:25."""
-        mock_lock.return_value = MockMessage()
-        pushed_at = datetime.now(tz.utc) - timedelta(minutes=25)
-        mock_last.return_value = _previous_push(pushed_at, total_at_push=1)
-        mock_summary.return_value = PrayerSummary(
-            people_count=11, current_sum=111, latest_user_id=uuid4()
-        )
-        mock_create.return_value = MagicMock(id=uuid4())
-
-        self._run(mock_session, uuid4())
-
-        assert mock_summary.call_args.kwargs["since"] == pushed_at
-        kwargs = mock_create.call_args.kwargs
-        assert kwargs["people_count"] == 11
-        assert kwargs["prayer_total"] == 110
-        assert kwargs["total_at_push"] == 111
-
-    def test_an_unpray_never_makes_the_total_negative(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
-    ):
-        mock_lock.return_value = MockMessage()
-        mock_last.return_value = _previous_push(
-            datetime.now(tz.utc) - timedelta(hours=1), total_at_push=100
-        )
-        mock_summary.return_value = PrayerSummary(
-            people_count=2, current_sum=60, latest_user_id=uuid4()
-        )
-        mock_create.return_value = MagicMock(id=uuid4())
-
-        self._run(mock_session, uuid4())
-
-        assert mock_create.call_args.kwargs["prayer_total"] == 2
-        assert mock_create.call_args.kwargs["total_at_push"] == 60
-
-    def test_the_requesters_own_prayer_raises_nothing(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
+    def test_the_requester_praying_raises_nothing(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
         message = MockMessage()
         mock_lock.return_value = message
@@ -663,20 +680,21 @@ class TestPrayerNotificationGate:
         mock_last.assert_not_called()
         mock_create.assert_not_called()
 
-    def test_nobody_new_raises_nothing(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
+    def test_nothing_unreported_raises_nothing_and_commits_nothing(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
+        """Backfilled prayers start with nothing unreported, so they never show
+        up as new."""
         mock_lock.return_value = MockMessage()
         mock_last.return_value = None
-        mock_summary.return_value = PrayerSummary(
-            people_count=0, current_sum=0, latest_user_id=None
-        )
+        mock_claim.return_value = []
 
         assert self._run(mock_session, uuid4()) is None
         mock_create.assert_not_called()
+        mock_session.return_value.__enter__.return_value.commit.assert_not_called()
 
     def test_a_deleted_request_raises_nothing(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
         mock_lock.return_value = None
 
@@ -684,34 +702,30 @@ class TestPrayerNotificationGate:
         mock_create.assert_not_called()
 
     def test_interval_zero_pushes_every_time(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, mock_get_int
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, mock_get_int
     ):
         mock_get_int.return_value = 0
         mock_lock.return_value = MockMessage()
-        mock_last.return_value = _previous_push(datetime.now(tz.utc), total_at_push=5)
-        mock_summary.return_value = PrayerSummary(
-            people_count=1, current_sum=6, latest_user_id=uuid4()
-        )
+        mock_last.return_value = _previous_push(datetime.now(tz.utc))
+        mock_claim.return_value = [_unreported(count=1)]
         mock_create.return_value = MagicMock(id=uuid4())
 
         assert self._run(mock_session, uuid4()) is not None
         assert mock_create.call_args.kwargs["prayer_total"] == 1
 
     def test_the_request_is_locked_before_the_last_push_is_read(
-        self, mock_session, mock_lock, mock_last, mock_summary, mock_create, _get_int
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
         """Two concurrent pray calls must not both find the interval open."""
         order = []
         mock_lock.side_effect = lambda **_: order.append("lock") or MockMessage()
         mock_last.side_effect = lambda **_: order.append("last") or None
-        mock_summary.return_value = PrayerSummary(
-            people_count=1, current_sum=1, latest_user_id=uuid4()
-        )
+        mock_claim.side_effect = lambda **_: order.append("claim") or [_unreported()]
         mock_create.return_value = MagicMock(id=uuid4())
 
         self._run(mock_session, uuid4())
 
-        assert order == ["lock", "last"]
+        assert order == ["lock", "last", "claim"]
 
 
 class TestNotifyPrayersForRequest:

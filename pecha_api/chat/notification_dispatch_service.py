@@ -8,6 +8,7 @@ from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.repository import (
     SUPPRESSED_SQS_MESSAGE_ID,
     _as_utc,
+    claim_unreported_prayers,
     create_prayer_notification,
     get_last_prayer_notification,
     get_message_by_id_any_room,
@@ -17,7 +18,6 @@ from pecha_api.chat.repository import (
     lock_prayer_request,
     mark_message_notification_dispatched,
     mark_prayer_notification_dispatched,
-    summarize_prayers_since,
 )
 from pecha_api.chat.service import _message_type_value
 from pecha_api.chat.sqs_client import (
@@ -201,8 +201,9 @@ def _create_prayer_notification_if_due(message_id: UUID, prayer_user_id: UUID) -
 
     The request row is locked for the whole decision, so two pray calls landing
     together cannot both find the interval open. Prayers that arrive while the
-    interval is closed are not lost: they are counted by the next push, which
-    sums everything since the previous one.
+    interval is closed are not lost: they stay unreported on their count rows
+    and the next push claims them. Claiming the counts and recording the push
+    commit together, so a push never reports prayers another push also did.
     """
     interval_seconds = max(get_int("PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS"), 0)
     with SessionLocal() as db:
@@ -216,28 +217,24 @@ def _create_prayer_notification_if_due(message_id: UUID, prayer_user_id: UUID) -
         ):
             return None
 
-        summary = summarize_prayers_since(
-            db=db,
-            message_id=message_id,
-            requester_id=message.sender_id,
-            since=_as_utc(previous.created_at) if previous else None,
-        )
-        if summary.people_count == 0:
+        # The requester's own prayers are claimed too, so they never pile up,
+        # but they are neither counted nor named.
+        claimed = [
+            row
+            for row in claim_unreported_prayers(db=db, message_id=message_id)
+            if row.user_id != message.sender_id
+        ]
+        if not claimed:
+            # Nothing is committed, so any claim rolls back with the session.
             return None
 
-        # An unpray since the previous push lowers the running total, which
-        # could otherwise make the difference negative. Everyone counted in
-        # people_count prayed at least once.
-        previous_total = previous.total_at_push if previous else 0
-        prayer_total = max(summary.current_sum - previous_total, summary.people_count)
-
+        latest = max(claimed, key=lambda row: row.last_prayed_at)
         notification = create_prayer_notification(
             db=db,
             message_id=message_id,
-            people_count=summary.people_count,
-            prayer_total=prayer_total,
-            latest_user_id=summary.latest_user_id,
-            total_at_push=summary.current_sum,
+            people_count=len(claimed),
+            prayer_total=sum(row.count for row in claimed),
+            latest_user_id=latest.user_id,
         )
         return notification.id
 

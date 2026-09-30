@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import NamedTuple, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -29,6 +29,7 @@ from pecha_api.chat.repository import (
     count_message_prayers,
     count_suppressed_prayer_requests,
     get_message_by_id_any_room,
+    get_prayer_by_id,
     get_prayer_notification_by_id,
     last_dispatched_prayer_request,
 )
@@ -306,12 +307,51 @@ def _build_prayer_notification_copy(
     )
 
 
+class _PrayerPush(NamedTuple):
+    id: UUID
+    message_id: UUID
+    people_count: int
+    prayer_total: int
+    latest_user_id: Optional[UUID]
+
+
+def _resolve_prayer_push(*, db: Session, push_id: UUID) -> Optional[_PrayerPush]:
+    """The push behind a PRAYER_RECEIVED event.
+
+    Events enqueued before repeat prayers shipped carry a chat_message_prayers
+    id instead. They are read as one person praying once, so an event already
+    in the queue at deploy is still delivered. Safe to remove once no event
+    from before the deploy can still arrive.
+    """
+    notification = get_prayer_notification_by_id(db=db, notification_id=push_id)
+    if notification:
+        return _PrayerPush(
+            id=notification.id,
+            message_id=notification.message_id,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
+            latest_user_id=notification.latest_user_id,
+        )
+    legacy = get_prayer_by_id(db=db, prayer_id=push_id)
+    if legacy:
+        return _PrayerPush(
+            id=legacy.id,
+            message_id=legacy.message_id,
+            people_count=1,
+            prayer_total=1,
+            latest_user_id=legacy.user_id,
+        )
+    return None
+
+
 def get_prayer_notification_targets(
     *,
     prayer_id: UUID,
     skip: int = 0,
     limit: int = 100,
 ) -> PrayerNotificationTargetsResponse:
+    """`prayer_id` is a chat_prayer_notifications id: one summarised push, not
+    one prayer. The name is kept so the worker's contract does not change."""
     if skip < 0:
         skip = 0
     if limit < 1:
@@ -319,10 +359,8 @@ def get_prayer_notification_targets(
     if limit > 500:
         limit = 500
 
-    """`prayer_id` is a chat_prayer_notifications id: one summarised push, not
-    one prayer. The name is kept so the worker's contract does not change."""
     with SessionLocal() as db:
-        notification = get_prayer_notification_by_id(db=db, notification_id=prayer_id)
+        notification = _resolve_prayer_push(db=db, push_id=prayer_id)
         if not notification:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
@@ -346,9 +384,13 @@ def get_prayer_notification_targets(
             ),
         )
 
-        # The requester alone. The gate never records a push for the
-        # requester's own prayers, so there is nobody else to exclude.
-        recipient_ids = [message.sender_id]
+        # The requester alone, and never for their own prayer. The gate never
+        # names the requester; the check guards a legacy prayer id.
+        recipient_ids = (
+            []
+            if notification.latest_user_id == message.sender_id
+            else [message.sender_id]
+        )
         recipient_ids = filter_users_by_notification_preference(
             db=db,
             user_ids=recipient_ids,

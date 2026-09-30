@@ -354,6 +354,11 @@ class ChatMessagePrayerCount(Base):
         nullable=False,
     )
     prayer_count = Column(BigInteger, nullable=False)
+    # Prayers the requester has not yet been told about. Every pray adds to it;
+    # the prayer-received push reads and zeroes it in one locked step.
+    unreported_count = Column(
+        BigInteger, nullable=False, default=0, server_default=sql_text("0")
+    )
     first_prayed_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(dt.timezone.utc),
@@ -390,10 +395,9 @@ class ChatMessagePrayerCount(Base):
 class ChatPrayerNotification(Base):
     """One prayer-received push to a requester, sent or queued.
 
-    Each row summarises the prayers since the previous push for the same
-    request, so a burst of prayers inside the interval is one notification.
-    `total_at_push` is the request's running total when this row was written;
-    the next push subtracts it to find how many prayers are new.
+    Each row summarises the prayers not yet reported for the same request
+    (see ChatMessagePrayerCount.unreported_count), so a burst of prayers
+    inside the interval is one notification.
     """
 
     __tablename__ = "chat_prayer_notifications"
@@ -411,7 +415,6 @@ class ChatPrayerNotification(Base):
         ForeignKey(FK_USERS_ID, ondelete="SET NULL"),
         nullable=True,
     )
-    total_at_push = Column(BigInteger, nullable=False)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(dt.timezone.utc),
