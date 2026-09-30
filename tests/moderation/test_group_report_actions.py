@@ -15,6 +15,7 @@ from pecha_api.chat.message_service import moderator_delete_message
 from pecha_api.group_posts.cms_service import cms_delete_group_post_comment_service
 from pecha_api.moderation.enums import GroupReportKind
 from pecha_api.moderation.service import resolve_group_report_service
+from pecha_api.plans.groups.groups_enums import AuthorGroupMemberRole
 
 MODULE = "pecha_api.moderation.service"
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=tz.utc)
@@ -74,6 +75,7 @@ def _resolve(group_id, chat=None, post=None, db=None):
     db = db or MagicMock()
     with patch(f"{MODULE}.SessionLocal", return_value=_session(db)), \
             patch(f"{MODULE}.validate_and_extract_author_details", return_value=MagicMock()), \
+            patch(f"{MODULE}.require_cms_write_access"), \
             patch(f"{MODULE}.require_group_member"), \
             patch(f"{MODULE}.get_chat_report_by_id", return_value=chat), \
             patch(f"{MODULE}.get_group_post_report_by_id", return_value=post):
@@ -148,6 +150,18 @@ class TestResolveGroupReport:
             with pytest.raises(HTTPException) as exc:
                 resolve_group_report_service(token="t", group_id=uuid4(), report_id=uuid4())
         assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_reviewer_who_owns_the_group_cannot_resolve(self):
+        """The read-only platform role wins over a moderator group role."""
+        reviewer = SimpleNamespace(id=uuid4(), platform_role="REVIEWER")
+        db = MagicMock()
+        with patch(f"{MODULE}.SessionLocal", return_value=_session(db)), \
+                patch(f"{MODULE}.validate_and_extract_author_details", return_value=reviewer), \
+                patch("pecha_api.plans.shared.permissions.get_member_role", return_value=AuthorGroupMemberRole.OWNER):
+            with pytest.raises(HTTPException) as exc:
+                resolve_group_report_service(token="t", group_id=uuid4(), report_id=uuid4())
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        db.commit.assert_not_called()
 
 
 class TestResolveChatReportPlatformQueue:

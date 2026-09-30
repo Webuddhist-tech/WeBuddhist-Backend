@@ -40,6 +40,7 @@ from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.plans.shared.permissions import (
     is_reviewer,
     is_super_admin,
+    require_cms_write_access,
     require_group_member,
 )
 from pecha_api.users.users_models import Users
@@ -61,7 +62,9 @@ def _require_group_moderator_write(
     db: Session, group_id: UUID, author: Author
 ) -> None:
     """As _require_group_moderator, minus reviewers: their platform role is
-    read-only, so they can see the queue but not act on it."""
+    read-only, so they can see the queue but not act on it - even in a group
+    they own or admin."""
+    require_cms_write_access(author)
     require_group_member(
         db=db, group_id=group_id, author=author, allowed_roles=_MODERATOR_ROLES
     )
