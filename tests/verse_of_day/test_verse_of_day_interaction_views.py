@@ -1,7 +1,7 @@
 """Tests for verse of the day like and comment HTTP routes."""
 from datetime import datetime, timezone as tz
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,8 +40,8 @@ def _comment_dto(verse_id: Optional[UUID] = None) -> VerseOfDayCommentDTO:
 
 class TestVerseOfDayLikeViews:
 
-    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service")
-    def test_get_likes(self, mock_service: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
+    def test_get_likes(self, mock_service: AsyncMock) -> None:
         verse_id = uuid4()
         mock_service.return_value = VerseOfDayLikesResponse(
             verse_id=verse_id,
@@ -56,13 +56,13 @@ class TestVerseOfDayLikeViews:
         assert body["like_count"] == 5
         assert body["liked_by_me"] is False
 
-    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service")
-    @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
     def test_get_likes_invalid_token_treated_as_anonymous(
-        self, mock_validate: MagicMock, mock_service: MagicMock
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
     ) -> None:
         verse_id = uuid4()
-        mock_validate.side_effect = HTTPException(
+        mock_threadpool.side_effect = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
         )
@@ -80,13 +80,13 @@ class TestVerseOfDayLikeViews:
         assert response.status_code == status.HTTP_200_OK
         mock_service.assert_called_once_with(verse_id=verse_id, user_id=None)
 
-    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service")
-    @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
+    @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
     def test_get_likes_database_error_propagates(
-        self, mock_validate: MagicMock, mock_service: MagicMock
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
     ) -> None:
         verse_id = uuid4()
-        mock_validate.side_effect = RuntimeError("database unavailable")
+        mock_threadpool.side_effect = RuntimeError("database unavailable")
 
         with pytest.raises(RuntimeError, match="database unavailable"):
             client.get(
@@ -96,12 +96,13 @@ class TestVerseOfDayLikeViews:
 
         mock_service.assert_not_called()
 
-    @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
-    @patch("pecha_api.verse_of_day.like_views.like_verse_of_day_service")
-    def test_like_new(self, mock_service: MagicMock, mock_validate: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.like_verse_of_day_service", new_callable=AsyncMock)
+    def test_like_new(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_validate.return_value = MagicMock(id=user_id)
+        user = MagicMock(id=user_id)
+        mock_threadpool.return_value = user
         mock_service.return_value = LikeVerseOfDayResponse(
             verse_id=verse_id,
             user_id=user_id,
@@ -119,12 +120,12 @@ class TestVerseOfDayLikeViews:
         assert response.status_code == status.HTTP_201_CREATED
         assert response.json()["is_new"] is True
 
-    @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
-    @patch("pecha_api.verse_of_day.like_views.like_verse_of_day_service")
-    def test_like_existing(self, mock_service: MagicMock, mock_validate: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.like_verse_of_day_service", new_callable=AsyncMock)
+    def test_like_existing(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_validate.return_value = MagicMock(id=user_id)
+        mock_threadpool.return_value = MagicMock(id=user_id)
         mock_service.return_value = LikeVerseOfDayResponse(
             verse_id=verse_id,
             user_id=user_id,
@@ -141,11 +142,11 @@ class TestVerseOfDayLikeViews:
 
         assert response.status_code == status.HTTP_200_OK
 
-    @patch("pecha_api.verse_of_day.like_views.validate_and_extract_user_details")
-    @patch("pecha_api.verse_of_day.like_views.unlike_verse_of_day_service")
-    def test_unlike(self, mock_service: MagicMock, mock_validate: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_views.unlike_verse_of_day_service", new_callable=AsyncMock)
+    def test_unlike(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         verse_id = uuid4()
-        mock_validate.return_value = MagicMock(id=uuid4())
+        mock_threadpool.return_value = MagicMock(id=uuid4())
 
         response = client.delete(
             f"/verse-of-day/{verse_id}/likes",
@@ -153,13 +154,16 @@ class TestVerseOfDayLikeViews:
         )
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
-        mock_service.assert_called_once()
+        mock_service.assert_awaited_once()
 
 
 class TestVerseOfDayCommentViews:
 
-    @patch("pecha_api.verse_of_day.comment_views.list_verse_comments_service")
-    def test_list_comments(self, mock_service: MagicMock) -> None:
+    @patch(
+        "pecha_api.verse_of_day.comment_views.list_verse_comments_service",
+        new_callable=AsyncMock,
+    )
+    def test_list_comments(self, mock_service: AsyncMock) -> None:
         verse_id = uuid4()
         dto = _comment_dto(verse_id=verse_id)
         mock_service.return_value = VerseOfDayCommentsResponse(
@@ -176,13 +180,16 @@ class TestVerseOfDayCommentViews:
         assert response.json()["comments"][0]["text"] == "Lovely verse."
         assert "email" not in response.json()["comments"][0]["user"]
 
-    @patch("pecha_api.verse_of_day.comment_views.validate_and_extract_user_details")
-    @patch("pecha_api.verse_of_day.comment_views.create_verse_comment_service")
-    def test_create_comment(self, mock_service: MagicMock, mock_validate: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_views.create_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    def test_create_comment(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         verse_id = uuid4()
         user = MagicMock()
         user.id = uuid4()
-        mock_validate.return_value = user
+        mock_threadpool.return_value = user
         mock_service.return_value = _comment_dto(verse_id=verse_id)
 
         response = client.post(
@@ -192,17 +199,20 @@ class TestVerseOfDayCommentViews:
         )
 
         assert response.status_code == status.HTTP_201_CREATED
-        mock_service.assert_called_once_with(
+        mock_service.assert_awaited_once_with(
             verse_id=verse_id,
             user_id=user.id,
             text="Lovely verse.",
         )
 
-    @patch("pecha_api.verse_of_day.comment_views.validate_and_extract_user_details")
-    @patch("pecha_api.verse_of_day.comment_views.delete_verse_comment_service")
-    def test_delete_comment(self, mock_service: MagicMock, mock_validate: MagicMock) -> None:
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_views.delete_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    def test_delete_comment(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         comment_id = uuid4()
-        mock_validate.return_value = MagicMock(id=uuid4())
+        mock_threadpool.return_value = MagicMock(id=uuid4())
 
         response = client.delete(
             f"/verse-of-day/comments/{comment_id}",
@@ -210,4 +220,4 @@ class TestVerseOfDayCommentViews:
         )
 
         assert response.status_code == status.HTTP_204_NO_CONTENT
-        mock_service.assert_called_once()
+        mock_service.assert_awaited_once()

@@ -1,7 +1,7 @@
 """Tests for verse of the day comment service."""
 from datetime import datetime, timezone as tz
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -115,63 +115,57 @@ class TestBuildCommentDto:
 
 class TestListVerseCommentsService:
 
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_comments")
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_list_comments_success(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_verse_comments", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_list_comments_success(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_get_comments: MagicMock,
+        mock_require: AsyncMock,
+        mock_get_comments: AsyncMock,
     ) -> None:
         verse_id = uuid4()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = MockVerse(verse_id)
         user = MockUser(firstname="Commenter")
         comment = MockComment(user=user, verse_id=verse_id)
         mock_get_comments.return_value = ([comment], 1)
 
-        result = list_verse_comments_service(verse_id=verse_id, skip=0, limit=20)
+        result = await list_verse_comments_service(verse_id=verse_id, skip=0, limit=20)
 
         assert result.total == 1
         assert result.comments[0].text == "Hello"
         assert result.comments[0].user.first_name == "Commenter"
 
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_list_comments_verse_not_found(
-        self, mock_session: MagicMock, mock_get_verse: MagicMock
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_list_comments_verse_not_found(
+        self, mock_require: AsyncMock
     ) -> None:
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = None
+        mock_require.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
 
         with pytest.raises(HTTPException) as exc_info:
-            list_verse_comments_service(verse_id=uuid4())
+            await list_verse_comments_service(verse_id=uuid4())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
 
 class TestCreateVerseCommentService:
 
-    @patch("pecha_api.verse_of_day.comment_service.VerseOfDayComment")
-    @patch("pecha_api.verse_of_day.comment_service.create_comment")
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_create_comment_success(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.create_comment", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_create_comment_success(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_create: MagicMock,
-        mock_comment_model: MagicMock,
+        mock_require: AsyncMock,
+        mock_create: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = MockVerse(verse_id)
         user = MockUser(firstname="Writer")
         mock_create.return_value = MockComment(user=user, verse_id=verse_id, text="Nice")
 
-        result = create_verse_comment_service(
+        result = await create_verse_comment_service(
             verse_id=verse_id,
             user_id=user_id,
             text="Nice",
@@ -179,18 +173,24 @@ class TestCreateVerseCommentService:
 
         assert result.text == "Nice"
         assert result.user.first_name == "Writer"
-        mock_comment_model.assert_called_once()
+        mock_create.assert_awaited_once_with(
+            verse_id=verse_id,
+            user_id=user_id,
+            text="Nice",
+        )
 
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_create_comment_verse_not_found(
-        self, mock_session: MagicMock, mock_get_verse: MagicMock
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_create_comment_verse_not_found(
+        self, mock_require: AsyncMock
     ) -> None:
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = None
+        mock_require.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
 
         with pytest.raises(HTTPException) as exc_info:
-            create_verse_comment_service(
+            await create_verse_comment_service(
                 verse_id=uuid4(),
                 user_id=uuid4(),
                 text="Hi",
@@ -201,78 +201,72 @@ class TestCreateVerseCommentService:
 
 class TestDeleteVerseCommentService:
 
-    @patch("pecha_api.verse_of_day.comment_service.delete_comment")
-    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_delete_comment_success(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.delete_comment", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_delete_comment_success(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_get_comment: MagicMock,
-        mock_delete: MagicMock,
+        mock_require: AsyncMock,
+        mock_get_comment: AsyncMock,
+        mock_delete: AsyncMock,
     ) -> None:
         user_id = uuid4()
         verse_id = uuid4()
         comment = MockComment(user_id=user_id, verse_id=verse_id)
-        mock_db = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_db
         mock_get_comment.return_value = comment
-        mock_get_verse.return_value = MockVerse(verse_id)
 
-        delete_verse_comment_service(comment_id=comment.id, user_id=user_id)
+        await delete_verse_comment_service(comment_id=comment.id, user_id=user_id)
 
-        mock_delete.assert_called_once_with(db=mock_db, comment=comment)
+        mock_delete.assert_awaited_once_with(comment_id=comment.id)
 
-    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_delete_comment_not_found(
-        self, mock_session: MagicMock, mock_get_comment: MagicMock
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id", new_callable=AsyncMock)
+    async def test_delete_comment_not_found(
+        self, mock_get_comment: AsyncMock
     ) -> None:
-        mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_comment.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_verse_comment_service(comment_id=uuid4(), user_id=uuid4())
+            await delete_verse_comment_service(comment_id=uuid4(), user_id=uuid4())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
-    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_delete_comment_forbidden_for_non_author(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_delete_comment_forbidden_for_non_author(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_get_comment: MagicMock,
+        mock_require: AsyncMock,
+        mock_get_comment: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         comment = MockComment(user_id=uuid4(), verse_id=verse_id)
-        mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_comment.return_value = comment
-        mock_get_verse.return_value = MockVerse(verse_id)
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_verse_comment_service(comment_id=comment.id, user_id=uuid4())
+            await delete_verse_comment_service(comment_id=comment.id, user_id=uuid4())
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_require.assert_awaited_once_with(verse_id)
 
-    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.comment_service.SessionLocal")
-    def test_delete_comment_verse_not_found(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.get_comment_by_id", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_delete_comment_verse_not_found(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_get_comment: MagicMock,
+        mock_require: AsyncMock,
+        mock_get_comment: AsyncMock,
     ) -> None:
         user_id = uuid4()
         comment = MockComment(user_id=user_id)
-        mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_comment.return_value = comment
-        mock_get_verse.return_value = None
+        mock_require.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
 
         with pytest.raises(HTTPException) as exc_info:
-            delete_verse_comment_service(comment_id=comment.id, user_id=user_id)
+            await delete_verse_comment_service(comment_id=comment.id, user_id=user_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND

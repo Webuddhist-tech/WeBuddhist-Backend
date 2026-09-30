@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.verse_of_day.like_response_models import (
@@ -30,7 +31,7 @@ verse_of_day_likes_router = APIRouter(
     status_code=status.HTTP_200_OK,
     response_model=VerseOfDayLikesResponse,
 )
-def get_verse_likes(
+async def get_verse_likes(
     verse_id: UUID,
     authentication_credential: Annotated[
         Optional[HTTPAuthorizationCredentials], Depends(oauth2_scheme_optional)
@@ -40,29 +41,33 @@ def get_verse_likes(
     user_id = None
     if authentication_credential:
         try:
-            user = validate_and_extract_user_details(
-                token=authentication_credential.credentials
+            user = await run_in_threadpool(
+                validate_and_extract_user_details,
+                token=authentication_credential.credentials,
             )
             user_id = user.id
         except HTTPException as exc:
             # Optional auth: invalid or expired tokens are treated as anonymous.
             if exc.status_code != status.HTTP_401_UNAUTHORIZED:
                 raise
-    return get_verse_likes_service(verse_id=verse_id, user_id=user_id)
+    return await get_verse_likes_service(verse_id=verse_id, user_id=user_id)
 
 
 @verse_of_day_likes_router.post(
     "",
     response_model=LikeVerseOfDayResponse,
 )
-def like_verse_of_day(
+async def like_verse_of_day(
     verse_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     response: Response,
 ) -> LikeVerseOfDayResponse:
     """Like a verse of the day. Returns 201 if newly created, 200 if already liked."""
-    user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    result = like_verse_of_day_service(verse_id=verse_id, user_id=user.id)
+    user = await run_in_threadpool(
+        validate_and_extract_user_details,
+        token=authentication_credential.credentials,
+    )
+    result = await like_verse_of_day_service(verse_id=verse_id, user_id=user.id)
     response.status_code = status.HTTP_201_CREATED if result.is_new else status.HTTP_200_OK
     return result
 
@@ -71,11 +76,14 @@ def like_verse_of_day(
     "",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def unlike_verse_of_day(
+async def unlike_verse_of_day(
     verse_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> Response:
     """Unlike a verse of the day. Idempotent — succeeds even if not liked."""
-    user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    unlike_verse_of_day_service(verse_id=verse_id, user_id=user.id)
+    user = await run_in_threadpool(
+        validate_and_extract_user_details,
+        token=authentication_credential.credentials,
+    )
+    await unlike_verse_of_day_service(verse_id=verse_id, user_id=user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,7 +1,7 @@
 """Tests for verse of the day like service."""
 from datetime import datetime
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,11 +16,6 @@ from pecha_api.verse_of_day.like_service import (
 )
 
 
-class MockVerse:
-    def __init__(self, verse_id: Optional[UUID] = None) -> None:
-        self.id: UUID = verse_id or uuid4()
-
-
 class MockLike:
     def __init__(self, created_at: Optional[str | datetime] = None) -> None:
         self.created_at: Optional[str | datetime] = created_at or "2024-01-01T00:00:00"
@@ -28,142 +23,123 @@ class MockLike:
 
 class TestLikeVerseOfDayService:
 
-    @patch("pecha_api.verse_of_day.like_service.VerseOfDayLike")
-    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
-    @patch("pecha_api.verse_of_day.like_service.create_like")
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_like_creates_new(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service.create_like", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_like_creates_new(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_create_like: MagicMock,
-        mock_count: MagicMock,
-        mock_like_model: MagicMock,
+        mock_require: AsyncMock,
+        mock_create_like: AsyncMock,
+        mock_count: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_db = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_db
-        mock_get_verse.return_value = MockVerse(verse_id)
         mock_create_like.return_value = (MockLike(), True)
         mock_count.return_value = 1
 
-        result = like_verse_of_day_service(verse_id=verse_id, user_id=user_id)
+        result = await like_verse_of_day_service(verse_id=verse_id, user_id=user_id)
 
         assert result.verse_id == verse_id
         assert result.user_id == user_id
         assert result.liked is True
         assert result.like_count == 1
         assert result.is_new is True
+        mock_require.assert_awaited_once_with(verse_id)
 
-    @patch("pecha_api.verse_of_day.like_service.VerseOfDayLike")
-    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
-    @patch("pecha_api.verse_of_day.like_service.create_like")
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_like_already_liked(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service.create_like", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_like_already_liked(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_create_like: MagicMock,
-        mock_count: MagicMock,
-        mock_like_model: MagicMock,
+        mock_require: AsyncMock,
+        mock_create_like: AsyncMock,
+        mock_count: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = MockVerse(verse_id)
         mock_create_like.return_value = (MockLike(), False)
         mock_count.return_value = 3
 
-        result = like_verse_of_day_service(verse_id=verse_id, user_id=user_id)
+        result = await like_verse_of_day_service(verse_id=verse_id, user_id=user_id)
 
         assert result.is_new is False
         assert result.like_count == 3
 
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_like_verse_not_found(
-        self, mock_session: MagicMock, mock_get_verse: MagicMock
-    ) -> None:
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = None
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_like_verse_not_found(self, mock_require: AsyncMock) -> None:
+        mock_require.side_effect = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
 
         with pytest.raises(HTTPException) as exc_info:
-            like_verse_of_day_service(verse_id=uuid4(), user_id=uuid4())
+            await like_verse_of_day_service(verse_id=uuid4(), user_id=uuid4())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
 
 class TestUnlikeVerseOfDayService:
 
-    @patch("pecha_api.verse_of_day.like_service.delete_like")
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_unlike_success(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.delete_like", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_unlike_success(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_delete: MagicMock,
+        mock_require: AsyncMock,
+        mock_delete: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_db = MagicMock()
-        mock_session.return_value.__enter__.return_value = mock_db
-        mock_get_verse.return_value = MockVerse(verse_id)
 
-        unlike_verse_of_day_service(verse_id=verse_id, user_id=user_id)
+        await unlike_verse_of_day_service(verse_id=verse_id, user_id=user_id)
 
-        mock_delete.assert_called_once_with(db=mock_db, verse_id=verse_id, user_id=user_id)
+        mock_require.assert_awaited_once_with(verse_id)
+        mock_delete.assert_awaited_once_with(verse_id=verse_id, user_id=user_id)
 
 
 class TestGetVerseLikesService:
 
-    @patch("pecha_api.verse_of_day.like_service.like_exists")
-    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_get_likes_anonymous(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.like_exists", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_get_likes_anonymous(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_count: MagicMock,
-        mock_exists: MagicMock,
+        mock_require: AsyncMock,
+        mock_count: AsyncMock,
+        mock_exists: AsyncMock,
     ) -> None:
         verse_id = uuid4()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = MockVerse(verse_id)
         mock_count.return_value = 10
 
-        result = get_verse_likes_service(verse_id=verse_id, user_id=None)
+        result = await get_verse_likes_service(verse_id=verse_id, user_id=None)
 
         assert result.like_count == 10
         assert result.liked_by_me is False
         mock_exists.assert_not_called()
 
-    @patch("pecha_api.verse_of_day.like_service.like_exists")
-    @patch("pecha_api.verse_of_day.like_service.count_verse_likes")
-    @patch("pecha_api.verse_of_day.like_service.get_verse_of_day_by_id")
-    @patch("pecha_api.verse_of_day.like_service.SessionLocal")
-    def test_get_likes_authenticated(
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.like_exists", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service.count_verse_likes", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_get_likes_authenticated(
         self,
-        mock_session: MagicMock,
-        mock_get_verse: MagicMock,
-        mock_count: MagicMock,
-        mock_exists: MagicMock,
+        mock_require: AsyncMock,
+        mock_count: AsyncMock,
+        mock_exists: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user_id = uuid4()
-        mock_session.return_value.__enter__.return_value = MagicMock()
-        mock_get_verse.return_value = MockVerse(verse_id)
         mock_count.return_value = 2
         mock_exists.return_value = True
 
-        result = get_verse_likes_service(verse_id=verse_id, user_id=user_id)
+        result = await get_verse_likes_service(verse_id=verse_id, user_id=user_id)
 
         assert result.liked_by_me is True
-        mock_exists.assert_called_once()
+        mock_exists.assert_awaited_once_with(verse_id=verse_id, user_id=user_id)
 
 
 class TestLikeServiceHelpers:

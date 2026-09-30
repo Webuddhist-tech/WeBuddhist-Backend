@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.verse_of_day.comment_response_models import (
@@ -35,13 +36,13 @@ verse_of_day_comment_actions_router = APIRouter(
     status_code=status.HTTP_200_OK,
     response_model=VerseOfDayCommentsResponse,
 )
-def list_verse_comments(
+async def list_verse_comments(
     verse_id: UUID,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> VerseOfDayCommentsResponse:
     """List comments on a verse of the day (newest first)."""
-    return list_verse_comments_service(
+    return await list_verse_comments_service(
         verse_id=verse_id,
         skip=skip,
         limit=limit,
@@ -53,14 +54,17 @@ def list_verse_comments(
     status_code=status.HTTP_201_CREATED,
     response_model=VerseOfDayCommentDTO,
 )
-def create_verse_comment(
+async def create_verse_comment(
     verse_id: UUID,
     request: CreateVerseOfDayCommentRequest,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> VerseOfDayCommentDTO:
     """Create a comment on a verse of the day (requires authentication)."""
-    user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return create_verse_comment_service(
+    user = await run_in_threadpool(
+        validate_and_extract_user_details,
+        token=authentication_credential.credentials,
+    )
+    return await create_verse_comment_service(
         verse_id=verse_id,
         user_id=user.id,
         text=request.text,
@@ -71,11 +75,14 @@ def create_verse_comment(
     "/{comment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def delete_verse_comment(
+async def delete_verse_comment(
     comment_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> Response:
     """Delete a comment (only the author can delete)."""
-    user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    delete_verse_comment_service(comment_id=comment_id, user_id=user.id)
+    user = await run_in_threadpool(
+        validate_and_extract_user_details,
+        token=authentication_credential.credentials,
+    )
+    await delete_verse_comment_service(comment_id=comment_id, user_id=user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -3,8 +3,8 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
@@ -69,64 +69,59 @@ def build_comment_dto(comment: VerseOfDayComment) -> VerseOfDayCommentDTO:
     )
 
 
-def _require_verse(db: Session, verse_id: UUID) -> None:
-    verse = get_verse_of_day_by_id(db=db, verse_id=verse_id)
-    if not verse:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NOT_FOUND,
-        )
+async def _require_verse(verse_id: UUID) -> None:
+    def _check() -> None:
+        with SessionLocal() as db:
+            verse = get_verse_of_day_by_id(db=db, verse_id=verse_id)
+            if not verse:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=NOT_FOUND,
+                )
+
+    await run_in_threadpool(_check)
 
 
-def list_verse_comments_service(
+async def list_verse_comments_service(
     verse_id: UUID,
     skip: int = 0,
     limit: int = 20,
 ) -> VerseOfDayCommentsResponse:
-    with SessionLocal() as db:
-        _require_verse(db, verse_id)
-        comments, total = get_verse_comments(
-            db=db,
-            verse_id=verse_id,
-            skip=skip,
-            limit=limit,
-        )
-        return VerseOfDayCommentsResponse(
-            comments=[build_comment_dto(comment) for comment in comments],
-            skip=skip,
-            limit=limit,
-            total=total,
-        )
+    await _require_verse(verse_id)
+    comments, total = await get_verse_comments(
+        verse_id=verse_id,
+        skip=skip,
+        limit=limit,
+    )
+    return VerseOfDayCommentsResponse(
+        comments=[build_comment_dto(comment) for comment in comments],
+        skip=skip,
+        limit=limit,
+        total=total,
+    )
 
 
-def create_verse_comment_service(
+async def create_verse_comment_service(
     verse_id: UUID,
     user_id: UUID,
     text: str,
 ) -> VerseOfDayCommentDTO:
-    with SessionLocal() as db:
-        _require_verse(db, verse_id)
-        comment = VerseOfDayComment(
-            verse_id=verse_id,
-            user_id=user_id,
-            text=text,
+    await _require_verse(verse_id)
+    created = await create_comment(verse_id=verse_id, user_id=user_id, text=text)
+    return build_comment_dto(created)
+
+
+async def delete_verse_comment_service(comment_id: UUID, user_id: UUID) -> None:
+    comment = await get_comment_by_id(comment_id=comment_id)
+    if not comment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=NOT_FOUND,
         )
-        created = create_comment(db=db, comment=comment)
-        return build_comment_dto(created)
-
-
-def delete_verse_comment_service(comment_id: UUID, user_id: UUID) -> None:
-    with SessionLocal() as db:
-        comment = get_comment_by_id(db=db, comment_id=comment_id)
-        if not comment:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=NOT_FOUND,
-            )
-        _require_verse(db, comment.verse_id)
-        if comment.user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only delete your own comments",
-            )
-        delete_comment(db=db, comment=comment)
+    await _require_verse(comment.verse_id)
+    if comment.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete your own comments",
+        )
+    await delete_comment(comment_id=comment_id)
