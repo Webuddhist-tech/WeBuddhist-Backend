@@ -223,7 +223,7 @@ class TestEndSessionOverHttp:
             broadcaster.broadcast_session_ended.return_value = True
             client.post(_url(event_id, "end"), headers=AUTH)
 
-        broadcaster.clear_segment_marks.assert_awaited_once_with(event_id)
+        broadcaster.close_segment_marks.assert_awaited_once_with(event_id)
 
     def test_failing_to_clear_the_snapshot_is_reported(self):
         """204 would tell the controller the puja ended while a stale position

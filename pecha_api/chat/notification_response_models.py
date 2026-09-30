@@ -39,7 +39,11 @@ class PrayerNotificationTargetsResponse(BaseModel):
 
     Recipients is the requester alone (never the person who prayed), so the
     pagination fields are there only to match the chat targets contract the
-    worker already speaks."""
+    worker already speaks.
+
+    `prayer_id` is the chat_prayer_notifications id. `prayer_count` is the
+    live number of people praying; `people_count` and `prayer_total` are what
+    this push summarises (since the previous push for the request)."""
     prayer_id: UUID
     message_id: UUID
     room_id: UUID
@@ -48,6 +52,8 @@ class PrayerNotificationTargetsResponse(BaseModel):
     event_id: Optional[UUID] = None
     requester_id: UUID
     prayer_count: int
+    people_count: int
+    prayer_total: int
     title: str
     body: str
     recipients: List[ChatNotificationRecipientDTO]

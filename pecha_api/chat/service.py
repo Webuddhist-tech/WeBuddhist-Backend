@@ -166,6 +166,7 @@ def build_message_dto(
     prayed_by_me: bool = False,
     recent_prayers=None,
     intention: Optional[PrayerIntentionDTO] = None,
+    my_prayer_count: int = 0,
 ) -> ChatMessageDTO:
     sender_email = (message.sender.email if message.sender else None) or "unknown@example.com"
     is_deleted = message.deleted_at is not None
@@ -184,6 +185,7 @@ def build_message_dto(
         reactions=_build_reaction_dtos(reactions, viewer_id),
         prayer_count=prayer_count,
         prayed_by_me=prayed_by_me,
+        my_prayer_count=my_prayer_count,
         recent_prayers=build_prayer_user_dtos(recent_prayers),
         intention=intention,
         is_edited=getattr(message, "is_edited", None) is True,

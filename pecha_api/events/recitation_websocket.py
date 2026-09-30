@@ -47,8 +47,18 @@ def presence_key(event_id: UUID) -> str:
 
 def segment_mark_key(event_id: UUID) -> str:
     """Per text, the line the room last landed on and when - what a segment's
-    play time is measured from once the next line arrives."""
+    play time is measured from once the next line arrives.
+
+    Only the text the room is actually on is kept: moving to another text drops
+    the one left behind, so returning to it later measures from the return and
+    not across the excursion."""
     return f"recitation:event:{event_id}:marks"
+
+
+def segment_boundary_key(event_id: UUID) -> str:
+    """The revision a session ended on. Marks at or below it belong to that
+    session, so nothing is measured across the gap between two pujas."""
+    return f"recitation:event:{event_id}:mark-boundary"
 
 
 # Shared with the presence script, which rebuilds lease keys itself from the
@@ -174,20 +184,53 @@ return revision
 # The same line sent twice - the controller re-sends the edition on screen
 # behind its followers - keeps the first mark: the line started when the room
 # first reached it, not when it was repeated.
+#
+# The room shows one text at a time, so writing a mark drops every other text's:
+# an operator who leaves a text and comes back to its next line must not be
+# billed the excursion as that line's recitation time.
+#
+# The session boundary is a revision, not a deletion, because ending a session
+# and writing a mark are both background work and cannot be ordered against
+# each other. A mark from the session that just ended is at or below it and is
+# neither written nor measured; the next session's marks are above it and a
+# late-running end can no longer erase them.
 _SWAP_SEGMENT_MARK_SCRIPT = """
+local revision = tonumber(ARGV[2])
+local boundary = tonumber(redis.call('GET', KEYS[2]) or '0')
+if revision <= boundary then
+    return false
+end
 local previous = redis.call('HGET', KEYS[1], ARGV[1])
 if previous then
     local previous_revision, previous_line = string.match(previous, '^(%d+)|%d+|(.*)$')
-    if previous_revision and tonumber(previous_revision) >= tonumber(ARGV[2]) then
+    if previous_revision and tonumber(previous_revision) >= revision then
         return false
     end
     if previous_line == ARGV[5] then
         return false
     end
+    if previous_revision and tonumber(previous_revision) <= boundary then
+        previous = false
+    end
+end
+local marked = redis.call('HKEYS', KEYS[1])
+for i = 1, #marked do
+    if marked[i] ~= ARGV[1] then
+        redis.call('HDEL', KEYS[1], marked[i])
+    end
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
 redis.call('EXPIRE', KEYS[1], ARGV[4])
 return previous
+"""
+
+# Taking the boundary from the shared counter is what makes it a boundary: the
+# revision is handed out by the same INCR every position uses, so no position
+# can ever land on it, and every position still to come is above it.
+_END_SEGMENT_MARKS_SCRIPT = """
+local revision = redis.call('INCR', KEYS[1])
+redis.call('SET', KEYS[2], revision, 'EX', ARGV[1])
+return revision
 """
 
 # Counting the window and stamping its expiry have to be one step. As two round
@@ -475,15 +518,17 @@ class RecitationBroadcaster:
 
         `mark` is `"<revision>|<accepted at ms>|<line>"`, where `line` names the
         line itself. None when there was nothing before it, when a newer mark is
-        already stored, when the same line is already marked, or when Redis
+        already stored, when the same line is already marked, when the mark or
+        the one before it belongs to a session that has ended, or when Redis
         could not be reached - in every case there is nothing to measure, and
         play times are never worth failing over.
         """
         try:
             previous = await self.redis.eval(
                 _SWAP_SEGMENT_MARK_SCRIPT,
-                1,
+                2,
                 segment_mark_key(event_id),
+                segment_boundary_key(event_id),
                 text_id,
                 str(revision),
                 mark,
@@ -495,13 +540,26 @@ class RecitationBroadcaster:
             return None
         return previous or None
 
-    async def clear_segment_marks(self, event_id: UUID) -> None:
-        """Forget every text's mark when a session ends, so the gap before the
-        next session is not taken for a line that took hours to recite."""
+    async def close_segment_marks(self, event_id: UUID) -> None:
+        """Close the session's marks so the gap before the next session is not
+        taken for a line that took hours to recite.
+
+        The marks are not deleted. This runs as background work alongside the
+        mark writes it has to shut out, and the two cannot be ordered: a delete
+        that ran late would take the next session's first mark with it, and one
+        that ran early would leave the mark it came to remove. Recording the
+        revision the session ended on settles both, whenever it lands.
+        """
         try:
-            await self.redis.delete(segment_mark_key(event_id))
+            await self.redis.eval(
+                _END_SEGMENT_MARKS_SCRIPT,
+                2,
+                position_revision_key(event_id),
+                segment_boundary_key(event_id),
+                str(POSITION_TTL_SECONDS),
+            )
         except Exception as e:
-            logger.exception("Failed to clear recitation segment marks in Redis: %s", e)
+            logger.exception("Failed to close recitation segment marks in Redis: %s", e)
 
     async def broadcast_session_ended(self, event_id: UUID) -> bool:
         """Tell every server holding a socket for this event that the operator

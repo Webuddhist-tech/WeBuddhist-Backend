@@ -194,7 +194,7 @@ async def end_recitation_session(
             detail="Failed to end the recitation session; retry",
         )
 
-    background_tasks.add_task(broadcaster.clear_segment_marks, event_id)
+    background_tasks.add_task(broadcaster.close_segment_marks, event_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -426,7 +426,7 @@ async def websocket_recitation_live(
                             _error("SERVER_ERROR", "Failed to end the session; try again")
                         )
                     else:
-                        _in_background(broadcaster.clear_segment_marks(event_id))
+                        _in_background(broadcaster.close_segment_marks(event_id))
                     continue
 
                 try:

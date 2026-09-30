@@ -7,12 +7,15 @@ from sqlalchemy.orm import Session
 from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.repository import (
     SUPPRESSED_SQS_MESSAGE_ID,
+    _as_utc,
+    claim_unreported_prayers,
+    create_prayer_notification,
+    get_last_prayer_notification,
     get_message_by_id_any_room,
-    get_prayer_by_id,
-    has_dispatched_prayer_since,
     last_dispatched_prayer_request,
     list_undispatched_chat_notification_messages,
     list_undispatched_prayer_notifications,
+    lock_prayer_request,
     mark_message_notification_dispatched,
     mark_prayer_notification_dispatched,
 )
@@ -185,88 +188,120 @@ def reconcile_undispatched_chat_notifications() -> int:
     return requeued
 
 
-def _should_notify_prayer(db, prayer) -> bool:
-    """Whether this prayer earns its own push.
-
-    Two reasons it does not: the requester prayed for their own request, or
-    another prayer for the same request already raised one inside the coalesce
-    window - twelve people praying in quick succession is one notification
-    saying twelve are praying, not twelve notifications.
-    """
-    message = get_message_by_id_any_room(db=db, message_id=prayer.message_id)
-    if message is None or message.sender_id == prayer.user_id:
-        return False
-
-    coalesce_seconds = max(get_int("PRAYER_NOTIFICATION_COALESCE_SECONDS"), 0)
-    if coalesce_seconds == 0:
+def _prayer_interval_is_open(last_created_at, interval_seconds: int) -> bool:
+    if interval_seconds == 0 or last_created_at is None:
         return True
-    since = datetime.now(timezone.utc) - timedelta(seconds=coalesce_seconds)
-    return not has_dispatched_prayer_since(
-        db=db,
-        message_id=prayer.message_id,
-        since=since,
-        exclude_prayer_id=prayer.id,
-    )
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=interval_seconds)
+    return _as_utc(last_created_at) <= cutoff
 
 
-def enqueue_prayer_notification(prayer_id: UUID) -> str | None:
-    """Enqueue a prayer notification event. Never raises to callers.
+def _create_prayer_notification_if_due(message_id: UUID, prayer_user_id: UUID) -> UUID | None:
+    """Decide whether this request's requester gets a push now and, if so,
+    record it. Returns the new notification id, or None when no push is due.
 
-    Returns the SQS MessageId on success, or None when the queue is not
-    configured, the prayer does not earn a push, or enqueue fails. The prayer
-    itself is already persisted.
+    The request row is locked for the whole decision, so two pray calls landing
+    together cannot both find the interval open. Prayers that arrive while the
+    interval is closed are not lost: they stay unreported on their count rows
+    and the next push claims them. Claiming the counts and recording the push
+    commit together, so a push never reports prayers another push also did.
     """
-    if not is_chat_notification_sqs_configured():
-        logger.debug(
-            "Skipping prayer notification enqueue for %s; SQS queue not configured",
-            prayer_id,
+    interval_seconds = max(get_int("PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS"), 0)
+    with SessionLocal() as db:
+        message = lock_prayer_request(db=db, message_id=message_id)
+        if message is None or message.sender_id == prayer_user_id:
+            return None
+
+        previous = get_last_prayer_notification(db=db, message_id=message_id)
+        if not _prayer_interval_is_open(
+            previous.created_at if previous else None, interval_seconds
+        ):
+            return None
+
+        # The requester's own prayers are claimed too, so they never pile up,
+        # but they are neither counted nor named.
+        claimed = [
+            row
+            for row in claim_unreported_prayers(db=db, message_id=message_id)
+            if row.user_id != message.sender_id
+        ]
+        if not claimed:
+            # Nothing is committed, so any claim rolls back with the session.
+            return None
+
+        latest = max(claimed, key=lambda row: row.last_prayed_at)
+        notification = create_prayer_notification(
+            db=db,
+            message_id=message_id,
+            people_count=len(claimed),
+            prayer_total=sum(row.count for row in claimed),
+            latest_user_id=latest.user_id,
         )
-        return None
+        return notification.id
 
-    try:
-        with SessionLocal() as db:
-            prayer = get_prayer_by_id(db=db, prayer_id=prayer_id)
-            if prayer is None:
-                return None
-            if not _should_notify_prayer(db=db, prayer=prayer):
-                mark_prayer_notification_dispatched(
-                    db=db,
-                    prayer_id=prayer_id,
-                    sqs_message_id=SUPPRESSED_SQS_MESSAGE_ID,
-                )
-                return None
-    except Exception:
-        logger.exception("Failed to evaluate prayer notification for %s", prayer_id)
-        return None
 
+def _send_prayer_notification(notification_id: UUID) -> str | None:
+    """Send one recorded prayer push to SQS and record its MessageId.
+
+    A send failure leaves the row without an SQS id for reconcile to retry."""
     try:
         sqs_message_id = send_chat_notification_message(
-            build_prayer_notification_event_body(prayer_id=str(prayer_id))
+            build_prayer_notification_event_body(prayer_id=str(notification_id))
         )
     except Exception:
-        logger.exception("Failed to enqueue prayer notification for prayer %s", prayer_id)
+        logger.exception(
+            "Failed to enqueue prayer notification %s", notification_id
+        )
         return None
 
     try:
         with SessionLocal() as db:
             mark_prayer_notification_dispatched(
                 db=db,
-                prayer_id=prayer_id,
+                notification_id=notification_id,
                 sqs_message_id=sqs_message_id,
             )
     except Exception:
         logger.exception(
-            "Enqueued prayer notification for %s but failed to persist SQS MessageId %s",
-            prayer_id,
+            "Enqueued prayer notification %s but failed to persist SQS MessageId %s",
+            notification_id,
             sqs_message_id,
         )
     return sqs_message_id
 
 
-def reconcile_undispatched_prayer_notifications() -> int:
-    """Re-enqueue prayers that never recorded an SQS MessageId.
+def notify_prayers_for_request(message_id: UUID, prayer_user_id: UUID) -> str | None:
+    """Run the prayer-received gate for one request after someone prayed.
+    Never raises to callers.
 
-    Covers the same commit-before-send crash window as chat messages.
+    At most one push per request per interval, and none for the requester's
+    own prayers. Returns the SQS MessageId when a push was sent, otherwise
+    None. The prayers themselves are already persisted either way.
+    """
+    if not is_chat_notification_sqs_configured():
+        logger.debug(
+            "Skipping prayer notification for %s; SQS queue not configured",
+            message_id,
+        )
+        return None
+
+    try:
+        notification_id = _create_prayer_notification_if_due(
+            message_id=message_id, prayer_user_id=prayer_user_id
+        )
+    except Exception:
+        logger.exception("Failed to evaluate prayer notification for %s", message_id)
+        return None
+    if notification_id is None:
+        return None
+
+    return _send_prayer_notification(notification_id)
+
+
+def reconcile_undispatched_prayer_notifications() -> int:
+    """Re-send prayer pushes that were recorded but never got an SQS MessageId.
+
+    Covers the same commit-before-send crash window as chat messages. The gate
+    is not re-run: the row is the push that was already decided.
     """
     if not is_chat_notification_sqs_configured():
         return 0
@@ -276,17 +311,17 @@ def reconcile_undispatched_prayer_notifications() -> int:
     older_than = datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)
 
     with SessionLocal() as db:
-        prayers = list_undispatched_prayer_notifications(
+        notifications = list_undispatched_prayer_notifications(
             db=db,
             older_than=older_than,
             limit=batch_size,
         )
-        prayer_ids = [prayer.id for prayer in prayers]
+        notification_ids = [notification.id for notification in notifications]
 
     requeued = 0
-    for prayer_id in prayer_ids:
-        if enqueue_prayer_notification(prayer_id):
+    for notification_id in notification_ids:
+        if _send_prayer_notification(notification_id):
             requeued += 1
-            logger.info("Re-enqueued undispatched prayer notification for %s", prayer_id)
+            logger.info("Re-enqueued undispatched prayer notification %s", notification_id)
 
     return requeued

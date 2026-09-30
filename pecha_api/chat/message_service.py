@@ -21,10 +21,10 @@ from pecha_api.chat.models import (
 from pecha_api.chat.moderation_service import validate_message_content
 from pecha_api.chat.notification_dispatch_service import (
     enqueue_chat_message_notification,
-    enqueue_prayer_notification,
+    notify_prayers_for_request,
 )
 from pecha_api.chat.repository import (
-    add_prayers_ignoring_duplicates,
+    add_prayers,
     add_reaction,
     count_message_prayers,
     create_message,
@@ -32,8 +32,8 @@ from pecha_api.chat.repository import (
     get_message_by_id,
     get_message_by_id_any_room,
     get_messages_by_ids,
+    get_my_prayer_counts_map,
     get_prayed_message_ids,
-    get_prayer,
     get_prayer_counts_map,
     get_prayer_user_ids_map,
     get_reaction,
@@ -44,7 +44,7 @@ from pecha_api.chat.repository import (
     get_room_messages,
     list_message_prayers,
     list_message_reactions,
-    remove_prayer,
+    remove_prayer_and_count,
     remove_reaction,
     soft_delete_message,
     soft_delete_messages,
@@ -89,6 +89,7 @@ _ALREADY_REPORTED = "ALREADY_REPORTED"
 _CANNOT_REPORT_OWN_MESSAGE = "CANNOT_REPORT_OWN_MESSAGE"
 _PRAYER_NOT_ALLOWED_IN_DM = "PRAYER_NOT_ALLOWED_IN_DM"
 _NOT_A_PRAYER_REQUEST = "NOT_A_PRAYER_REQUEST"
+_ONLY_REQUESTER_SEES_ROSTER = "Only the requester can see who is praying"
 _NOT_OWN_MESSAGES = "message_ids include other users' messages"
 _NOTHING_TO_EDIT = "Provide body or intention to edit"
 _RECENT_PRAYERS_LIMIT = 3
@@ -328,6 +329,9 @@ def list_room_messages_service(
         prayed_by_me = get_prayed_message_ids(
             db=db, message_ids=prayer_ids, user_id=user.id
         )
+        my_prayer_counts = get_my_prayer_counts_map(
+            db=db, message_ids=prayer_ids, user_id=user.id
+        )
         recent_prayers = get_recent_prayers_map(
             db=db, message_ids=prayer_ids, per_message=_RECENT_PRAYERS_LIMIT
         )
@@ -347,6 +351,7 @@ def list_room_messages_service(
                     intention=intention_dtos.get(message.intention)
                     if message.intention
                     else None,
+                    my_prayer_count=my_prayer_counts.get(message.id, 0),
                 )
                 for message in messages
             ],
@@ -443,6 +448,9 @@ def edit_message_service(
                 ).get(message.id, 0),
                 "prayed_by_me": message.id
                 in get_prayed_message_ids(db=db, message_ids=prayer_ids, user_id=user.id),
+                "my_prayer_count": get_my_prayer_counts_map(
+                    db=db, message_ids=prayer_ids, user_id=user.id
+                ).get(message.id, 0),
                 "recent_prayers": get_recent_prayers_map(
                     db=db, message_ids=prayer_ids, per_message=_RECENT_PRAYERS_LIMIT
                 ).get(message.id),
@@ -663,13 +671,15 @@ def pray_for_messages_service(
     room_id: UUID,
     user: Users,
     message_ids: Sequence[UUID],
+    count: int = 1,
 ) -> PrayerBatchResult:
-    """Pray for one or several selected prayer requests in one action.
+    """Pray `count` times for each of one or several selected prayer requests.
 
-    Idempotent: praying again for the same request is a no-op that still
-    reports the current state. Ids that are not live prayer requests in this
-    room are skipped rather than failing the whole batch, so a request deleted
-    between rendering and confirming does not lose the rest of the selection.
+    Praying again for the same request adds to the caller's running total; the
+    people count only moves on a first prayer. Ids that are not live prayer
+    requests in this room are skipped rather than failing the whole batch, so a
+    request deleted between rendering and confirming does not lose the rest of
+    the selection.
     """
     with SessionLocal() as db:
         _get_room_or_404(db=db, room_id=room_id)
@@ -690,10 +700,9 @@ def pray_for_messages_service(
                 detail=_NOT_A_PRAYER_REQUEST,
             )
 
-        created = add_prayers_ignoring_duplicates(
-            db=db, message_ids=valid_ids, user_id=user.id
+        result = add_prayers(
+            db=db, message_ids=valid_ids, user_id=user.id, count=count
         )
-        created_by_message = dict(created)
 
         counts = get_prayer_counts_map(db=db, message_ids=valid_ids)
         response = PrayerBatchResponse(
@@ -702,7 +711,8 @@ def pray_for_messages_service(
                     message_id=message_id,
                     prayer_count=counts.get(message_id, 0),
                     prayed_by_me=True,
-                    created=message_id in created_by_message,
+                    my_prayer_count=result.my_prayer_counts.get(message_id, 0),
+                    created=message_id in result.created_message_ids,
                 )
                 for message_id in valid_ids
             ]
@@ -710,9 +720,10 @@ def pray_for_messages_service(
         broadcast = _prayer_broadcast_entries(db=db, message_ids=valid_ids)
 
     # After the session closes: the prayers are already committed, so a
-    # notification failure cannot cost the user their prayer.
-    for _, prayer_id in created:
-        enqueue_prayer_notification(prayer_id)
+    # notification failure cannot cost the user their prayer. Every call runs
+    # the gate, not just a first prayer: repeat prayers are what the push sums.
+    for message_id in valid_ids:
+        notify_prayers_for_request(message_id=message_id, prayer_user_id=user.id)
 
     return PrayerBatchResult(room_id=room_id, response=response, broadcast=broadcast)
 
@@ -722,9 +733,7 @@ def unpray_message_service(message_id: UUID, user: Users) -> PrayerBatchResult:
     with SessionLocal() as db:
         message = _resolve_prayer_request(db=db, message_id=message_id, user=user)
 
-        existing = get_prayer(db=db, message_id=message.id, user_id=user.id)
-        if existing is not None:
-            remove_prayer(db=db, prayer=existing)
+        remove_prayer_and_count(db=db, message_id=message.id, user_id=user.id)
 
         response = PrayerBatchResponse(
             prayers=[
@@ -732,6 +741,7 @@ def unpray_message_service(message_id: UUID, user: Users) -> PrayerBatchResult:
                     message_id=message.id,
                     prayer_count=count_message_prayers(db=db, message_id=message.id),
                     prayed_by_me=False,
+                    my_prayer_count=0,
                     created=False,
                 )
             ]
@@ -748,9 +758,15 @@ def list_message_prayers_service(
     skip: int = 0,
     limit: int = 20,
 ) -> ChatMessagePrayersResponse:
-    """Who prayed for this request, newest first."""
+    """Who is praying for this request and how many times each, most recently
+    prayed first. Only the person who posted the request may see it."""
     with SessionLocal() as db:
         message = _resolve_prayer_request(db=db, message_id=message_id, user=user)
+        if message.sender_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=_ONLY_REQUESTER_SEES_ROSTER,
+            )
         prayers, total = list_message_prayers(
             db=db, message_id=message.id, skip=skip, limit=limit
         )
@@ -764,7 +780,9 @@ def list_message_prayers_service(
                     avatar_url=_generate_presigned_url(
                         prayer.user.avatar_url if prayer.user else None
                     ),
-                    created_at=prayer.created_at.isoformat(),
+                    prayer_count=int(prayer.prayer_count),
+                    created_at=prayer.first_prayed_at.isoformat(),
+                    last_prayed_at=prayer.last_prayed_at.isoformat(),
                 )
                 for prayer in prayers
             ],

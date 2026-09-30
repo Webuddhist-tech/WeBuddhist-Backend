@@ -763,6 +763,26 @@ class TestEditMessageService:
         assert mock_update.call_args.kwargs["intention"] == "healing"
         assert result.is_edited is True
 
+    def test_edited_prayer_request_keeps_the_authors_own_prayer_count(self):
+        """The edit response must agree with the message list, which carries
+        how many times the viewer has prayed for the request."""
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = None
+
+        with patch('pecha_api.chat.message_service.validate_message_intention_and_body', return_value=None), \
+             patch('pecha_api.chat.message_service.get_prayer_counts_map', return_value={message.id: 4}), \
+             patch('pecha_api.chat.message_service.get_prayed_message_ids', return_value={message.id}), \
+             patch('pecha_api.chat.message_service.get_my_prayer_counts_map', return_value={message.id: 30}) as mock_mine, \
+             patch('pecha_api.chat.message_service.get_recent_prayers_map', return_value={}):
+            result, _ = self._run(message, user, body="Pray for my mother")
+
+        assert mock_mine.call_args.kwargs["user_id"] == user.id
+        assert result.my_prayer_count == 30
+        assert result.prayer_count == 4
+        assert result.prayed_by_me is True
+
     def test_rejected_when_group_unpublished_before_commit(self):
         user = MockUser()
         message = MockMessage(sender=user, sender_id=user.id, body="Hello")

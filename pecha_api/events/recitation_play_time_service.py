@@ -64,11 +64,17 @@ async def record_segment_play_time(
     costs the whole room its place.
 
     Only a step to the very next line is a measurement. A jump - back to repeat
-    a passage, forward past a skipped section, onto another text - says nothing
-    about how long the line left behind takes to recite. Neither is a move the
-    controller's autoplay made: its timing came from these figures, and feeding
-    it back would only drown out the operator's real ones. It still marks where
-    the room is, so the operator's next move is measured from the right line.
+    a passage, forward past a skipped section - says nothing about how long the
+    line left behind takes to recite. Neither is a move the controller's
+    autoplay made: its timing came from these figures, and feeding it back would
+    only drown out the operator's real ones. It still marks where the room is,
+    so the operator's next move is measured from the right line.
+
+    A move onto another text, and the gap between two sessions, are ruled out by
+    the mark store itself: it keeps only the text the room is on, and marks from
+    a session that has ended are never handed back. Both have to be settled
+    there, because this runs as unordered background work and cannot tell how
+    much happened between two marks.
     """
     try:
         if revision is None:

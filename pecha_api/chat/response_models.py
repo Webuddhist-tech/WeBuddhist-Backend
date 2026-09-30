@@ -1,12 +1,15 @@
 from typing import Any, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator, model_serializer
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageType
 from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 
-MAX_PRAYER_BATCH_SIZE = 50
+# Kept at the per-second prayer limit: a call adds `count` to every id, so a
+# larger selection could never pass the rate limit even at count 1.
+MAX_PRAYER_BATCH_SIZE = 10
+MAX_PRAYERS_PER_CALL = 10
 MAX_MESSAGE_DELETE_BATCH_SIZE = 50
 
 
@@ -81,6 +84,7 @@ class ChatMessageDTO(BaseModel):
     reactions: List[ChatMessageReactionDTO] = []
     prayer_count: int = 0
     prayed_by_me: bool = False
+    my_prayer_count: int = 0
     recent_prayers: List[ChatMessagePrayerUserDTO] = []
     intention: Optional[PrayerIntentionDTO] = None
     is_edited: bool = False
@@ -94,7 +98,13 @@ class ChatMessageDTO(BaseModel):
         if data.get("deleted_at") is None:
             data.pop("deleted_at", None)
         if data.get("message_type") != ChatMessageType.PRAYER.value:
-            for field in ("prayer_count", "prayed_by_me", "recent_prayers", "intention"):
+            for field in (
+                "prayer_count",
+                "prayed_by_me",
+                "my_prayer_count",
+                "recent_prayers",
+                "intention",
+            ):
                 data.pop(field, None)
         elif data.get("intention") is None:
             data.pop("intention", None)
@@ -256,8 +266,10 @@ class EditChatMessageRequest(BaseModel):
 class PrayForMessagesRequest(BaseModel):
     """Request to pray for one or several selected prayer requests at once.
 
-    The multi-select action: the client sends the ids the user ticked."""
+    The multi-select action: the client sends the ids the user ticked.
+    `count` prayers are added to each of them."""
     message_ids: List[UUID]
+    count: int = Field(default=1, ge=1, le=MAX_PRAYERS_PER_CALL)
 
     @field_validator("message_ids")
     @classmethod
@@ -297,10 +309,12 @@ class DeleteChatMessagesRequest(BaseModel):
 
 class ChatMessagePrayerStateDTO(BaseModel):
     """One prayer request's state after a batch pray. `created` is False when
-    the caller had already prayed for it."""
+    the caller had already prayed for it. `prayer_count` counts people;
+    `my_prayer_count` is how many times the caller has prayed for it."""
     message_id: UUID
     prayer_count: int
     prayed_by_me: bool
+    my_prayer_count: int = 0
     created: bool
 
 
@@ -310,16 +324,19 @@ class PrayerBatchResponse(BaseModel):
 
 
 class ChatMessagePrayerDTO(BaseModel):
-    """One person who prayed for a request, and when."""
+    """One person praying for a request: how many times, when they first
+    prayed (`created_at`) and when they last did."""
     user_id: UUID
     email: Optional[str] = None
     name: Optional[str] = None
     avatar_url: Optional[str] = None
+    prayer_count: int
     created_at: str
+    last_prayed_at: str
 
 
 class ChatMessagePrayersResponse(BaseModel):
-    """Response for the who-prayed endpoint."""
+    """Response for the who-prayed endpoint. `total` counts people."""
     message_id: UUID
     prayers: List[ChatMessagePrayerDTO]
     skip: int

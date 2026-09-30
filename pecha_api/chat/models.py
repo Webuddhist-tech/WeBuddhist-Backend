@@ -3,12 +3,14 @@ import datetime as dt
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -176,6 +178,16 @@ class ChatMessage(Base):
         back_populates="message",
         cascade=CASCADE_DELETE_ORPHAN,
     )
+    prayer_counts = relationship(
+        "ChatMessagePrayerCount",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
+    prayer_notifications = relationship(
+        "ChatPrayerNotification",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
 
     __table_args__ = (
         Index("idx_chat_messages_room_created", "room_id", sql_text(CREATED_AT_DESC)),
@@ -317,8 +329,111 @@ class ChatMessagePrayer(Base):
             "user_id",
             sql_text(CREATED_AT_DESC),
         ),
+    )
+
+
+class ChatMessagePrayerCount(Base):
+    """How many times one person has prayed for one prayer request.
+
+    ChatMessagePrayer answers "is this person praying"; this row answers "how
+    many times". Both are written by the same pray call and removed together
+    on unpray.
+    """
+
+    __tablename__ = "chat_message_prayer_counts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_USERS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    prayer_count = Column(BigInteger, nullable=False)
+    # Prayers the requester has not yet been told about. Every pray adds to it;
+    # the prayer-received push reads and zeroes it in one locked step.
+    unreported_count = Column(
+        BigInteger, nullable=False, default=0, server_default=sql_text("0")
+    )
+    first_prayed_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+    last_prayed_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+
+    message = relationship("ChatMessage", back_populates="prayer_counts")
+    user = relationship("Users")
+
+    __table_args__ = (
+        # The upsert target: one running total per person per request.
+        UniqueConstraint(
+            "message_id",
+            "user_id",
+            name="uq_chat_message_prayer_counts_message_user",
+        ),
+        CheckConstraint(
+            "prayer_count >= 1", name="ck_chat_message_prayer_counts_positive"
+        ),
+        # Backs the "Praying together" roster, most recent first.
         Index(
-            "idx_chat_message_prayers_undispatched",
+            "idx_chat_message_prayer_counts_message_last",
+            "message_id",
+            sql_text("last_prayed_at DESC"),
+        ),
+    )
+
+
+class ChatPrayerNotification(Base):
+    """One prayer-received push to a requester, sent or queued.
+
+    Each row summarises the prayers not yet reported for the same request
+    (see ChatMessagePrayerCount.unreported_count), so a burst of prayers
+    inside the interval is one notification.
+    """
+
+    __tablename__ = "chat_prayer_notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    people_count = Column(Integer, nullable=False)
+    prayer_total = Column(BigInteger, nullable=False)
+    latest_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_USERS_ID, ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+    notification_sqs_message_id = Column(String(128), nullable=True)
+    notification_dispatched_at = Column(DateTime(timezone=True), nullable=True)
+
+    message = relationship("ChatMessage", back_populates="prayer_notifications")
+
+    __table_args__ = (
+        # Finds the request's last push, which starts the interval.
+        Index(
+            "idx_chat_prayer_notifications_message_created",
+            "message_id",
+            sql_text(CREATED_AT_DESC),
+        ),
+        Index(
+            "idx_chat_prayer_notifications_undispatched",
             "created_at",
             postgresql_where=sql_text("notification_sqs_message_id IS NULL"),
         ),
