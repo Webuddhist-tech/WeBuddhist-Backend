@@ -26,7 +26,7 @@ from pecha_api.cache.cache_enums import CacheType
 from pecha_api.utils import Utils
 
 # Bump on any change to the shape of a cached DTO.
-SCHEMA_VERSION = "v1"
+SCHEMA_VERSION = "v2"
 
 KeyPart = Union[str, int, float, bool, UUID, None]
 

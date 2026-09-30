@@ -6,7 +6,11 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
-from pecha_api.events.event_service import _event_to_dto, _local_hhmm
+from pecha_api.events.event_service import (
+    _effective_event_timezone,
+    _event_to_dto,
+    _local_hhmm,
+)
 
 MODULE = "pecha_api.events.event_service"
 
@@ -58,23 +62,42 @@ def test_local_hhmm_treats_naive_datetime_as_utc() -> None:
 
 
 @patch(f"{MODULE}.get", return_value="Asia/Kolkata")
-def test_local_hhmm_uses_default_zone_when_event_has_none(_mock_get) -> None:
-    value = datetime(2026, 9, 25, 2, 30, tzinfo=timezone.utc)
+def test_effective_timezone_uses_default_when_event_has_none(_mock_get) -> None:
+    assert _effective_event_timezone(None) == "Asia/Kolkata"
+    assert _effective_event_timezone("") == "Asia/Kolkata"
 
-    assert _local_hhmm(value, None) == "08:00"
+
+def test_effective_timezone_keeps_stored_zone() -> None:
+    assert _effective_event_timezone("America/New_York") == "America/New_York"
 
 
-def test_local_hhmm_falls_back_to_utc_for_unknown_zone() -> None:
-    value = datetime(2026, 9, 25, 2, 30, tzinfo=timezone.utc)
-
-    assert _local_hhmm(value, "Not/AZone") == "02:30"
+def test_effective_timezone_falls_back_to_utc_for_unknown_zone() -> None:
+    assert _effective_event_timezone("Not/AZone") == "UTC"
 
 
 def test_event_to_dto_sets_local_start_and_end_time() -> None:
     dto = _event_to_dto(_event())
 
+    assert dto.timezone == "Asia/Kolkata"
     assert dto.start_time == "08:00"
     assert dto.end_time == "17:00"
+
+
+@patch(f"{MODULE}.get", return_value="Asia/Kolkata")
+def test_event_to_dto_sends_default_zone_for_legacy_event(_mock_get) -> None:
+    """A legacy row's times are in the default zone, so the DTO names it
+    rather than leaving clients to guess from timezone: null."""
+    dto = _event_to_dto(_event(timezone=None))
+
+    assert dto.timezone == "Asia/Kolkata"
+    assert dto.start_time == "08:00"
+
+
+def test_event_to_dto_sends_utc_for_unknown_zone() -> None:
+    dto = _event_to_dto(_event(timezone="Not/AZone"))
+
+    assert dto.timezone == "UTC"
+    assert dto.start_time == "02:30"
 
 
 def test_event_to_dto_times_follow_occurrence_dates() -> None:
