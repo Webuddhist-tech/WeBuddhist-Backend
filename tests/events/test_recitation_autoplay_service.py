@@ -418,6 +418,24 @@ class TestChangingCourse:
         assert event_id not in h.engine._runners
 
     @pytest.mark.asyncio
+    async def test_a_new_plan_redis_refused_leaves_the_old_one_running(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        old = await h.engine.start(event_id, _steps(1000, 1000))
+        h.store.begin = AsyncMock(side_effect=RuntimeError("redis down"))
+
+        with pytest.raises(RuntimeError):
+            await h.engine.start(event_id, _steps(1000, 1000))
+
+        assert h.engine._running_here(event_id)
+        assert h.engine._runner_plans[event_id] == old.plan_id
+        h.gate.set()
+        await h.settle(event_id)
+        assert [segments[1] for _, segments, _ in h.sent] == ["bo-0", "bo-1"]
+        assert (await h.engine.state(event_id)).reason == "finished"
+
+    @pytest.mark.asyncio
     async def test_a_stop_redis_refused_still_stops_the_runner_here_and_raises(self):
         h = Harness()
         h.gate = asyncio.Event()

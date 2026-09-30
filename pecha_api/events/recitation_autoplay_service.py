@@ -313,6 +313,8 @@ class AutoplayEngine:
         self.clock = clock
         self.sleep = sleep
         self._runners: Dict[UUID, asyncio.Task] = {}
+        # The plan each of those runners is running.
+        self._runner_plans: Dict[UUID, str] = {}
         self._plans: Dict[UUID, tuple] = {}
         self._supervisor: Optional[asyncio.Task] = None
 
@@ -340,11 +342,19 @@ class AutoplayEngine:
         ]
         plan_id = uuid4().hex
         # The old runner goes before the new plan is in place, so no line of
-        # the old plan can go out after the first of the new one.
+        # the old plan can go out after the first of the new one. If the new
+        # plan is not saved, the old one is still the plan: its runner comes
+        # back rather than leaving it stalled until the lease lapses.
+        replaced = self._runner_plans.get(event_id) if self._running_here(event_id) else None
         self._forget_runner(event_id)
-        await self.store.begin(
-            event_id, plan_id, json.dumps(plan), total=len(plan), owner=self.owner
-        )
+        try:
+            await self.store.begin(
+                event_id, plan_id, json.dumps(plan), total=len(plan), owner=self.owner
+            )
+        except Exception:
+            if replaced is not None:
+                self._spawn(event_id, replaced)
+            raise
         try:
             self._plans[event_id] = (plan_id, plan)
             if first_step_elapsed_ms is None:
@@ -434,15 +444,18 @@ class AutoplayEngine:
     def _spawn(self, event_id: UUID, plan_id: str) -> None:
         task = asyncio.create_task(self._run(event_id, plan_id))
         self._runners[event_id] = task
+        self._runner_plans[event_id] = plan_id
 
         def _done(finished: asyncio.Task) -> None:
             if self._runners.get(event_id) is finished:
                 del self._runners[event_id]
+                self._runner_plans.pop(event_id, None)
 
         task.add_done_callback(_done)
 
     def _forget_runner(self, event_id: UUID) -> None:
         task = self._runners.pop(event_id, None)
+        self._runner_plans.pop(event_id, None)
         if task is not None and not task.done():
             task.cancel()
 

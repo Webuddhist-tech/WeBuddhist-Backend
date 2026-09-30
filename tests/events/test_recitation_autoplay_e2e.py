@@ -81,6 +81,10 @@ class TestEndToEnd:
                 client.websocket_connect(_live(event_id, token="app-user")) as viewer:
             assert operator.receive_json()["is_operator"] is True
             assert viewer.receive_json()["is_operator"] is False
+            # Where autoplay was on connecting (nowhere): read before starting,
+            # or the socket may send it only once the plan is already running.
+            initial = _until(operator, lambda f: f.get("type") == "autoplay")[-1]
+            assert (initial["status"], initial["plan_id"]) == ("stopped", None)
 
             began = time.monotonic()
             response = client.post(
@@ -105,8 +109,7 @@ class TestEndToEnd:
             assert revisions == sorted(revisions)
             assert 0.55 <= took <= 2.0, took
 
-            # The operator: where autoplay was on connecting (nowhere), each
-            # step as it went out, then the finish.
+            # The operator: each step as it went out, then the finish.
             states = [
                 f for f in _until(
                     operator,
@@ -114,7 +117,6 @@ class TestEndToEnd:
                 )
                 if f["type"] == "autoplay"
             ]
-            assert (states[0]["status"], states[0]["plan_id"]) == ("stopped", None)
             running_steps = [s["step"] for s in states if s["status"] == "running"]
             assert running_steps == [0, 1, 2]
             assert states[-1]["step"] == 2
