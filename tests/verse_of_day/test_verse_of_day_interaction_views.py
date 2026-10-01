@@ -45,12 +45,14 @@ def _comment_dto(verse_id: Optional[UUID] = None) -> VerseOfDayCommentDTO:
 
 class TestVerseOfDayLikeViews:
 
+    @patch("pecha_api.verse_of_day.like_views.run_in_threadpool", new_callable=AsyncMock)
     @patch(
         "pecha_api.verse_of_day.like_views.list_verse_likers_service",
         new_callable=AsyncMock,
     )
-    def test_list_likers(self, mock_service: AsyncMock) -> None:
+    def test_list_likers(self, mock_service: AsyncMock, mock_threadpool: AsyncMock) -> None:
         verse_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=uuid4())
         mock_service.return_value = VerseOfDayLikersResponse(
             likes=[],
             skip=0,
@@ -58,7 +60,7 @@ class TestVerseOfDayLikeViews:
             total=5,
         )
 
-        response = client.get(f"/verse-of-day/{verse_id}/likes/users")
+        response = client.get(f"/verse-of-day/{verse_id}/likes/users", headers=AUTH_HEADERS)
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 5
@@ -290,12 +292,16 @@ class TestVerseOfDayCommentViews:
 
 class TestVerseOfDayCommentLikeViews:
 
+    @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
     @patch(
         "pecha_api.verse_of_day.comment_like_views.list_verse_comment_likers_service",
         new_callable=AsyncMock,
     )
-    def test_list_comment_likers(self, mock_service: AsyncMock) -> None:
+    def test_list_comment_likers(
+        self, mock_service: AsyncMock, mock_threadpool: AsyncMock
+    ) -> None:
         comment_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=uuid4())
         mock_service.return_value = VerseOfDayCommentLikersResponse(
             likes=[],
             skip=0,
@@ -303,10 +309,21 @@ class TestVerseOfDayCommentLikeViews:
             total=2,
         )
 
-        response = client.get(f"/verse-of-day/comments/{comment_id}/likes/users")
+        response = client.get(
+            f"/verse-of-day/comments/{comment_id}/likes/users", headers=AUTH_HEADERS
+        )
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 2
+
+    def test_list_likers_requires_auth(self) -> None:
+        verse_id = uuid4()
+        comment_id = uuid4()
+
+        assert client.get(f"/verse-of-day/{verse_id}/likes/users").status_code == 403
+        assert (
+            client.get(f"/verse-of-day/comments/{comment_id}/likes/users").status_code == 403
+        )
 
     @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
     @patch(

@@ -20,6 +20,7 @@ from pecha_api.notification.notification_preference_enums import (
     V1_EVENT_TOGGLEABLE_TYPES,
     V1_GROUP_TOGGLEABLE_TYPES,
     V1_TOGGLEABLE_TYPES,
+    default_enabled,
 )
 from pecha_api.notification.notification_preference_models import (
     UserNotificationPreference,
@@ -123,7 +124,7 @@ def _resolve(
         enabled = bool(global_row.enabled)
         source = PreferenceSource.GLOBAL
     else:
-        enabled = True
+        enabled = default_enabled(notification_type)
         source = PreferenceSource.DEFAULT
 
     active_mutes = [

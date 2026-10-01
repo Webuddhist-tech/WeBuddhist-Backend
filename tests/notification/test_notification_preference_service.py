@@ -15,6 +15,7 @@ from pecha_api.notification.notification_preference_enums import (
     PreferenceSource,
     V1_GROUP_TOGGLEABLE_TYPES,
 )
+from pecha_api.notification.notification_preference_repository import upsert_preference
 from pecha_api.notification.notification_preference_response_models import (
     NotificationPreferenceUpdateDTO,
     UpdateNotificationPreferencesRequest,
@@ -53,6 +54,14 @@ class TestResolve:
             NotificationType.GROUP_POST, group_row=None, global_row=None, now=NOW
         )
         assert resolved.enabled is True
+        assert resolved.source == PreferenceSource.DEFAULT
+
+    def test_absent_rows_leave_chat_off(self):
+        """Chat is opt-in: no row means the user has not turned it on."""
+        resolved = _resolve(
+            NotificationType.CHAT_MESSAGE, group_row=None, global_row=None, now=NOW
+        )
+        assert resolved.enabled is False
         assert resolved.source == PreferenceSource.DEFAULT
 
     def test_global_row_applies_when_no_group_row(self):
@@ -156,6 +165,23 @@ class TestSparseUpdates:
             notification_type="EVENT", muted_until=None
         )
         assert entry.sets_muted_until is True
+
+    def test_snooze_alone_does_not_turn_chat_on(self):
+        """A new row written for a snooze takes the type's default, and chat's is off."""
+        db = MagicMock()
+        db.execute.return_value.scalar_one_or_none.return_value = None
+
+        row = upsert_preference(
+            db=db,
+            user_id=USER_ID,
+            notification_type=NotificationType.CHAT_MESSAGE,
+            channel=NotificationChannel.PUSH,
+            scope_id=GROUP_ID,
+            muted_until=NOW + timedelta(hours=1),
+            set_muted_until=True,
+        )
+
+        assert row.enabled is False
 
     @patch(f"{SERVICE}.upsert_preference")
     def test_only_named_types_are_upserted(self, mock_upsert):

@@ -32,10 +32,16 @@ verse_of_day_comment_likes_router = APIRouter(
 )
 async def list_verse_comment_likers(
     comment_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> VerseOfDayCommentLikersResponse:
-    """List users who liked this comment (newest first). Public, no auth required."""
+    """List users who liked this comment (newest first). Signed-in users only:
+    it names individual users and when they liked it."""
+    await run_in_threadpool(
+        validate_and_extract_user_details,
+        token=authentication_credential.credentials,
+    )
     return await list_verse_comment_likers_service(
         comment_id=comment_id, skip=skip, limit=limit
     )

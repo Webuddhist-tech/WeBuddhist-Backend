@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -17,7 +17,7 @@ class LikePostResponse(BaseModel):
 class PostLikerDTO(BaseModel):
     """DTO for a single liker in the list."""
     user_id: UUID
-    user_email: str
+    user_email: Optional[str] = None
     created_at: str
 
 

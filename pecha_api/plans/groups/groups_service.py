@@ -1390,17 +1390,20 @@ def _list_group_members_sync(
         # Status is still enforced: an unpublished group lists no members.
         if not group or not is_group_published(group):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        users, total = list_group_joiners_paginated(
-            db=db,
-            group_id=group_id,
-            skip=skip,
-            limit=limit,
-        )
         # Staff roles follow the same rule as the group detail teaser: a private
         # group's staff are only revealed to callers who have joined it.
         roles_visible = group.is_public or (
             viewer_id is not None
             and is_user_joined_group(db=db, group_id=group_id, user_id=viewer_id)
+        )
+        # Owner, then admins, then everyone else — only when roles are visible,
+        # otherwise the ordering itself would reveal a private group's staff.
+        users, total = list_group_joiners_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+            order_by_role=roles_visible,
         )
         # Joiners linked to a staff Author (Author.user_id) carry their staff
         # role; everyone else is a plain MEMBER.
