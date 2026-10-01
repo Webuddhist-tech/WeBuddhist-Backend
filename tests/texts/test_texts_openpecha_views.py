@@ -235,15 +235,18 @@ class TestTitleSearchEndpoint:
         )
 
     @patch("pecha_api.texts.texts_openpecha_views.get_titles_and_ids_by_query")
-    def test_search_titles_missing_title_returns_400(self, mock_service):
-        mock_service.side_effect = HTTPException(
-            status_code=400,
-            detail="title is required",
-        )
+    def test_search_titles_missing_title_returns_default_listing(self, mock_service):
+        mock_service.return_value = [TitleSearchResult(id="t-en", title="Heart Sutra")]
 
         response = client.get("/texts/title-search")
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        assert response.json() == [{"id": "t-en", "title": "Heart Sutra"}]
+        mock_service.assert_awaited_once_with(
+            title=None,
+            limit=20,
+            offset=0,
+        )
 
     @patch("pecha_api.texts.texts_openpecha_views.get_titles_and_ids_by_query")
     def test_search_titles_upstream_error(self, mock_service):

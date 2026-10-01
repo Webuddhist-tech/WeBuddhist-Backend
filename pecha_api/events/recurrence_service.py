@@ -110,6 +110,24 @@ def _resolve_gregorian_monthly(
     return occurrences
 
 
+def _resolve_gregorian_weekly(
+    day_of_week: int,
+    from_date: date,
+    to_date: date,
+) -> list[date]:
+    """Find all occurrences of a given weekday (0=Monday..6=Sunday) in the date range."""
+    occurrences = []
+
+    days_ahead = (day_of_week - from_date.weekday()) % 7
+    current = from_date + timedelta(days=days_ahead)
+
+    while current <= to_date:
+        occurrences.append(current)
+        current += timedelta(days=7)
+
+    return occurrences
+
+
 def _resolve_lunar_yearly(
     month: int,
     day: int,
@@ -242,15 +260,18 @@ def expand_occurrences(
     frequency = event.recurrence_frequency
     date_system = event.recurrence_date_system
     day = event.recurrence_day
+    day_of_week = event.recurrence_day_of_week
     month = event.recurrence_month
     calendar_type = event.recurrence_calendar_type
     duration = event.duration_days
-    
+
     # Expand search window backwards to capture multi-day occurrences that
     # started before from_date but are still active within the window
     search_from = from_date - timedelta(days=duration - 1) if duration > 1 else from_date
-    
-    if frequency == RecurrenceFrequency.YEARLY.value:
+
+    if frequency == RecurrenceFrequency.WEEKLY.value:
+        occurrence_dates = _resolve_gregorian_weekly(day_of_week, search_from, to_date)
+    elif frequency == RecurrenceFrequency.YEARLY.value:
         if date_system == RecurrenceDateSystem.GREGORIAN.value:
             occurrence_dates = _resolve_gregorian_yearly(month, day, search_from, to_date)
         else:
@@ -286,7 +307,13 @@ def compute_initial_dates(recurrence: RecurrenceInput) -> tuple[datetime, dateti
     # Use 5-year horizon to guarantee coverage of leap-day (Feb 29) recurrences
     search_end = date(today.year + 5, 12, 31)
     
-    if recurrence.frequency == RecurrenceFrequency.YEARLY:
+    if recurrence.frequency == RecurrenceFrequency.WEEKLY:
+        occurrences = _resolve_gregorian_weekly(
+            recurrence.day_of_week,
+            today,
+            search_end,
+        )
+    elif recurrence.frequency == RecurrenceFrequency.YEARLY:
         if recurrence.date_system == RecurrenceDateSystem.GREGORIAN:
             occurrences = _resolve_gregorian_yearly(
                 recurrence.month,

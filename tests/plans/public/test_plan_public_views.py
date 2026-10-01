@@ -74,7 +74,7 @@ def sample_plans_response(sample_plan_dto):
 @pytest.mark.asyncio
 async def test_get_plans_success(sample_plans_response):
     """Test successful retrieval of published plans with default language='en'."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get("/api/v1/plans")
         
         assert response.status_code == status.HTTP_200_OK
@@ -118,7 +118,7 @@ async def test_get_plans_success(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_with_search_filter(sample_plans_response):
     """Test retrieval of plans with search filter and default language='en'."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get("/api/v1/plans?search=meditation")
         
         assert response.status_code == status.HTTP_200_OK
@@ -141,7 +141,7 @@ async def test_get_plans_with_search_filter(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_with_language_filter(sample_plans_response):
     """Test retrieval of plans with language filter."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get("/api/v1/plans?language=en")
         
         assert response.status_code == status.HTTP_200_OK
@@ -164,7 +164,7 @@ async def test_get_plans_with_language_filter(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_with_sorting(sample_plans_response):
     """Test retrieval of plans with custom sorting and default language='en'."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get("/api/v1/plans?sort_by=subscription_count&sort_order=desc")
         
         assert response.status_code == status.HTTP_200_OK
@@ -187,7 +187,7 @@ async def test_get_plans_with_sorting(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_with_pagination(sample_plans_response):
     """Test retrieval of plans with pagination parameters and default language='en'."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get("/api/v1/plans?skip=10&limit=5")
         
         assert response.status_code == status.HTTP_200_OK
@@ -208,7 +208,7 @@ async def test_get_plans_with_pagination(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_with_all_filters(sample_plans_response):
     """Test retrieval of plans with all filter parameters."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response) as mock_service:
         response = client.get(
             "/api/v1/plans?search=meditation&language=en&sort_by=total_days&sort_order=desc&skip=5&limit=10"
         )
@@ -233,7 +233,7 @@ async def test_get_plans_empty_result():
     """Test retrieval when no plans are found."""
     empty_response = PublicPlansResponse(plans=[], skip=0, limit=20, total=0)
     
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=empty_response):
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=empty_response):
         response = client.get("/api/v1/plans")
         
         assert response.status_code == status.HTTP_200_OK
@@ -245,7 +245,7 @@ async def test_get_plans_empty_result():
 @pytest.mark.asyncio
 async def test_get_plans_invalid_sort_by(sample_plans_response):
     """Test retrieval with invalid sort_by parameter - endpoint accepts and uses default."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response):
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response):
         response = client.get("/api/v1/plans?sort_by=invalid_field")
         
         assert response.status_code == status.HTTP_200_OK
@@ -254,7 +254,7 @@ async def test_get_plans_invalid_sort_by(sample_plans_response):
 @pytest.mark.asyncio
 async def test_get_plans_invalid_sort_order(sample_plans_response):
     """Test retrieval with invalid sort_order parameter - endpoint accepts and uses default."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", return_value=sample_plans_response):
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, return_value=sample_plans_response):
         response = client.get("/api/v1/plans?sort_order=invalid_order")
         
         assert response.status_code == status.HTTP_200_OK
@@ -279,7 +279,7 @@ async def test_get_plans_invalid_limit():
 @pytest.mark.asyncio
 async def test_get_plans_service_error():
     """Test handling of service layer errors."""
-    with patch("pecha_api.plans.public.plan_views.get_published_plans", side_effect=HTTPException(
+    with patch("pecha_api.plans.public.plan_views.get_published_plans_cached", new_callable=AsyncMock, side_effect=HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Database connection error"
     )):
@@ -294,7 +294,7 @@ async def test_get_plan_details_success(sample_plan_dto):
     """Test successful retrieval of plan details."""
     plan_id = sample_plan_dto.id
     
-    with patch("pecha_api.plans.public.plan_views.get_published_plan", return_value=sample_plan_dto) as mock_service:
+    with patch("pecha_api.plans.public.plan_views.get_published_plan_cached", new_callable=AsyncMock, return_value=sample_plan_dto) as mock_service:
         response = client.get(f"/api/v1/plans/{plan_id}")
         
         assert response.status_code == status.HTTP_200_OK
@@ -324,7 +324,7 @@ async def test_get_plan_details_not_found():
     """Test retrieval of non-existent plan."""
     plan_id = uuid4()
     
-    with patch("pecha_api.plans.public.plan_views.get_published_plan", side_effect=HTTPException(
+    with patch("pecha_api.plans.public.plan_views.get_published_plan_cached", new_callable=AsyncMock, side_effect=HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=ErrorConstants.PLAN_NOT_FOUND
     )):
@@ -350,7 +350,7 @@ async def test_get_plan_daily_success():
     )
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_daily_content",
+        "pecha_api.plans.public.plan_views.get_plan_daily_content_cached",
         new_callable=AsyncMock,
         return_value=daily_response,
     ) as mock_service:
@@ -375,7 +375,7 @@ async def test_get_plan_daily_not_found():
     plan_id = uuid4()
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_daily_content",
+        "pecha_api.plans.public.plan_views.get_plan_daily_content_cached",
         new_callable=AsyncMock,
         side_effect=HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -410,7 +410,7 @@ async def test_get_plan_details_without_author(sample_plan_dto):
         author=None
     )
     
-    with patch("pecha_api.plans.public.plan_views.get_published_plan", return_value=plan_dto_no_author):
+    with patch("pecha_api.plans.public.plan_views.get_published_plan_cached", new_callable=AsyncMock, return_value=plan_dto_no_author):
         response = client.get(f"/api/v1/plans/{plan_dto_no_author.id}")
         
         assert response.status_code == status.HTTP_200_OK
@@ -423,7 +423,7 @@ async def test_get_plan_details_service_error():
     """Test handling of service layer errors."""
     plan_id = uuid4()
     
-    with patch("pecha_api.plans.public.plan_views.get_published_plan", side_effect=HTTPException(
+    with patch("pecha_api.plans.public.plan_views.get_published_plan_cached", new_callable=AsyncMock, side_effect=HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail="Failed to fetch published plan details"
     )):
@@ -444,9 +444,9 @@ async def test_get_plan_days_list_success():
     expected_response = PlanDaysResponse(days=expected_days)
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_days",
-        return_value=expected_response,
+        "pecha_api.plans.public.plan_views.get_plan_days_cached",
         new_callable=AsyncMock,
+        return_value=expected_response,
     ) as mock_service, \
     patch(
         "pecha_api.plans.public.plan_views.auto_enroll_plan"
@@ -480,9 +480,9 @@ async def test_get_plan_days_list_with_authenticated_user():
     mock_user.id = user_id
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_days",
-        return_value=expected_response,
+        "pecha_api.plans.public.plan_views.get_plan_days_cached",
         new_callable=AsyncMock,
+        return_value=expected_response,
     ) as mock_service, \
     patch(
         "pecha_api.plans.public.plan_views.auto_enroll_plan"
@@ -515,9 +515,9 @@ async def test_get_plan_days_list_with_invalid_token():
     expected_response = PlanDaysResponse(days=expected_days)
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_days",
-        return_value=expected_response,
+        "pecha_api.plans.public.plan_views.get_plan_days_cached",
         new_callable=AsyncMock,
+        return_value=expected_response,
     ) as mock_service, \
     patch(
         "pecha_api.plans.public.plan_views.auto_enroll_plan"
@@ -547,9 +547,9 @@ async def test_get_plan_days_list_empty_days():
     expected_response = PlanDaysResponse(days=[])
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_plan_days",
-        return_value=expected_response,
+        "pecha_api.plans.public.plan_views.get_plan_days_cached",
         new_callable=AsyncMock,
+        return_value=expected_response,
     ) as mock_service, \
     patch(
         "pecha_api.plans.public.plan_views.auto_enroll_plan"
@@ -662,7 +662,7 @@ async def test_get_plan_tags_success():
     mock_tags_response = TagsResponse(tags=make_tag_summaries(["meditation", "sleep", "daily"]))
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_tags", return_value=mock_tags_response
+        "pecha_api.plans.public.plan_views.get_tags_cached", new_callable=AsyncMock, return_value=mock_tags_response
     ) as mock_service:
         response = client.get("/api/v1/plans/tags")
 
@@ -681,7 +681,7 @@ async def test_get_plan_tags_with_language_param():
     mock_tags_response = TagsResponse(tags=make_tag_summaries(["煙供", "教學"]))
 
     with patch(
-        "pecha_api.plans.public.plan_views.get_tags", return_value=mock_tags_response
+        "pecha_api.plans.public.plan_views.get_tags_cached", new_callable=AsyncMock, return_value=mock_tags_response
     ) as mock_service:
         response = client.get("/api/v1/plans/tags?language=zh")
 
@@ -702,7 +702,8 @@ async def test_get_public_tags_success():
     )
 
     with patch(
-        "pecha_api.plans.public.public_tags_views.get_public_tags",
+        "pecha_api.plans.public.public_tags_views.get_public_tags_cached",
+        new_callable=AsyncMock,
         return_value=response_model,
     ) as mock_service:
         response = client.get("/api/v1/public/tags")
@@ -731,7 +732,8 @@ async def test_get_public_tags_with_filters():
     )
 
     with patch(
-        "pecha_api.plans.public.public_tags_views.get_public_tags",
+        "pecha_api.plans.public.public_tags_views.get_public_tags_cached",
+        new_callable=AsyncMock,
         return_value=response_model,
     ) as mock_service:
         response = client.get(
@@ -757,7 +759,8 @@ async def test_get_public_tags_with_filters():
 async def test_get_plans_with_tag_filter(sample_plans_response):
     """Test retrieval of plans with tag filter."""
     with patch(
-        "pecha_api.plans.public.plan_views.get_published_plans",
+        "pecha_api.plans.public.plan_views.get_published_plans_cached",
+        new_callable=AsyncMock,
         return_value=sample_plans_response,
     ) as mock_service:
         response = client.get("/api/v1/plans?tag=meditation")
@@ -783,7 +786,8 @@ async def test_get_plans_with_tag_filter(sample_plans_response):
 async def test_get_plans_with_group_filter(sample_plans_response):
     group_id = uuid4()
     with patch(
-        "pecha_api.plans.public.plan_views.get_published_plans",
+        "pecha_api.plans.public.plan_views.get_published_plans_cached",
+        new_callable=AsyncMock,
         return_value=sample_plans_response,
     ) as mock_service:
         response = client.get(f"/api/v1/plans?group_id={group_id}")

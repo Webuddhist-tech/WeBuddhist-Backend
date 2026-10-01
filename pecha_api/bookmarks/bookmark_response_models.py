@@ -51,6 +51,9 @@ class BookmarkTimerDTO(BaseModel):
     id: UUID
     title: str
     duration: int
+    ambient_sound_name: Optional[str] = None
+    bell_at_start: bool = True
+    bell_at_end: bool = True
 
 
 class BookmarkRecitationCollectionDTO(BaseModel):
@@ -58,6 +61,13 @@ class BookmarkRecitationCollectionDTO(BaseModel):
     title: str
     image: Optional[str] = None
     item_count: int
+
+
+class BookmarkGroupAccumulatorDTO(BaseModel):
+    id: UUID
+    group_id: UUID
+    title: str
+    image: Optional[str] = None
 
 
 class BookmarkGroupRecitationCollectionDTO(BaseModel):
@@ -108,6 +118,7 @@ class BookmarkDTO(BaseModel):
     timer: Optional[BookmarkTimerDTO] = None
     recitation_collection: Optional[BookmarkRecitationCollectionDTO] = None
     group_recitation_collection: Optional[BookmarkGroupRecitationCollectionDTO] = None
+    group_accumulator: Optional[BookmarkGroupAccumulatorDTO] = None
 
 
 class BookmarksResponse(BaseModel):

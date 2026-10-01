@@ -17,6 +17,7 @@ class AuthorGroupFeedItemDTO(BaseModel):
     type: AuthorGroupFeedItemType
     feed_at: str
     is_joined: bool
+    can_view_linked_content: bool = False
     group_id: UUID
     group_name: Optional[str] = None
     group_slug: Optional[str] = None

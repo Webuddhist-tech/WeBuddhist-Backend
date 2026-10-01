@@ -42,6 +42,10 @@ async def list_dashboard_items(
     language: Annotated[Optional[str], Query()] = None,
     featured: Annotated[Optional[bool], Query()] = None,
     group_id: Annotated[Optional[UUID], Query(description="Filter by author group")] = None,
+    include_partner_groups: Annotated[
+        bool,
+        Query(description="Also include series/plans the group is a SeriesPartner of"),
+    ] = False,
 ):
     return get_dashboard_items_list(
         token=authentication_credential.credentials,
@@ -53,6 +57,7 @@ async def list_dashboard_items(
         language=language,
         featured=featured,
         group_id=group_id,
+        include_partner_groups=include_partner_groups,
     )
 
 

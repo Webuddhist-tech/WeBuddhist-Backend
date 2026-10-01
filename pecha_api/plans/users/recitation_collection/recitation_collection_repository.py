@@ -12,7 +12,7 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_models im
     RecitationCollectionItem
 )
 from pecha_api.plans.auth.plan_auth_models import ResponseError
-from pecha_api.plans.response_message import BAD_REQUEST
+from pecha_api.plans.response_message import BAD_REQUEST, DUPLICATE_DISPLAY_ORDER
 
 
 def get_user_collections(
@@ -133,13 +133,52 @@ def update_collection(
 def get_max_display_order_for_collection(
     db: Session,
     collection_id: UUID
-) -> Optional[int]:
+) -> Optional[float]:
 
     result = db.query(func.max(RecitationCollectionItem.display_order)).filter(
         RecitationCollectionItem.recitation_collection_id == collection_id,
         RecitationCollectionItem.deleted_at.is_(None)
     ).scalar()
     return result
+
+
+def collection_item_display_order_taken(
+    db: Session,
+    collection_id: UUID,
+    display_order: float,
+    exclude_item_id: UUID,
+) -> bool:
+    """True when another active item in this collection already has this order."""
+    return (
+        db.query(RecitationCollectionItem.id)
+        .filter(
+            RecitationCollectionItem.recitation_collection_id == collection_id,
+            RecitationCollectionItem.display_order == display_order,
+            RecitationCollectionItem.id != exclude_item_id,
+            RecitationCollectionItem.deleted_at.is_(None),
+        )
+        .first()
+        is not None
+    )
+
+
+def update_collection_item(
+    db: Session,
+    item: RecitationCollectionItem,
+) -> RecitationCollectionItem:
+    try:
+        db.commit()
+        db.refresh(item)
+        return item
+    except IntegrityError as e:
+        db.rollback()
+        message = str(e.orig)
+        if "uq_recitation_collection_items_collection_display_order" in message:
+            message = DUPLICATE_DISPLAY_ORDER
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ResponseError(error=BAD_REQUEST, message=message).model_dump()
+        )
 
 
 def save_collection_items(

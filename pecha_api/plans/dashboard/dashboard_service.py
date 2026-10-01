@@ -145,6 +145,7 @@ def get_dashboard_items_list(
     language: Optional[str] = None,
     featured: Optional[bool] = None,
     group_id: Optional[UUID] = None,
+    include_partner_groups: bool = False,
 ) -> DashboardItemsResponse:
     current_author = validate_cms_author_details(token=token)
     page = max(page, 1)
@@ -169,6 +170,7 @@ def get_dashboard_items_list(
             language=language,
             featured=featured,
             group_ids=group_ids,
+            include_partner_groups=include_partner_groups,
         )
 
     items = [_row_to_dto(row, language=language) for row in rows]

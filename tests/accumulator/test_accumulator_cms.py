@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import patch, MagicMock, AsyncMock
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from pecha_api.accumulator.accumulator_enums import AccumulatorType
 from pecha_api.accumulator.accumulator_response_models import (
     AccumulatorMetadataDTO,
     CreatePresetAccumulatorRequest,
+    UpdateAccumulatorRequest,
     UpdatePresetAccumulatorRequest,
     PublicAccumulatorDTO,
     PublicAccumulatorsResponse,
@@ -29,14 +31,14 @@ from pecha_api.plans.plans_enums import LanguageCode
 client = TestClient(api)
 
 
-def _sample_public_dto(**overrides) -> PublicAccumulatorDTO:
+def _sample_public_dto(**overrides: Any) -> PublicAccumulatorDTO:
     data = {
         "id": uuid4(),
         "group_id": None,
         "type": AccumulatorType.PRESET,
         "target_count": 100000,
         "current_count": 0,
-        "text_id": str(uuid4()),
+        "text_id": "OPE1A2B3C4",
         "mantra": None,
         "mala_image_id": None,
         "mala_image_url": None,
@@ -56,12 +58,12 @@ def _sample_public_dto(**overrides) -> PublicAccumulatorDTO:
 
 class TestCmsPresetViews:
     @patch("pecha_api.accumulator.accumulator_cms_views.create_preset_accumulator_cms_service")
-    def test_create_preset_success(self, mock_service):
+    def test_create_preset_success(self, mock_service: MagicMock) -> None:
         sample = _sample_public_dto()
         mock_service.return_value = sample
         payload = {
             "target_count": 100000,
-            "text_id": str(sample.text_id),
+            "text_id": sample.text_id,
             "mantra_id": str(uuid4()),
             "metadata": [
                 {"language": "EN", "name": "Chenrezig Practice", "description": "Compassion practice"}
@@ -78,7 +80,7 @@ class TestCmsPresetViews:
         assert response.json()["id"] == str(sample.id)
         mock_service.assert_called_once()
 
-    def test_create_preset_requires_auth(self):
+    def test_create_preset_requires_auth(self) -> None:
         response = client.post(
             "/api/v1/cms/accumulators/presets",
             json={
@@ -87,7 +89,7 @@ class TestCmsPresetViews:
         )
         assert response.status_code == 403
 
-    def test_create_preset_rejects_empty_metadata(self):
+    def test_create_preset_rejects_empty_metadata(self) -> None:
         response = client.post(
             "/api/v1/cms/accumulators/presets",
             json={"metadata": []},
@@ -95,8 +97,11 @@ class TestCmsPresetViews:
         )
         assert response.status_code == 422
 
-    @patch("pecha_api.accumulator.accumulator_cms_views.list_preset_accumulators_cms_service")
-    def test_list_presets_success(self, mock_service):
+    @patch(
+        "pecha_api.accumulator.accumulator_cms_views.list_preset_accumulators_cms_service",
+        new_callable=AsyncMock,
+    )
+    def test_list_presets_success(self, mock_service: AsyncMock) -> None:
         sample = _sample_public_dto()
         mock_service.return_value = PublicAccumulatorsResponse(
             accumulators=[sample],
@@ -115,7 +120,7 @@ class TestCmsPresetViews:
         mock_service.assert_called_once()
 
     @patch("pecha_api.accumulator.accumulator_cms_views.get_preset_accumulator_cms_service")
-    def test_get_preset_success(self, mock_service):
+    def test_get_preset_success(self, mock_service: MagicMock) -> None:
         sample = _sample_public_dto()
         mock_service.return_value = sample
 
@@ -128,7 +133,7 @@ class TestCmsPresetViews:
         assert response.json()["id"] == str(sample.id)
 
     @patch("pecha_api.accumulator.accumulator_cms_views.update_preset_accumulator_cms_service")
-    def test_update_preset_success(self, mock_service):
+    def test_update_preset_success(self, mock_service: MagicMock) -> None:
         sample = _sample_public_dto(target_count=200000)
         mock_service.return_value = sample
 
@@ -142,7 +147,7 @@ class TestCmsPresetViews:
         assert response.json()["target_count"] == 200000
 
     @patch("pecha_api.accumulator.accumulator_cms_views.delete_preset_accumulator_cms_service")
-    def test_delete_preset_success(self, mock_service):
+    def test_delete_preset_success(self, mock_service: MagicMock) -> None:
         preset_id = uuid4()
         mock_service.return_value = None
 
@@ -157,21 +162,22 @@ class TestCmsPresetViews:
 
 class TestCmsPresetService:
     @pytest.mark.asyncio
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_texts_by_edition_or_text_ids", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
-    @patch("pecha_api.accumulator.accumulator_cms_service.TextUtils.validate_text_exists", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_mantra_exists")
     @patch("pecha_api.accumulator.accumulator_cms_service.save_accumulator")
     @patch("pecha_api.accumulator.accumulator_cms_service._to_public_dto")
     async def test_create_preset_service_success(
         self,
-        mock_to_dto,
-        mock_save,
-        mock_validate_mantra,
-        mock_validate_text,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_to_dto: MagicMock,
+        mock_save: MagicMock,
+        mock_validate_mantra: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+        mock_get_texts: AsyncMock,
+    ) -> None:
+        mock_get_texts.return_value = {}
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         saved = MagicMock()
@@ -179,7 +185,7 @@ class TestCmsPresetService:
         expected = _sample_public_dto()
         mock_to_dto.return_value = expected
 
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         mantra_id = uuid4()
         request = CreatePresetAccumulatorRequest(
             target_count=108000,
@@ -197,9 +203,10 @@ class TestCmsPresetService:
 
         assert result is expected
         mock_validate_auth.assert_called_once_with(token="token")
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
         mock_validate_mantra.assert_called_once_with(mock_db, mantra_id)
         mock_save.assert_called_once()
+        saved_preset = mock_save.call_args.args[1]
+        assert saved_preset.text_id == text_id
 
     @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
@@ -207,10 +214,10 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
     async def test_update_preset_not_found(
         self,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_get_preset.return_value = None
@@ -230,11 +237,11 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.delete_accumulator")
     def test_delete_preset_service_success(
         self,
-        mock_delete,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_delete: MagicMock,
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         preset = MagicMock()
@@ -245,57 +252,120 @@ class TestCmsPresetService:
 
         mock_delete.assert_called_once_with(mock_db, preset)
 
+    @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
-    def test_get_preset_service_not_found(
+    async def test_get_preset_service_not_found(
         self,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_get_preset.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            get_preset_accumulator_cms_service(token="token", preset_id=uuid4())
+            await get_preset_accumulator_cms_service(token="token", preset_id=uuid4())
 
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.asyncio
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_all_accumulators")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
-    def test_list_presets_service_success(
+    async def test_list_presets_service_success(
         self,
-        mock_get_mantras,
-        mock_get_all,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_mantras: MagicMock,
+        mock_get_all: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_get_all.return_value = ([], 0)
         mock_get_mantras.return_value = {}
 
-        result = list_preset_accumulators_cms_service(token="token", skip=0, limit=20)
+        result = await list_preset_accumulators_cms_service(
+            token="token", skip=0, limit=20
+        )
 
         assert result.total == 0
         assert result.accumulators == []
         mock_validate_auth.assert_called_once_with(token="token")
 
+    @pytest.mark.asyncio
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_texts_by_edition_or_text_ids", new_callable=AsyncMock)
+    @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
+    @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_all_accumulators")
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
+    @patch("pecha_api.accumulator.accumulator_cms_service.convert_accumulator_to_public_dto")
+    async def test_list_presets_resolves_linked_text_titles_once(
+        self,
+        mock_convert: MagicMock,
+        mock_get_mantras: MagicMock,
+        mock_get_all: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+        mock_get_texts: AsyncMock,
+    ) -> None:
+        from pecha_api.accumulator.accumulator_response_models import (
+            CMSPublicAccumulatorDTO,
+        )
+
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+        first = MagicMock(text_id="edition-1", mantra_id=None)
+        duplicate = MagicMock(text_id="edition-1", mantra_id=None)
+        second = MagicMock(text_id="edition-2", mantra_id=None)
+        mock_get_all.return_value = ([first, duplicate, second], 3)
+        mock_get_mantras.return_value = {}
+
+        def _dto(accumulator: MagicMock, **_kwargs: Any) -> CMSPublicAccumulatorDTO:
+            return CMSPublicAccumulatorDTO(
+                id=uuid4(),
+                type=AccumulatorType.PRESET,
+                current_count=0,
+                text_id=accumulator.text_id,
+                created_at="2024-01-01T00:00:00Z",
+            )
+
+        mock_convert.side_effect = _dto
+        heart = MagicMock(title="Heart Sutra")
+        diamond = MagicMock(title="  Diamond Sutra  ")
+        mock_get_texts.return_value = {
+            "edition-1": heart,
+            "edition-2": diamond,
+        }
+
+        result = await list_preset_accumulators_cms_service(
+            token="token", skip=0, limit=20
+        )
+
+        mock_get_texts.assert_awaited_once_with(["edition-1", "edition-2"])
+        assert [preset.text_title for preset in result.accumulators] == [
+            "Heart Sutra",
+            "Heart Sutra",
+            "Diamond Sutra",
+        ]
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_texts_by_edition_or_text_ids", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
     @patch("pecha_api.accumulator.accumulator_cms_service._to_public_dto")
-    def test_get_preset_service_success(
+    async def test_get_preset_service_success(
         self,
-        mock_to_dto,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_to_dto: MagicMock,
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+        mock_get_texts: AsyncMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         preset = MagicMock()
@@ -303,19 +373,23 @@ class TestCmsPresetService:
         expected = _sample_public_dto()
         mock_to_dto.return_value = expected
 
-        result = get_preset_accumulator_cms_service(
+        mock_get_texts.return_value = {"OPE1A2B3C4": MagicMock(title="Heart Sutra")}
+
+        result = await get_preset_accumulator_cms_service(
             token="token",
             preset_id=uuid4(),
             language="en",
         )
 
-        assert result is expected
+        # The by-id read carries the same resolved title the listing does.
+        assert result.text_title == "Heart Sutra"
+        assert result.id == expected.id
         mock_to_dto.assert_called_once_with(mock_db, preset, language="en")
 
     @pytest.mark.asyncio
+    @patch("pecha_api.accumulator.accumulator_cms_service.get_texts_by_edition_or_text_ids", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_cms_author_details")
     @patch("pecha_api.accumulator.accumulator_cms_service.SessionLocal")
-    @patch("pecha_api.accumulator.accumulator_cms_service.TextUtils.validate_text_exists", new_callable=AsyncMock)
     @patch("pecha_api.accumulator.accumulator_cms_service.validate_mantra_exists")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mala_image_by_id")
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
@@ -323,15 +397,16 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service._to_public_dto")
     async def test_update_preset_service_success(
         self,
-        mock_to_dto,
-        mock_update,
-        mock_get_preset,
-        mock_get_mala,
-        mock_validate_mantra,
-        mock_validate_text,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_to_dto: MagicMock,
+        mock_update: MagicMock,
+        mock_get_preset: MagicMock,
+        mock_get_mala: MagicMock,
+        mock_validate_mantra: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+        mock_get_texts: AsyncMock,
+    ) -> None:
+        mock_get_texts.return_value = {}
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         preset = MagicMock()
@@ -344,7 +419,7 @@ class TestCmsPresetService:
         expected = _sample_public_dto(target_count=200000)
         mock_to_dto.return_value = expected
 
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         mantra_id = uuid4()
         mala_image_id = uuid4()
         request = UpdatePresetAccumulatorRequest(
@@ -369,10 +444,9 @@ class TestCmsPresetService:
 
         assert result is expected
         assert preset.target_count == 200000
-        assert preset.text_id == str(text_id)
+        assert preset.text_id == text_id
         assert preset.mantra_id == mantra_id
         assert preset.mala_image == mala_image_id
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
         mock_validate_mantra.assert_called_once_with(mock_db, mantra_id)
         mock_get_mala.assert_called_once_with(mock_db, mala_image_id)
         preset.metadata_entries.clear.assert_called_once()
@@ -385,10 +459,10 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
     async def test_update_preset_rejects_non_preset_type(
         self,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         preset = MagicMock()
@@ -409,10 +483,10 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
     def test_delete_preset_not_found(
         self,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_get_preset.return_value = None
@@ -427,10 +501,10 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.get_preset_by_id")
     def test_delete_preset_rejects_non_preset_type(
         self,
-        mock_get_preset,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_get_preset: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         preset = MagicMock()
@@ -449,11 +523,11 @@ class TestCmsPresetService:
     @patch("pecha_api.accumulator.accumulator_cms_service.save_accumulator")
     async def test_create_preset_mala_image_not_found(
         self,
-        mock_save,
-        mock_get_mala,
-        mock_session,
-        mock_validate_auth,
-    ):
+        mock_save: MagicMock,
+        mock_get_mala: MagicMock,
+        mock_session: MagicMock,
+        mock_validate_auth: MagicMock,
+    ) -> None:
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
         mock_get_mala.return_value = None
@@ -473,7 +547,11 @@ class TestCmsPresetService:
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
     @patch("pecha_api.accumulator.accumulator_cms_service.convert_accumulator_to_public_dto")
-    def test_to_public_dto_loads_mantra_when_present(self, mock_convert, mock_get_mantras):
+    def test_to_public_dto_loads_mantra_when_present(
+        self,
+        mock_convert: MagicMock,
+        mock_get_mantras: MagicMock,
+    ) -> None:
         db = MagicMock()
         mantra_id = uuid4()
         accumulator = MagicMock()
@@ -491,11 +569,16 @@ class TestCmsPresetService:
             accumulator,
             mantras_by_id=mantras,
             language="bo",
+            include_key=True,
         )
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mantras_by_ids")
     @patch("pecha_api.accumulator.accumulator_cms_service.convert_accumulator_to_public_dto")
-    def test_to_public_dto_skips_mantra_lookup_when_absent(self, mock_convert, mock_get_mantras):
+    def test_to_public_dto_skips_mantra_lookup_when_absent(
+        self,
+        mock_convert: MagicMock,
+        mock_get_mantras: MagicMock,
+    ) -> None:
         db = MagicMock()
         accumulator = MagicMock()
         accumulator.mantra_id = None
@@ -510,15 +593,16 @@ class TestCmsPresetService:
             accumulator,
             mantras_by_id={},
             language=None,
+            include_key=True,
         )
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mala_image_by_id")
-    def test_validate_optional_mala_image_noop_when_none(self, mock_get_mala):
+    def test_validate_optional_mala_image_noop_when_none(self, mock_get_mala: MagicMock) -> None:
         _validate_optional_mala_image(MagicMock(), None)
         mock_get_mala.assert_not_called()
 
     @patch("pecha_api.accumulator.accumulator_cms_service.get_mala_image_by_id")
-    def test_validate_optional_mala_image_success(self, mock_get_mala):
+    def test_validate_optional_mala_image_success(self, mock_get_mala: MagicMock) -> None:
         db = MagicMock()
         mala_id = uuid4()
         mock_get_mala.return_value = MagicMock()
@@ -527,7 +611,7 @@ class TestCmsPresetService:
 
         mock_get_mala.assert_called_once_with(db, mala_id)
 
-    def test_create_request_rejects_duplicate_metadata_languages(self):
+    def test_create_request_rejects_duplicate_metadata_languages(self) -> None:
         with pytest.raises(ValidationError, match="metadata languages must be unique"):
             CreatePresetAccumulatorRequest(
                 metadata=[
@@ -536,7 +620,7 @@ class TestCmsPresetService:
                 ]
             )
 
-    def test_create_request_rejects_empty_metadata_name(self):
+    def test_create_request_rejects_empty_metadata_name(self) -> None:
         with pytest.raises(ValidationError, match="metadata name must not be empty"):
             CreatePresetAccumulatorRequest(
                 metadata=[
@@ -544,11 +628,43 @@ class TestCmsPresetService:
                 ]
             )
 
-    def test_update_request_allows_none_metadata(self):
+    def test_requests_reject_a_blank_text_id(self) -> None:
+        """A non-null text_id is what marks a preset a recitation and drops it
+        from the default public catalogue, so a blank one would hide a preset
+        behind a text id nothing can resolve."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        for blank in ("", "   "):
+            with pytest.raises(ValidationError):
+                CreatePresetAccumulatorRequest(text_id=blank, metadata=metadata)
+            with pytest.raises(ValidationError):
+                UpdatePresetAccumulatorRequest(text_id=blank)
+            with pytest.raises(ValidationError):
+                UpdateAccumulatorRequest(text_id=blank)
+
+    def test_requests_reject_a_text_id_past_the_column_width(self) -> None:
+        """text_id lands in a String(255), so an overlong value has to be a 422
+        rather than a database error on save."""
+        metadata = [AccumulatorMetadataDTO(language=LanguageCode.EN, name="One")]
+        too_long = "t" * 256
+        with pytest.raises(ValidationError):
+            CreatePresetAccumulatorRequest(text_id=too_long, metadata=metadata)
+        with pytest.raises(ValidationError):
+            UpdatePresetAccumulatorRequest(text_id=too_long)
+        with pytest.raises(ValidationError):
+            UpdateAccumulatorRequest(text_id=too_long)
+
+        at_the_limit = "t" * 255
+        assert UpdatePresetAccumulatorRequest(text_id=at_the_limit).text_id == at_the_limit
+
+    def test_text_id_is_stripped_and_stays_optional(self) -> None:
+        assert UpdatePresetAccumulatorRequest(text_id="  abc  ").text_id == "abc"
+        assert UpdatePresetAccumulatorRequest().text_id is None
+
+    def test_update_request_allows_none_metadata(self) -> None:
         request = UpdatePresetAccumulatorRequest(target_count=108)
         assert request.metadata is None
 
-    def test_update_request_rejects_duplicate_metadata_languages(self):
+    def test_update_request_rejects_duplicate_metadata_languages(self) -> None:
         with pytest.raises(ValidationError, match="metadata languages must be unique"):
             UpdatePresetAccumulatorRequest(
                 metadata=[

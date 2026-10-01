@@ -113,18 +113,11 @@ def verify_auth0_google_token(token: str) -> Auth0GoogleIdentity:
             raise ValueError("Auth0 Google subject is invalid")
 
         email_claim = get("AUTH0_GOOGLE_EMAIL_CLAIM").strip()
-        verified_claim = get("AUTH0_GOOGLE_EMAIL_VERIFIED_CLAIM").strip()
         email = _claim_string(payload, email_claim) or _extract_email_from_auth0_payload(
             payload
         )
         if not email:
             raise ValueError("Auth0 Google email claim is missing")
-
-        email_verified = payload.get(verified_claim)
-        if email_verified is None:
-            email_verified = payload.get("email_verified")
-        if email_verified is not True:
-            raise ValueError("Auth0 Google email is not verified")
 
         issued_at = payload.get("iat")
         if not isinstance(issued_at, (int, float)):

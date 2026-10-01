@@ -1,4 +1,6 @@
 import logging
+import time
+from threading import Lock
 from typing import Dict, Any
 
 from jose import jwt
@@ -36,12 +38,29 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return None
 
 
+# Access and refresh tokens carry identical claims, so without a marker the two
+# are indistinguishable and a refresh token works as a bearer credential on
+# protected endpoints - which hands it the refresh token's much longer lifetime
+# and makes the shorter access token expiry meaningless. Only the refresh token
+# is stamped: tokens minted before this claim existed carry no token_type and
+# stay accepted until they expire on their own, and Auth0-issued tokens (which
+# never carry it) are unaffected.
+TOKEN_TYPE_CLAIM = "token_type"
+REFRESH_TOKEN_TYPE = "refresh"
+
+
 def create_refresh_token(data: dict, expires_delta: timedelta = None):
     if data is not None:
         if expires_delta is None:
             expires_delta = timedelta(days=get_float("REFRESH_TOKEN_EXPIRE_DAYS"))
-        return _generate_token(data, expires_delta)
+        return _generate_token({**data, TOKEN_TYPE_CLAIM: REFRESH_TOKEN_TYPE}, expires_delta)
     return None
+
+
+def is_refresh_token_payload(payload: Dict[str, Any]) -> bool:
+    """True when the decoded payload belongs to a refresh token, which must
+    never be accepted where an access token is expected."""
+    return isinstance(payload, dict) and payload.get(TOKEN_TYPE_CLAIM) == REFRESH_TOKEN_TYPE
 
 
 def _generate_token(data: dict, expires_delta: timedelta):
@@ -78,10 +97,79 @@ def decode_backend_token(token: str):
     return jwt.decode(token, get("JWT_SECRET_KEY"), algorithms=[get("JWT_ALGORITHM")], audience=get("JWT_AUD"))
 
 
-def get_auth0_public_key():
+# Auth0 rotates its signing keys rarely, but this used to refetch the key set
+# on every single Auth0-issued token: one outbound HTTPS round trip per
+# authenticated request, which is both a latency tax on every call and enough
+# traffic for Auth0 to start rate limiting the tenant under a login wave.
+JWKS_CACHE_TTL_SECONDS = 600
+# How long a key set may go on being served once refreshes start failing.
+# Auth0 being briefly unreachable must not fail every login, so a stale set is
+# better than none - but the reason a key gets withdrawn is usually that it
+# should no longer be trusted, and an unbounded fallback means the one tenant
+# we can no longer reach is the one whose withdrawal we never hear about.
+# Past this, verification fails and tokens signed with those keys stop being
+# accepted.
+JWKS_STALE_GRACE_SECONDS = 3600
+# Without a timeout a hung connection holds its worker thread forever. The
+# threadpool is small (40 by default), so a handful of those stall every other
+# request on the instance.
+JWKS_FETCH_TIMEOUT_SECONDS = 5
+
+_jwks_cache: Dict[str, Any] = {"keys": None, "fetched_at": 0.0}
+_jwks_lock = Lock()
+
+
+def _fetch_auth0_public_key() -> Dict[str, Any]:
     jwks_url = f"https://{get('DOMAIN_NAME')}/.well-known/jwks.json"
-    jwks = requests.get(jwks_url).json()
-    return {key["kid"]: key for key in jwks["keys"]}
+    response = requests.get(jwks_url, timeout=JWKS_FETCH_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return {key["kid"]: key for key in response.json()["keys"]}
+
+
+def get_auth0_public_key(force_refresh: bool = False) -> Dict[str, Any]:
+    """The Auth0 key set, cached.
+
+    The lock is held across the fetch on purpose: when the cache expires under
+    load, every thread in the pool would otherwise fetch at once. One fetches,
+    the rest wait and take its result.
+    """
+    with _jwks_lock:
+        cached = _jwks_cache["keys"]
+        is_fresh = (
+            cached is not None
+            and (time.monotonic() - _jwks_cache["fetched_at"]) < JWKS_CACHE_TTL_SECONDS
+        )
+        if cached is not None and is_fresh and not force_refresh:
+            return cached
+
+        try:
+            keys = _fetch_auth0_public_key()
+        except Exception as fetch_error:
+            # A stale key set still verifies every token signed before the last
+            # rotation, so serving it beats failing every login while Auth0 is
+            # slow or unreachable - but only for as long as the outage can
+            # plausibly be an outage rather than a key we should have stopped
+            # trusting hours ago.
+            age = time.monotonic() - _jwks_cache["fetched_at"]
+            if cached is not None and age <= JWKS_CACHE_TTL_SECONDS + JWKS_STALE_GRACE_SECONDS:
+                logging.warning(
+                    "Falling back to cached Auth0 JWKS (%ds old) after fetch failure: %s",
+                    int(age),
+                    fetch_error,
+                )
+                return cached
+            if cached is not None:
+                logging.error(
+                    "Cached Auth0 JWKS is %ds old and refreshes keep failing; "
+                    "refusing to keep trusting it: %s",
+                    int(age),
+                    fetch_error,
+                )
+            raise
+
+        _jwks_cache["keys"] = keys
+        _jwks_cache["fetched_at"] = time.monotonic()
+        return keys
 
 
 def _allowed_auth0_audiences() -> list[str]:
@@ -124,6 +212,11 @@ def verify_auth0_token(token: str):
                 "Token header missing key id (kid); request an API access token with audience"
             )
         rsa_key = jwks.get(kid)
+        if not rsa_key:
+            # The cache predates a key rotation; refetch once before deciding
+            # the token is unverifiable.
+            jwks = get_auth0_public_key(force_refresh=True)
+            rsa_key = jwks.get(kid)
         if not rsa_key:
             raise ValueError("Unable to find appropriate key")
 

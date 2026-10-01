@@ -3,7 +3,10 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from fastapi import HTTPException
+
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_response_model import (
+    CONTENT_REQUIRED,
     SubTaskDTO,
     SubTaskRequest,
     SubTaskRequestFields,
@@ -13,11 +16,14 @@ from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_response_model import (
     SubtaskOrderItem,
 )
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services import (
+    _get_task_plan,
+    _reject_foreign_sub_task_ids,
+    _validate_subtasks,
     create_new_sub_tasks,
     update_sub_task_by_task_id,
     change_subtask_order_service,
 )
-from pecha_api.plans.response_message import BAD_REQUEST, FORBIDDEN, UNAUTHORIZED_TASK_ACCESS
+from pecha_api.plans.response_message import BAD_REQUEST, FORBIDDEN, SUBTASK_NOT_IN_TASK, UNAUTHORIZED_TASK_ACCESS
 from pecha_api.plans.plans_enums import ContentType
 
 
@@ -38,10 +44,10 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
 
     saved_items = [
         SimpleNamespace(
-            id=uuid.uuid4(), content_type="TEXT", content="First", duration="10", display_order=6, source_text_id=None, pecha_segment_id=None, segment_ids=None, segment_numbers=None,
+            id=uuid.uuid4(), content_type="TEXT", content="First", duration="10", display_order=6, source_text_id=None, pecha_segment_id=None, segment_ids=None, segment_numbers=None, reference_id=None,
         ),
         SimpleNamespace(
-            id=uuid.uuid4(), content_type="TEXT", content="Second", duration="10", display_order=7, source_text_id=None, pecha_segment_id=None, segment_ids=None, segment_numbers=None,
+            id=uuid.uuid4(), content_type="TEXT", content="Second", duration="10", display_order=7, source_text_id=None, pecha_segment_id=None, segment_ids=None, segment_numbers=None, reference_id=None,
         ),
     ]
 
@@ -55,6 +61,9 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_author_task",
         return_value=SimpleNamespace(id=task_id, created_by="author@example.com"),
     ) as mock_get_task, patch(
+        "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_task_plan",
+        return_value=SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4(), language="EN"),
+    ), patch(
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services.get_max_display_order_for_sub_task",
         return_value=5,
     ) as mock_get_max, patch(
@@ -68,6 +77,7 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
             content_type="TEXT",
             content="First",
             duration="10",
+            reference_id=None,
             display_order=6,
             created_by="author@example.com",
         )
@@ -76,6 +86,7 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
             content_type="TEXT",
             content="Second",
             duration="10",
+            reference_id=None,
             display_order=7,
             created_by="author@example.com",
         )
@@ -107,6 +118,7 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
             "pecha_segment_id": None,
             "segment_ids": None,
             "segment_numbers": None,
+            "reference_id": None,
             "display_order": 6,
             "created_by": "author@example.com",
         }
@@ -119,6 +131,7 @@ async def test_create_new_sub_tasks_builds_and_saves_with_incremented_display_or
             "pecha_segment_id": None,
             "segment_ids": None,
             "segment_numbers": None,
+            "reference_id": None,
             "display_order": 7,
             "created_by": "author@example.com",
         }
@@ -214,6 +227,9 @@ async def test_update_sub_task_by_task_id_deletes_missing_and_updates_existing_a
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_author_task",
         return_value=SimpleNamespace(id=task_id, created_by="author@example.com"),
     ) as mock_get_task, patch(
+        "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_task_plan",
+        return_value=SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4(), language="EN"),
+    ), patch(
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services.get_sub_tasks_by_task_id",
         return_value=[
             SimpleNamespace(id=existing_to_keep_id),
@@ -318,6 +334,7 @@ async def test_update_sub_task_by_task_id_creates_new_sub_tasks_for_none_ids():
         content_type="TEXT",
         content="New A",
         duration="10",
+        reference_id=None,
         display_order=2,
         created_by="author@example.com",
     )
@@ -326,6 +343,7 @@ async def test_update_sub_task_by_task_id_creates_new_sub_tasks_for_none_ids():
         content_type="TEXT",
         content="New B",
         duration="10",
+        reference_id=None,
         cdisplay_order=3,
         created_by="author@example.com",
     )
@@ -339,6 +357,9 @@ async def test_update_sub_task_by_task_id_creates_new_sub_tasks_for_none_ids():
     ), patch(
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_author_task",
         return_value=SimpleNamespace(id=task_id, created_by="author@example.com"),
+    ), patch(
+        "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services._get_task_plan",
+        return_value=SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4(), language="EN"),
     ), patch(
         "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services.get_sub_tasks_by_task_id",
         return_value=[SimpleNamespace(id=existing_id)],
@@ -377,6 +398,7 @@ async def test_update_sub_task_by_task_id_creates_new_sub_tasks_for_none_ids():
             "pecha_segment_id": None,
             "segment_ids": None,
             "segment_numbers": None,
+            "reference_id": None,
             "display_order": 2,
             "created_by": "author@example.com",
         }
@@ -389,6 +411,7 @@ async def test_update_sub_task_by_task_id_creates_new_sub_tasks_for_none_ids():
             "pecha_segment_id": None,
             "segment_ids": None,
             "segment_numbers": None,
+            "reference_id": None,
             "display_order": 3,
             "created_by": "author@example.com",
         }
@@ -816,3 +839,246 @@ async def test_change_subtask_order_service_update_failed():
             )
         
         assert exc.value.status_code == 400
+
+# --- Plan lookup for subtask references -----------------------------------
+#
+# A subtask may only link content owned by its plan's group, so the service
+# has to resolve the plan behind a task before validating any reference.
+
+SERVICE = "pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_services"
+
+
+def test_get_task_plan_returns_the_plan_behind_a_task():
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4())
+    plan_item = SimpleNamespace(id=uuid.uuid4(), plan_id=plan.id)
+    task = SimpleNamespace(id=uuid.uuid4(), plan_item_id=plan_item.id)
+    db = MagicMock()
+
+    with patch(f"{SERVICE}.get_plan_item_by_id", return_value=plan_item) as mock_day, \
+         patch(f"{SERVICE}.get_plan_by_id", return_value=plan) as mock_plan:
+        assert _get_task_plan(db=db, task=task) is plan
+
+    assert mock_day.call_args.kwargs == {"db": db, "day_id": plan_item.id}
+    assert mock_plan.call_args.kwargs == {"db": db, "plan_id": plan.id}
+
+
+def test_get_task_plan_404s_when_the_day_is_missing():
+    task = SimpleNamespace(id=uuid.uuid4(), plan_item_id=uuid.uuid4())
+    db = MagicMock()
+
+    with patch(f"{SERVICE}.get_plan_item_by_id", return_value=None), patch(
+        f"{SERVICE}.get_plan_by_id"
+    ) as mock_plan, pytest.raises(HTTPException) as exc:
+        _get_task_plan(db=db, task=task)
+
+    assert exc.value.status_code == 404
+    assert mock_plan.call_count == 0
+
+
+def test_get_task_plan_404s_when_the_plan_is_missing():
+    plan_item = SimpleNamespace(id=uuid.uuid4(), plan_id=uuid.uuid4())
+    task = SimpleNamespace(id=uuid.uuid4(), plan_item_id=plan_item.id)
+    db = MagicMock()
+
+    with patch(f"{SERVICE}.get_plan_item_by_id", return_value=plan_item), patch(
+        f"{SERVICE}.get_plan_by_id", return_value=None
+    ), pytest.raises(HTTPException) as exc:
+        _get_task_plan(db=db, task=task)
+
+    assert exc.value.status_code == 404
+
+
+def test_validate_subtasks_checks_every_subtask_against_the_plans_group():
+    group_id = uuid.uuid4()
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=group_id)
+    first = SimpleNamespace(content_type="EVENT", content=None, reference_id=uuid.uuid4())
+    second = SimpleNamespace(content_type="TEXT", content="Read this", reference_id=None)
+    db = MagicMock()
+
+    with patch(f"{SERVICE}.validate_subtask_reference") as mock_validate:
+        _validate_subtasks(db=db, plan=plan, sub_tasks=[first, second])
+
+    assert mock_validate.call_count == 2
+    assert mock_validate.call_args_list[0].kwargs == {
+        "db": db,
+        "content_type": "EVENT",
+        "reference_id": first.reference_id,
+        "group_id": group_id,
+    }
+    assert mock_validate.call_args_list[1].kwargs["content_type"] == "TEXT"
+
+
+def test_validate_subtasks_propagates_a_rejection():
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4())
+    sub_task = SimpleNamespace(content_type="POST", content=None, reference_id=uuid.uuid4())
+    db = MagicMock()
+    rejection = HTTPException(status_code=400, detail="nope")
+
+    with patch(
+        f"{SERVICE}.validate_subtask_reference", side_effect=rejection
+    ), pytest.raises(HTTPException) as exc:
+        _validate_subtasks(db=db, plan=plan, sub_tasks=[sub_task])
+
+    assert exc.value.status_code == 400
+
+
+# --- Cross-task write protection ------------------------------------------
+#
+# Authorization is granted for one task, so a subtask id belonging to another
+# task must never be writable through the update endpoint.
+
+
+def test_reject_foreign_sub_task_ids_allows_ids_from_the_authorized_task():
+    own = [SimpleNamespace(id=uuid.uuid4()), SimpleNamespace(id=uuid.uuid4())]
+
+    _reject_foreign_sub_task_ids(
+        requested=own, allowed_ids=[own[0].id, own[1].id, uuid.uuid4()]
+    )
+
+
+def test_reject_foreign_sub_task_ids_rejects_an_id_from_another_task():
+    own_id = uuid.uuid4()
+    foreign_id = uuid.uuid4()
+    requested = [SimpleNamespace(id=own_id), SimpleNamespace(id=foreign_id)]
+    allowed_ids = [own_id]
+
+    with pytest.raises(HTTPException) as exc:
+        _reject_foreign_sub_task_ids(requested=requested, allowed_ids=allowed_ids)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["message"] == SUBTASK_NOT_IN_TASK
+
+
+@pytest.mark.asyncio
+async def test_update_sub_task_rejects_a_subtask_id_from_another_task():
+    """An author must not overwrite another task's subtask by passing its id."""
+    task_id = uuid.uuid4()
+    own_id = uuid.uuid4()
+    foreign_id = uuid.uuid4()
+
+    request = UpdateSubTaskRequest(
+        task_id=task_id,
+        sub_tasks=[
+            SubTaskDTO(id=own_id, content_type="TEXT", content="Mine", display_order=1),
+            SubTaskDTO(
+                id=foreign_id, content_type="TEXT", content="Theirs", display_order=2
+            ),
+        ],
+    )
+
+    db_mock = MagicMock()
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db_mock
+
+    with patch(
+        f"{SERVICE}.validate_and_extract_author_details",
+        return_value=SimpleNamespace(email="author@example.com", is_admin=False),
+    ), patch(f"{SERVICE}.SessionLocal", return_value=session_cm), patch(
+        f"{SERVICE}._get_author_task",
+        return_value=SimpleNamespace(id=task_id, created_by="author@example.com"),
+    ), patch(
+        f"{SERVICE}._get_task_plan",
+        return_value=SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4(), language="EN"),
+    ), patch(
+        f"{SERVICE}.get_sub_tasks_by_task_id",
+        return_value=[SimpleNamespace(id=own_id)],
+    ), patch(
+        f"{SERVICE}.delete_sub_tasks_bulk"
+    ) as mock_delete, patch(
+        f"{SERVICE}.update_sub_tasks_bulk"
+    ) as mock_update:
+        with pytest.raises(HTTPException) as exc:
+            await update_sub_task_by_task_id(
+                token="token", update_sub_task_request=request
+            )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["message"] == SUBTASK_NOT_IN_TASK
+    # Nothing was written before the rejection.
+    assert mock_delete.call_count == 0
+    assert mock_update.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_update_sub_task_scopes_the_bulk_update_to_the_authorized_task():
+    task_id = uuid.uuid4()
+    own_id = uuid.uuid4()
+
+    request = UpdateSubTaskRequest(
+        task_id=task_id,
+        sub_tasks=[
+            SubTaskDTO(id=own_id, content_type="TEXT", content="Mine", display_order=1),
+        ],
+    )
+
+    db_mock = MagicMock()
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db_mock
+
+    with patch(
+        f"{SERVICE}.validate_and_extract_author_details",
+        return_value=SimpleNamespace(email="author@example.com", is_admin=False),
+    ), patch(f"{SERVICE}.SessionLocal", return_value=session_cm), patch(
+        f"{SERVICE}._get_author_task",
+        return_value=SimpleNamespace(id=task_id, created_by="author@example.com"),
+    ), patch(
+        f"{SERVICE}._get_task_plan",
+        return_value=SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4(), language="EN"),
+    ), patch(
+        f"{SERVICE}.get_sub_tasks_by_task_id",
+        return_value=[SimpleNamespace(id=own_id)],
+    ), patch(
+        f"{SERVICE}.delete_sub_tasks_bulk"
+    ), patch(
+        f"{SERVICE}.update_sub_tasks_bulk"
+    ) as mock_update, patch(
+        f"{SERVICE}.apply_sub_task_timestamp", return_value=(None, None)
+    ), patch(
+        f"{SERVICE}.invalidate_plan_day_cache_for_task", new=AsyncMock()
+    ):
+        await update_sub_task_by_task_id(token="token", update_sub_task_request=request)
+
+    assert mock_update.call_args.kwargs["task_id"] == task_id
+
+
+# --- Inline content requirement -------------------------------------------
+#
+# Reference subtasks carry no content, but inline ones must: a NULL content on
+# a TEXT subtask would reach text-to-audio generation as None.
+
+
+def test_validate_subtasks_rejects_an_inline_subtask_without_content():
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4())
+    sub_task = SimpleNamespace(content_type="TEXT", content=None, reference_id=None)
+    db = MagicMock()
+
+    with patch(
+        f"{SERVICE}.validate_subtask_reference"
+    ) as mock_reference, pytest.raises(HTTPException) as exc:
+        _validate_subtasks(db=db, plan=plan, sub_tasks=[sub_task])
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["message"] == CONTENT_REQUIRED
+    # Rejected before the reference lookup runs.
+    assert mock_reference.call_count == 0
+
+
+def test_validate_subtasks_allows_an_empty_string_for_inline_content():
+    """Empty content was accepted before reference types existed; keep it so."""
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4())
+    sub_task = SimpleNamespace(content_type="IMAGE", content="", reference_id=None)
+
+    with patch(f"{SERVICE}.validate_subtask_reference"):
+        _validate_subtasks(db=MagicMock(), plan=plan, sub_tasks=[sub_task])
+
+
+def test_validate_subtasks_allows_a_reference_subtask_without_content():
+    plan = SimpleNamespace(id=uuid.uuid4(), group_id=uuid.uuid4())
+    sub_task = SimpleNamespace(
+        content_type="GROUP_COLLECTION", content=None, reference_id=uuid.uuid4()
+    )
+
+    with patch(f"{SERVICE}.validate_subtask_reference") as mock_reference:
+        _validate_subtasks(db=MagicMock(), plan=plan, sub_tasks=[sub_task])
+
+    assert mock_reference.call_count == 1

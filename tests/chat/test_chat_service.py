@@ -10,15 +10,19 @@ from starlette import status
 # before any ChatRoom()/ChatRoomMember() instantiation below triggers mapper configuration.
 import pecha_api.app  # noqa: F401
 
+from pecha_api.prayer_intentions.prayer_intention_response_models import PrayerIntentionDTO
 from pecha_api.chat.service import (
     _default_group_room_name,
     _generate_presigned_url,
     _get_room_or_404,
+    _intention_dto_for_message,
     _isoformat,
     _require_active_member,
     build_message_dto,
     build_room_dto,
+    get_group_room_service,
     get_room_detail_service,
+    leave_group_chat_room,
     list_group_people_service,
     list_my_rooms_service,
     mark_room_read_service,
@@ -39,7 +43,7 @@ class MockUser:
 
 
 class MockMessage:
-    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello"):
+    def __init__(self, sender=None, sender_id=None, room_id=None, body="Hello", parent=None):
         self.id = uuid4()
         self.room_id = room_id or uuid4()
         self.sender_id = sender_id or uuid4()
@@ -47,6 +51,8 @@ class MockMessage:
         self.body = body
         self.created_at = datetime.now(tz.utc)
         self.deleted_at = None
+        self.parent = parent
+        self.parent_message_id = parent.id if parent else None
 
 
 class MockGroup:
@@ -68,6 +74,22 @@ class TestBuildMessageDTO:
 
         assert dto.sender_email == "unknown@example.com"
 
+    def test_uses_placeholder_email_when_sender_has_no_email(self):
+        """Phone-signup users have a NULL email; the DTO must still validate."""
+        message = MockMessage(sender=MockUser(email=None))
+
+        dto = build_message_dto(message)
+
+        assert dto.sender_email == "unknown@example.com"
+        assert dto.sender_name == "Alice"
+
+    def test_sender_name_falls_back_when_no_name_and_no_email(self):
+        message = MockMessage(sender=MockUser(email=None, firstname="", lastname=None))
+
+        dto = build_message_dto(message)
+
+        assert dto.sender_name == "Unknown"
+
     @patch('pecha_api.chat.service.generate_presigned_access_url')
     def test_sender_avatar_url_is_presigned(self, mock_presign):
         mock_presign.return_value = "https://s3.example.com/signed?sig=abc"
@@ -86,6 +108,58 @@ class TestBuildMessageDTO:
         dto = build_message_dto(message)
 
         assert dto.sender_avatar_url is None
+
+    def test_includes_parent_when_parent_exists(self):
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob", lastname="Smith")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Original")
+        reply = MockMessage(body="Reply", parent=parent)
+
+        dto = build_message_dto(reply)
+        payload = dto.model_dump()
+
+        assert dto.parent is not None
+        assert dto.parent.id == parent.id
+        assert dto.parent.body == "Original"
+        assert dto.parent.sender_id == parent_sender.id
+        assert dto.parent.sender_email == "parent@example.com"
+        assert dto.parent.sender_name == "Bob Smith"
+        assert dto.parent.deleted_at is None
+        assert "deleted_at" not in payload["parent"]
+
+    def test_includes_deleted_parent_without_content(self):
+        deleted_at = datetime.now(tz.utc)
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob", lastname="Smith")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Secret content")
+        parent.deleted_at = deleted_at
+        reply = MockMessage(body="Reply", parent=parent)
+
+        dto = build_message_dto(reply)
+        payload = dto.model_dump()
+
+        assert dto.parent is not None
+        assert dto.parent.id == parent.id
+        assert dto.parent.body == ""
+        assert dto.parent.sender_id == parent_sender.id
+        assert dto.parent.sender_email == "parent@example.com"
+        assert dto.parent.sender_name == "Bob Smith"
+        assert dto.parent.deleted_at == deleted_at.isoformat()
+        assert payload["parent"]["deleted_at"] == deleted_at.isoformat()
+        assert payload["parent"]["body"] == ""
+
+    def test_deleted_message_clears_body_and_keeps_sender(self):
+        deleted_at = datetime.now(tz.utc)
+        sender = MockUser(email="alice@example.com", firstname="Alice")
+        message = MockMessage(sender=sender, sender_id=sender.id, body="Secret content")
+        message.deleted_at = deleted_at
+
+        dto = build_message_dto(message)
+        payload = dto.model_dump()
+
+        assert dto.body == ""
+        assert dto.sender_email == "alice@example.com"
+        assert dto.sender_name == "Alice"
+        assert dto.deleted_at == deleted_at.isoformat()
+        assert payload["deleted_at"] == deleted_at.isoformat()
 
 
 class MockRoom:
@@ -148,6 +222,69 @@ class TestBuildRoomDTO:
         assert dto.other_user_email == "other@example.com"
         assert dto.other_user_name == "Bob Smith"
 
+    @patch("pecha_api.chat.service.count_unread_messages")
+    @patch("pecha_api.chat.service.get_active_member")
+    @patch("pecha_api.chat.service.count_active_members")
+    @patch("pecha_api.chat.service.get_last_message")
+    @patch("pecha_api.chat.service._intention_dto_for_message")
+    def test_last_message_includes_prayer_intention(
+        self,
+        mock_intention_dto,
+        mock_last_message,
+        mock_count_active,
+        mock_get_active,
+        mock_unread,
+    ):
+        room = MockRoom(group_id=uuid4())
+        last = MockMessage(body="Please pray")
+        last.intention = "healing"
+        mock_last_message.return_value = last
+        mock_count_active.return_value = 1
+        mock_get_active.return_value = None
+        mock_unread.return_value = 0
+        intention = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_intention_dto.return_value = intention
+
+        dto = build_room_dto(db=MagicMock(), room=room, viewer_id=uuid4())
+
+        assert dto.last_message is not None
+        assert dto.last_message.intention == intention
+        mock_intention_dto.assert_called_once()
+
+
+class TestIntentionDtoForMessage:
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_returns_none_when_message_has_no_intention(self, mock_resolve):
+        message = MockMessage()
+        message.intention = None
+
+        assert _intention_dto_for_message(db=MagicMock(), message=message) is None
+        mock_resolve.assert_not_called()
+
+    @patch("pecha_api.chat.service.resolve_intention_dtos_for_slugs")
+    def test_resolves_slug_to_dto(self, mock_resolve):
+        message = MockMessage()
+        message.intention = "healing"
+        expected = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_resolve.return_value = {"healing": expected}
+
+        dto = _intention_dto_for_message(db=MagicMock(), message=message)
+
+        assert dto == expected
+        mock_resolve.assert_called_once()
+
 
 class TestListGroupPeopleService:
 
@@ -175,8 +312,11 @@ class TestListGroupPeopleService:
         mock_session.return_value.__enter__.return_value = MagicMock()
         mock_get_group.return_value = None
 
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            list_group_people_service(group_id=uuid4(), user=MockUser(), skip=0, limit=50)
+            list_group_people_service(group_id=group_id, user=user, skip=0, limit=50)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -222,6 +362,28 @@ class TestResolveOrCreateGroupRoom:
 
         assert result is existing_room
 
+    @patch('pecha_api.chat.service.is_user_following_group', return_value=False)
+    @patch('pecha_api.chat.service.is_user_joined_group', return_value=True)
+    @patch('pecha_api.chat.service.get_member')
+    @patch('pecha_api.chat.service.is_group_id_published', return_value=True)
+    @patch('pecha_api.chat.service.get_room_by_group_id')
+    def test_rejoined_member_is_reactivated(
+        self, mock_get_room, _mock_published, mock_get_member, _mock_joined, _mock_following
+    ):
+        """Rejoining the group does not clear the chat membership's left_at, so
+        the room stays out of the inbox until something resolves it again."""
+        existing_room = MagicMock(id=uuid4())
+        mock_get_room.return_value = existing_room
+        member = MagicMock(left_at=datetime.now(tz.utc))
+        mock_get_member.return_value = member
+
+        result = resolve_or_create_group_room(
+            db=MagicMock(), group_id=uuid4(), user=MockUser()
+        )
+
+        assert result is existing_room
+        assert member.left_at is None
+
     @patch('pecha_api.chat.service.is_group_id_published', return_value=False)
     @patch('pecha_api.chat.service.get_room_by_group_id')
     def test_existing_room_rejected_when_group_hidden(self, mock_get_room, _mock_published):
@@ -229,8 +391,12 @@ class TestResolveOrCreateGroupRoom:
         group is hidden, so members cannot keep messaging through it."""
         mock_get_room.return_value = MagicMock()
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -247,8 +413,12 @@ class TestResolveOrCreateGroupRoom:
         mock_joined.return_value = False
         mock_following.return_value = False
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
@@ -258,10 +428,55 @@ class TestResolveOrCreateGroupRoom:
         mock_get_room.return_value = None
         mock_get_group.return_value = None
 
+        db = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_group_room(db=MagicMock(), group_id=uuid4(), user=MockUser())
+            resolve_or_create_group_room(db=db, group_id=group_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestLeaveGroupChatRoom:
+
+    @patch('pecha_api.chat.service.leave_member')
+    @patch('pecha_api.chat.service.get_active_member')
+    @patch('pecha_api.chat.service.get_room_by_group_id')
+    def test_marks_active_member_as_left(self, mock_get_room, mock_get_active_member, mock_leave_member):
+        room = MagicMock(id=uuid4())
+        member = MagicMock()
+        mock_get_room.return_value = room
+        mock_get_active_member.return_value = member
+        db = MagicMock()
+        user_id = uuid4()
+
+        leave_group_chat_room(db=db, group_id=uuid4(), user_id=user_id)
+
+        mock_get_active_member.assert_called_once_with(db=db, room_id=room.id, user_id=user_id)
+        mock_leave_member.assert_called_once_with(db=db, member=member, commit=True)
+
+    @patch('pecha_api.chat.service.leave_member')
+    @patch('pecha_api.chat.service.get_active_member')
+    @patch('pecha_api.chat.service.get_room_by_group_id')
+    def test_noop_when_no_room(self, mock_get_room, mock_get_active_member, mock_leave_member):
+        mock_get_room.return_value = None
+
+        leave_group_chat_room(db=MagicMock(), group_id=uuid4(), user_id=uuid4())
+
+        mock_get_active_member.assert_not_called()
+        mock_leave_member.assert_not_called()
+
+    @patch('pecha_api.chat.service.leave_member')
+    @patch('pecha_api.chat.service.get_active_member')
+    @patch('pecha_api.chat.service.get_room_by_group_id')
+    def test_noop_when_user_not_an_active_member(self, mock_get_room, mock_get_active_member, mock_leave_member):
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        mock_get_active_member.return_value = None
+
+        leave_group_chat_room(db=MagicMock(), group_id=uuid4(), user_id=uuid4())
+
+        mock_leave_member.assert_not_called()
 
 
 class TestResolveOrCreatePrivateRoom:
@@ -304,8 +519,10 @@ class TestResolveOrCreatePrivateRoom:
     def test_cannot_dm_self(self):
         user = MockUser()
 
+        db = MagicMock()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_private_room(db=MagicMock(), user=user, receiver_id=user.id)
+            resolve_or_create_private_room(db=db, user=user, receiver_id=user.id)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
 
@@ -313,8 +530,11 @@ class TestResolveOrCreatePrivateRoom:
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
+        user = MockUser()
+        receiver_id = uuid4()
+
         with pytest.raises(HTTPException) as exc_info:
-            resolve_or_create_private_room(db=mock_db, user=MockUser(), receiver_id=uuid4())
+            resolve_or_create_private_room(db=mock_db, user=user, receiver_id=receiver_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -356,8 +576,10 @@ class TestHelpers:
     @patch('pecha_api.chat.service.get_room_by_id')
     def test_get_room_or_404_raises(self, mock_get):
         mock_get.return_value = None
+        db = MagicMock()
+        room_id = uuid4()
         with pytest.raises(HTTPException) as exc_info:
-            _get_room_or_404(db=MagicMock(), room_id=uuid4())
+            _get_room_or_404(db=db, room_id=room_id)
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
     @patch('pecha_api.chat.service.get_room_by_id')
@@ -369,8 +591,11 @@ class TestHelpers:
     @patch('pecha_api.chat.service.get_active_member')
     def test_require_active_member_raises(self, mock_get):
         mock_get.return_value = None
+        db = MagicMock()
+        room_id = uuid4()
+        user_id = uuid4()
         with pytest.raises(HTTPException) as exc_info:
-            _require_active_member(db=MagicMock(), room_id=uuid4(), user_id=uuid4())
+            _require_active_member(db=db, room_id=room_id, user_id=user_id)
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
     @patch('pecha_api.chat.service.get_active_member')
@@ -382,6 +607,26 @@ class TestHelpers:
 
 
 class TestRoomServices:
+
+    @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_or_create_group_room')
+    @patch('pecha_api.chat.service.SessionLocal')
+    def test_get_group_room_service_resolves_by_group_id(
+        self, mock_session, mock_resolve, mock_build
+    ):
+        """A client with only a group id can get the room id - and, for someone
+        who rejoined, get put back into the room on the way."""
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        user = MockUser()
+        mock_resolve.return_value = MockRoom(group_id=group_id)
+        mock_build.return_value = MagicMock()
+
+        result = get_group_room_service(group_id=group_id, user=user)
+
+        assert result is mock_build.return_value
+        assert mock_resolve.call_args.kwargs["group_id"] == group_id
+        assert mock_resolve.call_args.kwargs["user"] is user
 
     @patch('pecha_api.chat.service.build_room_dto')
     @patch('pecha_api.chat.service._require_active_member')
@@ -399,16 +644,20 @@ class TestRoomServices:
         mock_require.assert_called_once()
 
     @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_intention_dtos_for_slugs')
     @patch('pecha_api.chat.service.get_last_messages_map')
     @patch('pecha_api.chat.service.list_my_active_rooms')
     @patch('pecha_api.chat.service.SessionLocal')
-    def test_list_my_rooms_service(self, mock_session, mock_list, mock_last, mock_build):
+    def test_list_my_rooms_service(
+        self, mock_session, mock_list, mock_last, mock_resolve, mock_build
+    ):
         from pecha_api.chat.response_models import ChatRoomDTO
 
         mock_session.return_value.__enter__.return_value = MagicMock()
         room = MockRoom()
         mock_list.return_value = ([room], 1)
         mock_last.return_value = {}
+        mock_resolve.return_value = {}
         mock_build.return_value = ChatRoomDTO(
             id=room.id,
             kind="GROUP",
@@ -423,7 +672,57 @@ class TestRoomServices:
 
         assert result.total == 1
         assert len(result.rooms) == 1
+        mock_resolve.assert_called_once()
 
+    @patch('pecha_api.chat.service.build_room_dto')
+    @patch('pecha_api.chat.service.resolve_intention_dtos_for_slugs')
+    @patch('pecha_api.chat.service.get_last_messages_map')
+    @patch('pecha_api.chat.service.list_my_active_rooms')
+    @patch('pecha_api.chat.service.SessionLocal')
+    def test_list_my_rooms_batches_intention_lookup(
+        self, mock_session, mock_list, mock_last, mock_resolve, mock_build
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        room_a = MockRoom()
+        room_b = MockRoom()
+        msg_a = MockMessage(body="Pray A")
+        msg_a.intention = "healing"
+        msg_b = MockMessage(body="Pray B")
+        msg_b.intention = "healing"
+        mock_list.return_value = ([room_a, room_b], 2)
+        mock_last.return_value = {room_a.id: msg_a, room_b.id: msg_b}
+        healing_dto = PrayerIntentionDTO(
+            slug="healing",
+            label="Healing",
+            color="#4A78C2",
+            description="For illness.",
+            display_order=0,
+        )
+        mock_resolve.return_value = {"healing": healing_dto}
+
+        def _room_dto(**kwargs):
+            from pecha_api.chat.response_models import ChatRoomDTO
+
+            return ChatRoomDTO(
+                id=kwargs["room"].id,
+                kind="GROUP",
+                name=kwargs["room"].name,
+                created_by=kwargs["room"].created_by,
+                member_count=1,
+                updated_at=kwargs["room"].updated_at.isoformat(),
+                unread_count=0,
+            )
+
+        mock_build.side_effect = _room_dto
+
+        list_my_rooms_service(user=MockUser(), skip=0, limit=20)
+
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["slugs"] == ["healing", "healing"]
+        assert mock_build.call_count == 2
+        for call in mock_build.call_args_list:
+            assert call.kwargs["resolve_last_message_intention"] is False
+            assert call.kwargs["last_message_intention"] == healing_dto
 
     @patch('pecha_api.chat.service.build_room_dto')
     @patch('pecha_api.chat.service.update_room')
@@ -459,9 +758,11 @@ class TestRoomServices:
         mock_get_room.return_value = room
         mock_require.return_value = MagicMock(role="MEMBER")
 
+        user = MockUser()
+
         with pytest.raises(HTTPException) as exc_info:
             update_room_profile_service(
-                room_id=room.id, user=MockUser(), name="Nope", img_url=None
+                room_id=room.id, user=user, name="Nope", img_url=None
             )
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
@@ -514,16 +815,20 @@ class TestRoomIdRoutesRespectGroupStatus:
         history, reactions, reports and member ops close together."""
         mock_get_room.return_value = MagicMock(group_id=uuid4())
 
+        db = MagicMock()
+        room_id = uuid4()
+
         with pytest.raises(HTTPException) as exc_info:
-            _get_room_or_404(db=MagicMock(), room_id=uuid4())
+            _get_room_or_404(db=db, room_id=room_id)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
     @patch('pecha_api.chat.service.is_group_id_published')
     @patch('pecha_api.chat.service.get_room_by_id')
     def test_dm_room_skips_the_group_check(self, mock_get_room, mock_published):
-        """DM rooms have no group_id and must never consult group status."""
-        room = MagicMock(group_id=None)
+        """DM rooms have no group_id and no event_id, so they must never
+        consult group status."""
+        room = MagicMock(group_id=None, event_id=None)
         mock_get_room.return_value = room
 
         assert _get_room_or_404(db=MagicMock(), room_id=uuid4()) is room

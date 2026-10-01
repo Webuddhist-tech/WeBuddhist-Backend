@@ -145,6 +145,13 @@ def _normalize_plan_status(status_value) -> PlanStatus:
     return PlanStatus(status_value)
 
 
+def can_create_group_content(member_role: Optional[AuthorGroupMemberRole]) -> bool:
+    """Same role set require_can_create_content enforces (OWNER/ADMIN/AUTHOR)
+    - exposed as a plain predicate for callers that report permissions
+    rather than gate an action (e.g. GET /users/me/permission/{group_id})."""
+    return member_role in _CONTENT_CREATE_ROLES
+
+
 def can_edit_content(member_role: AuthorGroupMemberRole, content_status) -> bool:
     status_enum = _normalize_plan_status(content_status)
     if member_role in _STATUS_CHANGE_ROLES:

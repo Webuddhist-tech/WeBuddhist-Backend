@@ -6,7 +6,11 @@ from starlette import status
 
 from pecha_api.plans.language_constants import language_query_description
 from pecha_api.plans.series.series_response_models import SeriesDTO, SeriesListResponse
-from pecha_api.plans.series.series_service import get_filtered_series, get_series_detail, get_random_featured_series
+from pecha_api.plans.series.series_cache_service import (
+    get_filtered_series_cached,
+    get_random_featured_series_cached,
+    get_series_detail_cached,
+)
 
 
 public_series_router = APIRouter(prefix="/series", tags=["Public Series"])
@@ -44,7 +48,7 @@ async def get_series_list(
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted series are hidden for Chinese timezones."),
     ] = None,
 ):
-    return get_filtered_series(
+    return await get_filtered_series_cached(
         search=search,
         skip=skip,
         limit=limit,
@@ -75,7 +79,7 @@ async def get_featured_series(
         Optional[HTTPAuthorizationCredentials], Depends(optional_oauth2_scheme)
     ] = None,
 ):
-    return get_random_featured_series(
+    return await get_random_featured_series_cached(
         language=language,
         limit=limit,
         token=_token_from_credentials(credentials),
@@ -99,7 +103,7 @@ async def get_series(
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted series are hidden for Chinese timezones."),
     ] = None,
 ):
-    return get_series_detail(
+    return await get_series_detail_cached(
         series_id=series_id,
         language=language,
         token=_token_from_credentials(credentials),

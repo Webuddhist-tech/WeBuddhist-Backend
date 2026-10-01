@@ -35,6 +35,38 @@ class CacheType(Enum):
 
     # Plan-specific cache types
     PLAN_DAY_DETAIL = "plan_day_detail"
+    PLAN_LIST = "plan_list"
+    PLAN_DETAIL = "plan_detail"
+    PLAN_DAYS_LIST = "plan_days_list"
+    PLAN_DAILY = "plan_daily"
+    PLAN_TAGS = "plan_tags"
+    PLAN_TAG_DETAIL = "plan_tag_detail"
+    SUBTASK_PRESETS = "subtask_presets"
+
+    # Series
+    SERIES_LIST = "series_list"
+    SERIES_FEATURED = "series_featured"
+    SERIES_DETAIL = "series_detail"
+
+    # Events. Short-lived: joins and live state change during an event.
+    EVENT_LIST = "event_list"
+    EVENT_DETAIL = "event_detail"
+    EVENT_FEATURED = "event_featured"
+
+    # Per-user plan progress
+    USER_PLAN_PROGRESS = "user_plan_progress"
+
+    # openpecha segment lookups. Upstream content, identical for every reader,
+    # so these are keyed by segment id alone and shared across every endpoint
+    # that resolves segments.
+    OPENPECHA_SEGMENT_CONTENT = "openpecha_segment_content"
+    OPENPECHA_SEGMENT_REFERENCE = "openpecha_segment_reference"
+
+    # Group social content. Short-lived for the same reason as events.
+    GROUP_POSTS_LIST = "group_posts_list"
+    GROUP_POST_DETAIL = "group_post_detail"
+    GROUP_ACCUMULATOR_LIST = "group_accumulator_list"
+    GROUP_ACCUMULATOR_DETAIL = "group_accumulator_detail"
 
     CALENDAR_YEAR = "calendar_year"
     

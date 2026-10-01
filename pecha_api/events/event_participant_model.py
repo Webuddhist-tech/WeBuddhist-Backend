@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, UUID, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Column, DateTime, String, UUID, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from ..db.database import Base
 from uuid import uuid4
@@ -20,6 +20,11 @@ class GroupEventParticipant(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
+
+    # How the user attends: "online" | "offline". NULL means they joined
+    # without picking - only possible on a hybrid event, where neither side
+    # can be inferred from the event itself.
+    participation_type = Column(String(10), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc))

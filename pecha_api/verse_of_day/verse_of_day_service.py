@@ -87,6 +87,7 @@ def build_public_dto(verse: VerseOfDay, lang: Optional[str] = None, group_info: 
             verses=None,
             image_url=presigned_image_url,
             ref_id=verse.ref_id,
+            source=verse.source,
             ref_type=verse.ref_type,
             date=verse.date,
             group_id=verse.group_id,
@@ -99,6 +100,7 @@ def build_public_dto(verse: VerseOfDay, lang: Optional[str] = None, group_info: 
             verse=None,
             image_url=presigned_image_url,
             ref_id=verse.ref_id,
+            source=verse.source,
             ref_type=verse.ref_type,
             date=verse.date,
             group_id=verse.group_id,
@@ -282,6 +284,7 @@ def create_verse_of_day_service(request: CreateVerseOfDayRequest, created_by: st
         verse_of_day = VerseOfDay(
             verse_id=request.verse_id,
             ref_id=request.ref_id,
+            source=request.source,
             ref_type=request.ref_type,
             image_urls=request.image_urls,
             group_id=request.group_id,
@@ -298,6 +301,7 @@ def create_verse_of_day_service(request: CreateVerseOfDayRequest, created_by: st
             verses=request.verses,
             verse_id=created.verse_id,
             ref_id=created.ref_id,
+            source=created.source,
             ref_type=created.ref_type,
             image_urls=created.image_urls,
             group_id=created.group_id,
@@ -325,6 +329,8 @@ def update_verse_of_day_service(
             updates['verse_id'] = request.verse_id
         if request.ref_id is not None:
             updates['ref_id'] = request.ref_id
+        if "source" in request.model_fields_set:
+            updates['source'] = request.source
         if request.ref_type is not None:
             updates['ref_type'] = request.ref_type
         if request.image_urls is not None:
@@ -349,6 +355,7 @@ def update_verse_of_day_service(
             verses=verses_dict if verses_dict else None,
             verse_id=updated_verse.verse_id,
             ref_id=updated_verse.ref_id,
+            source=updated_verse.source,
             ref_type=updated_verse.ref_type,
             image_urls=updated_verse.image_urls,
             group_id=updated_verse.group_id,

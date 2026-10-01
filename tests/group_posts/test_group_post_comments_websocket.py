@@ -1,9 +1,16 @@
+import asyncio
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock, ANY
 from uuid import uuid4
 from datetime import datetime, timezone as tz
 
 from pecha_api.group_posts.comment_response_models import GroupPostCommentDTO
+
+
+async def _never_ending():
+    """A subscription that stays open, as a real one does."""
+    await asyncio.Event().wait()
+    yield  # pragma: no cover
 
 
 class MockUser:
@@ -227,21 +234,40 @@ class TestPostCommentBroadcasterFailures:
             await broadcaster.broadcast_comment(post_id, comment)
 
     @pytest.mark.asyncio
-    async def test_subscribe_to_post_subscribes_to_the_post_channel(self):
+    async def test_post_subscription_is_shared_and_released_once_empty(self):
+        """Watchers of one post share a single Redis subscription, and the last
+        one out closes it. One per socket - or a close without aclose() - leaks
+        a Redis connection per client until Redis refuses new ones."""
         from pecha_api.group_posts.comment_websocket import PostCommentBroadcaster
+        from pecha_api.realtime.channel_fanout import ChannelFanout
 
         broadcaster = PostCommentBroadcaster("redis://localhost:6379/0")
         pubsub = MagicMock()
         pubsub.subscribe = AsyncMock()
+        pubsub.unsubscribe = AsyncMock()
+        pubsub.aclose = AsyncMock()
+        pubsub.listen = lambda: _never_ending()
         redis = MagicMock()
         redis.pubsub.return_value = pubsub
         broadcaster.redis = redis
+        broadcaster.fanout = ChannelFanout(redis)
 
         post_id = uuid4()
-        result = await broadcaster.subscribe_to_post(post_id)
+        channel = f"post:{post_id}:comments"
 
-        assert result is pubsub
-        pubsub.subscribe.assert_awaited_once_with(f"post:{post_id}:comments")
+        first = await broadcaster.subscribe_to_post(post_id)
+        second = await broadcaster.subscribe_to_post(post_id)
+
+        pubsub.subscribe.assert_awaited_once_with(channel)
+        assert redis.pubsub.call_count == 1
+
+        await broadcaster.unsubscribe_from_post(post_id, first)
+        pubsub.aclose.assert_not_awaited()
+
+        await broadcaster.unsubscribe_from_post(post_id, second)
+        pubsub.unsubscribe.assert_awaited_once_with(channel)
+        # The call that actually hands the connection back to the pool.
+        pubsub.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_connected_users_returns_empty_set_on_redis_failure(self):

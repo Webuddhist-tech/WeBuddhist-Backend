@@ -3,11 +3,14 @@ import datetime as dt
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -18,13 +21,15 @@ from sqlalchemy.orm import relationship
 
 from pecha_api.db.database import Base
 
-from .enums import ChatRoomMemberRoleEnum
+from .enums import ChatMessageTypeEnum, ChatRoomMemberRoleEnum
 
 FK_AUTHOR_GROUPS_ID = "author_groups.id"
 FK_USERS_ID = "users.id"
+FK_EVENTS_ID = "events.id"
 FK_CHAT_ROOMS_ID = "chat_rooms.id"
 FK_CHAT_MESSAGES_ID = "chat_messages.id"
 CASCADE_DELETE_ORPHAN = "all, delete-orphan"
+CREATED_AT_DESC = "created_at DESC"
 
 
 class ChatRoom(Base):
@@ -34,6 +39,11 @@ class ChatRoom(Base):
     group_id = Column(
         UUID(as_uuid=True),
         ForeignKey(FK_AUTHOR_GROUPS_ID, ondelete="CASCADE"),
+        nullable=True,
+    )
+    event_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_EVENTS_ID, ondelete="CASCADE"),
         nullable=True,
     )
     sender_id = Column(
@@ -78,9 +88,13 @@ class ChatRoom(Base):
     )
 
     __table_args__ = (
+        # Three mutually exclusive shapes: a group's room, an event's room, or
+        # a DM pair. Every row that satisfied the two-shape version still does.
         CheckConstraint(
-            "(group_id IS NOT NULL AND sender_id IS NULL AND receiver_id IS NULL) OR "
-            "(group_id IS NULL AND sender_id IS NOT NULL AND receiver_id IS NOT NULL AND sender_id <> receiver_id)",
+            "(group_id IS NOT NULL AND event_id IS NULL AND sender_id IS NULL AND receiver_id IS NULL) OR "
+            "(event_id IS NOT NULL AND group_id IS NULL AND sender_id IS NULL AND receiver_id IS NULL) OR "
+            "(group_id IS NULL AND event_id IS NULL AND sender_id IS NOT NULL AND receiver_id IS NOT NULL "
+            "AND sender_id <> receiver_id)",
             name="ck_chat_rooms_kind_shape",
         ),
         Index(
@@ -90,11 +104,19 @@ class ChatRoom(Base):
             postgresql_where=sql_text("group_id IS NOT NULL AND deleted_at IS NULL"),
         ),
         Index(
+            "uq_chat_rooms_event_id",
+            "event_id",
+            unique=True,
+            postgresql_where=sql_text("event_id IS NOT NULL AND deleted_at IS NULL"),
+        ),
+        Index(
             "uq_chat_rooms_sender_receiver",
             "sender_id",
             "receiver_id",
             unique=True,
-            postgresql_where=sql_text("group_id IS NULL AND deleted_at IS NULL"),
+            postgresql_where=sql_text(
+                "group_id IS NULL AND event_id IS NULL AND deleted_at IS NULL"
+            ),
         ),
         Index("idx_chat_rooms_updated_at", sql_text("updated_at DESC")),
         Index("idx_chat_rooms_created_by", "created_by"),
@@ -121,6 +143,18 @@ class ChatMessage(Base):
         nullable=True,
     )
     body = Column(Text, nullable=False)
+    message_type = Column(
+        ChatMessageTypeEnum,
+        nullable=False,
+        default="TEXT",
+        server_default="TEXT",
+    )
+    # Prayer-request intention slug (peace, healing, …). Null for TEXT messages.
+    intention = Column(String(32), nullable=True)
+    # Set once the sender edits the body or intention; never reset.
+    is_edited = Column(
+        Boolean, nullable=False, default=False, server_default=sql_text("false")
+    )
 
     created_at = Column(
         DateTime(timezone=True),
@@ -139,9 +173,33 @@ class ChatMessage(Base):
         back_populates="message",
         cascade=CASCADE_DELETE_ORPHAN,
     )
+    prayers = relationship(
+        "ChatMessagePrayer",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
+    prayer_counts = relationship(
+        "ChatMessagePrayerCount",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
+    prayer_notifications = relationship(
+        "ChatPrayerNotification",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
 
     __table_args__ = (
-        Index("idx_chat_messages_room_created", "room_id", sql_text("created_at DESC")),
+        Index("idx_chat_messages_room_created", "room_id", sql_text(CREATED_AT_DESC)),
+        # Backs the "Prayer requests" tab: one room's prayer requests, newest first.
+        Index(
+            "idx_chat_messages_room_prayers",
+            "room_id",
+            sql_text(CREATED_AT_DESC),
+            postgresql_where=sql_text(
+                "message_type = 'PRAYER' AND deleted_at IS NULL"
+            ),
+        ),
         Index(
             "idx_chat_messages_room_active",
             "room_id",
@@ -223,6 +281,162 @@ class ChatMessageReaction(Base):
             name="uq_chat_message_reactions_message_user_emoji",
         ),
         Index("idx_chat_message_reactions_message_id", "message_id"),
+    )
+
+
+class ChatMessagePrayer(Base):
+    """One person praying for one prayer request.
+
+    Deliberately separate from ChatMessageReaction: a prayer is an intention
+    record, counted and listed on its own terms, not an emoji whose meaning
+    could change.
+    """
+
+    __tablename__ = "chat_message_prayers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_USERS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+    notification_sqs_message_id = Column(String(128), nullable=True)
+    notification_dispatched_at = Column(DateTime(timezone=True), nullable=True)
+
+    message = relationship("ChatMessage", back_populates="prayers")
+    user = relationship("Users")
+
+    __table_args__ = (
+        # One prayer per person per request; what makes the batch endpoint idempotent.
+        UniqueConstraint(
+            "message_id",
+            "user_id",
+            name="uq_chat_message_prayers_message_user",
+        ),
+        Index("idx_chat_message_prayers_message_id", "message_id"),
+        Index(
+            "idx_chat_message_prayers_user_created",
+            "user_id",
+            sql_text(CREATED_AT_DESC),
+        ),
+    )
+
+
+class ChatMessagePrayerCount(Base):
+    """How many times one person has prayed for one prayer request.
+
+    ChatMessagePrayer answers "is this person praying"; this row answers "how
+    many times". Both are written by the same pray call and removed together
+    on unpray.
+    """
+
+    __tablename__ = "chat_message_prayer_counts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_USERS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    prayer_count = Column(BigInteger, nullable=False)
+    # Prayers the requester has not yet been told about. Every pray adds to it;
+    # the prayer-received push reads and zeroes it in one locked step.
+    unreported_count = Column(
+        BigInteger, nullable=False, default=0, server_default=sql_text("0")
+    )
+    first_prayed_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+    last_prayed_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+
+    message = relationship("ChatMessage", back_populates="prayer_counts")
+    user = relationship("Users")
+
+    __table_args__ = (
+        # The upsert target: one running total per person per request.
+        UniqueConstraint(
+            "message_id",
+            "user_id",
+            name="uq_chat_message_prayer_counts_message_user",
+        ),
+        CheckConstraint(
+            "prayer_count >= 1", name="ck_chat_message_prayer_counts_positive"
+        ),
+        # Backs the "Praying together" roster, most recent first.
+        Index(
+            "idx_chat_message_prayer_counts_message_last",
+            "message_id",
+            sql_text("last_prayed_at DESC"),
+        ),
+    )
+
+
+class ChatPrayerNotification(Base):
+    """One prayer-received push to a requester, sent or queued.
+
+    Each row summarises the prayers not yet reported for the same request
+    (see ChatMessagePrayerCount.unreported_count), so a burst of prayers
+    inside the interval is one notification.
+    """
+
+    __tablename__ = "chat_prayer_notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    people_count = Column(Integer, nullable=False)
+    prayer_total = Column(BigInteger, nullable=False)
+    latest_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_USERS_ID, ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+    notification_sqs_message_id = Column(String(128), nullable=True)
+    notification_dispatched_at = Column(DateTime(timezone=True), nullable=True)
+
+    message = relationship("ChatMessage", back_populates="prayer_notifications")
+
+    __table_args__ = (
+        # Finds the request's last push, which starts the interval.
+        Index(
+            "idx_chat_prayer_notifications_message_created",
+            "message_id",
+            sql_text(CREATED_AT_DESC),
+        ),
+        Index(
+            "idx_chat_prayer_notifications_undispatched",
+            "created_at",
+            postgresql_where=sql_text("notification_sqs_message_id IS NULL"),
+        ),
     )
 
 

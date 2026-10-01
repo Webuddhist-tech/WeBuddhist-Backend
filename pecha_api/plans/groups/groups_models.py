@@ -345,3 +345,52 @@ class AuthorGroupJoinRequest(Base):
             postgresql_where=text("status = 'PENDING'"),
         ),
     )
+
+
+class AuthorGroupBan(Base):
+    """A time-boxed block on an app user rejoining a COMMUNITY group.
+
+    Written by a group OWNER/ADMIN from Studio when they remove a joined user.
+    A ban is active while `lifted_at` is null and `expires_at` is in the future;
+    expired rows are left in place as an audit trail rather than being deleted,
+    so the active-ban lookup always filters on both columns.
+    """
+
+    __tablename__ = "author_group_bans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    group_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_AUTHOR_GROUPS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    lifted_at = Column(DateTime(timezone=True), nullable=True)
+    lifted_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("authors.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False
+    )
+    created_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("authors.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    group = relationship("AuthorGroup")
+    user = relationship("Users", foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index("idx_author_group_bans_group_user", "group_id", "user_id"),
+        Index("idx_author_group_bans_group_expires", "group_id", "expires_at"),
+        Index("idx_author_group_bans_user_expires", "user_id", "expires_at"),
+    )

@@ -25,6 +25,10 @@ class PlanSubTask(Base):
     # internal Segment UUIDs.
     segment_ids = Column(ARRAY(String(255)), nullable=True)
     segment_numbers = Column(ARRAY(Integer), nullable=True)
+    # Target of a reference content type (GROUP_ACCUMULATION, GROUP_COLLECTION,
+    # EVENT, POST). The content_type says which table the id belongs to; no FK
+    # because the target table varies.
+    reference_id = Column(UUID(as_uuid=True), nullable=True)
 
     display_order = Column(Integer, nullable=False)
 
@@ -55,6 +59,7 @@ class PlanSubTask(Base):
     __table_args__ = (
         Index("idx_sub_tasks_task_order", "task_id", "display_order"),
         Index("idx_sub_tasks_content_type", "content_type"),
+        Index("idx_sub_tasks_reference_id", "reference_id"),
     )
 
 

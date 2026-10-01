@@ -5,14 +5,17 @@ from fastapi import APIRouter, Query
 from starlette import status
 
 from pecha_api.plans.language_constants import language_query_description
-from pecha_api.plans.public.plan_service import get_public_tags, get_public_tag_detail
+from pecha_api.plans.public.plans_read_cache import (
+    get_public_tag_detail_cached,
+    get_public_tags_cached,
+)
 from pecha_api.plans.tags.tag_response_models import PublicTagsListResponse, PublicTagDetailDTO
 
 public_tags_router = APIRouter(prefix="/public/tags", tags=["Public Tags"])
 
 
 @public_tags_router.get("", status_code=status.HTTP_200_OK, response_model=PublicTagsListResponse)
-def get_tags(
+async def get_tags(
     featured: Annotated[
         Optional[bool],
         Query(description="Filter by featured flag. Omit for all tags."),
@@ -28,7 +31,7 @@ def get_tags(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
-    return get_public_tags(
+    return await get_public_tags_cached(
         featured=featured,
         search=search,
         language=language,
@@ -45,7 +48,7 @@ async def get_tag_detail(
         Query(description=f"{language_query_description('Language code')}. Defaults to EN."),
     ] = "EN",
 ):
-    return await get_public_tag_detail(
+    return await get_public_tag_detail_cached(
         tag_id=tag_id,
         language=language,
     )

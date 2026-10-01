@@ -29,6 +29,7 @@ class PoemsResponse(BaseModel):
     skip: int
     limit: int
     total: int
+    seed: Optional[str] = None
 
 
 class CreatePoemRequest(BaseModel):

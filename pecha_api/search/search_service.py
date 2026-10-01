@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import HTTPException
 from starlette import status
@@ -18,12 +18,29 @@ from .search_response_models import (
 )
 from openpecha_api.text.openpecha_text_service import fetch_text_by_id, search_by_content
 from openpecha_api.segments.openpecha_segment_service import fetch_segment_details
+from pecha_api.texts.texts_openpecha_api import fetch_edition_text_id
 from pecha_api.texts.texts_openpecha_service import _extract_title
 
 logger = logging.getLogger(__name__)
 
 MAX_SEARCH_LIMIT = 30
 MAX_EXTERNAL_SEARCH_LIMIT = 100
+# Caps how many edition/text lookups run concurrently against OpenPecha per
+# request. A single search can touch up to MAX_EXTERNAL_SEARCH_LIMIT distinct
+# editions; firing that many requests at once per incoming search would let a
+# handful of broad queries exhaust the shared upstream connection pool.
+MAX_CONCURRENT_UPSTREAM_LOOKUPS = 10
+
+
+async def _gather_limited(coroutines: List[Any]) -> List[Any]:
+    """asyncio.gather bounded to MAX_CONCURRENT_UPSTREAM_LOOKUPS in flight."""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSTREAM_LOOKUPS)
+
+    async def _run(coroutine: Any) -> Any:
+        async with semaphore:
+            return await coroutine
+
+    return await asyncio.gather(*[_run(coroutine) for coroutine in coroutines])
 
 
 async def get_search_results(query: str, search_type: SearchType, text_id: str = None, skip: int = 0, limit: int = 10) -> SearchResponse:
@@ -186,6 +203,46 @@ def _sheet_search(query: str, skip: int, limit: int) -> SearchResponse:
     )
 
 
+async def _edition_is_live(edition_id: str) -> bool:
+    """Whether OpenPecha still serves this edition.
+
+    Fails open: only a definite 404 rules an edition out, so an upstream blip
+    never silently empties a page of results.
+    """
+    try:
+        await fetch_edition_text_id(edition_id=edition_id)
+        return True
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            return False
+        logger.warning("Could not verify edition %s upstream; keeping it", edition_id)
+        return True
+    except Exception:
+        logger.warning("Could not verify edition %s upstream; keeping it", edition_id)
+        return True
+
+
+async def filter_live_edition_ids(edition_ids: List[str]) -> Set[str]:
+    """Keep only the editions OpenPecha can still open.
+
+    The content-search index outlives deleted texts, so hits can point at
+    editions the graph no longer has. Those render fine in a result list but
+    404 on POST /texts/{edition_id}/details as soon as the reader clicks one,
+    so they are dropped before the response is built.
+    """
+    unique_edition_ids = list(dict.fromkeys(edition_id for edition_id in edition_ids if edition_id))
+    if not unique_edition_ids:
+        return set()
+
+    results = await _gather_limited([_edition_is_live(edition_id) for edition_id in unique_edition_ids])
+    live_edition_ids = {edition_id for edition_id, is_live in zip(unique_edition_ids, results) if is_live}
+
+    dropped = len(unique_edition_ids) - len(live_edition_ids)
+    if dropped:
+        logger.info("Dropped %d search result(s) pointing at editions missing from OpenPecha", dropped)
+    return live_edition_ids
+
+
 def build_placeholder_text_index(text_id: str) -> TextIndex:
     """Stand-in metadata so a match is still returned when its text cannot be fetched."""
     return TextIndex(text_id=text_id, language="", title="", published_date="")
@@ -205,7 +262,7 @@ async def fetch_text_info(text_ids: List[str]) -> Dict[str, TextIndex]:
     if not unique_text_ids:
         return {}
 
-    payloads = await asyncio.gather(*[_fetch_text_safe(text_id) for text_id in unique_text_ids])
+    payloads = await _gather_limited([_fetch_text_safe(text_id) for text_id in unique_text_ids])
 
     text_info_map: Dict[str, TextIndex] = {}
     for text_id, payload in zip(unique_text_ids, payloads):

@@ -34,6 +34,8 @@ def _saved_event_stub(group_id=None, collection_id=None) -> SimpleNamespace:
         location=None,
         start_date=now,
         end_date=now,
+        timezone=None,
+        notifications_enabled=True,
         image_url=None,
         featured=False,
         event_format="hybrid",
@@ -73,7 +75,10 @@ def test_create_event_with_valid_same_group_collection_persists() -> None:
     ) as mock_get_collection, patch(
         "pecha_api.events.event_service.save_event",
         return_value=_saved_event_stub(group_id=group_id, collection_id=collection_id),
-    ) as mock_save:
+    ) as mock_save, patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ):
         result = create_event_service(token="token", request=request)
 
     _, _, kwargs = mock_get_collection.mock_calls[0]
@@ -133,6 +138,9 @@ def test_create_event_without_collection_skips_validation() -> None:
     ) as mock_get_collection, patch(
         "pecha_api.events.event_service.save_event",
         return_value=_saved_event_stub(),
+    ), patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
     ):
         create_event_service(token="token", request=request)
 
@@ -159,6 +167,12 @@ def test_update_event_sets_collection_when_valid() -> None:
     ), patch(
         "pecha_api.events.event_service.update_event",
         return_value=existing,
+    ), patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service._chat_room_id_for_event",
+        return_value=None,
     ):
         update_event_service(token="token", event_id=existing.id, request=request)
 
@@ -183,6 +197,12 @@ def test_update_event_clears_collection_with_explicit_null() -> None:
     ) as mock_get_collection, patch(
         "pecha_api.events.event_service.update_event",
         return_value=existing,
+    ), patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service._chat_room_id_for_event",
+        return_value=None,
     ):
         update_event_service(token="token", event_id=existing.id, request=request)
 
@@ -209,6 +229,12 @@ def test_update_event_omitting_collection_leaves_link_untouched() -> None:
     ) as mock_get_collection, patch(
         "pecha_api.events.event_service.update_event",
         return_value=existing,
+    ), patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service._chat_room_id_for_event",
+        return_value=None,
     ):
         update_event_service(token="token", event_id=existing.id, request=request)
 
@@ -261,4 +287,4 @@ def test_get_events_service_forwards_collection_filter_to_repository() -> None:
         )
 
     _, _, kwargs = mock_get_events.mock_calls[0]
-    assert kwargs["group_recitation_collection_id"] == collection_id
+    assert kwargs["content_filter"].group_recitation_collection_id == collection_id

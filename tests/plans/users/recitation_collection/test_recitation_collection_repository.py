@@ -19,12 +19,14 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_completio
     RecitationCollectionChantCompletion,
 )
 from pecha_api.plans.users.recitation_collection.recitation_collection_repository import (
+    collection_item_display_order_taken,
     delete_collection,
     get_collection_item_by_id,
     get_collection_item_counts,
     get_collection_items,
     get_max_display_order_for_collection,
     soft_delete_collection_item,
+    update_collection_item,
 )
 from pecha_api.plans.users.recitation_collection.recitation_collection_completion_repository import (
     count_unique_completion_days,
@@ -239,3 +241,50 @@ def test_deleting_a_collection_with_completion_history_still_succeeds():
     assert deleted is not None
     assert db.get(RecitationCollection, collection.id) is None
     assert db.get(RecitationCollectionItem, item.id) is None
+
+
+def test_update_collection_item_sets_fractional_display_order():
+    db = _make_session()
+    collection = _make_collection(db, uuid4())
+    item = _make_item(db, collection.id, display_order=2)
+
+    item.display_order = 1.4
+    updated = update_collection_item(db=db, item=item)
+
+    assert updated.display_order == 1.4
+    assert db.get(RecitationCollectionItem, item.id).display_order == 1.4
+
+
+def test_display_order_taken_is_true_for_another_active_item():
+    db = _make_session()
+    collection = _make_collection(db, uuid4())
+    first = _make_item(db, collection.id, text_id="first", display_order=1.4)
+    second = _make_item(db, collection.id, text_id="second", display_order=2)
+
+    assert collection_item_display_order_taken(
+        db=db,
+        collection_id=collection.id,
+        display_order=1.4,
+        exclude_item_id=second.id,
+    ) is True
+    assert collection_item_display_order_taken(
+        db=db,
+        collection_id=collection.id,
+        display_order=1.4,
+        exclude_item_id=first.id,
+    ) is False
+
+
+def test_display_order_taken_ignores_soft_deleted_items():
+    db = _make_session()
+    collection = _make_collection(db, uuid4())
+    removed = _make_item(db, collection.id, text_id="removed", display_order=1.4)
+    kept = _make_item(db, collection.id, text_id="kept", display_order=2)
+    soft_delete_collection_item(db=db, item=removed)
+
+    assert collection_item_display_order_taken(
+        db=db,
+        collection_id=collection.id,
+        display_order=1.4,
+        exclude_item_id=kept.id,
+    ) is False

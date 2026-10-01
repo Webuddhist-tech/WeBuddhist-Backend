@@ -476,6 +476,10 @@ def test_enroll_user_in_series_already_enrolled_without_group_id_is_noop():
     ), patch(
         "pecha_api.plans.users.plan_users_service.update_user_series_enrollment",
     ) as mock_update, patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
         enroll_user_in_series(token="tok", enroll_request=enroll_request)
@@ -511,6 +515,10 @@ def test_enroll_user_in_series_already_enrolled_updates_partner_when_group_chang
     ), patch(
         "pecha_api.plans.users.plan_users_service.update_user_series_enrollment",
     ) as mock_update, patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
         enroll_user_in_series(token="tok", enroll_request=enroll_request)
@@ -543,6 +551,10 @@ def test_enroll_user_in_series_already_enrolled_clears_partner_when_group_id_nul
     ) as mock_get_partner, patch(
         "pecha_api.plans.users.plan_users_service.update_user_series_enrollment",
     ) as mock_update, patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
         enroll_user_in_series(token="tok", enroll_request=enroll_request)
@@ -579,6 +591,10 @@ def test_enroll_user_in_series_already_enrolled_same_partner_is_noop():
     ), patch(
         "pecha_api.plans.users.plan_users_service.update_user_series_enrollment",
     ) as mock_update, patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
         enroll_user_in_series(token="tok", enroll_request=enroll_request)
@@ -647,6 +663,10 @@ def test_enroll_user_in_series_with_partner_group_stores_partner_and_joins_group
     ) as MockEnrollment, patch(
         "pecha_api.plans.users.plan_users_service.save_user_series_enrollment",
     ), patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
         MockEnrollment.return_value = SimpleNamespace(id=uuid.uuid4())
@@ -689,6 +709,10 @@ def test_enroll_user_in_series_with_creator_group_stores_partner_and_joins_group
         "pecha_api.plans.users.plan_users_service.UserSeriesEnrollment",
     ) as MockEnrollment, patch(
         "pecha_api.plans.users.plan_users_service.save_user_series_enrollment",
+    ), patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
     ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:
@@ -761,6 +785,10 @@ def test_enroll_user_in_series_without_group_skips_partner_and_join():
         "pecha_api.plans.users.plan_users_service.UserSeriesEnrollment",
     ) as MockEnrollment, patch(
         "pecha_api.plans.users.plan_users_service.save_user_series_enrollment",
+    ), patch(
+        # A MagicMock session makes every ban lookup return a row, so the guard
+        # is stubbed here; test_group_bans.py covers that it is called at all.
+        "pecha_api.plans.users.plan_users_service.assert_user_not_banned_from_group",
     ), patch(
         "pecha_api.plans.users.plan_users_service.upsert_group_join",
     ) as mock_join:

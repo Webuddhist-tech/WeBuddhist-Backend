@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 from datetime import datetime, timezone as tz
 
@@ -51,7 +51,7 @@ def _post_dto(group_id=None, caption="Hello", post_status="PUBLISHED") -> GroupP
 
 class TestPublicGroupPostsViews:
 
-    @patch('pecha_api.group_posts.views.list_group_posts_service')
+    @patch('pecha_api.group_posts.views.list_group_posts_cached', new_callable=AsyncMock)
     def test_list_group_posts(self, mock_service):
         group_id = uuid4()
         dto = _post_dto(group_id=group_id)
@@ -68,10 +68,10 @@ class TestPublicGroupPostsViews:
             group_id=group_id,
             skip=0,
             limit=10,
-            user_id=None,
+            token=None,
         )
 
-    @patch('pecha_api.group_posts.views.list_public_group_posts_service')
+    @patch('pecha_api.group_posts.views.list_public_group_posts_cached', new_callable=AsyncMock)
     def test_list_public_group_posts_forwards_include_unfollowed(self, mock_service):
         mock_service.return_value = GroupPostsResponse(
             posts=[],
@@ -86,12 +86,12 @@ class TestPublicGroupPostsViews:
         mock_service.assert_called_once_with(
             skip=0,
             limit=20,
-            user_id=None,
+            token=None,
             should_include_unfollowed=True,
         )
 
     @patch('pecha_api.group_posts.views.validate_and_extract_user_details')
-    @patch('pecha_api.group_posts.views.list_public_group_posts_service')
+    @patch('pecha_api.group_posts.views.list_public_group_posts_cached', new_callable=AsyncMock)
     def test_list_public_group_posts_uses_authenticated_user(
         self,
         mock_service,
@@ -112,16 +112,18 @@ class TestPublicGroupPostsViews:
         )
 
         assert response.status_code == status.HTTP_200_OK
-        assert mock_service.call_args.kwargs["user_id"] == user_id
+        # The token is forwarded; resolving it to a user is the cache
+        # wrapper's job, and only on a miss.
+        assert mock_service.call_args.kwargs["token"] == "user-token"
 
-    @patch('pecha_api.group_posts.views.list_group_posts_service')
+    @patch('pecha_api.group_posts.views.list_group_posts_cached', new_callable=AsyncMock)
     def test_list_group_posts_invalid_limit(self, mock_service):
         response = client.get(f"/groups/author/{uuid4()}/posts?limit=0")
 
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
         mock_service.assert_not_called()
 
-    @patch('pecha_api.group_posts.views.get_group_post_detail_service')
+    @patch('pecha_api.group_posts.views.get_group_post_detail_cached', new_callable=AsyncMock)
     def test_get_group_post_detail(self, mock_service):
         group_id = uuid4()
         dto = _post_dto(group_id=group_id)
@@ -131,9 +133,9 @@ class TestPublicGroupPostsViews:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["id"] == str(dto.id)
-        mock_service.assert_called_once_with(post_id=dto.id, user_id=None)
+        mock_service.assert_called_once_with(post_id=dto.id, token=None)
 
-    @patch('pecha_api.group_posts.views.get_group_post_detail_service')
+    @patch('pecha_api.group_posts.views.get_group_post_detail_cached', new_callable=AsyncMock)
     def test_get_group_post_detail_not_found(self, mock_service):
         mock_service.side_effect = HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Not found"

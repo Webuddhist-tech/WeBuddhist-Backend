@@ -1,13 +1,14 @@
-import asyncio
-from typing import Optional
+from typing import NamedTuple, Optional
 from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from typing import List
 from typing import Set
+from typing import Dict
 from pecha_api.config import get
-from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content
 
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_models import PlanSubTask
 
@@ -114,8 +115,10 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_ids_by_plan_ids,
     get_group_ids_by_series_ids,
     get_user_series_enrollment_partner_map,
+    lock_group_membership_changes,
     upsert_group_join,
 )
+from pecha_api.plans.groups.group_ban_guard import assert_user_not_banned_from_group
 from pecha_api.plans.groups.groups_service import get_group_summaries_by_ids
 from pecha_api.plans.groups.group_summary_models import AuthorGroupSummaryDTO
 from pecha_api.plans.series.series_service import (
@@ -682,10 +685,55 @@ async def get_user_plan_days_completion_status_service(token: str, plan_id: UUID
             start_date=plan.start_date
         )
     
-async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+class _DayReadState(NamedTuple):
+    """What one worker thread reads for a day, handed back to the loop."""
+
+    plan_item: object
+    completed_task_ids: List[UUID]
+    completed_subtask_ids: Set[UUID]
+    audio_url: Optional[str]
+    audio_duration_ms: Optional[int]
+    thumbnail_url: Optional[str]
+    shareable_image_url: Optional[str]
+    references_by_id: Dict[UUID, object]
+    day_is_completed: bool
+
+
+def _load_user_plan_day(token: str, plan_id: UUID, day_number: int) -> _DayReadState:
+    """Every read this response needs, in one worker thread.
+
+    This is all blocking: a token check, then a handful of queries. On the
+    event loop it stalls every other request on the instance for as long as it
+    runs, which is why it is out here rather than inline in the coroutine - the
+    public day endpoint loads itself the same way, for the same reason.
+
+    The token is checked before the session is opened, not inside it. Verifying
+    it can mean an outbound fetch of a key set, and a connection held across
+    that is a connection pinned on an external service.
+
+    The connection goes back before the openpecha fan-out runs. Holding it
+    across that await pinned a connection per in-flight reader for however long
+    an external service took to answer - which is what emptied the pool and
+    left unrelated endpoints timing out on checkout.
+
+    The rows outlive the session safely: get_plan_day_with_tasks_and_subtasks
+    eager-loads audio, shareable_images, videos, tasks, sub_tasks and
+    timestamps, and nothing is committed here, so no attribute is expired and
+    nothing lazy-loads once these objects detach. Adding a lazy relationship to
+    this response means loading it in here too.
+    """
+    from pecha_api.plans.audio.dto_helpers import (
+        build_plan_day_audio_fields,
+        build_plan_day_shareable_image_fields,
+    )
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
     current_user = validate_and_extract_user_details(token=token)
+
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
+        plan = get_plan_by_id(db=db, plan_id=plan_id)
+        plan_language = getattr(plan, "language", None)
         completed_task_ids = []
         completed_subtask_ids = set()
         task_ids = [task.id for task in plan_item.tasks]
@@ -698,64 +746,132 @@ async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_numbe
             user_subtask_completions = get_user_subtask_completions_by_user_id_and_sub_task_ids(db=db, user_id=current_user.id, sub_task_ids=sub_task_ids)
             completed_subtask_ids = {completion.sub_task_id for completion in user_subtask_completions}
 
-        from pecha_api.plans.audio.dto_helpers import (
-            build_plan_day_audio_fields,
-            build_plan_day_shareable_image_fields,
-        )
-
         audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
         thumbnail_url, _, shareable_image_url, _ = build_plan_day_shareable_image_fields(
             getattr(plan_item, "shareable_images", None)
         )
-        from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
-        tasks_sub_tasks = await asyncio.gather(
-            *[
-                _get_user_sub_tasks_dto_bulk(sub_tasks=task.sub_tasks, completed_subtask_ids=completed_subtask_ids)
-                for task in plan_item.tasks
-            ]
+        # Resolved once for the whole day, on the session this request already
+        # holds. Per task each call opened a session of its own, and the gather
+        # below ran them at once: a five-task day checked out six connections
+        # and pinned them for as long as the openpecha fan-out took. Against a
+        # pool of fifteen, three readers were enough to starve it.
+        all_sub_tasks = [
+            sub_task for task in plan_item.tasks for sub_task in task.sub_tasks
+        ]
+        references_by_id = dict(
+            zip(
+                (sub_task.id for sub_task in all_sub_tasks),
+                resolve_subtask_references(
+                    subtasks=all_sub_tasks, db=db, language=plan_language
+                ),
+            )
         )
-        user_day_details = UserPlanDayDetailsResponse(
-            id=plan_item.id,
-            day_number=plan_item.day_number,
-            is_completed=is_day_completed(db=db, user_id=current_user.id, day_id=plan_item.id),
-            audio_url=audio_url,
-            audio_duration_ms=audio_duration_ms,
-            thumbnail_url=thumbnail_url,
-            shareable_image_url=shareable_image_url,
-            tasks=[
-                UserTaskDTO(
-                    id=task.id,
-                    title=task.title,
-                    estimated_time=task.estimated_time,
-                    display_order=task.display_order,
-                    is_completed=(task.id in completed_task_ids),
-                    sub_tasks=sub_tasks_dto
-                ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
-            ],
-            videos=[
-                DayVideoSummaryDTO(
-                    id=video.id,
-                    url=video.url,
-                    video_id=video.video_id,
-                    title=video.title,
-                    display_order=video.display_order,
-                )
-                for video in sorted(plan_item.videos, key=lambda v: v.display_order)
-            ],
+
+        day_is_completed = is_day_completed(
+            db=db, user_id=current_user.id, day_id=plan_item.id
         )
-        return user_day_details
+
+    return _DayReadState(
+        plan_item=plan_item,
+        completed_task_ids=completed_task_ids,
+        completed_subtask_ids=completed_subtask_ids,
+        audio_url=audio_url,
+        audio_duration_ms=audio_duration_ms,
+        thumbnail_url=thumbnail_url,
+        shareable_image_url=shareable_image_url,
+        references_by_id=references_by_id,
+        day_is_completed=day_is_completed,
+    )
+
+
+async def get_user_plan_day_details_service(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    """A reader's own view of one plan day.
+
+    One hop to a worker thread and nothing else. Every value in the response
+    now comes from our database - see `_get_user_sub_tasks_dto_bulk` for why
+    the segment text does too - so there is no remote call left to overlap and
+    nothing to gain from doing any of it on the event loop.
+    """
+    return await run_in_threadpool(_build_user_plan_day, token, plan_id, day_number)
+
+
+def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlanDayDetailsResponse:
+    from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
+
+    state = _load_user_plan_day(token, plan_id, day_number)
+    plan_item = state.plan_item
+    completed_task_ids = state.completed_task_ids
+    references_by_id = state.references_by_id
+
+    tasks_sub_tasks = [
+        _get_user_sub_tasks_dto_bulk(
+            sub_tasks=task.sub_tasks,
+            completed_subtask_ids=state.completed_subtask_ids,
+            references_by_id=references_by_id,
+        )
+        for task in plan_item.tasks
+    ]
+
+    return UserPlanDayDetailsResponse(
+        id=plan_item.id,
+        day_number=plan_item.day_number,
+        is_completed=state.day_is_completed,
+        audio_url=state.audio_url,
+        audio_duration_ms=state.audio_duration_ms,
+        thumbnail_url=state.thumbnail_url,
+        shareable_image_url=state.shareable_image_url,
+        tasks=[
+            UserTaskDTO(
+                id=task.id,
+                title=task.title,
+                estimated_time=task.estimated_time,
+                display_order=task.display_order,
+                is_completed=(task.id in completed_task_ids),
+                sub_tasks=sub_tasks_dto
+            ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
+        ],
+        videos=[
+            DayVideoSummaryDTO(
+                id=video.id,
+                url=video.url,
+                video_id=video.video_id,
+                title=video.title,
+                display_order=video.display_order,
+            )
+            for video in sorted(plan_item.videos, key=lambda v: v.display_order)
+        ],
+    )
 
 def is_day_completed(db: SessionLocal(), user_id: UUID, day_id: UUID) -> bool:
     user_day_completion = get_user_day_completion_by_user_id_and_day_id(db=db, user_id=user_id, day_id=day_id)
     return user_day_completion is not None
 
-async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_subtask_ids: Set[UUID]) -> List[UserSubTaskDTO]:
+def _get_user_sub_tasks_dto_bulk(
+    sub_tasks: List[PlanSubTask],
+    completed_subtask_ids: Set[UUID],
+    references_by_id: Dict[UUID, Optional["SubTaskReferenceDTO"]],
+) -> List[UserSubTaskDTO]:
+    """Build a task's subtask DTOs. References arrive already resolved.
+
+    A SOURCE_REFERENCE subtask's text is taken from the `content` column rather
+    than resolved from openpecha. openpecha has no bulk segment endpoint, so
+    resolving live costs one HTTP round trip per segment id, and a day carries
+    as many of those as its subtasks list between them - which is what made
+    this endpoint slow no matter how the work was scheduled or cached.
+
+    The column is always populated: `_validate_subtasks` rejects a write whose
+    content is None for any non-reference type, and SOURCE_REFERENCE is one of
+    those, so there is nothing to fall back to openpecha for.
+
+    The cost is that an edit made in openpecha does not reach a reader here
+    until the subtask is written again. The endpoints that do resolve live -
+    the public day, the CMS - are unchanged.
+    """
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
 
-    resolved_contents = await resolve_subtasks_content(sub_tasks)
-
     result = []
-    for sub_task, resolved_content in zip(sub_tasks, resolved_contents):
+    for sub_task in sub_tasks:
+        reference = references_by_id.get(sub_task.id)
         start_ms, end_ms = build_subtask_timestamp_fields(sub_task)
         audio_url = (
             _get_presigned_url(content=sub_task.audio_url)
@@ -765,7 +881,7 @@ async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_s
             UserSubTaskDTO(
                 id=sub_task.id,
                 content_type=sub_task.content_type,
-                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else resolved_content,
+                content=_get_presigned_url(content=sub_task.content) if sub_task.content_type == ContentType.IMAGE else sub_task.content,
                 duration=sub_task.duration,
                 display_order=sub_task.display_order,
                 is_completed=(sub_task.id in completed_subtask_ids),
@@ -774,6 +890,8 @@ async def _get_user_sub_tasks_dto_bulk(sub_tasks: List[PlanSubTask], completed_s
                 pecha_segment_id=sub_task.pecha_segment_id,
                 segment_ids=sub_task.segment_ids,
                 segment_numbers=sub_task.segment_numbers,
+                reference_id=sub_task.reference_id,
+                reference=reference,
                 start_ms=start_ms,
                 end_ms=end_ms,
             )
@@ -922,6 +1040,17 @@ def _resolve_series_partner_id(
     return series_partner.id
 
 
+def _assert_may_join_partner_group(db: Session, group_id: UUID, user_id: UUID) -> None:
+    """Enrolling in a series joins its partner group, so the same ban applies.
+
+    Picking a partner group here is an ordinary membership write, and it is the
+    one the group's moderators cannot see coming, so it goes through the same
+    lock-then-check the direct join paths use.
+    """
+    lock_group_membership_changes(db=db, group_id=group_id)
+    assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user_id)
+
+
 def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -> None:
     """Enroll user in a series, or update partner group when already enrolled."""
     current_user = validate_and_extract_user_details(token=token)
@@ -943,6 +1072,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
             new_partner_id = _resolve_series_partner_id(
                 db, enroll_request.series_id, enroll_request.group_id
             )
+            # Checked before anything is written, so a banned user is turned
+            # away rather than left with the partner switched and no membership.
+            if enroll_request.group_id is not None:
+                _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
             if existing_enrollment.series_partner_id != new_partner_id:
                 existing_enrollment.series_partner_id = new_partner_id
                 update_user_series_enrollment(db, existing_enrollment)
@@ -954,6 +1087,10 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
         new_partner_id = _resolve_series_partner_id(
             db, enroll_request.series_id, enroll_request.group_id
         )
+        # Before the enrolment is written: a ban refuses the whole call, so it
+        # cannot leave an enrolment behind that never joined its partner group.
+        if enroll_request.group_id is not None:
+            _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
 
         first_plan = None
         if enroll_request.start_immediately:

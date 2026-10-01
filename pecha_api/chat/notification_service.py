@@ -1,26 +1,60 @@
+from datetime import datetime, timezone
+from typing import NamedTuple, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
+from pecha_api.chat.enums import ChatMessageType, ChatRoomKind
 from pecha_api.chat.notification_repository import (
     deactivate_push_device_token_by_id,
+    filter_users_by_notification_preference,
     get_active_push_devices_by_user_ids,
+    get_group_avatar_key,
     get_sender_display_name,
+    get_sender_short_name,
+    list_event_chat_recipient_user_ids,
     list_group_chat_recipient_user_ids,
     list_private_chat_recipient_user_ids,
     normalize_platform,
 )
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.chat.notification_response_models import (
     ChatNotificationRecipientDTO,
     ChatNotificationTargetsResponse,
     ChatPushDeviceTargetDTO,
     DeactivatePushDeviceResponse,
+    PrayerNotificationTargetsResponse,
 )
-from pecha_api.chat.repository import get_message_by_id_any_room
+from pecha_api.chat.repository import (
+    count_message_prayers,
+    count_suppressed_prayer_requests,
+    get_message_by_id_any_room,
+    get_prayer_by_id,
+    get_prayer_notification_by_id,
+    last_dispatched_prayer_request,
+)
+from pecha_api.chat.service import (
+    _generate_presigned_url,
+    _message_type_value,
+    room_kind,
+)
+from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.config import get_int
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.response_message import NOT_FOUND
+
+
+def _owning_group_id(*, db, room):
+    """The group whose notification preferences govern this room. An event room
+    carries no group_id of its own; it inherits the event's."""
+    if room.group_id is not None:
+        return room.group_id
+    if getattr(room, "event_id", None) is None:
+        return None
+    event = get_event_by_id(db, room.event_id)
+    return event.group_id if event else None
 
 
 def _preview_body(body: str, max_length: int) -> str:
@@ -30,20 +64,172 @@ def _preview_body(body: str, max_length: int) -> str:
     return text[: max(max_length - 1, 1)].rstrip() + "…"
 
 
+def _count_held_prayer_requests(
+    *,
+    db: Session,
+    room_id: UUID,
+    message_id: UUID,
+    dispatched_at: Optional[datetime],
+) -> int:
+    """How many prayer requests the interval held since the last push that went out.
+
+    `exclude_message_id` matters on both calls. By the time the worker asks for
+    targets the backend has usually already stamped this message with its real
+    SQS id, so without the exclusion the "last sent push" would be this very
+    message, `since` would be roughly now, and the count would always be zero.
+
+    The window closes at this push's own dispatch time, so a request suppressed
+    while the worker is building this push belongs to the next one rather than
+    being counted here and again there. `dispatched_at` is normally already set
+    - the backend stamps it before the worker asks for targets - and now() is
+    the fallback for the moment where the worker got there first.
+
+    Both bounds come off that one moment. The worker is not guaranteed to
+    reach a message before the next prayer request pushes, so the newest push
+    in the room can be one that went out after this message did; taken as the
+    window's start it would sit past its end, the count would come out zero,
+    and the requests this push promised to carry would be announced by no push
+    at all. `before` keeps the search on this message's side of the timeline.
+    """
+    window_end = dispatched_at or datetime.now(timezone.utc)
+    last_sent = last_dispatched_prayer_request(
+        db=db,
+        room_id=room_id,
+        exclude_message_id=message_id,
+        before=window_end,
+    )
+    return count_suppressed_prayer_requests(
+        db=db,
+        room_id=room_id,
+        since=last_sent.dispatched_at if last_sent else None,
+        until=window_end,
+        exclude_message_id=message_id,
+    )
+
+
+def _held_prayer_request_suffix(held_count: int) -> str:
+    """What the interval skipped, as words on the end of the body.
+
+    The held requests are not listed and their senders are not named: the room
+    shows each one in full. This is only how many notifications did not fire.
+    """
+    if held_count < 1:
+        return ""
+    if held_count == 1:
+        return " · +1 other prayer request"
+    return f" · +{held_count} other prayer requests"
+
+
 def _build_notification_copy(
     *,
-    chat_kind: str,
     room_name: str,
     sender_name: str,
     message_body: str,
+    message_type: str = ChatMessageType.TEXT.value,
+    has_image: bool = False,
+    held_count: int = 0,
 ) -> tuple[str, str]:
     preview = _preview_body(
         message_body,
         max(get_int("CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH"), 1),
     )
-    if chat_kind == "PRIVATE":
-        return sender_name, preview
-    return room_name, f"{sender_name}: {preview}"
+    if message_type == ChatMessageType.PRAYER.value:
+        # A prayer request leads with the person asking and what they asked
+        # for. The room name buys nothing beside that - as long as the room's
+        # image is there to say which sangha this came from. Rooms without an
+        # image, and images that could not be signed, keep the name instead:
+        # a prayer from an unidentified group is a stranger's prayer.
+        title = f"{sender_name} is requesting a prayer 🙏"
+        body = preview if has_image else f"{room_name}: {preview}"
+        # After the preview was truncated, so the cap applies to the request
+        # text and never to the count. A long request is what gets the ellipsis.
+        return title, f"{body}{_held_prayer_request_suffix(held_count)}"
+    # Private and group chat alike read as a message from the sender; in a
+    # group the group's avatar, sent alongside, says where it was posted.
+    return sender_name, preview
+
+
+def _notification_image_url(*, db, room, is_prayer: bool, is_group_text: bool) -> str | None:
+    """A prayer request carries the room's image. A group or event chat message
+    carries the owning group's current avatar, falling back to the room's own
+    image (what the chat list shows) when the group has none. Private chat has
+    no image."""
+    if is_prayer:
+        return _generate_presigned_url(room.img_url)
+    if is_group_text:
+        return _generate_presigned_url(
+            get_group_avatar_key(db=db, group_id=_owning_group_id(db=db, room=room))
+            or room.img_url
+        )
+    return None
+
+
+def _list_notification_recipient_ids(
+    *,
+    db,
+    room,
+    chat_kind: str,
+    sender_id: UUID,
+    skip: int,
+    limit: int,
+) -> tuple[list[UUID], int]:
+    if chat_kind == ChatRoomKind.PRIVATE.value:
+        all_recipient_ids = list_private_chat_recipient_user_ids(
+            room=room,
+            sender_id=sender_id,
+        )
+        # Private chat has no group scope, so only GLOBAL rows can apply.
+        all_recipient_ids = filter_users_by_notification_preference(
+            db=db,
+            user_ids=all_recipient_ids,
+            notification_type=NotificationType.CHAT_MESSAGE,
+        )
+        return all_recipient_ids[skip : skip + limit], len(all_recipient_ids)
+    if chat_kind == ChatRoomKind.EVENT.value:
+        # An event room's audience is its own membership, not the whole
+        # group; preferences still scope to the group that owns the event.
+        return list_event_chat_recipient_user_ids(
+            db=db,
+            room_id=room.id,
+            sender_id=sender_id,
+            group_id=_owning_group_id(db=db, room=room),
+            skip=skip,
+            limit=limit,
+            notification_type=NotificationType.CHAT_MESSAGE,
+        )
+    return list_group_chat_recipient_user_ids(
+        db=db,
+        group_id=room.group_id,
+        sender_id=sender_id,
+        skip=skip,
+        limit=limit,
+        notification_type=NotificationType.CHAT_MESSAGE,
+    )
+
+
+def _build_notification_recipients(
+    *, db, user_ids: list[UUID]
+) -> list[ChatNotificationRecipientDTO]:
+    devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=user_ids)
+    recipients: list[ChatNotificationRecipientDTO] = []
+    for user_id in user_ids:
+        devices = devices_by_user.get(user_id) or []
+        if not devices:
+            continue
+        recipients.append(
+            ChatNotificationRecipientDTO(
+                user_id=user_id,
+                push_devices=[
+                    ChatPushDeviceTargetDTO(
+                        id=device.id,
+                        token=device.token,
+                        platform=normalize_platform(device.platform),
+                    )
+                    for device in devices
+                ],
+            )
+        )
+    return recipients
 
 
 def get_chat_notification_targets(
@@ -65,30 +251,202 @@ def get_chat_notification_targets(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
 
         room = message.room
-        chat_kind = "GROUP" if room.group_id is not None else "PRIVATE"
-        sender_name = get_sender_display_name(db=db, sender_id=message.sender_id)
+        chat_kind = room_kind(room)
+        message_type = _message_type_value(message)
+        is_prayer = message_type == ChatMessageType.PRAYER.value
+        is_group_text = not is_prayer and chat_kind != ChatRoomKind.PRIVATE.value
+        # A group or event chat message is titled with the sender's last name
+        # (username without one); prayer requests and private chat keep the
+        # full display name.
+        sender_name = (
+            get_sender_short_name(db=db, sender_id=message.sender_id)
+            if is_group_text
+            else get_sender_display_name(db=db, sender_id=message.sender_id)
+        )
+        # A prayer request carries the room's image: it replaces the room name
+        # the copy drops. Resolved before the copy is built, because whether
+        # the image is actually there decides whether the copy can afford to
+        # drop the name. A group or event chat message carries the owning
+        # group's current avatar, so the push says which group it came from,
+        # falling back to the room's own image (what the chat list shows) when
+        # the group has none. Private chat has no image.
+        image_url = _notification_image_url(
+            db=db, room=room, is_prayer=is_prayer, is_group_text=is_group_text
+        )
+        # Counted at read time, so the number matches the rows that exist when
+        # the worker asks for targets rather than when the event was enqueued.
+        held_count = (
+            _count_held_prayer_requests(
+                db=db,
+                room_id=room.id,
+                message_id=message.id,
+                dispatched_at=message.notification_dispatched_at,
+            )
+            if is_prayer
+            else 0
+        )
         title, body = _build_notification_copy(
-            chat_kind=chat_kind,
             room_name=room.name,
             sender_name=sender_name,
             message_body=message.body,
+            message_type=message_type,
+            held_count=held_count,
+            # Empty string too: the signer returns one for an unusable key.
+            has_image=bool(image_url),
         )
 
-        if chat_kind == "PRIVATE":
-            all_recipient_ids = list_private_chat_recipient_user_ids(
-                room=room,
-                sender_id=message.sender_id,
-            )
-            total = len(all_recipient_ids)
-            recipient_ids = all_recipient_ids[skip : skip + limit]
-        else:
-            recipient_ids, total = list_group_chat_recipient_user_ids(
-                db=db,
-                group_id=room.group_id,
-                sender_id=message.sender_id,
-                skip=skip,
-                limit=limit,
-            )
+        recipient_ids, total = _list_notification_recipient_ids(
+            db=db,
+            room=room,
+            chat_kind=chat_kind,
+            sender_id=message.sender_id,
+            skip=skip,
+            limit=limit,
+        )
+        recipients = _build_notification_recipients(db=db, user_ids=recipient_ids)
+
+        return ChatNotificationTargetsResponse(
+            message_id=message.id,
+            room_id=room.id,
+            sender_id=message.sender_id,
+            chat_kind=chat_kind,
+            group_id=room.group_id,
+            message_type=message_type,
+            image_url=image_url,
+            title=title,
+            body=body,
+            recipients=recipients,
+            skip=skip,
+            limit=limit,
+            total=total,
+            has_more=(skip + limit) < total,
+        )
+
+
+def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDeviceResponse:
+    with SessionLocal() as db:
+        device = deactivate_push_device_token_by_id(db=db, push_device_id=push_device_id)
+        if not device:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+        return DeactivatePushDeviceResponse(
+            push_device_id=device.id,
+            deactivated=not device.is_active,
+        )
+
+
+def _build_prayer_notification_copy(
+    *,
+    room_name: str,
+    people_count: int,
+    prayer_total: int,
+    latest_prayer_name: str,
+) -> tuple[str, str]:
+    """Copy reads from the push's stored summary: everyone who prayed since
+    the previous push for this request, and how many prayers they added."""
+    if people_count <= 1:
+        if prayer_total <= 1:
+            return room_name, f"{latest_prayer_name} prayed for you"
+        return room_name, f"{latest_prayer_name} prayed for you {prayer_total} times"
+    others = people_count - 1
+    others_label = "1 other" if others == 1 else f"{others} others"
+    return (
+        room_name,
+        f"{latest_prayer_name} with {others_label} prayed for you {prayer_total} times",
+    )
+
+
+class _PrayerPush(NamedTuple):
+    id: UUID
+    message_id: UUID
+    people_count: int
+    prayer_total: int
+    latest_user_id: Optional[UUID]
+
+
+def _resolve_prayer_push(*, db: Session, push_id: UUID) -> Optional[_PrayerPush]:
+    """The push behind a PRAYER_RECEIVED event.
+
+    Events enqueued before repeat prayers shipped carry a chat_message_prayers
+    id instead. They are read as one person praying once, so an event already
+    in the queue at deploy is still delivered. Safe to remove once no event
+    from before the deploy can still arrive.
+    """
+    notification = get_prayer_notification_by_id(db=db, notification_id=push_id)
+    if notification:
+        return _PrayerPush(
+            id=notification.id,
+            message_id=notification.message_id,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
+            latest_user_id=notification.latest_user_id,
+        )
+    legacy = get_prayer_by_id(db=db, prayer_id=push_id)
+    if legacy:
+        return _PrayerPush(
+            id=legacy.id,
+            message_id=legacy.message_id,
+            people_count=1,
+            prayer_total=1,
+            latest_user_id=legacy.user_id,
+        )
+    return None
+
+
+def get_prayer_notification_targets(
+    *,
+    prayer_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+) -> PrayerNotificationTargetsResponse:
+    """`prayer_id` is a chat_prayer_notifications id: one summarised push, not
+    one prayer. The name is kept so the worker's contract does not change."""
+    if skip < 0:
+        skip = 0
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    with SessionLocal() as db:
+        notification = _resolve_prayer_push(db=db, push_id=prayer_id)
+        if not notification:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+
+        message = get_message_by_id_any_room(db=db, message_id=notification.message_id)
+        if not message or not message.room:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+
+        room = message.room
+        chat_kind = room_kind(room)
+        group_id = _owning_group_id(db=db, room=room)
+
+        prayer_count = count_message_prayers(db=db, message_id=message.id)
+        title, body = _build_prayer_notification_copy(
+            room_name=room.name,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
+            latest_prayer_name=(
+                get_sender_display_name(db=db, sender_id=notification.latest_user_id)
+                if notification.latest_user_id
+                else "Someone"
+            ),
+        )
+
+        # The requester alone, and never for their own prayer. The gate never
+        # names the requester; the check guards a legacy prayer id.
+        recipient_ids = (
+            []
+            if notification.latest_user_id == message.sender_id
+            else [message.sender_id]
+        )
+        recipient_ids = filter_users_by_notification_preference(
+            db=db,
+            user_ids=recipient_ids,
+            notification_type=NotificationType.PRAYER_RECEIVED,
+            scope_id=group_id,
+        )
+        total = len(recipient_ids)
+        recipient_ids = recipient_ids[skip : skip + limit]
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)
         recipients: list[ChatNotificationRecipientDTO] = []
@@ -110,12 +468,17 @@ def get_chat_notification_targets(
                 )
             )
 
-        return ChatNotificationTargetsResponse(
+        return PrayerNotificationTargetsResponse(
+            prayer_id=notification.id,
             message_id=message.id,
             room_id=room.id,
-            sender_id=message.sender_id,
             chat_kind=chat_kind,
-            group_id=room.group_id,
+            group_id=group_id,
+            event_id=room.event_id,
+            requester_id=message.sender_id,
+            prayer_count=prayer_count,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
             title=title,
             body=body,
             recipients=recipients,
@@ -123,15 +486,4 @@ def get_chat_notification_targets(
             limit=limit,
             total=total,
             has_more=(skip + limit) < total,
-        )
-
-
-def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDeviceResponse:
-    with SessionLocal() as db:
-        device = deactivate_push_device_token_by_id(db=db, push_device_id=push_device_id)
-        if not device:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
-        return DeactivatePushDeviceResponse(
-            push_device_id=device.id,
-            deactivated=not device.is_active,
         )

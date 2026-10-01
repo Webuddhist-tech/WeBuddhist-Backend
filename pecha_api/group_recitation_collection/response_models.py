@@ -2,6 +2,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 from uuid import UUID
 
+from pecha_api.group_assets.response_models import GroupAssetDTO
+
 
 class GroupRecitationCollectionItemDTO(BaseModel):
     """DTO for collection item with text details from MongoDB"""
@@ -12,6 +14,9 @@ class GroupRecitationCollectionItemDTO(BaseModel):
     language: Optional[str] = None
     type: Optional[str] = None
     display_order: int
+    # Ordered by display_order, presigned. Additive with a default, so existing
+    # clients are unaffected.
+    audio: List[GroupAssetDTO] = []
 
 
 class GroupRecitationCollectionDTO(BaseModel):

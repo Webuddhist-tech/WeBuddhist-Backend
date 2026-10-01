@@ -54,7 +54,8 @@ async def get_texts_by_collection(
     "/title-search",
     status_code=status.HTTP_200_OK,
     summary="Search texts by title from OpenPecha",
-    description="Search for texts by title (case-insensitive substring) from the OpenPecha API.",
+    description="Search for texts by title (case-insensitive substring) from the OpenPecha API. "
+                 "Omitting title returns a default, unfiltered listing.",
 )
 async def search_titles(
     title: Annotated[Optional[str], Query(description="Title to search for")] = None,

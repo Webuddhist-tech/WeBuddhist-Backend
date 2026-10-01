@@ -2,10 +2,11 @@ import pytest
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
-from pecha_api.mantra.mantra_service import get_mantras_service, _build_mantra_dto
+from pecha_api.mantra.mantra_service import get_mantras_service, _build_mantra_dto, resolve_deity_image
 from pecha_api.mantra.mantra_response_models import MantraResponse, MantraDTO
 from pecha_api.mantra.mantra_model import Mantra
 from pecha_api.mantra.mantra_metadata_model import MantraMetadata
+from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.plans.plans_enums import LanguageCode
 
 
@@ -30,13 +31,14 @@ class TestDataFactory:
         return entry
 
     @staticmethod
-    def create_mock_mantra(mantra_id=None, audio_url="audio/mantra.mp3", metadata_entries=None, mala=None):
+    def create_mock_mantra(mantra_id=None, audio_url="audio/mantra.mp3", metadata_entries=None, mala=None, deity_image=None):
         """Create a mock Mantra model."""
         mantra = MagicMock(spec=Mantra)
         mantra.id = mantra_id or uuid4()
         mantra.audio_url = audio_url
         mantra.metadata_entries = metadata_entries or []
         mantra.mala = mala
+        mantra.deity_image = deity_image
         return mantra
 
 
@@ -163,3 +165,55 @@ class TestBuildMantraDto:
         result = _build_mantra_dto(mantra, language="bo")
 
         assert len(result.metadata) == 0
+
+    def test_build_mantra_dto_no_deity_image_key_is_none(self):
+        """Without a stored key, deity_image is None."""
+        mantra = TestDataFactory.create_mock_mantra(deity_image=None)
+
+        result = _build_mantra_dto(mantra, language=None)
+
+        assert result.deity_image is None
+
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    def test_build_mantra_dto_includes_resolved_deity_image(self, mock_resolve):
+        """The resolved deity image is passed through onto the DTO."""
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_resolve.return_value = expected_image
+        mantra = TestDataFactory.create_mock_mantra(deity_image="images/mantra_images/x/original/y.webp")
+
+        result = _build_mantra_dto(mantra, language=None)
+
+        assert result.deity_image is expected_image
+        mock_resolve.assert_called_once_with(mantra)
+
+
+class TestResolveDeityImage:
+    """Test cases for the resolve_deity_image helper."""
+
+    def test_resolve_deity_image_none_mantra(self):
+        assert resolve_deity_image(None) is None
+
+    def test_resolve_deity_image_no_key(self):
+        mantra = TestDataFactory.create_mock_mantra(deity_image=None)
+        assert resolve_deity_image(mantra) is None
+
+    @patch('pecha_api.mantra.mantra_service.safe_get_image_url')
+    def test_resolve_deity_image_success(self, mock_safe_get):
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_safe_get.return_value = expected_image
+        mantra = TestDataFactory.create_mock_mantra(deity_image="images/mantra_images/x/original/y.webp")
+
+        result = resolve_deity_image(mantra)
+
+        assert result is expected_image
+        mock_safe_get.assert_called_once_with(
+            mantra.deity_image, resource_id=mantra.id, resource_type="mantra"
+        )
+
+    @patch('pecha_api.mantra.mantra_service.safe_get_image_url')
+    def test_resolve_deity_image_presign_failure_degrades_to_none(self, mock_safe_get):
+        """A bad key/presign failure should yield None, not raise."""
+        mock_safe_get.return_value = None
+        mantra = TestDataFactory.create_mock_mantra(deity_image="bad-key")
+
+        assert resolve_deity_image(mantra) is None

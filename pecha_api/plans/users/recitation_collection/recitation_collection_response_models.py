@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict
+import math
+
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import List, Optional
 from uuid import UUID
 
@@ -36,6 +38,22 @@ class AddItemsResponse(BaseModel):
     items: List["RecitationCollectionItemDTO"]
 
 
+class UpdateCollectionItemRequest(BaseModel):
+    """Patch a collection item's display_order. Fractional values (1.4) are
+    allowed so an item can sit between neighbors; the value must be unique
+    among active items in the same collection."""
+    model_config = ConfigDict(extra="forbid")
+
+    display_order: float
+
+    @field_validator("display_order")
+    @classmethod
+    def validate_display_order(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("display_order must be a finite number")
+        return value
+
+
 class RecitationCollectionItemDTO(BaseModel):
     """DTO for collection item with text details from MongoDB"""
     id: UUID
@@ -44,7 +62,7 @@ class RecitationCollectionItemDTO(BaseModel):
     title: str
     language: Optional[str] = None
     type: Optional[str] = None
-    display_order: int
+    display_order: float
 
 
 class RecitationCollectionDTO(BaseModel):

@@ -24,6 +24,7 @@ from pecha_api.group_posts.notification_sqs_client import (
     build_group_post_notification_event_body,
 )
 from pecha_api.group_posts.response_models import CreateGroupPostRequest
+from pecha_api.notification.notification_preference_enums import NotificationType
 
 
 class MockUser:
@@ -167,6 +168,7 @@ class TestGetGroupPostNotificationTargets:
             sender_id=author.id,
             skip=0,
             limit=100,
+            notification_type=NotificationType.GROUP_POST,
         )
 
     @patch("pecha_api.group_posts.notification_service.get_user_by_email")

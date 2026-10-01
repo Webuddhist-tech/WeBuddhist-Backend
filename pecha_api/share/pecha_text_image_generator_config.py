@@ -31,7 +31,9 @@ CONFIG = {
         "black": (0, 0, 0),
     },
     "BG_COLOR": {
-        "DEFAULT": "#deac2c",
+        "DEFAULT": "#ff0000",
+        "red": "#ff0000",
+        "yellow": "#deac2c",
         "black": "#000000"
     },
     # String Literals
@@ -59,6 +61,12 @@ CONFIG = {
     "FALLBACK_HEADER_RATIO": 0.5,
     "FALLBACK_LOGO_HEIGHT_RATIO": 0.3,
     "REF_TEXT_Y_OFFSET": 40,
+    "EVENT_CARD_WIDTH": 1200,
+    "EVENT_CARD_HEIGHT": 630,
+    "EVENT_MARGIN": 36,
+    "EVENT_LOGO_HEIGHT_RATIO": 0.15,
+    "EVENT_TITLE_MAX_LINES": 2,
+    "EVENT_FALLBACK_BG": (255, 0, 0, 255),
     # Default font size
     "DEFAULT_FONT_SIZE": 24,
     # Default language code

@@ -8,9 +8,11 @@ from pecha_api.plans.media.media_response_models import PlanUploadResponse
 from pecha_api.plans.users.recitation_collection.recitation_collection_response_models import (
     RecitationCollectionsResponse,
     RecitationCollectionDetailDTO,
+    RecitationCollectionItemDTO,
     CreateCollectionRequest,
     CreateCollectionResponse,
     UpdateCollectionRequest,
+    UpdateCollectionItemRequest,
     AddItemsRequest,
     AddItemsResponse
 )
@@ -22,7 +24,8 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_service i
     upload_collection_image_service,
     add_items_to_collection_service,
     delete_collection_service,
-    delete_collection_item_service
+    delete_collection_item_service,
+    update_collection_item_display_order_service
 )
 
 oauth2_scheme = HTTPBearer()
@@ -151,6 +154,31 @@ async def delete_collection(
     await delete_collection_service(
         token=authentication_credential.credentials,
         collection_id=collection_id
+    )
+
+
+@recitation_collection_router.patch(
+    "/{collection_id}/items/{item_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=RecitationCollectionItemDTO
+)
+async def update_collection_item_display_order(
+    collection_id: UUID,
+    item_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    request: UpdateCollectionItemRequest
+):
+    """Update a collection item's display_order.
+
+    The value can be fractional (e.g. 1.4) so an item can sit between
+    neighbors. It must be unique among active items in the collection.
+    Newly added items continue from the current max + 1.
+    """
+    return await update_collection_item_display_order_service(
+        token=authentication_credential.credentials,
+        collection_id=collection_id,
+        item_id=item_id,
+        request=request
     )
 
 

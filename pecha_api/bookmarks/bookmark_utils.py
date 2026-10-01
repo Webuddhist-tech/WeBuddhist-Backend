@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
@@ -9,6 +10,7 @@ from pecha_api.bookmarks.bookmark_enums import BookmarkType
 from pecha_api.bookmarks.bookmark_models import Bookmark
 from pecha_api.bookmarks.bookmark_response_models import (
     BookmarkAccumulatorDTO,
+    BookmarkGroupAccumulatorDTO,
     BookmarkGroupRecitationCollectionDTO,
     BookmarkRecitationCollectionDTO,
     BookmarkPlanDTO,
@@ -18,11 +20,6 @@ from pecha_api.bookmarks.bookmark_response_models import (
     BookmarkTimerDTO,
     PlanBookmarkMetadataDTO,
 )
-from pecha_api.texts.segments.segments_models import Segment
-from pecha_api.texts.segments.segments_repository import (
-    get_related_mapped_segments,
-    get_segment_by_id,
-)
 from fastapi import HTTPException
 from pecha_api.texts.texts_openpecha_service import (
     get_text_by_id_from_openpecha,
@@ -30,7 +27,6 @@ from pecha_api.texts.texts_openpecha_service import (
 )
 from pecha_api.texts.texts_openpecha_api import fetch_edition_text_id
 from pecha_api.recitations.recitations_services import build_first_segment_for_edition
-from pecha_api.texts.texts_repository import get_first_segment_table_of_content
 from pecha_api.plans.public.plan_repository import get_published_plan_by_id
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.items.plan_items_models import PlanItem
@@ -47,14 +43,13 @@ from pecha_api.plans.series.series_service import (
     compute_series_progress,
 )
 from pecha_api.accumulator.accumulator_models import Accumulator
+from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.accumulator.accumulator_service import (
     generate_mala_image_presigned_url,
     resolve_accumulator_bookmark_mala_image_url,
 )
 from pecha_api.texts.first_segment_preview_service import (
     build_first_segment_preview_for_text,
-    build_first_segment_previews_for_texts,
-    resolve_segment_by_ref,
 )
 from pecha_api.mantra.mantra_repository import get_mantra_by_id
 from pecha_api.plans.groups.groups_repository import (
@@ -62,7 +57,13 @@ from pecha_api.plans.groups.groups_repository import (
     get_group_member,
     is_group_published,
 )
+from openpecha_api.segments.openpecha_segment_service import (
+    fetch_related_segments,
+    fetch_segment_content,
+    fetch_segment_details,
+)
 from pecha_api.timers.timer_repository import get_timer_by_id
+from pecha_api.ambient_sounds.ambient_sound_repository import get_ambient_sound_by_id
 from pecha_api.group_recitation_collection.repository import (
     get_collection_item_counts,
     get_collection_without_group_filter,
@@ -161,6 +162,81 @@ def _invalid_text_bookmark_segment(source_id: str) -> BookmarkSegmentDTO:
     return BookmarkSegmentDTO(id=source_id, content=INVALID_BOOKMARK_TEXT_PLACEHOLDER)
 
 
+async def _fetch_openpecha_segment_content_safe(segment_id: str) -> Optional[str]:
+    try:
+        return await fetch_segment_content(segment_id)
+    except Exception:
+        logger.warning(
+            "Failed to fetch segment content for bookmark segment %s from openpecha",
+            segment_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _fetch_openpecha_segment_details_safe(segment_id: str) -> Optional[dict]:
+    try:
+        return await fetch_segment_details(segment_id)
+    except Exception:
+        logger.warning(
+            "Failed to fetch segment details for bookmark segment %s from openpecha",
+            segment_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _fetch_openpecha_segment(segment_id: str) -> Optional[dict]:
+    """Resolve a bookmark's verse/segment id straight from openpecha -
+    there's no local Mongo segments collection to fall back to any more.
+    Returns {"id", "text_id", "content"}, or None if either call fails.
+    """
+    content, details = await asyncio.gather(
+        _fetch_openpecha_segment_content_safe(segment_id),
+        _fetch_openpecha_segment_details_safe(segment_id),
+    )
+    text_id = details.get("text_id") if details else None
+    if content is None or not text_id:
+        return None
+    return {"id": segment_id, "text_id": text_id, "content": content}
+
+
+async def _resolve_localized_openpecha_segment(
+    segment_id: str,
+    target_text_id: str,
+) -> Optional[dict]:
+    """Find the segment mapped into `target_text_id` for a source segment,
+    via openpecha's related-segments lookup (replaces the old local Mongo
+    segment-mapping table)."""
+    try:
+        related = await fetch_related_segments(
+            segment_id=segment_id,
+            limit=1,
+            offset=0,
+            text_id=target_text_id,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to fetch related segments for %s in text %s from openpecha",
+            segment_id,
+            target_text_id,
+            exc_info=True,
+        )
+        return None
+
+    items = related.get("items") or [] if related else []
+    if not items:
+        return None
+    mapped_id = items[0].get("id")
+    if not mapped_id:
+        return None
+
+    content = await _fetch_openpecha_segment_content_safe(mapped_id)
+    if content is None:
+        return None
+    return {"id": mapped_id, "text_id": target_text_id, "content": content}
+
+
 async def _enrich_edition_text_bookmark(
     source_id: str,
     resolved_text_id: str,
@@ -191,57 +267,44 @@ async def _enrich_edition_text_bookmark(
     }
 
 
-async def _resolve_text_segment(
-    text_id: str,
-    verse_id: Optional[str],
-) -> tuple[Optional[str], Optional[Segment]]:
-    if verse_id:
-        segment = await resolve_segment_by_ref(verse_id)
-        if segment and segment.text_id == text_id:
-            return str(segment.id), segment
-
-    segment_id, _ = await get_first_segment_table_of_content(text_id=text_id)
-    if segment_id:
-        segment = await get_segment_by_id(segment_id=segment_id)
-        return segment_id, segment
-
-    segment = await Segment.get_first_segment_by_text_id(text_id=text_id)
-    if segment:
-        return str(segment.id), segment
-
-    return None, None
-
-
 async def enrich_text_bookmark(
     bookmark: Bookmark,
     language: Optional[str] = None,
 ) -> dict:
     verse_id: Optional[str] = None
     text_id: Optional[str] = None
-    segment: Optional[Segment] = None
     segment_id: Optional[str] = None
+    segment_content: Optional[str] = None
+    segment_source_text_id: Optional[str] = None
     use_first_segment_preview = False
 
     if bookmark.type == BookmarkType.VERSE:
         verse_id = bookmark.source_id
-        segment = await resolve_segment_by_ref(verse_id)
-        if not segment:
+        resolved = await _fetch_openpecha_segment(verse_id)
+        if not resolved:
             return {}
-        text_id = segment.text_id
-        segment_id = str(segment.id)
+        text_id = resolved["text_id"]
+        segment_id = resolved["id"]
+        segment_content = resolved["content"]
+        segment_source_text_id = resolved["text_id"]
     elif bookmark.type == BookmarkType.TEXT:
         text_id = bookmark.source_id
         if bookmark.name:
-            candidate = await resolve_segment_by_ref(bookmark.name)
-            if candidate and candidate.text_id == text_id:
+            candidate_details = await _fetch_openpecha_segment_details_safe(bookmark.name)
+            if candidate_details and candidate_details.get("text_id") == text_id:
                 verse_id = bookmark.name
         if verse_id:
-            segment_id, segment = await _resolve_text_segment(
-                text_id=text_id,
-                verse_id=verse_id,
-            )
-            if not segment_id:
-                return {}
+            resolved = await _fetch_openpecha_segment(verse_id)
+            if resolved:
+                segment_id = resolved["id"]
+                segment_content = resolved["content"]
+                segment_source_text_id = resolved["text_id"]
+            else:
+                # The name was already confirmed to belong to this text
+                # above; a transient failure re-fetching its content/details
+                # shouldn't blank out the whole bookmark when a first-segment
+                # preview of the same text is still available.
+                use_first_segment_preview = True
         else:
             resolved_edition_text_id = await _resolve_edition_text_id(text_id)
             if resolved_edition_text_id is not None:
@@ -263,14 +326,19 @@ async def enrich_text_bookmark(
     else:
         text = await _try_get_openpecha_text(text_id=text_id)
 
-    if not use_first_segment_preview and language and segment and text_id != segment.text_id:
-        localized_segment = await _resolve_localized_segment(
-            segment=segment,
+    if (
+        not use_first_segment_preview
+        and language
+        and segment_id
+        and text_id != segment_source_text_id
+    ):
+        localized = await _resolve_localized_openpecha_segment(
+            segment_id=segment_id,
             target_text_id=text_id,
         )
-        if localized_segment:
-            segment = localized_segment
-            segment_id = str(segment.id)
+        if localized:
+            segment_id = localized["id"]
+            segment_content = localized["content"]
 
     segment_dto = None
     if use_first_segment_preview:
@@ -282,10 +350,10 @@ async def enrich_text_bookmark(
             id=segment_id,
             content=preview_content,
         )
-    elif segment_id and segment:
+    elif segment_id and segment_content is not None:
         segment_dto = BookmarkSegmentDTO(
             id=segment_id,
-            content=segment.content,
+            content=segment_content,
         )
 
     return {
@@ -315,18 +383,6 @@ async def _resolve_localized_text(text_id: str, language: Optional[str]):
         fallback_language=DEFAULT_FALLBACK_LANGUAGE,
     )
     return matched[0] if matched else text
-
-
-async def _resolve_localized_segment(segment: Segment, target_text_id: str) -> Optional[Segment]:
-    if segment.text_id == target_text_id:
-        return segment
-
-    mapped_segments = await get_related_mapped_segments(parent_segment_id=str(segment.id))
-    for mapped in mapped_segments:
-        if mapped.text_id == target_text_id:
-            localized = await get_segment_by_id(segment_id=str(mapped.id))
-            return localized or mapped
-    return segment
 
 
 def _resolve_published_plan_for_language(
@@ -535,11 +591,20 @@ def enrich_timer_bookmark(db: Session, source_id: str) -> dict:
     if not timer:
         return {}
 
+    ambient_sound_name = None
+    if timer.ambient_sound_id:
+        ambient_sound = get_ambient_sound_by_id(db=db, ambient_sound_id=timer.ambient_sound_id)
+        if ambient_sound:
+            ambient_sound_name = ambient_sound.name
+
     return {
         "timer": BookmarkTimerDTO(
             id=timer.id,
             title=timer.name,
             duration=timer.duration,
+            ambient_sound_name=ambient_sound_name,
+            bell_at_start=timer.bell_at_start,
+            bell_at_end=timer.bell_at_end,
         )
     }
 
@@ -612,6 +677,48 @@ def enrich_group_recitation_collection_bookmark(
     }
 
 
+def enrich_group_accumulator_bookmark(
+    db: Session,
+    source_id: str,
+    user_id: UUID,
+) -> dict:
+    group_accumulator_id = _parse_source_uuid(source_id)
+    if group_accumulator_id is None:
+        return {}
+
+    group_accumulator = (
+        db.query(GroupAccumulator)
+        .filter(
+            GroupAccumulator.id == group_accumulator_id,
+            GroupAccumulator.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if not group_accumulator:
+        return {}
+
+    # Mirror the access rules of group-content reads: group accumulations are
+    # visible only when the group is public or the user is currently a member.
+    group = get_group_by_id(db=db, group_id=group_accumulator.group_id)
+    if not group or not is_group_published(group):
+        return {}
+    if not group.is_public and not get_group_member(
+        db=db,
+        group_id=group_accumulator.group_id,
+        author_id=user_id,
+    ):
+        return {}
+
+    return {
+        "group_accumulator": BookmarkGroupAccumulatorDTO(
+            id=group_accumulator.id,
+            group_id=group_accumulator.group_id,
+            title=group_accumulator.title or "",
+            image=_generate_collection_image_url(group_accumulator.image_key),
+        )
+    }
+
+
 def _parse_source_uuid(source_id: str) -> Optional[UUID]:
     try:
         return UUID(source_id)
@@ -644,6 +751,12 @@ async def enrich_bookmark(
             db=db,
             source_id=bookmark.source_id,
             language=normalized_language,
+        )
+    if bookmark.type == BookmarkType.GROUP_ACCUMULATOR:
+        return enrich_group_accumulator_bookmark(
+            db=db,
+            source_id=bookmark.source_id,
+            user_id=bookmark.user_id,
         )
     if bookmark.type == BookmarkType.TIMER:
         return enrich_timer_bookmark(db=db, source_id=bookmark.source_id)

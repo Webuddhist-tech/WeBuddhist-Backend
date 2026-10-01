@@ -2,11 +2,18 @@ from datetime import datetime
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette import status
 
-from .event_response_models import EventFormat, EventsResponse, EventDTO, EventParticipantsResponse
+from .event_response_models import (
+    EventFormat,
+    EventsResponse,
+    EventDTO,
+    EventParticipantsResponse,
+    JoinEventRequest,
+    UpdateParticipationTypeRequest,
+)
 from .event_service import (
     EventContentFilter,
     get_events_service,
@@ -17,20 +24,34 @@ from .event_service import (
 from .event_participant_service import (
     join_event_service,
     leave_event_service,
+    update_participation_type_service,
     get_event_participants_service,
 )
 
 oauth2_scheme = HTTPBearer()
 optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
+from pecha_api.cache.cache_enums import CacheType
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.events.events_cache_service import (
+    EVENT_CACHE_TYPES,
+    get_event_by_id_service_cached,
+    get_events_service_cached,
+    get_events_today_service_cached,
+    get_featured_events_service_cached,
+)
+
 events_router = APIRouter(
     prefix="/events",
     tags=["Events"],
+    # Joining or leaving changes is_joined for the caller alone, so only
+    # their entries are evicted; counts follow the short timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*EVENT_CACHE_TYPES))],
 )
 
 
 @events_router.get("", status_code=status.HTTP_200_OK, response_model=EventsResponse, response_model_exclude_none=True)
-def get_events_endpoint(
+async def get_events_endpoint(
     group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
     plan_id: Annotated[Optional[UUID], Query(description="Filter by plan ID")] = None,
     accumulator_id: Annotated[Optional[UUID], Query(description="Filter by accumulator ID")] = None,
@@ -46,8 +67,8 @@ def get_events_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,
@@ -58,7 +79,7 @@ def get_events_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventsResponse:
-    return get_events_service(
+    return await get_events_service_cached(
         content_filter=EventContentFilter(
             group_id=group_id,
             plan_id=plan_id,
@@ -79,8 +100,10 @@ def get_events_endpoint(
     )
 
 
-@events_router.get("/today", status_code=status.HTTP_200_OK, response_model=EventsResponse, response_model_exclude_none=True)
-def get_events_today_endpoint(
+# Unlike the other event routes, /today sends every EventDTO field, with
+# null for empty ones, so clients always get the same set of keys.
+@events_router.get("/today", status_code=status.HTTP_200_OK, response_model=EventsResponse)
+async def get_events_today_endpoint(
     group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = None,
     should_include_unfollowed: Annotated[
@@ -88,8 +111,8 @@ def get_events_today_endpoint(
         Query(
             alias="include_unfollowed",
             description=(
-                "For authenticated users, false = joined groups only; "
-                "true = all public groups"
+                "For authenticated users, events are listed from published "
+                "public groups and joined groups even when false."
             ),
         ),
     ] = False,
@@ -104,7 +127,7 @@ def get_events_today_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventsResponse:
-    return get_events_today_service(
+    return await get_events_today_service_cached(
         timezone=x_timezone,
         group_id=group_id,
         language=language,
@@ -116,7 +139,7 @@ def get_events_today_endpoint(
 
 
 @events_router.get("/featured", status_code=status.HTTP_200_OK, response_model=list[EventDTO], response_model_exclude_none=True)
-def get_featured_events_endpoint(
+async def get_featured_events_endpoint(
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = "en",
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
     credentials: Annotated[
@@ -124,7 +147,7 @@ def get_featured_events_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> list[EventDTO]:
-    return get_featured_events_service(
+    return await get_featured_events_service_cached(
         language=language,
         limit=limit,
         token=credentials.credentials if credentials else None,
@@ -138,9 +161,40 @@ def get_featured_events_endpoint(
 def join_event_endpoint(
     event_id: UUID,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    payload: Annotated[Optional[JoinEventRequest], Body()] = None,
 ) -> None:
-    """Join an event. Idempotent: joining again succeeds without creating a duplicate."""
-    join_event_service(token=credentials.credentials, event_id=event_id)
+    """Join an event. Idempotent: joining again succeeds without creating a duplicate.
+
+    The body is optional. With `participation_type` set, it also records how
+    the user attends - and re-sending it on an existing participation updates
+    the choice. Online-only and offline-only events fill it in themselves and
+    reject the other value with a 400."""
+    join_event_service(
+        token=credentials.credentials,
+        event_id=event_id,
+        participation_type=payload.participation_type if payload else None,
+    )
+
+
+@events_router.patch(
+    "/{event_id}/participants/me",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def update_participation_type_endpoint(
+    event_id: UUID,
+    payload: UpdateParticipationTypeRequest,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+) -> None:
+    """Switch how the caller attends an event: 'online' or 'offline'.
+
+    An upsert: a caller who has not joined yet is joined by this call, and
+    joining an event also joins its group. 400 when the event only runs the
+    other way."""
+    update_participation_type_service(
+        token=credentials.credentials,
+        event_id=event_id,
+        participation_type=payload.participation_type,
+    )
 
 
 @events_router.delete(
@@ -169,7 +223,7 @@ def get_event_participants_endpoint(
 
 
 @events_router.get("/{event_id}", status_code=status.HTTP_200_OK, response_model=EventDTO, response_model_exclude_none=True)
-def get_event_by_id_endpoint(
+async def get_event_by_id_endpoint(
     event_id: UUID,
     language: Annotated[Optional[str], Query(description="Filter metadata by language code")] = None,
     credentials: Annotated[
@@ -177,7 +231,7 @@ def get_event_by_id_endpoint(
         Depends(optional_oauth2_scheme),
     ] = None,
 ) -> EventDTO:
-    return get_event_by_id_service(
+    return await get_event_by_id_service_cached(
         event_id=event_id,
         language=language,
         token=credentials.credentials if credentials else None,

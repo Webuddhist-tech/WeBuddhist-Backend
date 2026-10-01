@@ -10,6 +10,7 @@ from pecha_api.plans.plans_enums import (
 )
 from uuid import UUID
 from pecha_api.plans.plans_models import Plan
+from pecha_api.plans.shared.subtask_reference_resolver import SubTaskReferenceDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 
 
@@ -90,6 +91,8 @@ class SubTaskDTO(BaseModel):
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
     audio_url: Optional[str] = None
+    reference_id: Optional[UUID] = None
+    reference: Optional[SubTaskReferenceDTO] = None
 
 class TaskDTO(BaseModel):
     id: UUID

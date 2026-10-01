@@ -1,12 +1,15 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from typing import List, Tuple, Optional, Dict
 from uuid import UUID
+from datetime import datetime
 from fastapi import HTTPException
 from starlette import status
+import _datetime
 from .timer_model import Timer
 from .timer_history_model import TimerHistory
+from .timer_enums import TimerType
 
 
 def save_timer(db: Session, timer: Timer) -> Timer:
@@ -23,8 +26,11 @@ def save_timer(db: Session, timer: Timer) -> Timer:
         )
 
 
-def get_timer_by_id(db: Session, timer_id: UUID) -> Optional[Timer]:
-    return db.query(Timer).filter(Timer.id == timer_id).first()
+def get_timer_by_id(db: Session, timer_id: UUID, include_deleted: bool = False) -> Optional[Timer]:
+    query = db.query(Timer).filter(Timer.id == timer_id)
+    if not include_deleted:
+        query = query.filter(Timer.deleted_at.is_(None))
+    return query.first()
 
 
 def update_timer(db: Session, timer: Timer) -> Timer:
@@ -42,7 +48,7 @@ def update_timer(db: Session, timer: Timer) -> Timer:
 
 def delete_timer(db: Session, timer: Timer) -> None:
     try:
-        db.delete(timer)
+        timer.deleted_at = datetime.now(_datetime.timezone.utc)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -52,21 +58,65 @@ def delete_timer(db: Session, timer: Timer) -> None:
         )
 
 
+def purge_deleted_timers_older_than(db: Session, cutoff_datetime: datetime) -> int:
+    deleted_count = (
+        db.query(Timer)
+        .filter(Timer.deleted_at.isnot(None), Timer.deleted_at < cutoff_datetime)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return deleted_count
+
+
 def get_timers_by_group(
     db: Session,
     group_id: Optional[UUID] = None,
     skip: int = 0,
-    limit: int = 20
+    limit: int = 20,
+    user_id: Optional[UUID] = None,
 ) -> Tuple[List[Timer], int]:
-
-    query = db.query(Timer)
+    query = db.query(Timer).filter(Timer.deleted_at.is_(None))
     if group_id:
         query = query.filter(Timer.group_id == group_id)
-    
+    if user_id is None:
+        # Anonymous catalogue: shared presets only, never anyone's personal rows.
+        query = query.filter(Timer.type == TimerType.PRESET)
+    else:
+        query = _catalogue_plus_caller_timers(query, db, user_id)
+
     total = query.count()
     timers = query.order_by(Timer.created_at.desc()).offset(skip).limit(limit).all()
-    
+
     return timers, total
+
+
+def _catalogue_plus_caller_timers(query: Query[Timer], db: Session, user_id: UUID) -> Query[Timer]:
+    """Presets the caller has not copied, plus their user_created timers.
+
+    Ownership is limited to USER rows so a preset whose user_id happens to
+    be the caller is not re-included after the copied-preset exclusion.
+    Other accounts' user_created rows stay out.
+    """
+    copied_preset_ids = (
+        db.query(Timer.parent_preset_id)
+        .filter(
+            Timer.user_id == user_id,
+            Timer.parent_preset_id.isnot(None),
+            Timer.deleted_at.is_(None),
+        )
+    )
+    return query.filter(
+        or_(
+            and_(
+                Timer.type == TimerType.PRESET,
+                ~Timer.id.in_(copied_preset_ids),
+            ),
+            and_(
+                Timer.type == TimerType.USER,
+                Timer.user_id == user_id,
+            ),
+        )
+    )
 
 
 def get_user_timers_by_group(
@@ -77,7 +127,7 @@ def get_user_timers_by_group(
     limit: int = 20
 ) -> Tuple[List[Timer], int]:
 
-    query = db.query(Timer).filter(Timer.user_id == user_id)
+    query = db.query(Timer).filter(Timer.user_id == user_id, Timer.deleted_at.is_(None))
     if group_id:
         query = query.filter(Timer.group_id == group_id)
     
@@ -85,6 +135,32 @@ def get_user_timers_by_group(
     timers = query.order_by(Timer.created_at.desc()).offset(skip).limit(limit).all()
     
     return timers, total
+
+
+def lock_timer_row(db: Session, timer_id: UUID) -> None:
+    """Take a row lock on a timer, serializing writers keyed to that timer.
+
+    Used before creating a user's personal copy of a preset: nothing enforces
+    uniqueness on (user_id, parent_preset_id), so two first-time customizations
+    of the same preset can otherwise both find nothing and both insert.
+    """
+    db.query(Timer.id).filter(Timer.id == timer_id).with_for_update().first()
+
+
+def get_user_timer_by_parent_preset(
+    db: Session,
+    user_id: UUID,
+    parent_preset_id: UUID,
+) -> Optional[Timer]:
+    return (
+        db.query(Timer)
+        .filter(
+            Timer.user_id == user_id,
+            Timer.parent_preset_id == parent_preset_id,
+            Timer.deleted_at.is_(None),
+        )
+        .first()
+    )
 
 
 def get_user_total_duration(db: Session, user_id: UUID) -> int:
@@ -125,11 +201,15 @@ def get_user_timer_history(
         .subquery()
     )
     
-    total = db.query(Timer).filter(Timer.id.in_(timer_ids_with_history)).count()
-    
+    total = (
+        db.query(Timer)
+        .filter(Timer.id.in_(timer_ids_with_history), Timer.deleted_at.is_(None))
+        .count()
+    )
+
     timers = (
         db.query(Timer)
-        .filter(Timer.id.in_(timer_ids_with_history))
+        .filter(Timer.id.in_(timer_ids_with_history), Timer.deleted_at.is_(None))
         .order_by(Timer.created_at.desc())
         .offset(skip)
         .limit(limit)

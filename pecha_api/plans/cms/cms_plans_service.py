@@ -955,11 +955,19 @@ async def delete_selected_plan(token:str,plan_id: UUID):
         _soft_delete_plan_by_id(db=db, plan_id=plan.id, author=current_author)
         return
 
-def _get_task_subtasks_dto(subtasks: List[PlanSubTask]) -> List[SubTaskDTO]:
+def _get_task_subtasks_dto(
+    subtasks: List[PlanSubTask], db: Session, language: Optional[str] = None
+) -> List[SubTaskDTO]:
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
+    # On the caller's session: called once per task, so leaving `db` off meant
+    # a day's worth of extra connections opened inside a block already holding
+    # one of its own.
+    references = resolve_subtask_references(subtasks=subtasks, db=db, language=language)
 
     subtasks_dto = []
-    for subtask in subtasks:
+    for subtask, reference in zip(subtasks, references):
         start_ms, end_ms = build_subtask_timestamp_fields(subtask)
         audio_url = (
             generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=subtask.audio_url)
@@ -974,6 +982,8 @@ def _get_task_subtasks_dto(subtasks: List[PlanSubTask]) -> List[SubTaskDTO]:
                 start_ms=start_ms,
                 end_ms=end_ms,
                 audio_url=audio_url,
+                reference_id=subtask.reference_id,
+                reference=reference,
             )
         )
     return subtasks_dto
@@ -1020,7 +1030,7 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
                     title=task.title,
                     estimated_time=task.estimated_time,
                     display_order=task.display_order,
-                    subtasks=_get_task_subtasks_dto(task.sub_tasks)
+                    subtasks=_get_task_subtasks_dto(task.sub_tasks, db=db, language=plan.language)
                 )
                 for task in plan_item.tasks
             ]

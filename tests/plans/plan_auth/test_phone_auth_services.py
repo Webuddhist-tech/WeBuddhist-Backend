@@ -86,6 +86,7 @@ def test_exchange_new_profile_requires_both_names():
         subject="sms|+14155552671",
         phone_number="+14155552671",
     )
+    request = PhoneExchangeRequest(auth0_token="auth0-token", first_name="Tashi")
     with patch(
         "pecha_api.plans.auth.plan_auth_services.verify_auth0_sms_token",
         return_value=sms_identity,
@@ -97,9 +98,7 @@ def test_exchange_new_profile_requires_both_names():
     ):
         _session(session_local)
         with pytest.raises(HTTPException) as exc:
-            exchange_phone_token(
-                PhoneExchangeRequest(auth0_token="auth0-token", first_name="Tashi")
-            )
+            exchange_phone_token(request)
 
     assert exc.value.status_code == 422
 
@@ -229,7 +228,7 @@ def test_author_payload_resolution_prefers_uuid_and_supports_legacy_email():
         by_email.assert_called_once_with(db=db, email="legacy@example.com")
 
 
-def test_cms_author_resolution_uses_uuid_subject_before_email():
+def test_cms_author_resolution_uses_uuid_subject_only():
     author = _author()
     with patch(
         "pecha_api.plans.authors.plan_authors_service.validate_token",
@@ -237,14 +236,11 @@ def test_cms_author_resolution_uses_uuid_subject_before_email():
     ), patch(
         "pecha_api.plans.authors.plan_authors_service.SessionLocal",
     ) as session_local, patch(
-        "pecha_api.plans.authors.plan_authors_service.get_author_by_id",
+        "pecha_api.plans.authors.plan_authors_service.find_author_by_id",
         return_value=author,
-    ) as by_id, patch(
-        "pecha_api.plans.authors.plan_authors_service.get_author_by_email",
-    ) as by_email:
+    ) as by_id:
         db = _session(session_local)
         result = validate_and_extract_author_details("backend-token")
 
     assert result is author
     by_id.assert_called_once_with(db=db, author_id=author.id)
-    by_email.assert_not_called()

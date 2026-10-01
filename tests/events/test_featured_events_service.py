@@ -23,7 +23,9 @@ def _event(event_id=None, group_id=None, featured=False):
     event = MagicMock()
     event.id = event_id or uuid4()
     event.plan_id = None
+    event.series_id = None
     event.accumulator_id = None
+    event.group_accumulator_id = None
     event.mantra_id = None
     event.timer_id = None
     event.group_recitation_collection_id = None
@@ -31,7 +33,9 @@ def _event(event_id=None, group_id=None, featured=False):
     event.location_id = None
     event.location = None
     event.plan = None
+    event.series = None
     event.accumulator = None
+    event.group_accumulator = None
     event.mantra = None
     event.timer = None
     event.group_recitation_collection = None
@@ -86,7 +90,10 @@ def test_get_featured_events_returns_list(mock_get_featured, _mock_recurring, _m
     assert all(isinstance(e, EventDTO) for e in result)
     assert all(e.is_joined is None for e in result)
     # Service now fetches all featured events and applies limit internally
-    mock_get_featured.assert_called_once_with(mock_db, limit=None)
+    mock_get_featured.assert_called_once()
+    _, kwargs = mock_get_featured.call_args
+    assert kwargs["limit"] is None
+    assert kwargs["not_ended_before"] is not None
 
 
 @patch(f"{MODULE}.SessionLocal")
@@ -101,7 +108,9 @@ def test_get_featured_events_empty_list(mock_get_featured, _mock_recurring, _moc
     result = get_featured_events_service(language="en", limit=10)
 
     assert result == []
-    mock_get_featured.assert_called_once_with(mock_db, limit=None)
+    mock_get_featured.assert_called_once()
+    assert mock_get_featured.call_args.kwargs["limit"] is None
+    assert mock_get_featured.call_args.kwargs["not_ended_before"] is not None
 
 
 @patch(f"{MODULE}.SessionLocal")
@@ -119,7 +128,9 @@ def test_get_featured_events_with_language(mock_get_featured, _mock_recurring, _
     result = get_featured_events_service(language="bo", limit=5)
 
     assert len(result) == 1
-    mock_get_featured.assert_called_once_with(mock_db, limit=None)
+    mock_get_featured.assert_called_once()
+    assert mock_get_featured.call_args.kwargs["limit"] is None
+    assert mock_get_featured.call_args.kwargs["not_ended_before"] is not None
 
 
 @patch(f"{MODULE}.SessionLocal")
@@ -138,7 +149,9 @@ def test_get_featured_events_respects_limit(mock_get_featured, _mock_recurring, 
 
     assert len(result) == 3
     # Service fetches all and applies limit internally
-    mock_get_featured.assert_called_once_with(mock_db, limit=None)
+    mock_get_featured.assert_called_once()
+    assert mock_get_featured.call_args.kwargs["limit"] is None
+    assert mock_get_featured.call_args.kwargs["not_ended_before"] is not None
 
 
 @patch(f"{MODULE}.SessionLocal")

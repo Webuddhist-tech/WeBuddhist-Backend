@@ -13,7 +13,7 @@ class TimerHistory(Base):
     user_id = Column(UUID(as_uuid=True), nullable=False)
     duration_ms = Column(Integer, nullable=False)
     
-    created_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), nullable=False)
 
     __table_args__ = (
         Index("idx_timer_history_timer_id", "timer_id"),

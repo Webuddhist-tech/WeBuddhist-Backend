@@ -1,21 +1,27 @@
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence, Tuple
-from uuid import UUID
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from uuid import UUID, uuid4
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
 from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
-from pecha_api.plans.groups.groups_models import AuthorGroup
+from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
+from pecha_api.events.event_model import Event
 
-from pecha_api.chat.enums import ChatMessageReportSource, ChatRoomMemberRole
+from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatRoomMemberRole
 from pecha_api.chat.models import (
     ChatMessage,
+    ChatMessagePrayer,
+    ChatMessagePrayerCount,
     ChatMessageReaction,
     ChatMessageReport,
     ChatRoom,
     ChatRoomMember,
+    ChatPrayerNotification,
 )
+from pecha_api.users.users_models import Users
 
 
 def get_room_by_id(db: Session, room_id: UUID) -> Optional[ChatRoom]:
@@ -32,6 +38,32 @@ def get_room_by_group_id(db: Session, group_id: UUID) -> Optional[ChatRoom]:
         .filter(ChatRoom.group_id == group_id, ChatRoom.deleted_at.is_(None))
         .first()
     )
+
+
+def get_room_by_event_id(db: Session, event_id: UUID) -> Optional[ChatRoom]:
+    return (
+        db.query(ChatRoom)
+        .filter(ChatRoom.event_id == event_id, ChatRoom.deleted_at.is_(None))
+        .first()
+    )
+
+
+def get_room_ids_by_event_ids(
+    db: Session,
+    event_ids: Sequence[UUID],
+) -> Dict[UUID, UUID]:
+    """Room id for each event that has one, keyed by event_id.
+
+    One query per page of events, so a list endpoint can carry the room link
+    without a lookup per row. Events with no room yet are simply absent."""
+    if not event_ids:
+        return {}
+    rows = (
+        db.query(ChatRoom.event_id, ChatRoom.id)
+        .filter(ChatRoom.event_id.in_(event_ids), ChatRoom.deleted_at.is_(None))
+        .all()
+    )
+    return dict(rows)
 
 
 def get_room_by_pair(db: Session, low_id: UUID, high_id: UUID) -> Optional[ChatRoom]:
@@ -129,9 +161,47 @@ def count_active_members(db: Session, room_id: UUID) -> int:
     )
 
 
-def leave_member(db: Session, member: ChatRoomMember) -> None:
+def leave_member(db: Session, member: ChatRoomMember, *, commit: bool = True) -> None:
+    """Mark a member as having left. Pass commit=False to keep an enclosing
+    transaction open, so the caller can land this with its own changes."""
     member.left_at = datetime.now(timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
+
+
+def rejoin_group_room_member(
+    db: Session, group_id: UUID, user_id: UUID, *, commit: bool = True
+) -> bool:
+    """Undo a leave_member for the group's chat room: someone whose group
+    membership has begun again is active in the room again, keeping their role
+    and last_read_at so unread counts pick up where they left off.
+
+    The mirror of leave_group_chat_room, which the leave flows call. It lives
+    here rather than beside it in the service layer because its callers are the
+    upsert_group_join/upsert_group_follow writes themselves - the one chokepoint
+    every way of joining a group passes through, so no new join flow can forget
+    it and leave the room missing from list_my_active_rooms until the user
+    posts a message.
+
+    Only re-activates a row that already exists: someone who was never in the
+    room is added by resolve_or_create_group_room when they first open it, and
+    that decision (which carries the CREATOR role for a room that does not
+    exist yet) does not belong to a join. Returns whether anything changed.
+    No-op if the group has no room, or the user is already active in it.
+
+    Pass commit=False when the caller is inside a transaction that must include
+    this, so regaining group membership and regaining chat access cannot land
+    separately."""
+    room = get_room_by_group_id(db=db, group_id=group_id)
+    if room is None:
+        return False
+    member = get_member(db=db, room_id=room.id, user_id=user_id)
+    if member is None or member.left_at is None:
+        return False
+    member.left_at = None
+    if commit:
+        db.commit()
+    return True
 
 
 def mark_read(db: Session, member: ChatRoomMember) -> None:
@@ -168,6 +238,79 @@ def list_my_active_rooms(
                     .correlate(ChatRoom)
                 ),
             ),
+            # Chat access tracks live join/follow status, not just the
+            # ChatRoomMember row (which flows that end membership, like
+            # leave_group/unfollow_group, may not always have gotten around
+            # to closing out - see leave_group_chat_room). Checked here too
+            # so the list is correct even for rows left over from before that
+            # existed. DM rooms have no group_id and are unaffected.
+            or_(
+                ChatRoom.group_id.is_(None),
+                exists(
+                    select(1)
+                    .select_from(author_group_joins)
+                    .where(
+                        author_group_joins.c.group_id == ChatRoom.group_id,
+                        author_group_joins.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+                exists(
+                    select(1)
+                    .select_from(author_group_followers)
+                    .where(
+                        author_group_followers.c.group_id == ChatRoom.group_id,
+                        author_group_followers.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+            ),
+            # Same two gates for event rooms, which carry event_id instead of
+            # group_id: the owning group must still be published and still have
+            # this user, and the event's chat must not have been switched off.
+            or_(
+                ChatRoom.event_id.is_(None),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(AuthorGroup, AuthorGroup.id == Event.group_id)
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        Event.chat_enabled.is_(True),
+                        AuthorGroup.status == AuthorGroupStatus.PUBLISHED,
+                    )
+                    .correlate(ChatRoom)
+                ),
+            ),
+            or_(
+                ChatRoom.event_id.is_(None),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(
+                        author_group_joins,
+                        author_group_joins.c.group_id == Event.group_id,
+                    )
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        author_group_joins.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+                exists(
+                    select(1)
+                    .select_from(Event)
+                    .join(
+                        author_group_followers,
+                        author_group_followers.c.group_id == Event.group_id,
+                    )
+                    .where(
+                        Event.id == ChatRoom.event_id,
+                        author_group_followers.c.user_id == user_id,
+                    )
+                    .correlate(ChatRoom)
+                ),
+            ),
         )
     )
     total = query.count()
@@ -192,12 +335,15 @@ def get_room_messages(
     room_id: UUID,
     skip: int = 0,
     limit: int = 20,
+    message_type: Optional[str] = None,
 ) -> Tuple[List[ChatMessage], int]:
     query = (
         db.query(ChatMessage)
         .filter(ChatMessage.room_id == room_id)
         .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
     )
+    if message_type is not None:
+        query = query.filter(ChatMessage.message_type == message_type)
     total = query.count()
     messages = (
         query.options(
@@ -209,6 +355,20 @@ def get_room_messages(
         .all()
     )
     return messages, total
+
+
+def count_prayer_requests_in_room(db: Session, room_id: UUID) -> int:
+    """Live prayer-request messages in a room (non-deleted PRAYER rows)."""
+    return (
+        db.query(func.count(ChatMessage.id))
+        .filter(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+        )
+        .scalar()
+        or 0
+    )
 
 
 def get_message_by_id(db: Session, message_id: UUID, room_id: UUID) -> Optional[ChatMessage]:
@@ -226,6 +386,47 @@ def get_message_by_id(db: Session, message_id: UUID, room_id: UUID) -> Optional[
 def soft_delete_message(db: Session, message: ChatMessage) -> datetime:
     deleted_at = datetime.now(timezone.utc)
     message.deleted_at = deleted_at
+    db.commit()
+    return deleted_at
+
+
+def update_message(
+    db: Session, message: ChatMessage, body: str, intention: Optional[str]
+) -> ChatMessage:
+    message.body = body
+    message.intention = intention
+    message.is_edited = True
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+def get_messages_by_ids(
+    db: Session, message_ids: Sequence[UUID], room_id: UUID
+) -> List[ChatMessage]:
+    """Live (not yet deleted) messages of this room among the given ids.
+
+    Ids that do not belong to the room, or that are already deleted, simply do
+    not come back - the caller decides what that means."""
+    if not message_ids:
+        return []
+    return (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.id.in_(message_ids),
+            ChatMessage.room_id == room_id,
+            ChatMessage.deleted_at.is_(None),
+        )
+        .all()
+    )
+
+
+def soft_delete_messages(db: Session, messages: Sequence[ChatMessage]) -> datetime:
+    """Soft-delete several messages in one commit, so a bulk delete is all or
+    nothing and every message carries the same deleted_at."""
+    deleted_at = datetime.now(timezone.utc)
+    for message in messages:
+        message.deleted_at = deleted_at
     db.commit()
     return deleted_at
 
@@ -257,14 +458,17 @@ def list_undispatched_chat_notification_messages(
     *,
     older_than: datetime,
     limit: int,
+    message_type: Optional[str] = None,
 ) -> List[ChatMessage]:
+    query = db.query(ChatMessage).filter(
+        ChatMessage.deleted_at.is_(None),
+        ChatMessage.notification_sqs_message_id.is_(None),
+        ChatMessage.created_at <= older_than,
+    )
+    if message_type is not None:
+        query = query.filter(ChatMessage.message_type == message_type)
     return (
-        db.query(ChatMessage)
-        .filter(
-            ChatMessage.deleted_at.is_(None),
-            ChatMessage.notification_sqs_message_id.is_(None),
-            ChatMessage.created_at <= older_than,
-        )
+        query
         .order_by(ChatMessage.created_at.asc())
         .limit(limit)
         .all()
@@ -372,6 +576,500 @@ def get_reactions_map(
     return result
 
 
+def get_prayer_by_id(db: Session, prayer_id: UUID) -> Optional[ChatMessagePrayer]:
+    return (
+        db.query(ChatMessagePrayer)
+        .filter(ChatMessagePrayer.id == prayer_id)
+        .first()
+    )
+
+
+class PrayResult(NamedTuple):
+    """What one pray call wrote: the requests the caller prayed for the first
+    time, and the caller's running total for every request in the call."""
+
+    created_message_ids: Set[UUID]
+    my_prayer_counts: Dict[UUID, int]
+
+
+def add_prayers(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+    count: int = 1,
+) -> PrayResult:
+    """Add `count` prayers to each of these requests, in one commit.
+
+    The "is praying" row is written on the first prayer only (the uniqueness
+    constraint leaves an existing one alone); the counter row is upserted on
+    every call. Both land in the same transaction, so a request is never left
+    with a count and no prayer, or the other way round."""
+    if not message_ids:
+        return PrayResult(created_message_ids=set(), my_prayer_counts={})
+
+    prayers_statement = (
+        pg_insert(ChatMessagePrayer.__table__)
+        .values(
+            [
+                {"id": uuid4(), "message_id": message_id, "user_id": user_id}
+                for message_id in message_ids
+            ]
+        )
+        .on_conflict_do_nothing(constraint="uq_chat_message_prayers_message_user")
+        .returning(ChatMessagePrayer.__table__.c.message_id)
+    )
+    created = {row[0] for row in db.execute(prayers_statement).all()}
+
+    counts_table = ChatMessagePrayerCount.__table__
+    now = func.now()
+    counts_insert = pg_insert(counts_table).values(
+        [
+            {
+                "id": uuid4(),
+                "message_id": message_id,
+                "user_id": user_id,
+                "prayer_count": count,
+                "unreported_count": count,
+                "first_prayed_at": now,
+                "last_prayed_at": now,
+            }
+            for message_id in message_ids
+        ]
+    )
+    counts_statement = counts_insert.on_conflict_do_update(
+        constraint="uq_chat_message_prayer_counts_message_user",
+        set_={
+            "prayer_count": counts_table.c.prayer_count
+            + counts_insert.excluded.prayer_count,
+            "unreported_count": counts_table.c.unreported_count
+            + counts_insert.excluded.unreported_count,
+            "last_prayed_at": now,
+        },
+    ).returning(counts_table.c.message_id, counts_table.c.prayer_count)
+    my_counts = {row[0]: int(row[1]) for row in db.execute(counts_statement).all()}
+
+    db.commit()
+    return PrayResult(created_message_ids=created, my_prayer_counts=my_counts)
+
+
+def remove_prayer_and_count(db: Session, message_id: UUID, user_id: UUID) -> None:
+    """Take back one person's prayers for a request: both the "is praying" row
+    and the running total, in one commit. A no-op when there are none."""
+    db.query(ChatMessagePrayer).filter(
+        ChatMessagePrayer.message_id == message_id,
+        ChatMessagePrayer.user_id == user_id,
+    ).delete(synchronize_session=False)
+    db.query(ChatMessagePrayerCount).filter(
+        ChatMessagePrayerCount.message_id == message_id,
+        ChatMessagePrayerCount.user_id == user_id,
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+def count_message_prayers(db: Session, message_id: UUID) -> int:
+    return (
+        db.query(func.count(ChatMessagePrayer.id))
+        .filter(ChatMessagePrayer.message_id == message_id)
+        .scalar()
+        or 0
+    )
+
+
+def get_prayer_counts_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+) -> Dict[UUID, int]:
+    """Prayer counts for many messages at once, keyed by message_id.
+
+    One grouped query per page of messages, so the prayers table stays the
+    source of truth with no denormalised counter to drift."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayer.message_id, func.count(ChatMessagePrayer.id))
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .group_by(ChatMessagePrayer.message_id)
+        .all()
+    )
+    return dict(rows)
+
+
+def get_prayed_message_ids(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+) -> Set[UUID]:
+    """Which of these messages the viewer has already prayed for."""
+    if not message_ids:
+        return set()
+    rows = (
+        db.query(ChatMessagePrayer.message_id)
+        .filter(
+            ChatMessagePrayer.message_id.in_(message_ids),
+            ChatMessagePrayer.user_id == user_id,
+        )
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def get_my_prayer_counts_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    user_id: UUID,
+) -> Dict[UUID, int]:
+    """How many times the viewer has prayed for each of these messages.
+    Messages they have not prayed for are absent."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayerCount.message_id, ChatMessagePrayerCount.prayer_count)
+        .filter(
+            ChatMessagePrayerCount.message_id.in_(message_ids),
+            ChatMessagePrayerCount.user_id == user_id,
+        )
+        .all()
+    )
+    return {message_id: int(prayer_count) for message_id, prayer_count in rows}
+
+
+def get_prayer_user_ids_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+) -> Dict[UUID, List[UUID]]:
+    """Everyone who prayed for each message, keyed by message_id.
+
+    Feeds the prayers_updated broadcast, where each client works out its own
+    prayed_by_me from the shared payload (reactions do the same)."""
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessagePrayer.message_id, ChatMessagePrayer.user_id)
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .order_by(ChatMessagePrayer.created_at.asc())
+        .all()
+    )
+    result: Dict[UUID, List[UUID]] = {}
+    for message_id, user_id in rows:
+        result.setdefault(message_id, []).append(user_id)
+    return result
+
+
+def get_recent_prayers_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    per_message: int = 3,
+) -> Dict[UUID, List[Users]]:
+    """The most recent few people who prayed for each message (avatar stack).
+
+    Ranked in one query rather than one query per message; the full roster
+    comes from list_message_prayers."""
+    if not message_ids or per_message < 1:
+        return {}
+    ranked = (
+        db.query(
+            ChatMessagePrayer.message_id.label("message_id"),
+            ChatMessagePrayer.user_id.label("user_id"),
+            func.row_number()
+            .over(
+                partition_by=ChatMessagePrayer.message_id,
+                order_by=ChatMessagePrayer.created_at.desc(),
+            )
+            .label("rank"),
+        )
+        .filter(ChatMessagePrayer.message_id.in_(message_ids))
+        .subquery()
+    )
+    rows = (
+        db.query(ranked.c.message_id, Users)
+        .join(Users, Users.id == ranked.c.user_id)
+        .filter(ranked.c.rank <= per_message)
+        .order_by(ranked.c.message_id, ranked.c.rank)
+        .all()
+    )
+    result: Dict[UUID, List[Users]] = {}
+    for message_id, user in rows:
+        result.setdefault(message_id, []).append(user)
+    return result
+
+
+def list_message_prayers(
+    db: Session,
+    message_id: UUID,
+    skip: int = 0,
+    limit: int = 20,
+) -> Tuple[List[ChatMessagePrayerCount], int]:
+    """Who is praying for one request and how many times each, most recently
+    prayed first. `total` counts people, not prayers."""
+    query = db.query(ChatMessagePrayerCount).filter(
+        ChatMessagePrayerCount.message_id == message_id
+    )
+    total = query.with_entities(func.count(ChatMessagePrayerCount.id)).scalar() or 0
+    rows = (
+        query.options(selectinload(ChatMessagePrayerCount.user))
+        .order_by(
+            ChatMessagePrayerCount.last_prayed_at.desc(),
+            ChatMessagePrayerCount.id,
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return rows, total
+
+
+# Written to notification_sqs_message_id for a notification that deliberately
+# did not go out: a prayer request held by the room's notification interval. Excluded from the "was one actually sent"
+# queries below, so a suppressed row never extends a window it did not notify
+# anybody about. Non-null, so reconcile - which only retries rows that never
+# recorded an SQS id at all - leaves these alone.
+SUPPRESSED_SQS_MESSAGE_ID = "SUPPRESSED"
+
+
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Postgres hands back an aware value for a timestamptz column; SQLite,
+    which the tests run on, does not. Normalised here so callers can compare
+    against an aware now() without each of them repeating it."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+class DispatchedPrayerRequest(NamedTuple):
+    """The room's last prayer-request push, by both clocks.
+
+    `dispatched_at` is when the push went out, which is what the interval is
+    measured from. `created_at` is what the held count windows on - see
+    `count_suppressed_prayer_requests` for why the two cannot be mixed.
+    """
+
+    dispatched_at: datetime
+    created_at: datetime
+
+
+def last_dispatched_prayer_request(
+    db: Session,
+    *,
+    room_id: UUID,
+    exclude_message_id: UUID,
+    before: Optional[datetime] = None,
+) -> Optional[DispatchedPrayerRequest]:
+    """The last prayer request in this room whose push actually went out.
+
+    Suppressed rows do not count: a request held by the interval must not
+    extend it, or one busy minute would silence the room indefinitely.
+
+    Deleted rows *do* count. Deleting a request does not un-send the push its
+    members already received, so dropping it here would let the sender clear
+    the interval by deleting their own request and post again straight away.
+
+    `exclude_message_id` is required, not a convenience. The gate calls this
+    before the message is marked, where it changes nothing; the copy calls it
+    after the backend has already stamped this message with its real SQS id,
+    where without it the answer would be this very message and the held count
+    would always come out zero.
+
+    `before` bounds the search to pushes that went out earlier than a moment
+    the caller already has in hand. The copy needs it: the worker can reach a
+    message well after a later prayer request has pushed, and the latest push
+    overall is then one that went out *after* this message's own dispatch
+    time. Used as the start of this message's count it would make the window
+    end before it began and report nothing held, dropping the requests this
+    push had promised to carry. Left None - the gate's case, which is asking
+    about now - the latest push is the right answer.
+    """
+    query = db.query(ChatMessage.notification_dispatched_at, ChatMessage.created_at).filter(
+        ChatMessage.room_id == room_id,
+        ChatMessage.message_type == ChatMessageType.PRAYER.value,
+        ChatMessage.id != exclude_message_id,
+        ChatMessage.notification_dispatched_at.isnot(None),
+        ChatMessage.notification_sqs_message_id.isnot(None),
+        ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+    )
+    if before is not None:
+        query = query.filter(ChatMessage.notification_dispatched_at < before)
+    row = query.order_by(ChatMessage.notification_dispatched_at.desc()).first()
+    if not row or row[0] is None or row[1] is None:
+        return None
+    return DispatchedPrayerRequest(
+        dispatched_at=_as_utc(row[0]),
+        created_at=_as_utc(row[1]),
+    )
+
+
+def count_suppressed_prayer_requests(
+    db: Session,
+    *,
+    room_id: UUID,
+    since: Optional[datetime],
+    until: datetime,
+    exclude_message_id: UUID,
+) -> int:
+    """Prayer requests in this room the interval held between two pushes.
+
+    The window is half-open on `notification_dispatched_at` - when the hold was
+    *recorded*, not when the request was written. Bounding on `created_at`
+    instead loses a request that was held out of order: one whose first enqueue
+    failed and which reconcile suppresses later, after a newer request has
+    already pushed. Its creation time sits before this window's lower bound, so
+    it would be counted by no push at all while its SUPPRESSED marker stops it
+    ever being delivered - a request nobody is told about. Suppression order is
+    the order these were decided in, so it is the order to count them in.
+
+    Both bounds read that one clock, so each held request falls in exactly one
+    window and is counted exactly once.
+
+    `since` is None when this room has never raised a push, in which case every
+    held request up to `until` counts. Deleted requests are left out: unlike
+    the dispatch lookup, this number is shown to people, and it should not
+    advertise requests that are no longer in the room.
+    """
+    query = db.query(func.count(ChatMessage.id)).filter(
+        ChatMessage.room_id == room_id,
+        ChatMessage.message_type == ChatMessageType.PRAYER.value,
+        ChatMessage.deleted_at.is_(None),
+        ChatMessage.id != exclude_message_id,
+        ChatMessage.notification_sqs_message_id == SUPPRESSED_SQS_MESSAGE_ID,
+        ChatMessage.notification_dispatched_at.isnot(None),
+        ChatMessage.notification_dispatched_at <= until,
+    )
+    if since is not None:
+        query = query.filter(ChatMessage.notification_dispatched_at > since)
+    return int(query.scalar() or 0)
+
+
+def lock_prayer_request(db: Session, message_id: UUID) -> Optional[ChatMessage]:
+    """The prayer request, locked for the rest of the transaction.
+
+    Serialises the prayer-received gate per request: two pray calls landing
+    together cannot both find the interval open and both push. The request row
+    is locked rather than the last push, because before a request's first push
+    there is no push row to lock."""
+    return (
+        db.query(ChatMessage)
+        .filter(ChatMessage.id == message_id)
+        .with_for_update()
+        .first()
+    )
+
+
+def get_last_prayer_notification(
+    db: Session, message_id: UUID
+) -> Optional[ChatPrayerNotification]:
+    """The request's most recent prayer-received push, which starts the interval."""
+    return (
+        db.query(ChatPrayerNotification)
+        .filter(ChatPrayerNotification.message_id == message_id)
+        .order_by(ChatPrayerNotification.created_at.desc())
+        .first()
+    )
+
+
+class UnreportedPrayers(NamedTuple):
+    """One person's prayers for a request that no push has reported yet."""
+
+    user_id: UUID
+    count: int
+    last_prayed_at: datetime
+
+
+def claim_unreported_prayers(
+    db: Session, message_id: UUID
+) -> List[UnreportedPrayers]:
+    """Read and zero every unreported prayer count for this request, in one
+    statement. Nothing is committed: the caller commits together with the
+    push row, or rolls back to leave the counts for the next push.
+
+    The rows are locked (FOR UPDATE) before they are read, so a pray landing
+    at the same moment either lands first and is claimed here, or waits and
+    adds to a zeroed count for the next push - never lost in between."""
+    counts = ChatMessagePrayerCount.__table__
+    pending = (
+        select(counts.c.id, counts.c.unreported_count.label("claimed"))
+        .where(counts.c.message_id == message_id, counts.c.unreported_count > 0)
+        .with_for_update()
+        .cte("pending")
+    )
+    statement = (
+        update(counts)
+        .where(counts.c.id == pending.c.id)
+        .values(unreported_count=0)
+        .returning(counts.c.user_id, pending.c.claimed, counts.c.last_prayed_at)
+    )
+    return [
+        UnreportedPrayers(
+            user_id=row[0], count=int(row[1]), last_prayed_at=_as_utc(row[2])
+        )
+        for row in db.execute(statement).all()
+    ]
+
+
+def create_prayer_notification(
+    db: Session,
+    *,
+    message_id: UUID,
+    people_count: int,
+    prayer_total: int,
+    latest_user_id: Optional[UUID],
+) -> ChatPrayerNotification:
+    """Record a prayer-received push and commit - together with the counts
+    claimed by claim_unreported_prayers - which also releases the lock taken
+    by lock_prayer_request."""
+    notification = ChatPrayerNotification(
+        message_id=message_id,
+        people_count=people_count,
+        prayer_total=prayer_total,
+        latest_user_id=latest_user_id,
+    )
+    db.add(notification)
+    db.commit()
+    db.refresh(notification)
+    return notification
+
+
+def get_prayer_notification_by_id(
+    db: Session, notification_id: UUID
+) -> Optional[ChatPrayerNotification]:
+    return (
+        db.query(ChatPrayerNotification)
+        .filter(ChatPrayerNotification.id == notification_id)
+        .first()
+    )
+
+
+def mark_prayer_notification_dispatched(
+    db: Session,
+    notification_id: UUID,
+    sqs_message_id: str,
+) -> Optional[ChatPrayerNotification]:
+    notification = get_prayer_notification_by_id(db=db, notification_id=notification_id)
+    if not notification:
+        return None
+    notification.notification_sqs_message_id = sqs_message_id
+    notification.notification_dispatched_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(notification)
+    return notification
+
+
+def list_undispatched_prayer_notifications(
+    db: Session,
+    *,
+    older_than: datetime,
+    limit: int,
+) -> List[ChatPrayerNotification]:
+    return (
+        db.query(ChatPrayerNotification)
+        .filter(
+            ChatPrayerNotification.notification_sqs_message_id.is_(None),
+            ChatPrayerNotification.created_at <= older_than,
+        )
+        .order_by(ChatPrayerNotification.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
 def get_report_by_message_and_reporter(
     db: Session,
     message_id: UUID,
@@ -394,10 +1092,31 @@ def list_reports(
     source: Optional[str] = None,
     reason: Optional[str] = None,
     resolved: Optional[bool] = None,
+    group_id: Optional[UUID] = None,
 ) -> Tuple[List[ChatMessageReport], int]:
     """Paginated moderation reports, newest first, with the people and
-    message context eagerly loaded for display."""
+    message context eagerly loaded for display.
+
+    `group_id` narrows to one group's rooms. A report's own room_id is
+    authoritative, but manual reports filed before that column was added were
+    never backfilled and still resolve their room through the message - the
+    same fallback the queue DTO displays them with. Scoping on room_id alone
+    would drop those from both the page and the total, so the join takes
+    whichever of the two is set.
+    """
     query = db.query(ChatMessageReport)
+    if group_id is not None:
+        query = (
+            query.outerjoin(
+                ChatMessage, ChatMessageReport.message_id == ChatMessage.id
+            )
+            .join(
+                ChatRoom,
+                ChatRoom.id
+                == func.coalesce(ChatMessageReport.room_id, ChatMessage.room_id),
+            )
+            .filter(ChatRoom.group_id == group_id)
+        )
     if source:
         query = query.filter(ChatMessageReport.source == source)
     if reason:
@@ -449,6 +1168,37 @@ def create_report(db: Session, report: ChatMessageReport) -> ChatMessageReport:
     db.commit()
     db.refresh(report)
     return report
+
+
+def get_report_by_id(db: Session, report_id: UUID) -> Optional[ChatMessageReport]:
+    """One report with the same context the queue DTOs read."""
+    return (
+        db.query(ChatMessageReport)
+        .options(
+            selectinload(ChatMessageReport.reporter),
+            selectinload(ChatMessageReport.reported_user),
+            selectinload(ChatMessageReport.room),
+            selectinload(ChatMessageReport.message).selectinload(ChatMessage.sender),
+            selectinload(ChatMessageReport.message).selectinload(ChatMessage.room),
+        )
+        .filter(ChatMessageReport.id == report_id)
+        .first()
+    )
+
+
+def resolve_open_reports_for_message(
+    db: Session, message_id: UUID, resolved_at: datetime
+) -> None:
+    """Close every open report against a message. Does not commit, so it lands
+    in the same transaction as the moderator's delete."""
+    db.execute(
+        update(ChatMessageReport)
+        .where(
+            ChatMessageReport.message_id == message_id,
+            ChatMessageReport.resolved_at.is_(None),
+        )
+        .values(resolved_at=resolved_at)
+    )
 
 
 def count_unread_messages(

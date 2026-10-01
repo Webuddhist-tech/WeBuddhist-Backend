@@ -1,0 +1,42 @@
+[
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000005",
+    "slug": "peace",
+    "label": "Peace",
+    "color": "#FFFFFF",
+    "description": "Calm, clarity, a peaceful passing, rest for those who have died",
+    "display_order": 0
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000001",
+    "slug": "healing",
+    "label": "Healing",
+    "color": "#4A78C2",
+    "description": "Recovery from illness, emotional healing, calm after conflict",
+    "display_order": 1
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000004",
+    "slug": "abundance",
+    "label": "Abundance",
+    "color": "#E8A317",
+    "description": "Success, prosperity, a good job, things going well",
+    "display_order": 2
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000003",
+    "slug": "love",
+    "label": "Love",
+    "color": "#C8503D",
+    "description": "Relationships, family harmony, connection, compassion",
+    "display_order": 3
+  },
+  {
+    "id": "a1b2c3d4-e5f6-4789-a012-000000000002",
+    "slug": "protection",
+    "label": "Protection",
+    "color": "#5B9A6F",
+    "description": "Safety, overcoming fear, removing obstacles",
+    "display_order": 4
+  }
+]

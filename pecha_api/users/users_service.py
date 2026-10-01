@@ -1,6 +1,7 @@
 import logging
 import random
 import string
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import jose
@@ -8,6 +9,7 @@ from fastapi import HTTPException, status, UploadFile
 from jose import JWTError
 from jose.exceptions import JWTClaimsError
 from jwt import ExpiredSignatureError
+from starlette.concurrency import run_in_threadpool
 
 from pecha_api.error_contants import ErrorConstants
 from .user_response_models import (
@@ -21,6 +23,7 @@ from .user_response_models import (
     UpdateOnboardingStatusRequest,
 )
 from .users_enums import SocialProfile
+from .reserved_usernames import is_reserved_username
 from .users_models import Users, SocialMediaAccount
 from ..auth.auth_repository import validate_token
 from .users_repository import (
@@ -39,15 +42,25 @@ from pecha_api.utils import Utils
 from pecha_api.image_utils import ImageUtils
 
 async def get_user_info(token: str) -> UserInfoResponse:
+    # Token validation and response building are both synchronous SQLAlchemy,
+    # so they run in one worker thread rather than on the event loop.
+    return await run_in_threadpool(_get_user_info_sync, token=token)
+
+
+def _get_user_info_sync(token: str) -> UserInfoResponse:
     current_user = validate_and_extract_user_details(token=token)
-    user_info_response = generate_user_info_response(user=current_user)
-    return user_info_response
+    return generate_user_info_response(user=current_user)
+
 
 async def get_user_info_by_username(username: str) -> UserInfoResponse:
+    return await run_in_threadpool(_get_user_info_by_username_sync, username=username)
+
+
+def _get_user_info_by_username_sync(username: str) -> UserInfoResponse:
     with SessionLocal() as db_session:
         user = get_user_by_username(db=db_session, username=username)
         db_session.close()
-    return generate_user_info_response(user=user)    
+    return generate_user_info_response(user=user)
 
 def fetch_user_by_email(email: str) -> Optional[UserInfoResponse]:
     with SessionLocal() as db_session:
@@ -96,7 +109,7 @@ def update_user_info(token: str, user_info_request: UserInfoRequest) -> Users:
     current_user.organization = user_info_request.organization
     current_user.location = user_info_request.location
     current_user.education = ','.join(user_info_request.educations)
-    current_user.avatar_url = Utils.extract_s3_key(presigned_url=user_info_request.avatar_url)
+    current_user.avatar_url = Utils.stored_avatar_reference(user_info_request.avatar_url)
     current_user.about_me = user_info_request.about_me
     with SessionLocal() as db_session:
         try:
@@ -160,10 +173,21 @@ def resolve_user_from_token_payload(db, payload: Dict[str, Any]) -> Users:
     )
 
 
-def validate_and_extract_user_details(token: str) -> Users:
+def validate_and_extract_user_details(token: str, db=None) -> Users:
+    """Resolve the token's user.
+
+    `db` lets a caller that already holds a session lend it to us. Without it
+    this opens a second connection while the caller still holds its own, so a
+    request costs two connections at once - and above `DB_POOL_SIZE +
+    DB_MAX_OVERFLOW` concurrent requests every one of them holds the first
+    while waiting for a second that nobody can give back. Pass the session
+    whenever this is called from inside a `with SessionLocal()` block.
+    """
     try:
         payload = validate_token(token)
-        with SessionLocal() as db_session:
+        # nullcontext: a lent session belongs to the caller, so it is not ours
+        # to close when we are done with it.
+        with nullcontext(db) if db is not None else SessionLocal() as db_session:
             try:
                 user = resolve_user_from_token_payload(db_session, payload)
             except HTTPException as exception:
@@ -202,7 +226,7 @@ def delete_user_account(token: str) -> None:
     with SessionLocal() as db_session:
         db_session.add(current_user)
         delete_user(db=db_session, user=current_user)
-    if avatar_key:
+    if avatar_key and not str(avatar_key).startswith(("http://", "https://")):
         try:
             delete_file(file_path=avatar_key)
         except Exception as e:
@@ -264,6 +288,9 @@ def _generate_username_suggestions(base: str, count: int = 3) -> List[str]:
         while len(suggestions) < count and attempts < 20:
             suffix = ''.join(random.choices(string.digits, k=4))
             candidate = f"{base}{suffix}"
+            if is_reserved_username(candidate):
+                attempts += 1
+                continue
             if not find_user_by_username(db=db_session, username=candidate):
                 suggestions.append(candidate)
             attempts += 1

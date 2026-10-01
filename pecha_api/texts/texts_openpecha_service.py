@@ -119,10 +119,12 @@ async def _get_texts_by_collection_id(
     skip: int,
     limit: int,
     title: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> Tuple[List[V2TextDTO], bool]:
     try:
         page = await fetch_texts_by_category(
             category_id=collection_id,
+            language=language,
             title=title,
             offset=skip,
             limit=limit,
@@ -135,7 +137,7 @@ async def _get_texts_by_collection_id(
 
     items = page.get("items", [])
     has_more = bool(page.get("has_more", False))
-    texts = [_map_external_text_to_dto(item) for item in items]
+    texts = [_map_external_text_to_dto(item, language) for item in items]
 
     return texts, has_more
 
@@ -152,6 +154,7 @@ async def get_texts_by_collection_from_openpecha(
         title=title,
         skip=skip,
         limit=limit,
+        language=language,
     )
 
     collection: Optional[V2CollectionModel] = None
@@ -186,15 +189,12 @@ async def get_titles_and_ids_by_query(
     limit: int = 20,
     offset: int = 0,
 ) -> List[TitleSearchResult]:
-    if not title:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="title is required",
-        )
-
+    """List texts (as their first critical edition), optionally filtered by title.
+    An empty/missing title returns a default, unfiltered listing so callers can
+    show a starting set of texts before the user has typed a search query."""
     texts, _ = await _get_texts_by_collection_id(
         collection_id=None,
-        title=title,
+        title=title or None,
         skip=offset,
         limit=limit,
     )

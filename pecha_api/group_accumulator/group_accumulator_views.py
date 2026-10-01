@@ -4,6 +4,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 from starlette import status
 
+from pecha_api.plans.language_constants import language_query_description
 from .group_accumulator_service import (
     get_group_accumulator_service,
     get_group_accumulators_service,
@@ -25,7 +26,20 @@ from .group_accumulator_response_models import (
     GroupAccumulatorMemberSortBy,
 )
 
-group_accumulator_router = APIRouter(prefix="/group-accumulators", tags=["Group Accumulators"])
+from pecha_api.cache.cache_invalidation_deps import invalidate_caller_on_write
+from pecha_api.group_accumulator.group_accumulator_cache_service import (
+    GROUP_ACCUMULATOR_CACHE_TYPES,
+    get_group_accumulator_service_cached,
+    get_group_accumulators_service_cached,
+)
+
+group_accumulator_router = APIRouter(
+    prefix="/group-accumulators",
+    tags=["Group Accumulators"],
+    # Submitting a count updates this caller's view at once; the group total
+    # everyone else sees follows the short timeout.
+    dependencies=[Depends(invalidate_caller_on_write(*GROUP_ACCUMULATOR_CACHE_TYPES))],
+)
 oauth2_scheme = HTTPBearer()
 optional_oauth2_scheme = HTTPBearer(auto_error=False)
 
@@ -42,18 +56,23 @@ async def get_group_accumulators(
         Optional[HTTPAuthorizationCredentials],
         Depends(optional_oauth2_scheme),
     ] = None,
+    language: Annotated[
+        Optional[str],
+        Query(description=language_query_description("Language code for the About description")),
+    ] = None,
     x_timezone: Annotated[
         Optional[str],
         Header(alias="X-Timezone", description="IANA timezone (e.g. Asia/Shanghai). Restricted group accumulators are hidden for Chinese timezones."),
     ] = None,
 ):
     token = credentials.credentials if credentials else None
-    return get_group_accumulators_service(
+    return await get_group_accumulators_service_cached(
         group_id=group_id,
         skip=skip,
         limit=limit,
         token=token,
         timezone_name=x_timezone,
+        language=language,
     )
 
 
@@ -64,6 +83,10 @@ async def get_group_accumulator(
         Optional[HTTPAuthorizationCredentials],
         Depends(optional_oauth2_scheme),
     ] = None,
+    language: Annotated[
+        Optional[str],
+        Query(description=language_query_description("Language code for the About description")),
+    ] = None,
     x_timezone: Annotated[
         Optional[str],
         Header(alias="X-Timezone", description="IANA timezone for today counts (e.g. Asia/Kathmandu). Defaults to UTC."),
@@ -71,10 +94,11 @@ async def get_group_accumulator(
 ):
     """Get group accumulator details including lifetime and today totals."""
     token = credentials.credentials if credentials else None
-    return get_group_accumulator_service(
+    return await get_group_accumulator_service_cached(
         group_accumulator_id=group_accumulator_id,
         timezone_name=x_timezone,
         token=token,
+        language=language,
     )
 
 

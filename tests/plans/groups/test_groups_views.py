@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 from starlette import status
@@ -455,10 +455,13 @@ def test_get_public_group_by_id_with_language():
 
 def test_get_public_group_members():
     group_id = uuid4()
+    user_id = uuid4()
     response_model = AuthorGroupMembersListResponse(
         total_members=1,
         list=[
             AuthorGroupMemberProfileDTO(
+                user_id=user_id,
+                role="ADMIN",
                 username="alice",
                 fullname="Alice Smith",
                 avatar_url="https://example.com/avatar.webp",
@@ -469,13 +472,15 @@ def test_get_public_group_members():
     )
     with patch(
         "pecha_api.plans.groups.groups_views.list_group_members",
-        return_value=response_model,
+        new=AsyncMock(return_value=response_model),
     ) as mock_service:
         response = client.get(f"/author/groups/{group_id}/members?skip=0&limit=20")
     assert response.status_code == status.HTTP_200_OK
-    mock_service.assert_called_once_with(group_id=group_id, skip=0, limit=20)
+    mock_service.assert_awaited_once_with(group_id=group_id, skip=0, limit=20, token=None)
     body = response.json()
     assert body["total_members"] == 1
+    assert body["list"][0]["user_id"] == str(user_id)
+    assert body["list"][0]["role"] == "ADMIN"
     assert body["list"][0]["username"] == "alice"
     assert body["list"][0]["fullname"] == "Alice Smith"
     assert body["list"][0]["avatar_url"] == "https://example.com/avatar.webp"
@@ -615,9 +620,25 @@ def test_get_group_practices_feed_passes_filters():
     )
 
 
-def test_get_group_practices_feed_requires_auth():
-    response = client.get("/author/groups/practices")
-    assert response.status_code == status.HTTP_403_FORBIDDEN
+def test_get_group_practices_feed_allows_guest():
+    feed_response = GroupPracticesFeedResponse(
+        practices=[], skip=0, limit=20, total=0, include_unfollowed=False
+    )
+    with patch(
+        "pecha_api.plans.groups.groups_views.get_group_practices_feed",
+        return_value=feed_response,
+    ) as mock_service:
+        response = client.get("/author/groups/practices")
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(
+        token=None,
+        group_id=None,
+        should_include_unfollowed=False,
+        skip=0,
+        limit=20,
+        language=None,
+        timezone_name=None,
+    )
 
 
 def test_follow_and_unfollow_group():
@@ -1186,3 +1207,76 @@ def test_get_cms_groups_passes_status_filter():
 
     assert response.status_code == status.HTTP_200_OK
     assert mock_service.call_args.kwargs["group_status"] == AuthorGroupStatus.DRAFT
+
+
+def test_get_my_join_request_notifications_forwards_params():
+    from pecha_api.plans.groups.groups_enums import AuthorGroupJoinRequestStatus
+    from pecha_api.plans.groups.groups_response_models import (
+        GroupJoinRequestNotificationDTO,
+        GroupJoinRequestNotificationListResponse,
+    )
+
+    item = GroupJoinRequestNotificationDTO(
+        id=uuid4(),
+        group_id=uuid4(),
+        group_name="Vajra foundation",
+        status=AuthorGroupJoinRequestStatus.APPROVED,
+        title="WeBuddhist",
+        message="Vajra foundation accepted your request. Tap to open the group.",
+        created_at=datetime.now(timezone.utc),
+    )
+    with patch(
+        "pecha_api.plans.groups.groups_views.list_my_join_request_notifications",
+        return_value=GroupJoinRequestNotificationListResponse(
+            notifications=[item], skip=10, limit=5, total=11
+        ),
+    ) as mock_service:
+        response = client.get(
+            "/users/me/notifications/group-join-requests?skip=10&limit=5&language=bo",
+            headers={"Authorization": "Bearer dummy"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(token="dummy", skip=10, limit=5, language="bo")
+    body = response.json()
+    assert body["total"] == 11
+    assert body["notifications"][0]["status"] == "APPROVED"
+    assert body["notifications"][0]["group_name"] == "Vajra foundation"
+
+
+def test_get_my_join_request_notifications_defaults():
+    from pecha_api.plans.groups.groups_response_models import (
+        GroupJoinRequestNotificationListResponse,
+    )
+
+    with patch(
+        "pecha_api.plans.groups.groups_views.list_my_join_request_notifications",
+        return_value=GroupJoinRequestNotificationListResponse(
+            notifications=[], skip=0, limit=20, total=0
+        ),
+    ) as mock_service:
+        response = client.get(
+            "/users/me/notifications/group-join-requests",
+            headers={"Authorization": "Bearer dummy"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(token="dummy", skip=0, limit=20, language=None)
+
+
+def test_get_my_join_request_notifications_requires_auth():
+    response = client.get("/users/me/notifications/group-join-requests")
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_get_my_join_request_notifications_validates_limit():
+    with patch(
+        "pecha_api.plans.groups.groups_views.list_my_join_request_notifications",
+    ) as mock_service:
+        for limit in (0, 101):
+            response = client.get(
+                f"/users/me/notifications/group-join-requests?limit={limit}",
+                headers={"Authorization": "Bearer dummy"},
+            )
+            assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    mock_service.assert_not_called()

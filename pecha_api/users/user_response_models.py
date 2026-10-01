@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, field_validator
 from .users_enums import SocialProfile
+from .reserved_usernames import is_reserved_username
 
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9_.-]{1,28}[a-zA-Z0-9])?$")
 
@@ -66,7 +67,10 @@ class UpdateUsernameRequest(BaseModel):
                 "Username can only contain letters, numbers, underscores, hyphens, and periods, "
                 "and must start and end with a letter or number"
             )
-        return v.lower()
+        v = v.lower()
+        if is_reserved_username(v):
+            raise ValueError("This username is reserved and cannot be used")
+        return v
 
 
 class UpdateUsernameResponse(BaseModel):
