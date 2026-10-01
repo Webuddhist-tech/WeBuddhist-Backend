@@ -413,7 +413,10 @@ def test_create_event_service_passes_links_and_youtube_to_save() -> None:
     ), patch(
         "pecha_api.events.event_service.save_event",
         return_value=_saved_event_stub(),
-    ) as mock_save:
+    ) as mock_save, patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ):
         create_event_service(token="token", request=request)
 
     # links are forwarded as the 4th positional arg; youtube by keyword
@@ -442,7 +445,13 @@ def test_update_event_service_replaces_links_and_youtube() -> None:
     ), patch(
         "pecha_api.events.event_service.update_event",
         return_value=existing,
-    ) as mock_update:
+    ) as mock_update, patch(
+        "pecha_api.events.event_service._intention_dtos_for_event",
+        return_value=[],
+    ), patch(
+        "pecha_api.events.event_service._chat_room_id_for_event",
+        return_value=None,
+    ):
         update_event_service(token="token", event_id=existing.id, request=request)
 
     _, _, kwargs = mock_update.mock_calls[0]
