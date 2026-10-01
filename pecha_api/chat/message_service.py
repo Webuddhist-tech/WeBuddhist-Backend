@@ -235,7 +235,11 @@ def _persist_message(
             detail="Message body must not be empty",
         )
     stored_intention = validate_message_intention_and_body(
-        db=db, message_type=message_type, body=body, intention=intention
+        db=db,
+        message_type=message_type,
+        body=body,
+        intention=intention,
+        event_id=getattr(room, "event_id", None),
     )
     validate_message_content(db=db, room=room, user=user, body=body)
     parent = _resolve_parent_message(db=db, room=room, parent_message_id=parent_message_id)
@@ -449,6 +453,7 @@ def edit_message_service(
             message_type=message_type,
             body=new_body,
             intention=intention if intention is not None else message.intention,
+            event_id=getattr(room, "event_id", None),
         )
         if new_body != message.body or stored_intention != message.intention:
             validate_message_content(db=db, room=room, user=user, body=new_body)

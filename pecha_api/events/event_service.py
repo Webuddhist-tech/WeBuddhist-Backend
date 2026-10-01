@@ -57,6 +57,17 @@ from pecha_api.plans.shared.permissions import (
     is_super_admin,
 )
 from pecha_api.users.users_service import validate_and_extract_user_details
+from pecha_api.prayer_intentions.prayer_intention_response_models import (
+    PrayerIntentionDTO,
+)
+from pecha_api.prayer_intentions.prayer_intention_repository import (
+    list_prayer_intentions_for_event,
+    replace_event_prayer_intentions,
+    count_event_prayer_intention_links,
+)
+from pecha_api.prayer_intentions.prayer_intention_service import (
+    prayer_intention_to_dto,
+)
 
 from .event_model import Event
 from .event_enums import EventLinkType
@@ -484,6 +495,13 @@ def _chat_room_ids_for_events(*, db, event_ids) -> dict:
     return get_room_ids_by_event_ids(db=db, event_ids=event_ids)
 
 
+def _intention_dtos_for_event(db: Session, event_id: UUID) -> List[PrayerIntentionDTO]:
+    if count_event_prayer_intention_links(db=db, event_id=event_id) == 0:
+        return []
+    rows = list_prayer_intentions_for_event(db=db, event_id=event_id)
+    return [prayer_intention_to_dto(row) for row in rows]
+
+
 def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
     """How many live prayer requests exist in the event's chat room."""
     from pecha_api.chat.repository import (
@@ -511,6 +529,7 @@ def _event_to_dto(
     end_date: Optional[datetime] = None,
     chat_room_id: Optional[UUID] = None,
     prayer_request_count: int = 0,
+    intentions: Optional[List[PrayerIntentionDTO]] = None,
 ) -> EventDTO:
     recurrence_dto = None
     if event.is_recurring:
@@ -576,6 +595,7 @@ def _event_to_dto(
         group_avatar_url=group_avatar_url,
         participant_count=participant_count,
         prayer_request_count=prayer_request_count,
+        intentions=intentions if intentions is not None else [],
         is_joined=is_joined,
         my_participation_type=my_participation_type,
         created_at=event.created_at,
@@ -1192,6 +1212,7 @@ def get_cms_event_by_id_service(
             start_date=start_date,
             end_date=end_date,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
+            intentions=_intention_dtos_for_event(db=db, event_id=event.id),
         )
 
 
@@ -1357,6 +1378,12 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             # are owed is decided in event_reminder_service, which also holds
             # the flag that keeps them off until the rollout says otherwise.
             schedule_event_reminders(db, flushed_event)
+            if request.intention_ids:
+                replace_event_prayer_intentions(
+                    db=db,
+                    event_id=flushed_event.id,
+                    intention_ids=request.intention_ids,
+                )
 
         saved = save_event(
             db, event, request.metadata, request.links,
@@ -1368,7 +1395,12 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         )
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
-        return _event_to_dto(saved)
+        intentions = (
+            _intention_dtos_for_event(db=db, event_id=saved.id)
+            if request.intention_ids
+            else []
+        )
+        return _event_to_dto(saved, intentions=intentions)
 
 
 def _resolve_recurrence_time_window(
@@ -1607,6 +1639,14 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         # stale/canceled against an unchanged event.
         _sync_event_reminders(db, event, should_rebuild_reminders)
 
+        intention_ids_updated = "intention_ids" in request.model_fields_set
+        if intention_ids_updated:
+            replace_event_prayer_intentions(
+                db=db,
+                event_id=event.id,
+                intention_ids=request.intention_ids or [],
+            )
+
         saved = update_event(
             db, event,
             metadata_entries=request.metadata,
@@ -1625,9 +1665,15 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         if chat_was_enabled and not bool(getattr(saved, "chat_enabled", True)):
             _close_event_chat_sockets_best_effort(event_id=saved.id)
 
+        intentions = (
+            _intention_dtos_for_event(db=db, event_id=saved.id)
+            if intention_ids_updated
+            else []
+        )
         return _event_to_dto(
             saved,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=saved.id),
+            intentions=intentions,
         )
 
 
