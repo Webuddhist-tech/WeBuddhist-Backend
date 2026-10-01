@@ -1,5 +1,5 @@
 """Tests for verse of the day like service."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -123,7 +123,7 @@ class TestListVerseLikersService:
         class MockLike:
             user_id = uuid4()
             user = MockUser()
-            created_at = None
+            created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
         mock_get_likers.return_value = ([MockLike()], 1)
 
