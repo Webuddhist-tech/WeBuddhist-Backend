@@ -1,4 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO
 from uuid import UUID
 from typing import Optional
 from pecha_api.plans.plans_enums import ContentType
@@ -18,6 +19,7 @@ class TaskDTO(BaseModel):
     estimated_time: Optional[int] = None
     display_order: Optional[int] = None
     subtasks: List[SubTaskDTO] = []
+    settings: TaskSettingsDTO = Field(default_factory=TaskSettingsDTO)
 
 class PlanDayDTO(BaseModel):
     id: UUID

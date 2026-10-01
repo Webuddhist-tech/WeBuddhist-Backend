@@ -17,6 +17,7 @@ from pecha_api.plans.plans_enums import UserPlanStatus, EnrollmentSource, Series
 from pecha_api.plans.shared.utils import load_plans_from_json, convert_plan_model_to_dto
 from pecha_api.plans.users.plan_users_models import UserPlanProgress, UserSubTaskCompletion, UserTaskCompletion, UserDayCompletion, UserSeriesEnrollment
 from pecha_api.plans.series.series_model import Series
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.users.plan_users_response_models import (
     UserPlanDayCompletionStatus,
     UserPlanDayCompletionStatusResponse,
@@ -827,7 +828,8 @@ def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlan
                 estimated_time=task.estimated_time,
                 display_order=task.display_order,
                 is_completed=(task.id in completed_task_ids),
-                sub_tasks=sub_tasks_dto
+                sub_tasks=sub_tasks_dto,
+                settings=build_task_settings(task),
             ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
         ],
         videos=[

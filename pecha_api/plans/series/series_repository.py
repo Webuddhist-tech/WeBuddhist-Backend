@@ -329,6 +329,11 @@ def _clone_task(db: Session, src_task, new_item_id: UUID, created_by: str) -> No
         display_order=src_task.display_order,
         estimated_time=src_task.estimated_time,
         is_required=src_task.is_required,
+        # Reader defaults carry over; live does not - it belongs to one day.
+        is_commentary_open=src_task.is_commentary_open,
+        commentary_text_id=src_task.commentary_text_id,
+        is_translation_open=src_task.is_translation_open,
+        translation_text_id=src_task.translation_text_id,
         created_by=created_by,
         updated_by=created_by,
     )
