@@ -362,9 +362,12 @@ class TestCommandScripts:
         await store.advance(event_id, "A", "p1", 0, "", {"step_started_ms": "100"})
 
         assert not await store.note_early(event_id, "A", "p1", 0, "100", sent=True)
-        assert await store.note_early(event_id, "A", "p1", 0, "100", sent=False)
+        assert await store.note_early(
+            event_id, "A", "p1", 0, "100", sent=False, duration_ms=1000
+        )
         state = await store.read(event_id)
         assert (state["pre_sending"], state["pre_sent"]) == ("1", "")
+        assert state["fixed_duration_ms"] == "1000"
         # Held while on its way: the hold sees it.
         held = await store.hold(event_id, "p1", 200, "A")
         assert held.resend is True

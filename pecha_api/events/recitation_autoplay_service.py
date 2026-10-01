@@ -237,7 +237,8 @@ return {outcome, plan_id, step, started, resend}
 # 'sending' just before it goes - so a hold that lands while it is on its way
 # still puts the room back - and 'sent' once all of it is out, which is what
 # lets it pass without being sent again when its time comes. Refused while the
-# plan is held: a held room gets no early line.
+# plan is held: a held room gets no early line. ARGV[6], with 'sending', is how
+# long the current step is held: fixed from then on (see _step_duration_ms).
 _NOTE_EARLY_SCRIPT = """
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[2] then return 0 end
@@ -247,7 +248,7 @@ if redis.call('HGET', KEYS[1], 'step_started_ms') ~= ARGV[4] then return 0 end
 if redis.call('HGET', KEYS[1], 'held') == '1' then return 0 end
 local following = tostring(tonumber(ARGV[3]) + 1)
 if ARGV[5] == 'sending' then
-    redis.call('HSET', KEYS[1], 'pre_sending', following)
+    redis.call('HSET', KEYS[1], 'pre_sending', following, 'fixed_duration_ms', ARGV[6])
     return 1
 end
 if redis.call('HGET', KEYS[1], 'pre_sending') ~= following then return 0 end
@@ -345,6 +346,23 @@ def effective_duration_ms(recorded_ms: int, tempo: float) -> int:
     )
 
 
+def _step_duration_ms(
+    state: Dict[str, str], plan: List[dict], step: int, tempo: float
+) -> int:
+    """How long `step` is held: its recorded time at the room's pace - until
+    the next line starts going to the room early. From then the time that send
+    was timed against stands: phones already have the next line, and a pace
+    raised after it would keep them there long past the lead while the stage
+    and the operator wait on this one. A hold still moves the deadline, by
+    moving the step's start."""
+    following = str(step + 1)
+    if following in (state.get("pre_sending"), state.get("pre_sent")):
+        fixed = _as_int(state.get("fixed_duration_ms"))
+        if fixed is not None:
+            return fixed
+    return effective_duration_ms(int(plan[step]["duration_ms"]), tempo)
+
+
 def lead_for(duration_ms: int, lead_ms: int) -> int:
     """How early the step after one held for `duration_ms` goes to the room.
     Never more than half the line, so a short line is still on phones for at
@@ -393,6 +411,8 @@ class AutoplayStore:
                     # before it starts going.
                     "pre_sent": "",
                     "pre_sending": "",
+                    # How long the step is held once that early line is going.
+                    "fixed_duration_ms": "",
                     "held": "",
                     "held_at_ms": "",
                 },
@@ -552,10 +572,11 @@ class AutoplayStore:
         step: int,
         step_started_ms: str,
         sent: bool,
+        duration_ms: Optional[int] = None,
     ) -> bool:
         """Note the step after `step` as going (`sent` False) or gone to the
         room early. Refused unless `owner` still runs the plan at `step`,
-        unheld."""
+        unheld. Going, `duration_ms` is how long `step` is held from then on."""
         return bool(
             await self.redis.eval(
                 _NOTE_EARLY_SCRIPT,
@@ -567,6 +588,7 @@ class AutoplayStore:
                 str(step),
                 step_started_ms,
                 "sent" if sent else "sending",
+                "" if duration_ms is None else str(duration_ms),
             )
         )
 
@@ -650,7 +672,7 @@ def _state_response(
     started = state.get("step_started_ms") or ""
     duration: Optional[int] = None
     if plan is not None and 0 <= step < len(plan):
-        duration = effective_duration_ms(int(plan[step]["duration_ms"]), settings.tempo)
+        duration = _step_duration_ms(state, plan, step, settings.tempo)
     return AutoplayStateResponse(
         event_id=event_id,
         plan_id=state.get("plan_id") or None,
@@ -816,6 +838,9 @@ class AutoplayEngine:
         self._forget_runner(event_id)
         try:
             state = await self.store.read(event_id) or {}
+            # Not sent is not a failed seek: the plan was replaced or stopped,
+            # or a hold took the lease first and sends this line itself
+            # (_show_held_step). Either way the state below is the room's.
             await self._send_step(
                 event_id,
                 plan_id,
@@ -902,28 +927,53 @@ class AutoplayEngine:
         # Held now, or held before with a take-back that never landed: either
         # way this instance has the lease.
         self._forget_runner(event_id)
-        if outcome.resend:
-            plan = await self._plan_for(event_id, outcome.plan_id)
-            if plan and 0 <= outcome.step < len(plan):
-                emitted = await self._emit_step(
-                    event_id,
-                    plan,
-                    outcome.step,
-                    AutoplayGuard(
-                        owner=self.owner,
-                        plan_id=outcome.plan_id,
-                        step=outcome.step,
-                        step_started_ms=outcome.step_started_ms,
-                    ),
-                )
-                # False: the plan moved on while this was sending, and the
-                # room is wherever that move put it.
-                if emitted is not False:
-                    await self.store.clear_early(
-                        event_id, outcome.plan_id, outcome.step, outcome.step_started_ms
-                    )
+        if outcome.resend or not outcome.step_started_ms:
+            await self._show_held_step(event_id, outcome)
         await self._spawn_if_current(event_id, outcome.plan_id)
         return outcome
+
+    async def _show_held_step(self, event_id: UUID, outcome: HoldOutcome) -> None:
+        """Put the room on the step the plan is held on, when it is not.
+
+        Either the next line went out early, and the room is put back. Or the
+        plan had moved on to this step and not yet sent it - a seek, or the
+        runner moving on - when the hold took the lease from under that send,
+        which is then refused. Then the step is sent here, held from now:
+        otherwise the room stays on the line before while the stage and the
+        operator are on this one, until the plan is resumed.
+        """
+        plan = await self._plan_for(event_id, outcome.plan_id)
+        if not plan or not 0 <= outcome.step < len(plan):
+            return
+        if not outcome.step_started_ms:
+            state = await self.store.read(event_id) or {}
+            await self._send_step(
+                event_id,
+                outcome.plan_id,
+                plan,
+                outcome.step,
+                "",
+                self.clock(),
+                already_sent=state.get("pre_sent") == str(outcome.step),
+            )
+            return
+        emitted = await self._emit_step(
+            event_id,
+            plan,
+            outcome.step,
+            AutoplayGuard(
+                owner=self.owner,
+                plan_id=outcome.plan_id,
+                step=outcome.step,
+                step_started_ms=outcome.step_started_ms,
+            ),
+        )
+        # False: the plan moved on while this was sending, and the room is
+        # wherever that move put it.
+        if emitted is not False:
+            await self.store.clear_early(
+                event_id, outcome.plan_id, outcome.step, outcome.step_started_ms
+            )
 
     async def _learn_pace(self, event_id: UUID, recorded_ms: int, recited_ms: int) -> None:
         """Fold one line's actual time into the room's pace. Never worth failing
@@ -1099,7 +1149,7 @@ class AutoplayEngine:
                 continue
 
             settings = await self.store.read_settings(event_id)
-            duration = effective_duration_ms(int(plan[step]["duration_ms"]), settings.tempo)
+            duration = _step_duration_ms(state, plan, step, settings.tempo)
             deadline = int(started) + duration
             following = step + 1
             # Phones show a line the moment it lands, so the next one is sent
@@ -1109,7 +1159,7 @@ class AutoplayEngine:
             pending_early = lead > 0 and state.get("pre_sent") != str(following)
             now = self.clock()
             if pending_early and deadline - lead <= now < deadline:
-                if not await self._send_early(event_id, plan_id, plan, step, started):
+                if not await self._send_early(event_id, plan_id, plan, step, started, duration):
                     return
                 continue
             if now < deadline:
@@ -1201,6 +1251,7 @@ class AutoplayEngine:
         plan: List[dict],
         step: int,
         started: str,
+        duration_ms: int,
     ) -> bool:
         """Send the step after `step` to the room ahead of its time, and note
         it went, so it is not sent again when its time comes. Sent under the
@@ -1209,11 +1260,12 @@ class AutoplayEngine:
 
         Noted as going before it is sent and as gone after, so a hold landing
         anywhere in between sees it and puts the room back, and one landing
-        first stops it going at all."""
+        first stops it going at all. Going, `step` keeps `duration_ms`, the
+        time this send was timed against, whatever the pace does next."""
         if not await self.store.may_send(event_id, self.owner, plan_id, step, started):
             return False
         if not await self.store.note_early(
-            event_id, self.owner, plan_id, step, started, sent=False
+            event_id, self.owner, plan_id, step, started, sent=False, duration_ms=duration_ms
         ):
             return False
         following = step + 1

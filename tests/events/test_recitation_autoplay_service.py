@@ -105,7 +105,9 @@ class FakeStore:
             self.leases[event_id] = (owner, self.clock() + LEASE_MS)
         return HoldOutcome(result, state["plan_id"], step, started, resend)
 
-    async def note_early(self, event_id, owner, plan_id, step, step_started_ms, sent):
+    async def note_early(
+        self, event_id, owner, plan_id, step, step_started_ms, sent, duration_ms=None
+    ):
         state = self.states.get(event_id)
         if (
             self._holder(event_id) != owner
@@ -120,6 +122,7 @@ class FakeStore:
         following = str(step + 1)
         if not sent:
             state["pre_sending"] = following
+            state["fixed_duration_ms"] = "" if duration_ms is None else str(duration_ms)
             return True
         if state.get("pre_sending") != following:
             return False
@@ -950,6 +953,31 @@ class TestSendingAhead:
         assert _sent(h, began) == [(0, "bo-0"), (200, "bo-1")]
 
     @pytest.mark.asyncio
+    async def test_a_pace_raised_after_the_next_line_went_early_does_not_hold_the_stage_back(self):
+        """Phones already have the next line: the stage moves on when that send
+        was timed for, not later by the new pace, which starts with the next
+        line instead."""
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await _yield()
+
+        during = await h.engine.update_settings(event_id, tempo=1.6)
+        paused.until = lambda: False
+        paused.gate.set()
+        await h.settle(event_id)
+
+        assert during.step_duration_ms == 1000
+        assert _sent(h, began) == [(0, "bo-0"), (700, "bo-1")]
+        next_line = [
+            s for s in h.store.published if s["status"] == "running" and s["step"] == 1
+        ]
+        assert next_line[0]["step_started_at_ms"] - began == 1000
+        assert next_line[0]["step_duration_ms"] == 1600
+
+    @pytest.mark.asyncio
     async def test_no_lead_sends_each_line_on_time(self):
         h = Harness()
         event_id = uuid4()
@@ -1317,6 +1345,43 @@ class TestHolding:
         h.engine._forget_runner(event_id)
 
     @pytest.mark.asyncio
+    async def test_a_hold_between_a_seek_and_its_send_holds_the_room_on_the_new_line(self):
+        """The seek has moved the plan but not sent the line when a hold lands
+        on another instance. The hold takes the lease, so the seek's send is
+        refused: the hold sends the line itself rather than holding the stage
+        on the new line and phones on the old one."""
+        clock = Clock()
+        store = FakeStore(clock)
+        first = Harness(clock=clock, store=store, owner="A")
+        second = Harness(clock=clock, store=store, owner="B")
+        first_paused = _Paused(first, until=lambda: True)
+        second_paused = _Paused(second, until=lambda: True)
+        event_id = uuid4()
+        began = clock.now
+        await first.engine.start(event_id, _steps(1000, 1000, 1000))
+        plan_id = _plan_id(first, event_id)
+        seek = store.seek
+
+        async def seek_then_hold(*args):
+            outcome = await seek(*args)
+            await second.engine.hold(event_id, plan_id)
+            return outcome
+
+        store.seek = seek_then_hold
+        clock.now += 200
+        state = await first.engine.seek(event_id, plan_id, 2)
+
+        assert _sent(first, began) == [(0, "bo-0")]
+        assert _sent(second, began) == [(200, "bo-2")]
+        assert state.step == 2
+        assert state.held is True
+        assert state.step_started_at_ms == began + 200
+        first.engine._forget_runner(event_id)
+        second.engine._forget_runner(event_id)
+        first_paused.gate.set()
+        second_paused.gate.set()
+
+    @pytest.mark.asyncio
     async def test_a_hold_that_lands_first_stops_the_early_line_going(self):
         h = _with_lead(300)
         event_id = uuid4()
@@ -1326,7 +1391,7 @@ class TestHolding:
         await h.store.hold(event_id, plan_id, h.clock(), "A")
 
         plan = h.engine._plans[event_id][1]
-        sent = await h.engine._send_early(event_id, plan_id, plan, 0, started)
+        sent = await h.engine._send_early(event_id, plan_id, plan, 0, started, 1000)
 
         assert sent is False
         assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0"]
