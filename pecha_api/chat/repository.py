@@ -458,14 +458,17 @@ def list_undispatched_chat_notification_messages(
     *,
     older_than: datetime,
     limit: int,
+    message_type: Optional[str] = None,
 ) -> List[ChatMessage]:
+    query = db.query(ChatMessage).filter(
+        ChatMessage.deleted_at.is_(None),
+        ChatMessage.notification_sqs_message_id.is_(None),
+        ChatMessage.created_at <= older_than,
+    )
+    if message_type is not None:
+        query = query.filter(ChatMessage.message_type == message_type)
     return (
-        db.query(ChatMessage)
-        .filter(
-            ChatMessage.deleted_at.is_(None),
-            ChatMessage.notification_sqs_message_id.is_(None),
-            ChatMessage.created_at <= older_than,
-        )
+        query
         .order_by(ChatMessage.created_at.asc())
         .limit(limit)
         .all()

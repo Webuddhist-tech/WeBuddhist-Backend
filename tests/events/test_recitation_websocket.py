@@ -12,6 +12,8 @@ from pecha_api.events.recitation_websocket import (
     MAX_SETS_PER_SECOND,
     POSITION_TTL_SECONDS,
     RATE_WINDOW_SECONDS,
+    AutoplayGuard,
+    AutoplayRefused,
     RecitationBroadcaster,
     _ALLOW_SET_SCRIPT,
     _END_SEGMENT_MARKS_SCRIPT,
@@ -436,6 +438,53 @@ class TestRecitationPositionSnapshot:
         )
 
         broadcaster.redis.publish.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_autoplay_position_is_not_published_once_its_plan_is_gone(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = 0
+        event_id = uuid4()
+
+        with pytest.raises(AutoplayRefused):
+            await broadcaster.broadcast_position(
+                event_id=event_id,
+                text_id="bo",
+                segment_id="bo-0",
+                index=0,
+                round_number=1,
+                server_time="2026-09-14T09:30:00Z",
+                guard=AutoplayGuard(owner="A", plan_id="old", step=1, step_started_ms=""),
+            )
+
+        script = broadcaster.redis.eval.await_args.args[0]
+        assert "plan_id" in script and "PUBLISH" in script
+        broadcaster.redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_autoplay_position_is_saved_and_published_in_one_step(self):
+        broadcaster = _broadcaster()
+        broadcaster.redis.eval.return_value = 41
+        event_id = uuid4()
+
+        revision = await broadcaster.broadcast_position(
+            event_id=event_id,
+            text_id="bo",
+            segment_id="bo-0",
+            index=0,
+            round_number=1,
+            server_time="2026-09-14T09:30:00Z",
+            guard=AutoplayGuard(owner="A", plan_id="plan-1", step=0, step_started_ms=""),
+        )
+
+        assert revision == 41
+        script, key_count, *args = broadcaster.redis.eval.await_args.args
+        assert key_count == 4
+        assert "INCR" in script and "PUBLISH" in script
+        assert args[10:14] == ["A", "plan-1", "0", ""]
+        payload = json.loads(args[-1] + "41}")
+        assert payload["segment_id"] == "bo-0"
+        assert payload["revision"] == 41
+        broadcaster.redis.publish.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_get_position_returns_stored_frame(self):

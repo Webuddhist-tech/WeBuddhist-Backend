@@ -325,12 +325,13 @@ class PrayerBatchResponse(BaseModel):
 
 class ChatMessagePrayerDTO(BaseModel):
     """One person praying for a request: how many times, when they first
-    prayed (`created_at`) and when they last did."""
+    prayed (`created_at`) and when they last did. `prayer_count` is only
+    filled in for the request's author; everyone else gets null."""
     user_id: UUID
     email: Optional[str] = None
     name: Optional[str] = None
     avatar_url: Optional[str] = None
-    prayer_count: int
+    prayer_count: Optional[int] = None
     created_at: str
     last_prayed_at: str
 

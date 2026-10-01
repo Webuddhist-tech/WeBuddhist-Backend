@@ -47,6 +47,76 @@ class TestRecordSegmentPlayTime:
         save.assert_called_once_with("text-7", "seg-a", 4000)
 
     @pytest.mark.asyncio
+    async def test_the_controllers_own_measurement_is_what_gets_recorded(self):
+        """The controller timed the line it left; the marks only say the two are
+        adjacent. Subtracting them here would measure the gap between two HTTP
+        arrivals instead - network, liveness check, throttle and the
+        controller's send pacing included."""
+        broadcaster = _broadcaster(previous="8|6000|0|r1|3|1|seg-a")
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(broadcaster, elapsed_ms=3_100)
+
+        save.assert_called_once_with("text-7", "seg-a", 3_100)
+
+    @pytest.mark.asyncio
+    async def test_without_a_reported_hold_the_marks_are_still_subtracted(self):
+        """A controller that reports nothing - an older one, a script, a pedal -
+        is measured as before rather than not at all."""
+        broadcaster = _broadcaster(previous="8|6000|0|r1|3|1|seg-a")
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(broadcaster, elapsed_ms=None)
+
+        save.assert_called_once_with("text-7", "seg-a", 4_000)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "elapsed_ms", [MIN_SEGMENT_PLAY_MS - 1, MAX_SEGMENT_PLAY_MS + 1]
+    )
+    async def test_a_reported_hold_is_clamped_like_any_other(self, elapsed_ms):
+        """The emit token is a shared secret, so the figure is a claim: a line
+        recited in no time, or held for an hour, is not a play time."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|3|1|seg-a"), elapsed_ms=elapsed_ms
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_reported_hold_does_not_get_a_move_measured_that_would_not_be(self):
+        """The controller says how long, never whether. A move whose predecessor
+        never reached the room spans a line the store never saw, and the
+        adjacency test still throws it out."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|2|1|seg-a"),
+                index=4,
+                elapsed_ms=2_000,
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_reported_hold_does_not_make_an_autoplay_move_a_measurement(self):
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|3|1|seg-a"),
+                autoplay=True,
+                elapsed_ms=2_000,
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_reported_hold_is_not_billed_across_runs(self):
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r0|3|1|seg-a"), elapsed_ms=2_000
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_marks_the_new_line_under_its_revision(self):
         broadcaster = _broadcaster()
         with patch(f"{MODULE}._save_sample"):
@@ -130,6 +200,76 @@ class TestRecordSegmentPlayTime:
         line left behind takes."""
         with patch(f"{MODULE}._save_sample") as save:
             await _record(_broadcaster(previous="8|6000|0|r1|3|1|seg-a"), index=index)
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_return_from_the_end_of_a_passage_measures_its_last_line(self):
+        """Back to the passage's start, in the next round: the line the Return
+        sits under was recited through, and nothing else ever times it."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|12|1|seg-last"),
+                index=3,
+                round_number=2,
+                from_index=12,
+                elapsed_ms=5_200,
+            )
+
+        save.assert_called_once_with("text-7", "seg-last", 5_200)
+
+    @pytest.mark.asyncio
+    async def test_a_step_over_yigchung_measures_the_line_before_it(self):
+        """Yigchung is not recited, so Next lands two lines on - still the next
+        line the room says aloud."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|3|1|seg-a"),
+                index=5,
+                from_index=3,
+                elapsed_ms=2_500,
+            )
+
+        save.assert_called_once_with("text-7", "seg-a", 2_500)
+
+    @pytest.mark.asyncio
+    async def test_following_on_without_a_destination_is_not_a_measurement(self):
+        """`from_index` matching the room's last line is not a move until it
+        names the line it landed on. Both fields are optional, so a request
+        can omit `index` and still be accepted."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|12|1|seg-last"),
+                index=None,
+                from_index=12,
+                elapsed_ms=5_200,
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_following_on_from_a_line_the_room_never_took_is_not_a_measurement(self):
+        """The controller's word counts only when the room's last line is the one
+        it says it left: otherwise the hold spans a line the store never saw."""
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|0|r1|10|1|seg-a"),
+                index=3,
+                from_index=12,
+                elapsed_ms=2_500,
+            )
+
+        save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_following_on_is_still_not_measured_after_autoplay(self):
+        with patch(f"{MODULE}._save_sample") as save:
+            await _record(
+                _broadcaster(previous="8|6000|1|r1|12|1|seg-a"),
+                index=3,
+                from_index=12,
+                elapsed_ms=2_500,
+            )
 
         save.assert_not_called()
 

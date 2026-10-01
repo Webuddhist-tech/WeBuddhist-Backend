@@ -25,6 +25,20 @@ events for the WebBuddhist worker.
 The event intentionally contains only the message ID. Title, body preview, and
 recipient devices are resolved by the backend when the worker asks for targets.
 
+## Prayer queue
+
+Prayer pushes go to `PRAYER_NOTIFICATION_SQS_QUEUE_URL` instead of the chat
+queue, so a burst of prayers never delays ordinary chat pushes:
+
+| Push | Event |
+|------|-------|
+| Prayer request (`message_type=PRAYER`, sent to the whole room) | `CHAT_MESSAGE_CREATED` with `message_id`, same as above |
+| Someone prayed for your request | `PRAYER_RECEIVED` with `prayer_id` |
+
+When `PRAYER_NOTIFICATION_SQS_QUEUE_URL` is empty, both fall back to the chat
+queue. The worker handles either event on either queue, so the backend and
+worker can be deployed in any order.
+
 ## Dispatch tracking
 
 `chat_messages` stores:
@@ -71,6 +85,7 @@ Sets `push_device_tokens.is_active = false` for a permanently invalid FCM token.
 | Variable | Purpose |
 |----------|---------|
 | `CHAT_NOTIFICATION_SQS_QUEUE_URL` | Dedicated chat notification queue |
+| `PRAYER_NOTIFICATION_SQS_QUEUE_URL` | Prayer requests and "someone prayed" pushes (empty = use the chat queue) |
 | `CHAT_NOTIFICATION_DISPATCH_RECONCILE_GRACE_SECONDS` | Wait before re-enqueue |
 | `CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS` | Scheduler interval |
 | `CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE` | Max messages per reconcile pass |

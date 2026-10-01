@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import AsyncIterator, Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
@@ -49,6 +50,28 @@ def segment_mark_key(event_id: UUID) -> str:
     """Per text, the line the room last landed on and when - what a segment's
     play time is measured from once the next line arrives."""
     return f"recitation:event:{event_id}:marks"
+
+
+def autoplay_state_key(event_id: UUID) -> str:
+    """Where autoplay is: its plan, status, step and when the step went out."""
+    return f"recitation:event:{event_id}:autoplay"
+
+
+def autoplay_plan_key(event_id: UUID) -> str:
+    """The steps autoplay is running, as the controller laid them out."""
+    return f"recitation:event:{event_id}:autoplay-plan"
+
+
+def autoplay_lease_key(event_id: UUID) -> str:
+    """The instance running this event's autoplay. Exactly one does, and another
+    takes over once the lease lapses - a deploy or a crash does not end it."""
+    return f"recitation:event:{event_id}:autoplay-lease"
+
+
+def autoplay_channel(event_id: UUID) -> str:
+    """Autoplay's state as it changes, for the operator's socket only. Kept off
+    the position channel so the room's phones only ever see positions."""
+    return f"recitation:event:{event_id}:autoplay-state"
 
 
 def segment_boundary_key(event_id: UUID) -> str:
@@ -243,6 +266,72 @@ return count
 """
 
 
+class AutoplayRefused(Exception):
+    """An autoplay position was not sent: its plan is no longer the one running
+    at that step."""
+
+
+@dataclass(frozen=True)
+class AutoplayGuard:
+    """What an autoplay position may only go out under: the runner still holds
+    the lease, and its plan is still running at this step as it last saw it."""
+
+    owner: str
+    plan_id: str
+    step: int
+    step_started_ms: str
+
+
+# An autoplay position is saved and published in the same step as the check
+# that its plan is still the one running. Checked in one round trip and sent in
+# another, a stop or a new plan can land between them, and the room is moved
+# back to a line of a plan that is over. Returns 0, sending nothing, when the
+# check fails; otherwise the revision, as _SAVE_POSITION_SCRIPT does.
+_SAVE_AND_PUBLISH_GUARDED_SCRIPT = """
+if redis.call('GET', KEYS[4]) ~= ARGV[7] then return 0 end
+if redis.call('HGET', KEYS[3], 'plan_id') ~= ARGV[8] then return 0 end
+if redis.call('HGET', KEYS[3], 'status') ~= 'running' then return 0 end
+if redis.call('HGET', KEYS[3], 'step') ~= ARGV[9] then return 0 end
+if redis.call('HGET', KEYS[3], 'step_started_ms') ~= ARGV[10] then return 0 end
+local revision = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1],
+    'text_id', ARGV[1],
+    'segment_id', ARGV[2],
+    'index', ARGV[3],
+    'round_number', ARGV[4],
+    'updated_at', ARGV[5],
+    'revision', revision)
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+redis.call('EXPIRE', KEYS[2], ARGV[6])
+redis.call('PUBLISH', ARGV[11], ARGV[12] .. revision .. '}')
+return revision
+"""
+
+
+def _position_payload(
+    event_id: UUID,
+    text_id: str,
+    segment_id: str,
+    index: Optional[int],
+    round_number: Optional[int],
+    server_time: str,
+    revision: Optional[int],
+) -> str:
+    """The position frame as the room receives it, manual and autoplay alike."""
+    return json.dumps(
+        {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": text_id,
+            "segment_id": segment_id,
+            "index": index,
+            "round_number": round_number,
+            "server_time": server_time,
+            "revision": revision,
+        }
+    )
+
+
 class RecitationBroadcaster:
     """Manages WebSocket connections and Redis pub/sub for live recitation
     position, plus the current-position snapshot each new subscriber is sent.
@@ -365,6 +454,13 @@ class RecitationBroadcaster:
         """Detach a socket; the last one out closes the Redis subscription."""
         await self.fanout.unsubscribe(position_channel(event_id), subscriber)
 
+    async def subscribe_to_autoplay(self, event_id: UUID) -> Subscriber:
+        """Attach the operator's socket to autoplay's state as it changes."""
+        return await self.fanout.subscribe(autoplay_channel(event_id))
+
+    async def unsubscribe_from_autoplay(self, event_id: UUID, subscriber: Subscriber) -> None:
+        await self.fanout.unsubscribe(autoplay_channel(event_id), subscriber)
+
     async def save_position(
         self,
         event_id: UUID,
@@ -462,13 +558,30 @@ class RecitationBroadcaster:
         index: Optional[int],
         round_number: Optional[int],
         server_time: str,
+        guard: Optional[AutoplayGuard] = None,
     ) -> Optional[int]:
         """Snapshot under a fresh revision, then publish via Redis pub/sub.
 
         Returns the revision the position was stored under (None when the
         snapshot could not be written), so an HTTP caller can be told where its
         click landed in the ordering.
+
+        With a `guard`, the position only goes out if the autoplay plan it
+        belongs to is still running at its step, checked, saved and published
+        in one step; raises `AutoplayRefused` when it is not, having sent
+        nothing.
         """
+        if guard is not None:
+            return await self._broadcast_guarded(
+                event_id=event_id,
+                text_id=text_id,
+                segment_id=segment_id,
+                index=index,
+                round_number=round_number,
+                server_time=server_time,
+                guard=guard,
+            )
+
         revision = await self.save_position(
             event_id=event_id,
             text_id=text_id,
@@ -478,7 +591,32 @@ class RecitationBroadcaster:
             server_time=server_time,
         )
 
-        payload = {
+        try:
+            await self.redis.publish(
+                position_channel(event_id),
+                _position_payload(
+                    event_id, text_id, segment_id, index, round_number, server_time, revision
+                ),
+            )
+        except Exception as e:
+            logger.exception("Failed to broadcast recitation position to Redis: %s", e)
+            raise
+
+        return revision
+
+    async def _broadcast_guarded(
+        self,
+        event_id: UUID,
+        text_id: str,
+        segment_id: str,
+        index: Optional[int],
+        round_number: Optional[int],
+        server_time: str,
+        guard: AutoplayGuard,
+    ) -> int:
+        # Everything but the revision, which only the script knows: it is
+        # appended there as the last field.
+        head = json.dumps({
             "type": "position",
             "event_id": str(event_id),
             "text_id": text_id,
@@ -486,16 +624,34 @@ class RecitationBroadcaster:
             "index": index,
             "round_number": round_number,
             "server_time": server_time,
-            "revision": revision,
-        }
-
+        })
         try:
-            await self.redis.publish(position_channel(event_id), json.dumps(payload))
+            revision = await self.redis.eval(
+                _SAVE_AND_PUBLISH_GUARDED_SCRIPT,
+                4,
+                position_state_key(event_id),
+                position_revision_key(event_id),
+                autoplay_state_key(event_id),
+                autoplay_lease_key(event_id),
+                text_id,
+                segment_id,
+                "" if index is None else str(index),
+                "" if round_number is None else str(round_number),
+                server_time,
+                str(POSITION_TTL_SECONDS),
+                guard.owner,
+                guard.plan_id,
+                str(guard.step),
+                guard.step_started_ms,
+                position_channel(event_id),
+                head[:-1] + ', "revision": ',
+            )
         except Exception as e:
-            logger.exception("Failed to broadcast recitation position to Redis: %s", e)
+            logger.exception("Failed to broadcast autoplay position to Redis: %s", e)
             raise
-
-        return revision
+        if int(revision or 0) == 0:
+            raise AutoplayRefused()
+        return int(revision)
 
     async def swap_segment_mark(
         self,

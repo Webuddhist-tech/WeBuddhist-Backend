@@ -291,11 +291,10 @@ class TestPrayForMessagesService:
         self, mock_session, _mock_room, _mock_member, _mock_get_message
     ):
         _session(mock_session)
+        room_id, user, message_ids = uuid4(), MockUser(), [uuid4()]
 
         with pytest.raises(HTTPException) as exc_info:
-            pray_for_messages_service(
-                room_id=uuid4(), user=MockUser(), message_ids=[uuid4()]
-            )
+            pray_for_messages_service(room_id=room_id, user=user, message_ids=message_ids)
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -385,9 +384,10 @@ class TestUnprayMessageService:
     ):
         _session(mock_session)
         mock_get_message.return_value = MockMessage(message_type="TEXT")
+        message_id, user = uuid4(), MockUser()
 
         with pytest.raises(HTTPException) as exc_info:
-            unpray_message_service(message_id=uuid4(), user=MockUser())
+            unpray_message_service(message_id=message_id, user=user)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail == "NOT_A_PRAYER_REQUEST"
@@ -442,7 +442,7 @@ class TestListMessagePrayersService:
     @patch(f"{MODULE}._require_active_member")
     @patch(f"{MODULE}._get_room_or_404")
     @patch(f"{MODULE}.SessionLocal")
-    def test_another_member_gets_403_and_no_roster(
+    def test_another_member_sees_who_is_praying_but_not_how_often(
         self,
         mock_session,
         _mock_room,
@@ -451,14 +451,21 @@ class TestListMessagePrayersService:
         mock_list,
     ):
         _session(mock_session)
-        mock_get_message.return_value = MockMessage()
+        message = MockMessage()
+        mock_get_message.return_value = message
+        bob = MockUser(email="bob@example.com", firstname="Bob")
+        mock_list.return_value = (
+            [MockPrayerCount(message.id, bob, prayer_count=3)],
+            1,
+        )
 
-        with pytest.raises(HTTPException) as exc_info:
-            list_message_prayers_service(message_id=uuid4(), user=MockUser())
+        response = list_message_prayers_service(
+            message_id=message.id, user=MockUser()
+        )
 
-        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
-        assert exc_info.value.detail == "Only the requester can see who is praying"
-        mock_list.assert_not_called()
+        assert response.total == 1
+        assert [p.name for p in response.prayers] == ["Bob"]
+        assert response.prayers[0].prayer_count is None
 
     @patch(f"{MODULE}.list_message_prayers")
     @patch(f"{MODULE}.get_message_by_id_any_room")
@@ -731,7 +738,7 @@ class TestPrayerNotificationGate:
 class TestNotifyPrayersForRequest:
 
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=False)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=False)
     def test_no_queue_records_no_push(self, _configured, mock_gate):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
@@ -740,9 +747,9 @@ class TestNotifyPrayersForRequest:
 
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
     @patch(f"{DISPATCH}.SessionLocal")
-    @patch(f"{DISPATCH}.send_chat_notification_message", return_value="sqs-1")
+    @patch(f"{DISPATCH}.send_prayer_notification_message", return_value="sqs-1")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_sends_the_notification_id_as_prayer_id(
         self, _configured, mock_gate, mock_send, mock_session, mock_mark
     ):
@@ -760,9 +767,9 @@ class TestNotifyPrayersForRequest:
         assert mock_mark.call_args.kwargs["notification_id"] == notification_id
         assert mock_mark.call_args.kwargs["sqs_message_id"] == "sqs-1"
 
-    @patch(f"{DISPATCH}.send_chat_notification_message")
+    @patch(f"{DISPATCH}.send_prayer_notification_message")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", return_value=None)
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_held_by_the_interval_sends_nothing(self, _configured, _gate, mock_send):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
@@ -770,16 +777,16 @@ class TestNotifyPrayersForRequest:
         mock_send.assert_not_called()
 
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", side_effect=RuntimeError)
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_never_raises(self, _configured, _gate):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
         assert notify_prayers_for_request(uuid4(), uuid4()) is None
 
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
-    @patch(f"{DISPATCH}.send_chat_notification_message", side_effect=RuntimeError)
+    @patch(f"{DISPATCH}.send_prayer_notification_message", side_effect=RuntimeError)
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_a_failed_send_leaves_the_row_for_reconcile(
         self, _configured, mock_gate, _send, mock_mark
     ):
@@ -797,7 +804,7 @@ class TestReconcilePrayerNotifications:
     @patch(f"{DISPATCH}.list_undispatched_prayer_notifications")
     @patch(f"{DISPATCH}.get_int", return_value=60)
     @patch(f"{DISPATCH}.SessionLocal")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=True)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_resends_unsent_pushes_without_re_gating(
         self, _configured, mock_session, _get_int, mock_list, mock_send
     ):
@@ -815,7 +822,7 @@ class TestReconcilePrayerNotifications:
         ]
 
     @patch(f"{DISPATCH}.list_undispatched_prayer_notifications")
-    @patch(f"{DISPATCH}.is_chat_notification_sqs_configured", return_value=False)
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=False)
     def test_no_queue_does_nothing(self, _configured, mock_list):
         from pecha_api.chat.notification_dispatch_service import (
             reconcile_undispatched_prayer_notifications,

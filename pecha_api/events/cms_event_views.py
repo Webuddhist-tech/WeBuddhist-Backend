@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from typing import Annotated, Optional
 from uuid import UUID
@@ -29,7 +30,30 @@ from .notification_response_models import (
     SendEventAnnouncementResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 oauth2_scheme = HTTPBearer()
+
+
+async def _stop_autoplay_for_deleted_event(event_id: UUID) -> None:
+    """A deleted event must not keep reciting.
+
+    Best-effort, and only once the delete has gone through: the delete is what
+    checks the caller may touch this event, so stopping first would let anyone
+    stop any event's autoplay. If this cannot be recorded, the runner still
+    refuses its next step once the event is no longer there.
+    """
+    from pecha_api.events.recitation_autoplay_service import get_autoplay_engine
+
+    try:
+        engine = get_autoplay_engine()
+    except RuntimeError:
+        return
+    try:
+        await engine.stop(event_id, reason="ended")
+    except Exception as error:
+        logger.exception("Failed to stop autoplay for deleted event %s: %s", event_id, error)
+
 
 cms_events_router = APIRouter(
     prefix="/cms/events",
@@ -130,6 +154,7 @@ async def delete_event_endpoint(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> None:
     delete_event_service(token=credentials.credentials, event_id=event_id)
+    await _stop_autoplay_for_deleted_event(event_id)
 
 
 @cms_events_router.patch("/{event_id}/featured", status_code=status.HTTP_204_NO_CONTENT)

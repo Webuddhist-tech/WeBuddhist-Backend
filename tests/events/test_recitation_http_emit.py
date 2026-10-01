@@ -82,6 +82,19 @@ class TestPublishPositionOverHttp:
         assert isinstance(kwargs["accepted_at_ms"], int)
         assert kwargs["autoplay"] is False
         assert kwargs["run"] is None
+        assert kwargs["elapsed_ms"] is None
+
+    def test_the_hold_the_controller_measured_is_passed_on(self):
+        with _http_env() as broadcaster:
+            client.post(_url(uuid4()), json=_body(elapsed_ms=2_750), headers=AUTH)
+
+        assert broadcaster.record.await_args.kwargs["elapsed_ms"] == 2_750
+
+    def test_a_negative_hold_is_refused(self):
+        with _http_env():
+            response = client.post(_url(uuid4()), json=_body(elapsed_ms=-1), headers=AUTH)
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
     def test_the_run_is_passed_on(self):
         with _http_env() as broadcaster:

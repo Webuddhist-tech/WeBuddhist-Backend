@@ -204,6 +204,8 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
+    # Prayer requests and "someone prayed" pushes. Empty = use the chat queue.
+    PRAYER_NOTIFICATION_SQS_QUEUE_URL="",
     # /share/image serves an event's own photo, re-encoded as JPEG because the
     # stored WebP is not a format link-preview crawlers render. The endpoint is
     # public, so the fetch is bounded and the bytes are held per process.
