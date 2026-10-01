@@ -117,14 +117,16 @@ end
 return 1
 """
 
-# Renewing the lease keeps the plan and its state alive with it: a plan may
-# run longer than their TTL, and losing them mid-run would stop the room with
-# nobody told and nobody able to take over.
+# Renewing the lease keeps the plan, its state and the event's settings alive
+# with it: a plan may run longer than their TTL, and losing the plan mid-run
+# would stop the room with nobody told and nobody able to take over, while
+# losing the settings would drop the room's learned pace back to the default.
 _RENEW_SCRIPT = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     redis.call('PEXPIRE', KEYS[1], ARGV[2])
     redis.call('EXPIRE', KEYS[2], ARGV[3])
     redis.call('EXPIRE', KEYS[3], ARGV[3])
+    redis.call('EXPIRE', KEYS[4], ARGV[3])
     return 1
 end
 return 0
@@ -132,7 +134,7 @@ return 0
 
 # Asked just before a step goes out: the runner still holds the lease and its
 # plan is still at the step, unsent, as it last saw it. Renews the lease and
-# the plan's TTL on success, as _RENEW_SCRIPT does.
+# the TTLs on success, as _RENEW_SCRIPT does.
 _MAY_SEND_SCRIPT = """
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[2] then return 0 end
@@ -142,6 +144,7 @@ if redis.call('HGET', KEYS[1], 'step_started_ms') ~= ARGV[4] then return 0 end
 redis.call('PEXPIRE', KEYS[2], ARGV[5])
 redis.call('EXPIRE', KEYS[1], ARGV[6])
 redis.call('EXPIRE', KEYS[3], ARGV[6])
+redis.call('EXPIRE', KEYS[4], ARGV[6])
 return 1
 """
 
@@ -172,10 +175,11 @@ return 0
 # tick. The old runner's next conditional write fails, and it stops.
 
 # A seek moves the plan to `step`, unsent. Returns {outcome, the step it was
-# on, when that step went out}: 1 moved, 2 the plan was already there by itself
-# (the press raced the plan's own move, and is not applied a second time),
-# 0 refused. A step already sent to the room early stays marked so it is not
-# sent again.
+# on, when that step went out}: 1 moved, 2 a forward press the plan has already
+# reached or passed by itself (made on a line the plan has since moved on from:
+# applying it would put the room back on an old line), 0 refused. A step
+# already sent to the room early stays marked so it is not sent again; one
+# only on its way out is not.
 _SEEK_SCRIPT = """
 if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return {0, '', ''} end
 if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[1] then return {0, '', ''} end
@@ -184,37 +188,80 @@ if tonumber(ARGV[2]) >= tonumber(redis.call('HGET', KEYS[1], 'total') or '0') th
 end
 local current = redis.call('HGET', KEYS[1], 'step') or '0'
 local started = redis.call('HGET', KEYS[1], 'step_started_ms') or ''
-if ARGV[3] ~= '' and current ~= ARGV[3] and current == ARGV[2] then
+if ARGV[3] ~= '' and current ~= ARGV[3]
+    and tonumber(ARGV[2]) > tonumber(ARGV[3])
+    and tonumber(current) >= tonumber(ARGV[2]) then
     return {2, current, started}
 end
 local pre_sent = redis.call('HGET', KEYS[1], 'pre_sent') or ''
 if pre_sent ~= ARGV[2] then pre_sent = '' end
 redis.call('HSET', KEYS[1],
     'step', ARGV[2], 'step_started_ms', '', 'due_ms', '',
-    'pre_sent', pre_sent, 'held', '', 'held_at_ms', '')
+    'pre_sent', pre_sent, 'pre_sending', '', 'held', '', 'held_at_ms', '')
 redis.call('SET', KEYS[2], ARGV[4], 'PX', ARGV[5])
 return {1, current, started}
 """
 
 # Holds the plan on its step. Returns {outcome, plan, step, when it went out,
 # resend}: 1 held, 2 already held, 0 refused. `resend` is 1 when the next line
-# had already been sent to the room early: the room is put back on this one.
+# went to the room early, in whole or in part: the room is put back on this
+# one. The marks stay until that resend has landed (_CLEAR_EARLY_SCRIPT), so a
+# hold whose resend failed is retried by the next hold rather than forgotten;
+# the lease is taken for it then too.
 _HOLD_SCRIPT = """
 if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return {0, '', '', '', 0} end
 local plan_id = redis.call('HGET', KEYS[1], 'plan_id')
 if ARGV[1] ~= '' and plan_id ~= ARGV[1] then return {0, '', '', '', 0} end
 local step = redis.call('HGET', KEYS[1], 'step') or '0'
 local started = redis.call('HGET', KEYS[1], 'step_started_ms') or ''
-if redis.call('HGET', KEYS[1], 'held') == '1' then return {2, plan_id, step, started, 0} end
 local pre_sent = redis.call('HGET', KEYS[1], 'pre_sent') or ''
+local pre_sending = redis.call('HGET', KEYS[1], 'pre_sending') or ''
 local resend = 0
-if pre_sent ~= '' and pre_sent ~= step and started ~= '' then
+if started ~= '' and ((pre_sent ~= '' and pre_sent ~= step)
+    or (pre_sending ~= '' and pre_sending ~= step)) then
     resend = 1
-    pre_sent = ''
 end
-redis.call('HSET', KEYS[1], 'held', '1', 'held_at_ms', ARGV[2], 'pre_sent', pre_sent)
-redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])
-return {1, plan_id, step, started, resend}
+local outcome = 1
+if redis.call('HGET', KEYS[1], 'held') == '1' then
+    outcome = 2
+else
+    redis.call('HSET', KEYS[1], 'held', '1', 'held_at_ms', ARGV[2])
+end
+if outcome == 1 or resend == 1 then
+    redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])
+end
+return {outcome, plan_id, step, started, resend}
+"""
+
+# Notes the step after the current one going to the room early. ARGV[5] is
+# 'sending' just before it goes - so a hold that lands while it is on its way
+# still puts the room back - and 'sent' once all of it is out, which is what
+# lets it pass without being sent again when its time comes. Refused while the
+# plan is held: a held room gets no early line.
+_NOTE_EARLY_SCRIPT = """
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[2] then return 0 end
+if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return 0 end
+if redis.call('HGET', KEYS[1], 'step') ~= ARGV[3] then return 0 end
+if redis.call('HGET', KEYS[1], 'step_started_ms') ~= ARGV[4] then return 0 end
+if redis.call('HGET', KEYS[1], 'held') == '1' then return 0 end
+local following = tostring(tonumber(ARGV[3]) + 1)
+if ARGV[5] == 'sending' then
+    redis.call('HSET', KEYS[1], 'pre_sending', following)
+    return 1
+end
+if redis.call('HGET', KEYS[1], 'pre_sending') ~= following then return 0 end
+redis.call('HSET', KEYS[1], 'pre_sent', following)
+return 1
+"""
+
+# The room is back on the held line: the early one no longer needs taking back.
+_CLEAR_EARLY_SCRIPT = """
+if redis.call('HGET', KEYS[1], 'plan_id') ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'step') ~= ARGV[2] then return 0 end
+if redis.call('HGET', KEYS[1], 'step_started_ms') ~= ARGV[3] then return 0 end
+redis.call('HSET', KEYS[1], 'pre_sent', '', 'pre_sending', '')
+return 1
 """
 
 # Lets a held plan go on. The step keeps what was left of its time when it was
@@ -342,8 +389,10 @@ class AutoplayStore:
                     "due_ms": "",
                     "total": str(total),
                     # The step after this one, once it has gone to the room
-                    # ahead of its time (see DEFAULT_LEAD_MS).
+                    # ahead of its time (see DEFAULT_LEAD_MS), and from just
+                    # before it starts going.
                     "pre_sent": "",
+                    "pre_sending": "",
                     "held": "",
                     "held_at_ms": "",
                 },
@@ -395,10 +444,11 @@ class AutoplayStore:
         return bool(
             await self.redis.eval(
                 _MAY_SEND_SCRIPT,
-                3,
+                4,
                 autoplay_state_key(event_id),
                 autoplay_lease_key(event_id),
                 autoplay_plan_key(event_id),
+                autoplay_settings_key(event_id),
                 owner,
                 plan_id,
                 str(step),
@@ -436,10 +486,11 @@ class AutoplayStore:
         return bool(
             await self.redis.eval(
                 _RENEW_SCRIPT,
-                3,
+                4,
                 autoplay_lease_key(event_id),
                 autoplay_state_key(event_id),
                 autoplay_plan_key(event_id),
+                autoplay_settings_key(event_id),
                 owner,
                 str(LEASE_MS),
                 str(POSITION_TTL_SECONDS),
@@ -491,6 +542,47 @@ class AutoplayStore:
             step=_as_int(step) or 0,
             step_started_ms=started or "",
             resend=bool(int(resend)),
+        )
+
+    async def note_early(
+        self,
+        event_id: UUID,
+        owner: str,
+        plan_id: str,
+        step: int,
+        step_started_ms: str,
+        sent: bool,
+    ) -> bool:
+        """Note the step after `step` as going (`sent` False) or gone to the
+        room early. Refused unless `owner` still runs the plan at `step`,
+        unheld."""
+        return bool(
+            await self.redis.eval(
+                _NOTE_EARLY_SCRIPT,
+                2,
+                autoplay_state_key(event_id),
+                autoplay_lease_key(event_id),
+                owner,
+                plan_id,
+                str(step),
+                step_started_ms,
+                "sent" if sent else "sending",
+            )
+        )
+
+    async def clear_early(
+        self, event_id: UUID, plan_id: str, step: int, step_started_ms: str
+    ) -> bool:
+        """Forget the early line once the room is back on `step`."""
+        return bool(
+            await self.redis.eval(
+                _CLEAR_EARLY_SCRIPT,
+                1,
+                autoplay_state_key(event_id),
+                plan_id,
+                str(step),
+                step_started_ms,
+            )
         )
 
     async def resume(
@@ -671,12 +763,15 @@ class AutoplayEngine:
 
         A pause leaves the room on the line the operator sees. If the next one
         had already gone to the room early, the room is put back first; a
-        session that is ending is about to be cleared, so it is not."""
+        session that is ending is about to be cleared, so it is not. If the
+        room could not be put back, this raises with the plan left held, not
+        stopped: a retry holds again, and resends."""
         if reason != "ended":
             try:
                 await self._hold_here(event_id, None)
             except Exception as e:
                 logger.exception("Could not take back an early line for event %s: %s", event_id, e)
+                raise
         try:
             await self.store.stop(event_id, reason)
         finally:
@@ -800,13 +895,17 @@ class AutoplayEngine:
         """Hold the plan with this instance as its runner, and put the room
         back on the held line if the next one had already gone out early."""
         outcome = await self.store.hold(event_id, plan_id, self.clock(), self.owner)
-        if outcome.result != "held" or not outcome.plan_id:
+        if outcome.result == "refused" or not outcome.plan_id:
             return outcome
+        if outcome.result == "already_held" and not outcome.resend:
+            return outcome
+        # Held now, or held before with a take-back that never landed: either
+        # way this instance has the lease.
         self._forget_runner(event_id)
         if outcome.resend:
             plan = await self._plan_for(event_id, outcome.plan_id)
             if plan and 0 <= outcome.step < len(plan):
-                await self._emit_step(
+                emitted = await self._emit_step(
                     event_id,
                     plan,
                     outcome.step,
@@ -817,6 +916,12 @@ class AutoplayEngine:
                         step_started_ms=outcome.step_started_ms,
                     ),
                 )
+                # False: the plan moved on while this was sending, and the
+                # room is wherever that move put it.
+                if emitted is not False:
+                    await self.store.clear_early(
+                        event_id, outcome.plan_id, outcome.step, outcome.step_started_ms
+                    )
         await self._spawn_if_current(event_id, outcome.plan_id)
         return outcome
 
@@ -1083,7 +1188,7 @@ class AutoplayEngine:
             plan_id,
             step,
             expected_started,
-            {"step_started_ms": str(start_at), "due_ms": "", "pre_sent": ""},
+            {"step_started_ms": str(start_at), "due_ms": "", "pre_sent": "", "pre_sending": ""},
         )
         if marked:
             await self._announce(event_id, await self.state(event_id))
@@ -1100,8 +1205,16 @@ class AutoplayEngine:
         """Send the step after `step` to the room ahead of its time, and note
         it went, so it is not sent again when its time comes. Sent under the
         current step's permit: the plan must still be on that step, as it was
-        when the send was decided."""
+        when the send was decided.
+
+        Noted as going before it is sent and as gone after, so a hold landing
+        anywhere in between sees it and puts the room back, and one landing
+        first stops it going at all."""
         if not await self.store.may_send(event_id, self.owner, plan_id, step, started):
+            return False
+        if not await self.store.note_early(
+            event_id, self.owner, plan_id, step, started, sent=False
+        ):
             return False
         following = step + 1
         emitted = await self._emit_step(
@@ -1109,13 +1222,17 @@ class AutoplayEngine:
             plan,
             following,
             AutoplayGuard(
-                owner=self.owner, plan_id=plan_id, step=step, step_started_ms=started
+                owner=self.owner,
+                plan_id=plan_id,
+                step=step,
+                step_started_ms=started,
+                early=True,
             ),
         )
         if emitted is False:
             return False
-        return await self.store.advance(
-            event_id, self.owner, plan_id, step, started, {"pre_sent": str(following)}
+        return await self.store.note_early(
+            event_id, self.owner, plan_id, step, started, sent=True
         )
 
     async def _emit_step(
