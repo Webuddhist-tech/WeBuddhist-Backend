@@ -33,19 +33,20 @@ class TestLikeVerseCommentService:
         new_callable=AsyncMock,
     )
     @patch("pecha_api.verse_of_day.comment_like_service._require_verse", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service._require_comment", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_like_service._get_comment_verse_id",
+        new_callable=AsyncMock,
+    )
     async def test_like_creates_new(
         self,
-        mock_threadpool: AsyncMock,
-        mock_require_comment: AsyncMock,
+        mock_get_verse_id: AsyncMock,
         mock_require_verse: AsyncMock,
         mock_create: AsyncMock,
         mock_count: AsyncMock,
     ) -> None:
         comment_id = uuid4()
         user_id = uuid4()
-        mock_threadpool.return_value = uuid4()
+        mock_get_verse_id.return_value = uuid4()
         mock_create.return_value = (MockLike(), True)
         mock_count.return_value = 1
 
@@ -56,9 +57,12 @@ class TestLikeVerseCommentService:
         assert result.like_count == 1
 
     @pytest.mark.asyncio
-    @patch("pecha_api.verse_of_day.comment_like_service._require_comment", new_callable=AsyncMock)
-    async def test_like_comment_not_found(self, mock_require: AsyncMock) -> None:
-        mock_require.side_effect = HTTPException(
+    @patch(
+        "pecha_api.verse_of_day.comment_like_service._get_comment_verse_id",
+        new_callable=AsyncMock,
+    )
+    async def test_like_comment_not_found(self, mock_get_verse_id: AsyncMock) -> None:
+        mock_get_verse_id.side_effect = HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Not found",
         )
@@ -77,17 +81,18 @@ class TestUnlikeVerseCommentService:
         new_callable=AsyncMock,
     )
     @patch("pecha_api.verse_of_day.comment_like_service._require_verse", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service._require_comment", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_like_service._get_comment_verse_id",
+        new_callable=AsyncMock,
+    )
     async def test_unlike_success(
         self,
-        mock_threadpool: AsyncMock,
-        mock_require_comment: AsyncMock,
+        mock_get_verse_id: AsyncMock,
         mock_require_verse: AsyncMock,
         mock_delete: AsyncMock,
     ) -> None:
         comment_id = uuid4()
-        mock_threadpool.return_value = uuid4()
+        mock_get_verse_id.return_value = uuid4()
 
         await unlike_verse_comment_service(comment_id=comment_id, user_id=uuid4())
 
@@ -102,17 +107,18 @@ class TestListVerseCommentLikersService:
         new_callable=AsyncMock,
     )
     @patch("pecha_api.verse_of_day.comment_like_service._require_verse", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service._require_comment", new_callable=AsyncMock)
-    @patch("pecha_api.verse_of_day.comment_like_service.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_like_service._get_comment_verse_id",
+        new_callable=AsyncMock,
+    )
     async def test_list_likers_success(
         self,
-        mock_threadpool: AsyncMock,
-        mock_require_comment: AsyncMock,
+        mock_get_verse_id: AsyncMock,
         mock_require_verse: AsyncMock,
         mock_get_likers: AsyncMock,
     ) -> None:
         comment_id = uuid4()
-        mock_threadpool.return_value = uuid4()
+        mock_get_verse_id.return_value = uuid4()
         mock_get_likers.return_value = ([MockLike()], 1)
 
         result = await list_verse_comment_likers_service(comment_id=comment_id)

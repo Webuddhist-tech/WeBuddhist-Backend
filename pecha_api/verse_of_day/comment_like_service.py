@@ -25,30 +25,24 @@ from pecha_api.verse_of_day.like_service import (
 )
 
 
-async def _require_comment(comment_id: UUID) -> None:
-    def _check() -> None:
+async def _get_comment_verse_id(comment_id: UUID) -> UUID:
+    def _load() -> UUID:
         comment = get_comment_by_id_in_session(comment_id=comment_id)
         if not comment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=NOT_FOUND,
             )
+        return comment.verse_id
 
-    await run_in_threadpool(_check)
+    return await run_in_threadpool(_load)
 
 
 async def like_verse_comment_service(
     comment_id: UUID,
     user_id: UUID,
 ) -> LikeVerseOfDayCommentResponse:
-    await _require_comment(comment_id)
-
-    def _load_verse_id() -> UUID:
-        comment = get_comment_by_id_in_session(comment_id=comment_id)
-        assert comment is not None
-        return comment.verse_id
-
-    verse_id = await run_in_threadpool(_load_verse_id)
+    verse_id = await _get_comment_verse_id(comment_id)
     await _require_verse(verse_id)
 
     created_like, is_new = await create_like(comment_id=comment_id, user_id=user_id)
@@ -65,14 +59,7 @@ async def like_verse_comment_service(
 
 
 async def unlike_verse_comment_service(comment_id: UUID, user_id: UUID) -> None:
-    await _require_comment(comment_id)
-
-    def _load_verse_id() -> UUID:
-        comment = get_comment_by_id_in_session(comment_id=comment_id)
-        assert comment is not None
-        return comment.verse_id
-
-    verse_id = await run_in_threadpool(_load_verse_id)
+    verse_id = await _get_comment_verse_id(comment_id)
     await _require_verse(verse_id)
     await delete_like(comment_id=comment_id, user_id=user_id)
 
@@ -82,14 +69,7 @@ async def list_verse_comment_likers_service(
     skip: int = 0,
     limit: int = 20,
 ) -> VerseOfDayCommentLikersResponse:
-    await _require_comment(comment_id)
-
-    def _load_verse_id() -> UUID:
-        comment = get_comment_by_id_in_session(comment_id=comment_id)
-        assert comment is not None
-        return comment.verse_id
-
-    verse_id = await run_in_threadpool(_load_verse_id)
+    verse_id = await _get_comment_verse_id(comment_id)
     await _require_verse(verse_id)
 
     likes, total = await get_comment_likers(
