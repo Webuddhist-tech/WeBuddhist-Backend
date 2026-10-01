@@ -14,6 +14,7 @@ from pecha_api.verse_of_day.like_service import (
     _require_verse,
     get_verse_likes_service,
     like_verse_of_day_service,
+    list_verse_likers_service,
     unlike_verse_of_day_service,
 )
 
@@ -100,6 +101,37 @@ class TestUnlikeVerseOfDayService:
 
         mock_require.assert_awaited_once_with(verse_id)
         mock_delete.assert_awaited_once_with(verse_id=verse_id, user_id=user_id)
+
+
+class TestListVerseLikersService:
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.get_verse_likers", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_list_likers_success(
+        self,
+        mock_require: AsyncMock,
+        mock_get_likers: AsyncMock,
+    ) -> None:
+        verse_id = uuid4()
+
+        class MockUser:
+            firstname = "Pema"
+            lastname = None
+            avatar_url = None
+
+        class MockLike:
+            user_id = uuid4()
+            user = MockUser()
+            created_at = None
+
+        mock_get_likers.return_value = ([MockLike()], 1)
+
+        result = await list_verse_likers_service(verse_id=verse_id, skip=0, limit=20)
+
+        assert result.total == 1
+        assert result.likes[0].first_name == "Pema"
+        mock_require.assert_awaited_once_with(verse_id)
 
 
 class TestGetVerseLikesService:

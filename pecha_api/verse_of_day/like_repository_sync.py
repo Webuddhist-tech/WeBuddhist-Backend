@@ -2,11 +2,11 @@
 
 Invoked only from worker threads via ``run_in_threadpool`` in ``like_repository``.
 """
-from typing import Tuple
+from typing import List, Tuple
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from pecha_api.db.database import SessionLocal
 from pecha_api.verse_of_day.like_models import VerseOfDayLike
@@ -50,6 +50,27 @@ def _count_verse_likes(db: Session, verse_id: UUID) -> int:
     return db.query(VerseOfDayLike).filter(VerseOfDayLike.verse_id == verse_id).count()
 
 
+def _get_verse_likers(
+    db: Session,
+    verse_id: UUID,
+    skip: int,
+    limit: int,
+) -> Tuple[List[VerseOfDayLike], int]:
+    query = (
+        db.query(VerseOfDayLike)
+        .filter(VerseOfDayLike.verse_id == verse_id)
+        .order_by(VerseOfDayLike.created_at.desc(), VerseOfDayLike.id.desc())
+    )
+    total = query.count()
+    likes = (
+        query.options(selectinload(VerseOfDayLike.user))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return likes, total
+
+
 def _like_exists(db: Session, verse_id: UUID, user_id: UUID) -> bool:
     return (
         db.query(VerseOfDayLike)
@@ -81,3 +102,10 @@ def count_verse_likes_in_session(verse_id: UUID) -> int:
 def like_exists_in_session(verse_id: UUID, user_id: UUID) -> bool:
     with SessionLocal() as db:
         return _like_exists(db=db, verse_id=verse_id, user_id=user_id)
+
+
+def get_verse_likers_in_session(
+    verse_id: UUID, skip: int, limit: int
+) -> Tuple[List[VerseOfDayLike], int]:
+    with SessionLocal() as db:
+        return _get_verse_likers(db=db, verse_id=verse_id, skip=skip, limit=limit)

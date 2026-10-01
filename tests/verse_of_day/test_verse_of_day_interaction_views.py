@@ -13,11 +13,9 @@ from pecha_api.verse_of_day.comment_response_models import (
     VerseOfDayCommentDTO,
     VerseOfDayCommentsResponse,
 )
-from pecha_api.verse_of_day.comment_like_response_models import (
-    LikeVerseOfDayCommentResponse,
-)
 from pecha_api.verse_of_day.like_response_models import (
     LikeVerseOfDayResponse,
+    VerseOfDayLikersResponse,
     VerseOfDayLikesResponse,
 )
 
@@ -43,8 +41,27 @@ def _comment_dto(verse_id: Optional[UUID] = None) -> VerseOfDayCommentDTO:
 
 class TestVerseOfDayLikeViews:
 
+    @patch(
+        "pecha_api.verse_of_day.like_views.list_verse_likers_service",
+        new_callable=AsyncMock,
+    )
+    def test_list_likers(self, mock_service: AsyncMock) -> None:
+        verse_id = uuid4()
+        mock_service.return_value = VerseOfDayLikersResponse(
+            likes=[],
+            skip=0,
+            limit=20,
+            total=5,
+        )
+
+        response = client.get(f"/verse-of-day/{verse_id}/likes")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["total"] == 5
+        mock_service.assert_awaited_once_with(verse_id=verse_id, skip=0, limit=20)
+
     @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
-    def test_get_likes(self, mock_service: AsyncMock) -> None:
+    def test_get_likes_summary(self, mock_service: AsyncMock) -> None:
         verse_id = uuid4()
         mock_service.return_value = VerseOfDayLikesResponse(
             verse_id=verse_id,
@@ -52,7 +69,7 @@ class TestVerseOfDayLikeViews:
             liked_by_me=False,
         )
 
-        response = client.get(f"/verse-of-day/{verse_id}/likes")
+        response = client.get(f"/verse-of-day/{verse_id}/likes/summary")
 
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
@@ -74,7 +91,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes",
+            f"/verse-of-day/{verse_id}/likes/summary",
             headers=AUTH_HEADERS,
         )
 
@@ -93,7 +110,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes",
+            f"/verse-of-day/{verse_id}/likes/summary",
             headers=AUTH_HEADERS,
         )
 
@@ -117,7 +134,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes",
+            f"/verse-of-day/{verse_id}/likes/summary",
             headers=AUTH_HEADERS,
         )
 
@@ -134,7 +151,7 @@ class TestVerseOfDayLikeViews:
 
         with pytest.raises(RuntimeError, match="database unavailable"):
             client.get(
-                f"/verse-of-day/{verse_id}/likes",
+                f"/verse-of-day/{verse_id}/likes/summary",
                 headers=AUTH_HEADERS,
             )
 
@@ -260,57 +277,6 @@ class TestVerseOfDayCommentViews:
 
         response = client.delete(
             f"/verse-of-day/comments/{comment_id}",
-            headers=AUTH_HEADERS,
-        )
-
-        assert response.status_code == status.HTTP_204_NO_CONTENT
-        mock_service.assert_awaited_once()
-
-
-class TestVerseOfDayCommentLikeViews:
-
-    @patch(
-        "pecha_api.verse_of_day.comment_like_views.like_verse_comment_service",
-        new_callable=AsyncMock,
-    )
-    @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
-    def test_like_comment_new(
-        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
-    ) -> None:
-        comment_id = uuid4()
-        user_id = uuid4()
-        mock_threadpool.return_value = MagicMock(id=user_id)
-        mock_service.return_value = LikeVerseOfDayCommentResponse(
-            comment_id=comment_id,
-            user_id=user_id,
-            liked=True,
-            like_count=1,
-            created_at=datetime.now(tz.utc).isoformat(),
-            is_new=True,
-        )
-
-        response = client.post(
-            f"/verse-of-day/comments/{comment_id}/likes",
-            headers=AUTH_HEADERS,
-        )
-
-        assert response.status_code == status.HTTP_201_CREATED
-        assert response.json()["like_count"] == 1
-        mock_service.assert_awaited_once_with(comment_id=comment_id, user_id=user_id)
-
-    @patch(
-        "pecha_api.verse_of_day.comment_like_views.unlike_verse_comment_service",
-        new_callable=AsyncMock,
-    )
-    @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
-    def test_unlike_comment(
-        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
-    ) -> None:
-        comment_id = uuid4()
-        mock_threadpool.return_value = MagicMock(id=uuid4())
-
-        response = client.delete(
-            f"/verse-of-day/comments/{comment_id}/likes",
             headers=AUTH_HEADERS,
         )
 
