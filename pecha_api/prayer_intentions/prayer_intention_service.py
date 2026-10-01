@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Sequence
+from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -9,9 +10,11 @@ from pecha_api.chat.enums import ChatMessageType
 
 from .prayer_intention_model import PrayerIntention
 from .prayer_intention_repository import (
+    get_event_allowed_slugs,
     get_prayer_intention_by_slug,
     get_prayer_intentions_by_slugs,
     list_prayer_intentions,
+    list_prayer_intentions_for_event,
 )
 from .intention_slugs import (
     canonical_prayer_intention_slug,
@@ -28,6 +31,7 @@ PRAYER_INTENTION_REQUIRED = "PRAYER_INTENTION_REQUIRED"
 INVALID_PRAYER_INTENTION = "INVALID_PRAYER_INTENTION"
 PRAYER_BODY_TOO_LONG = "PRAYER_BODY_TOO_LONG"
 INTENTION_NOT_ALLOWED_ON_TEXT = "INTENTION_NOT_ALLOWED_ON_TEXT"
+INTENTION_NOT_ALLOWED_FOR_EVENT = "INTENTION_NOT_ALLOWED_FOR_EVENT"
 
 
 def prayer_intention_to_dto(row: PrayerIntention) -> PrayerIntentionDTO:
@@ -49,9 +53,24 @@ def resolve_prayer_intention_catalog_slug(db: Session, slug: str) -> Optional[st
     return None
 
 
-def get_all_prayer_intentions_service() -> PrayerIntentionsResponse:
+def get_all_prayer_intentions_service(
+    event_id: Optional[UUID] = None,
+) -> PrayerIntentionsResponse:
     with SessionLocal() as db:
-        rows = list_prayer_intentions(db)
+        if event_id is not None:
+            # Lazy import avoids events package init → event_service → this module.
+            from pecha_api.events.event_repository import get_event_by_id
+
+            if get_event_by_id(db=db, event_id=event_id) is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Event with id '{event_id}' not found",
+                )
+            rows = list_prayer_intentions_for_event(db=db, event_id=event_id)
+            if not rows:
+                rows = list_prayer_intentions(db)
+        else:
+            rows = list_prayer_intentions(db)
         return PrayerIntentionsResponse(
             intentions=[prayer_intention_to_dto(row) for row in rows]
         )
@@ -85,6 +104,7 @@ def validate_message_intention_and_body(
     message_type: str,
     body: str,
     intention: Optional[str],
+    event_id: Optional[UUID] = None,
 ) -> Optional[str]:
     """Return the normalised intention slug to store, or None for TEXT."""
     normalized_intention = (intention or "").strip().lower() or None
@@ -123,4 +143,11 @@ def validate_message_intention_and_body(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=INVALID_PRAYER_INTENTION,
         )
+    if event_id is not None:
+        allowed_slugs = get_event_allowed_slugs(db=db, event_id=event_id)
+        if allowed_slugs is not None and catalog_slug not in allowed_slugs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=INTENTION_NOT_ALLOWED_FOR_EVENT,
+            )
     return catalog_slug

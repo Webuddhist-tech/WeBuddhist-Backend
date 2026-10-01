@@ -1,4 +1,3 @@
-import os
 import uuid
 import pytest
 from sqlalchemy import create_engine
@@ -12,11 +11,12 @@ from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.cms.cms_plans_repository import save_plan, get_plans_by_author_id
 from pecha_api.plans.plans_response_models import PlansRepositoryResponse
 from pecha_api.users.users_models import Users
+from tests.postgres_integration import postgres_integration_url
 
-DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+DATABASE_URL = postgres_integration_url()
 if not DATABASE_URL:
     pytest.skip(
-        "Set TEST_DATABASE_URL to a PostgreSQL database URL to run these tests.",
+        "Set TEST_DATABASE_URL to a reachable PostgreSQL database to run these tests.",
         allow_module_level=True,
     )
 

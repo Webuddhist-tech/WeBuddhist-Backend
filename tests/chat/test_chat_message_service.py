@@ -754,14 +754,41 @@ class TestEditMessageService:
         message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
         message.message_type = "PRAYER"
         message.intention = "peace"
+        event_id = uuid4()
+        self.room.event_id = event_id
 
         with patch('pecha_api.chat.message_service.validate_message_intention_and_body', return_value="healing") as mock_validate,              patch('pecha_api.chat.message_service.get_prayer_counts_map', return_value={}),              patch('pecha_api.chat.message_service.get_prayed_message_ids', return_value=set()),              patch('pecha_api.chat.message_service.get_recent_prayers_map', return_value={}),              patch('pecha_api.chat.message_service.resolve_intention_dtos_for_slugs', return_value={}):
             result, mock_update = self._run(message, user, intention="healing")
 
         assert mock_validate.call_args.kwargs["body"] == "Pray for me"
         assert mock_validate.call_args.kwargs["intention"] == "healing"
+        assert mock_validate.call_args.kwargs["event_id"] == event_id
         assert mock_update.call_args.kwargs["intention"] == "healing"
         assert result.is_edited is True
+
+    def test_body_only_prayer_edit_skips_event_intention_restriction(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = "legacy"
+        self.room.event_id = uuid4()
+
+        with patch(
+            "pecha_api.chat.message_service.validate_message_intention_and_body",
+            return_value="legacy",
+        ) as mock_validate, patch(
+            "pecha_api.chat.message_service.get_prayer_counts_map", return_value={}
+        ), patch(
+            "pecha_api.chat.message_service.get_prayed_message_ids", return_value=set()
+        ), patch(
+            "pecha_api.chat.message_service.get_recent_prayers_map", return_value={}
+        ), patch(
+            "pecha_api.chat.message_service.resolve_intention_dtos_for_slugs",
+            return_value={},
+        ):
+            self._run(message, user, body="Updated prayer text")
+
+        assert mock_validate.call_args.kwargs["event_id"] is None
 
     def test_edited_prayer_request_keeps_the_authors_own_prayer_count(self):
         """The edit response must agree with the message list, which carries

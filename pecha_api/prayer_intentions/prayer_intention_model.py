@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Integer, Text, DateTime, UUID
+from sqlalchemy.orm import relationship
 from uuid import uuid4
 import _datetime
 from _datetime import datetime
@@ -7,7 +8,7 @@ from pecha_api.db.database import Base
 
 
 class PrayerIntention(Base):
-    """Read-only catalog of prayer-request intention types (slug, color, copy)."""
+    """Catalog of prayer-request intention types (slug, color, copy)."""
 
     __tablename__ = "prayer_intentions"
 
@@ -21,4 +22,10 @@ class PrayerIntention(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(_datetime.timezone.utc),
         nullable=False,
+    )
+
+    event_links = relationship(
+        "EventPrayerIntention",
+        back_populates="intention",
+        passive_deletes=True,
     )

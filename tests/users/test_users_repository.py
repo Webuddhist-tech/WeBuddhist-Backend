@@ -1,4 +1,3 @@
-import os
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -10,11 +9,12 @@ from pecha_api.users.users_models import Base, Users, SocialMediaAccount, Passwo
 from pecha_api.users.users_repository import save_user, get_user_by_email, get_user_by_username, \
     get_user_social_account, update_user, delete_user
 from pecha_api.plans.users.recitation.user_recitations_models import UserRecitations
+from tests.postgres_integration import postgres_integration_url
 
-DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+DATABASE_URL = postgres_integration_url()
 if not DATABASE_URL:
     pytest.skip(
-        "Set TEST_DATABASE_URL to a PostgreSQL database URL to run these tests.",
+        "Set TEST_DATABASE_URL to a reachable PostgreSQL database to run these tests.",
         allow_module_level=True,
     )
 

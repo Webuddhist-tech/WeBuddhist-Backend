@@ -90,6 +90,13 @@ class Event(Base):
     timer = relationship("Timer")
     group_recitation_collection = relationship("GroupRecitationCollection")
 
+    prayer_intention_links = relationship(
+        "EventPrayerIntention",
+        back_populates="event",
+        cascade=CASCADE_DELETE_ORPHAN,
+        passive_deletes=True,
+    )
+
     __table_args__ = (
         Index("idx_events_group_id", "group_id"),
         Index("idx_events_location_id", "location_id"),

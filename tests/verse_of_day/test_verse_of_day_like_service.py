@@ -1,5 +1,5 @@
 """Tests for verse of the day like service."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -11,9 +11,12 @@ from starlette import status
 from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.verse_of_day.like_service import (
     _isoformat,
+    _liker_avatar_url,
+    _liker_first_name,
     _require_verse,
     get_verse_likes_service,
     like_verse_of_day_service,
+    list_verse_likers_service,
     unlike_verse_of_day_service,
 )
 
@@ -102,6 +105,63 @@ class TestUnlikeVerseOfDayService:
         mock_delete.assert_awaited_once_with(verse_id=verse_id, user_id=user_id)
 
 
+class TestListVerseLikersService:
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.get_verse_likers", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_list_likers_success(
+        self,
+        mock_require: AsyncMock,
+        mock_get_likers: AsyncMock,
+    ) -> None:
+        verse_id = uuid4()
+
+        class MockUser:
+            firstname = "Pema"
+            lastname = None
+            avatar_url = None
+
+        like_created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        class MockLike:
+            user_id = uuid4()
+            user = MockUser()
+            created_at = like_created_at
+
+        mock_get_likers.return_value = ([MockLike()], 1)
+
+        result = await list_verse_likers_service(verse_id=verse_id, skip=0, limit=20)
+
+        assert result.total == 1
+        assert result.likes[0].first_name == "Pema"
+        assert result.likes[0].created_at == like_created_at.isoformat()
+        mock_require.assert_awaited_once_with(verse_id)
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.like_service.get_verse_likers", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.like_service._require_verse", new_callable=AsyncMock)
+    async def test_list_likers_missing_user(
+        self,
+        mock_require: AsyncMock,
+        mock_get_likers: AsyncMock,
+    ) -> None:
+        verse_id = uuid4()
+
+        class MockLike:
+            user_id = uuid4()
+            user = None
+            created_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        mock_get_likers.return_value = ([MockLike()], 1)
+
+        result = await list_verse_likers_service(verse_id=verse_id)
+
+        assert result.likes[0].first_name == "Unknown"
+        assert result.likes[0].last_name is None
+        assert result.likes[0].avatar_url is None
+
+
 class TestGetVerseLikesService:
 
     @pytest.mark.asyncio
@@ -151,6 +211,54 @@ class TestLikeServiceHelpers:
 
     def test_isoformat_non_datetime_value(self) -> None:
         assert _isoformat(123) == "123"
+
+    def test_isoformat_datetime(self) -> None:
+        value = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
+        assert _isoformat(value) == value.isoformat()
+
+    def test_liker_first_name_unknown_user(self) -> None:
+        assert _liker_first_name(None) == "Unknown"
+
+    def test_liker_first_name_fallback_when_empty(self) -> None:
+        user = MagicMock()
+        user.firstname = "   "
+        assert _liker_first_name(user) == "User"
+
+    def test_liker_avatar_url_no_user(self) -> None:
+        assert _liker_avatar_url(None) is None
+
+    def test_liker_avatar_url_no_avatar(self) -> None:
+        user = MagicMock()
+        user.avatar_url = None
+        assert _liker_avatar_url(user) is None
+
+    @patch("pecha_api.verse_of_day.like_service.generate_presigned_access_url")
+    @patch("pecha_api.verse_of_day.like_service.get", return_value="test-bucket")
+    def test_liker_avatar_url_success(
+        self, mock_get: MagicMock, mock_presign: MagicMock
+    ) -> None:
+        user = MagicMock()
+        user.avatar_url = "avatars/user.png"
+        mock_presign.return_value = "https://signed.example/avatar"
+
+        assert _liker_avatar_url(user) == "https://signed.example/avatar"
+        mock_presign.assert_called_once_with(
+            bucket_name="test-bucket",
+            s3_key="avatars/user.png",
+        )
+
+    @patch(
+        "pecha_api.verse_of_day.like_service.generate_presigned_access_url",
+        side_effect=RuntimeError("s3 down"),
+    )
+    @patch("pecha_api.verse_of_day.like_service.get", return_value="test-bucket")
+    def test_liker_avatar_url_presign_failure(
+        self, mock_get: MagicMock, mock_presign: MagicMock
+    ) -> None:
+        user = MagicMock()
+        user.avatar_url = "avatars/user.png"
+
+        assert _liker_avatar_url(user) is None
 
 
 class TestRequireVerse:
