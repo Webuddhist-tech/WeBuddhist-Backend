@@ -179,3 +179,16 @@ class TestCmsPrayerIntentionsService:
             description=existing.description,
             display_order=existing.display_order,
         )
+
+    def test_create_rejects_whitespace_only_slug(self):
+        with pytest.raises(ValueError):
+            CreatePrayerIntentionRequest(
+                slug="   ",
+                label="Healing",
+                color="#111111",
+                description="For illness.",
+            )
+
+    def test_patch_rejects_whitespace_only_label(self):
+        with pytest.raises(ValueError):
+            PatchPrayerIntentionRequest(label="   ")

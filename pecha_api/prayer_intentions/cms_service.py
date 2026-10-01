@@ -53,14 +53,13 @@ def cms_create_prayer_intention_service(
 ) -> PrayerIntentionCMSDTO:
     author = validate_cms_author_details(token=token)
     require_cms_write_access(author)
-    slug = request.slug.strip().lower()
     with SessionLocal() as db:
         row = create_prayer_intention(
             db=db,
-            slug=slug,
-            label=request.label.strip(),
-            color=request.color.strip(),
-            description=request.description.strip(),
+            slug=request.slug,
+            label=request.label,
+            color=request.color,
+            description=request.description,
             display_order=request.display_order,
         )
         return _build_cms_dto(row, linked_event_count=0)
@@ -83,16 +82,10 @@ def cms_patch_prayer_intention_service(
         row = update_prayer_intention(
             db=db,
             intention=row,
-            label=(
-                request.label.strip()
-                if request.label is not None
-                else row.label
-            ),
-            color=(
-                request.color.strip() if request.color is not None else row.color
-            ),
+            label=request.label if request.label is not None else row.label,
+            color=request.color if request.color is not None else row.color,
             description=(
-                request.description.strip()
+                request.description
                 if request.description is not None
                 else row.description
             ),

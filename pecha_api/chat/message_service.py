@@ -448,12 +448,17 @@ def edit_message_service(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Message body must not be empty",
             )
+        # Body-only edits keep the stored intention even when the event's
+        # allow-list later drops that slug; re-check the list only when the
+        # client sends a new intention value.
         stored_intention = validate_message_intention_and_body(
             db=db,
             message_type=message_type,
             body=new_body,
             intention=intention if intention is not None else message.intention,
-            event_id=getattr(room, "event_id", None),
+            event_id=(
+                getattr(room, "event_id", None) if intention is not None else None
+            ),
         )
         if new_body != message.body or stored_intention != message.intention:
             validate_message_content(db=db, room=room, user=user, body=new_body)

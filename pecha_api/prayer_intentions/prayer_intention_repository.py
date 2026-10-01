@@ -135,6 +135,32 @@ def list_prayer_intentions_for_event(db: Session, event_id: UUID) -> List[Prayer
     )
 
 
+def list_prayer_intentions_grouped_by_event_id(
+    db: Session, event_ids: Sequence[UUID]
+) -> Dict[UUID, List[PrayerIntention]]:
+    unique_ids = list(dict.fromkeys(event_ids))
+    if not unique_ids:
+        return {}
+    rows = (
+        db.query(EventPrayerIntention.event_id, PrayerIntention)
+        .join(
+            PrayerIntention,
+            EventPrayerIntention.intention_id == PrayerIntention.id,
+        )
+        .filter(EventPrayerIntention.event_id.in_(unique_ids))
+        .order_by(
+            EventPrayerIntention.event_id.asc(),
+            PrayerIntention.display_order.asc(),
+            PrayerIntention.slug.asc(),
+        )
+        .all()
+    )
+    grouped: Dict[UUID, List[PrayerIntention]] = {event_id: [] for event_id in unique_ids}
+    for event_id, intention in rows:
+        grouped[event_id].append(intention)
+    return grouped
+
+
 def replace_event_prayer_intentions(
     db: Session, event_id: UUID, intention_ids: Sequence[UUID]
 ) -> None:

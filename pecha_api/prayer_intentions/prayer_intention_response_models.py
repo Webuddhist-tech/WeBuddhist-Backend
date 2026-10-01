@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
 from typing import List, Optional
 from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class PrayerIntentionDTO(BaseModel):
@@ -34,9 +35,33 @@ class CreatePrayerIntentionRequest(BaseModel):
     description: str = Field(..., min_length=1)
     display_order: int = 0
 
+    @field_validator("slug", "label", "color", "description", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        if isinstance(value, str):
+            value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("slug")
+    @classmethod
+    def normalize_slug(cls, value: str) -> str:
+        return value.lower()
+
 
 class PatchPrayerIntentionRequest(BaseModel):
     label: Optional[str] = Field(None, min_length=1, max_length=64)
     color: Optional[str] = Field(None, min_length=1, max_length=16)
     description: Optional[str] = Field(None, min_length=1)
     display_order: Optional[int] = None
+
+    @field_validator("label", "color", "description", mode="before")
+    @classmethod
+    def strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value

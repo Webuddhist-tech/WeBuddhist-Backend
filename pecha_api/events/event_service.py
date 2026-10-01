@@ -62,6 +62,7 @@ from pecha_api.prayer_intentions.prayer_intention_response_models import (
 )
 from pecha_api.prayer_intentions.prayer_intention_repository import (
     list_prayer_intentions_for_event,
+    list_prayer_intentions_grouped_by_event_id,
     replace_event_prayer_intentions,
     count_event_prayer_intention_links,
 )
@@ -500,6 +501,16 @@ def _intention_dtos_for_event(db: Session, event_id: UUID) -> List[PrayerIntenti
         return []
     rows = list_prayer_intentions_for_event(db=db, event_id=event_id)
     return [prayer_intention_to_dto(row) for row in rows]
+
+
+def _intention_dtos_map_for_events(
+    db: Session, event_ids: Sequence[UUID]
+) -> Dict[UUID, List[PrayerIntentionDTO]]:
+    grouped = list_prayer_intentions_grouped_by_event_id(db=db, event_ids=event_ids)
+    return {
+        event_id: [prayer_intention_to_dto(row) for row in rows]
+        for event_id, rows in grouped.items()
+    }
 
 
 def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
@@ -1015,6 +1026,7 @@ def _build_listing_event_dtos(
     event_ids = list({item["event"].id for item in paginated_items})
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
+    intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
     group_ids = list({item["event"].group_id for item in paginated_items})
     group_cards = _group_card_map(db, group_ids)
 
@@ -1035,6 +1047,7 @@ def _build_listing_event_dtos(
                 start_date=item["start_date"],
                 end_date=item["end_date"],
                 chat_room_id=chat_rooms_by_event.get(event.id),
+                intentions=intentions_by_event.get(event.id, []),
             )
         )
     return event_dtos
@@ -1283,6 +1296,7 @@ def get_event_by_id_service(
             prayer_request_count=_prayer_request_count_for_event(
                 db=db, event_id=event.id
             ),
+            intentions=_intention_dtos_for_event(db=db, event_id=event.id),
         )
 
 
@@ -1395,11 +1409,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         )
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
-        intentions = (
-            _intention_dtos_for_event(db=db, event_id=saved.id)
-            if request.intention_ids
-            else []
-        )
+        intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
         return _event_to_dto(saved, intentions=intentions)
 
 
@@ -1665,11 +1675,7 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         if chat_was_enabled and not bool(getattr(saved, "chat_enabled", True)):
             _close_event_chat_sockets_best_effort(event_id=saved.id)
 
-        intentions = (
-            _intention_dtos_for_event(db=db, event_id=saved.id)
-            if intention_ids_updated
-            else []
-        )
+        intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
         return _event_to_dto(
             saved,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=saved.id),
@@ -1760,6 +1766,7 @@ def get_featured_events_service(
         event_ids = list({item['event'].id for item in paginated_items})
         counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
         chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
+        intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
         group_cards = _group_card_map(db, [item['event'].group_id for item in paginated_items])
 
         joined_ids: set[UUID] = set()
@@ -1797,6 +1804,7 @@ def get_featured_events_service(
                     start_date=item['start_date'],
                     end_date=item['end_date'],
                     chat_room_id=chat_rooms_by_event.get(event.id),
+                    intentions=intentions_by_event.get(event.id, []),
                 )
             )
 
