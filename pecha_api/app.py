@@ -79,12 +79,16 @@ from pecha_api.verse_of_day import verse_of_day_views
 from pecha_api.verse_of_day import verse_of_day_notification_internal_views
 from pecha_api.verse_of_day import like_views as verse_of_day_like_views
 from pecha_api.verse_of_day import comment_views as verse_of_day_comment_views
+from pecha_api.verse_of_day import comment_like_views as verse_of_day_comment_like_views
 from pecha_api.calendar import calendar_views
 from pecha_api.poems import views as poems_views
 from pecha_api.poems import cms_views as cms_poems_views
 from pecha_api.timers import timer_router
 from pecha_api.ambient_sounds import ambient_sound_router, ambient_sound_cms_router
-from pecha_api.prayer_intentions import prayer_intention_router
+from pecha_api.prayer_intentions import (
+    cms_prayer_intentions_router,
+    prayer_intention_router,
+)
 from pecha_api.accumulator import accumulator_router, accumulator_cms_router
 from pecha_api.group_accumulator import group_accumulator_router, group_accumulator_cms_router
 from pecha_api.daily_log import daily_log_views
@@ -213,6 +217,7 @@ api.include_router(verse_of_day_views.verse_of_day_router)
 api.include_router(verse_of_day_like_views.verse_of_day_likes_router)
 api.include_router(verse_of_day_comment_views.verse_of_day_comments_router)
 api.include_router(verse_of_day_comment_views.verse_of_day_comment_actions_router)
+api.include_router(verse_of_day_comment_like_views.verse_of_day_comment_likes_router)
 api.include_router(verse_of_day_views.cms_verse_of_day_router)
 api.include_router(verse_of_day_notification_internal_views.internal_verse_of_day_notifications_router)
 api.include_router(calendar_views.calendar_router)
@@ -222,6 +227,7 @@ api.include_router(timer_router)
 api.include_router(ambient_sound_router)
 api.include_router(ambient_sound_cms_router)
 api.include_router(prayer_intention_router)
+api.include_router(cms_prayer_intentions_router)
 api.include_router(accumulator_router)
 api.include_router(accumulator_cms_router)
 api.include_router(group_accumulator_router)

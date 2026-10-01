@@ -11,10 +11,17 @@ from fastapi import HTTPException
 from pecha_api.events.recitation_autoplay_service import (
     LATE_CATCH_UP_MS,
     LEASE_MS,
+    AutoplayCommandRefused,
     AutoplayEngine,
     AutoplayStore,
+    HoldOutcome,
+    SeekOutcome,
     _event_is_live,
+    _settings_from,
     current_autoplay_send_permit,
+    effective_duration_ms,
+    lead_for,
+    next_tempo,
 )
 from pecha_api.events.recitation_live_models import AutoplayStep, SetPositionFrame
 from pecha_api.events.recitation_websocket import POSITION_TTL_SECONDS
@@ -33,12 +40,118 @@ class FakeStore:
     the shared clock, and writes that only land for the lease holder at the
     step it last saw."""
 
-    def __init__(self, clock: Clock) -> None:
+    def __init__(self, clock: Clock, lead_ms: int = 0) -> None:
         self.clock = clock
         self.states: Dict[UUID, Dict[str, str]] = {}
         self.plans: Dict[UUID, str] = {}
         self.leases: Dict[UUID, tuple] = {}
         self.published: List[dict] = []
+        # No lead unless a test asks for one, so the timing tests read in
+        # whole steps; the lead has tests of its own.
+        self.settings: Dict[UUID, Dict[str, str]] = {}
+        self.default_lead_ms = lead_ms
+
+    async def read_settings(self, event_id):
+        raw = {"lead_ms": str(self.default_lead_ms), **self.settings.get(event_id, {})}
+        return _settings_from(raw)
+
+    async def write_settings(self, event_id, fields):
+        self.settings.setdefault(event_id, {}).update(fields)
+
+    def _running(self, event_id, plan_id):
+        state = self.states.get(event_id)
+        if not state or state["status"] != "running":
+            return None
+        if plan_id and state["plan_id"] != plan_id:
+            return None
+        return state
+
+    async def seek(self, event_id, plan_id, step, expected_step, owner):
+        state = self._running(event_id, plan_id)
+        if state is None or step >= int(state["total"]):
+            return SeekOutcome("refused")
+        current, started = state["step"], state["step_started_ms"]
+        previous = (int(current), int(started) if started else None)
+        if (
+            expected_step is not None
+            and current != str(expected_step)
+            and step > expected_step
+            and int(current) >= step
+        ):
+            return SeekOutcome("already_there", *previous)
+        state.update({
+            "step": str(step),
+            "step_started_ms": "",
+            "due_ms": "",
+            "pre_sent": state.get("pre_sent", "") if state.get("pre_sent") == str(step) else "",
+            "pre_sending": "",
+            "held": "",
+            "held_at_ms": "",
+        })
+        self.leases[event_id] = (owner, self.clock() + LEASE_MS)
+        return SeekOutcome("moved", *previous)
+
+    async def hold(self, event_id, plan_id, now_ms, owner):
+        state = self._running(event_id, plan_id)
+        if state is None:
+            return HoldOutcome("refused")
+        step, started = int(state["step"]), state["step_started_ms"]
+        marks = (state.get("pre_sent", ""), state.get("pre_sending", ""))
+        resend = bool(started) and any(m and m != state["step"] for m in marks)
+        result = "already_held" if state.get("held") == "1" else "held"
+        if result == "held":
+            state.update({"held": "1", "held_at_ms": str(now_ms)})
+        if result == "held" or resend:
+            self.leases[event_id] = (owner, self.clock() + LEASE_MS)
+        return HoldOutcome(result, state["plan_id"], step, started, resend)
+
+    async def note_early(self, event_id, owner, plan_id, step, step_started_ms, sent):
+        state = self.states.get(event_id)
+        if (
+            self._holder(event_id) != owner
+            or not state
+            or state["plan_id"] != plan_id
+            or state["status"] != "running"
+            or state["step"] != str(step)
+            or state["step_started_ms"] != step_started_ms
+            or state.get("held") == "1"
+        ):
+            return False
+        following = str(step + 1)
+        if not sent:
+            state["pre_sending"] = following
+            return True
+        if state.get("pre_sending") != following:
+            return False
+        state["pre_sent"] = following
+        return True
+
+    async def clear_early(self, event_id, plan_id, step, step_started_ms):
+        state = self.states.get(event_id)
+        if (
+            not state
+            or state["plan_id"] != plan_id
+            or state["step"] != str(step)
+            or state["step_started_ms"] != step_started_ms
+        ):
+            return False
+        state.update({"pre_sent": "", "pre_sending": ""})
+        return True
+
+    async def resume(self, event_id, plan_id, now_ms, owner):
+        state = self._running(event_id, plan_id)
+        if state is None:
+            return "refused", None
+        if state.get("held") != "1":
+            return "not_held", state["plan_id"]
+        started = state["step_started_ms"]
+        if started:
+            state["step_started_ms"] = str(int(started) + now_ms - int(state["held_at_ms"]))
+        else:
+            state["due_ms"] = str(now_ms)
+        state.update({"held": "", "held_at_ms": ""})
+        self.leases[event_id] = (owner, self.clock() + LEASE_MS)
+        return "resumed", state["plan_id"]
 
     def _holder(self, event_id: UUID) -> Optional[str]:
         lease = self.leases.get(event_id)
@@ -720,20 +833,21 @@ class TestAutoplayStore:
         assert list(args[4:]) == ["A", "plan-1", "3", "1234", "step", "4", "step_started_ms", ""]
 
     @pytest.mark.asyncio
-    async def test_renewing_the_lease_keeps_the_plan_and_state_alive(self):
+    async def test_renewing_the_lease_keeps_the_plan_state_and_settings_alive(self):
         redis = self._redis()
         event_id = uuid4()
 
         await AutoplayStore(redis).renew(event_id, "A")
 
         args = redis.eval.await_args.args
-        assert args[1] == 3
-        assert list(args[2:5]) == [
+        assert args[1] == 4
+        assert list(args[2:6]) == [
             f"recitation:event:{event_id}:autoplay-lease",
             f"recitation:event:{event_id}:autoplay",
             f"recitation:event:{event_id}:autoplay-plan",
+            f"recitation:event:{event_id}:autoplay-settings",
         ]
-        assert list(args[5:]) == ["A", str(LEASE_MS), str(POSITION_TTL_SECONDS)]
+        assert list(args[6:]) == ["A", str(LEASE_MS), str(POSITION_TTL_SECONDS)]
 
     @pytest.mark.asyncio
     async def test_claim_only_takes_a_free_lease(self):
@@ -756,3 +870,596 @@ class TestAutoplayStore:
         redis.publish.assert_awaited_once_with(
             f"recitation:event:{event_id}:autoplay-state", "{}"
         )
+
+
+def _plan_id(h: Harness, event_id: UUID) -> str:
+    return h.store.states[event_id]["plan_id"]
+
+
+def _sent(h: Harness, began: int) -> List[tuple]:
+    """(when, the edition on screen) for every step that went to the room."""
+    return [(at - began, segments[-1]) for at, segments, _ in h.sent]
+
+
+def _with_lead(lead_ms: int) -> Harness:
+    h = Harness()
+    h.store = FakeStore(h.clock, lead_ms=lead_ms)
+    h.engine.store = h.store
+    return h
+
+
+class _Paused:
+    """Stops the runner where a test wants it, by holding its sleeps."""
+
+    def __init__(self, h: Harness, until) -> None:
+        self.h = h
+        self.until = until
+        self.gate = asyncio.Event()
+        h.engine.sleep = self.sleep
+
+    async def sleep(self, seconds: float) -> None:
+        if self.until():
+            await self.gate.wait()
+        self.h.clock.now += int(seconds * 1000)
+        await asyncio.sleep(0)
+
+
+async def _yield(times: int = 20) -> None:
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+class TestSendingAhead:
+    """Phones show a line the moment it lands, and cannot be changed, so the
+    room is sent each line a little ahead of its time to land with the stage."""
+
+    @pytest.mark.asyncio
+    async def test_each_line_goes_to_the_room_early_and_to_the_operator_on_time(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        await h.settle(event_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (700, "bo-1"), (1700, "bo-2")]
+        started = [
+            s["step_started_at_ms"] - began for s in h.store.published if s["status"] == "running"
+        ]
+        assert started == [0, 1000, 2000]
+
+    @pytest.mark.asyncio
+    async def test_a_line_sent_early_is_not_sent_again_when_its_time_comes(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await h.settle(event_id)
+
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0", "bo-1"]
+
+    @pytest.mark.asyncio
+    async def test_a_short_line_keeps_at_least_half_its_time_on_phones(self):
+        h = _with_lead(600)
+        event_id = uuid4()
+        began = h.clock.now
+
+        await h.engine.start(event_id, _steps(400, 1000))
+        await h.settle(event_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (200, "bo-1")]
+
+    @pytest.mark.asyncio
+    async def test_no_lead_sends_each_line_on_time(self):
+        h = Harness()
+        event_id = uuid4()
+        began = h.clock.now
+
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await h.settle(event_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (1000, "bo-1")]
+
+
+class TestSeek:
+
+    @pytest.mark.asyncio
+    async def test_a_hand_move_goes_to_the_room_at_once_without_a_new_plan(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        began = h.clock.now
+        await h.engine.start(event_id, _steps(1000, 1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+
+        h.clock.now += 200
+        state = await h.engine.seek(event_id, plan_id, 2)
+
+        assert _sent(h, began) == [(0, "bo-0"), (200, "bo-2")]
+        assert state.plan_id == plan_id
+        assert state.step == 2
+        assert state.step_started_at_ms == h.clock.now
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_the_plan_carries_on_from_the_line_moved_to(self):
+        h = Harness()
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: h.clock.now - began >= 300)
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        await _yield()
+
+        await h.engine.seek(event_id, _plan_id(h, event_id), 1, expected_step=0)
+        paused.until = lambda: False
+        paused.gate.set()
+        await h.settle(event_id)
+
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0", "bo-1", "bo-2"]
+        assert (await h.engine.state(event_id)).reason == "finished"
+
+    @pytest.mark.asyncio
+    async def test_a_press_that_races_the_plan_moving_on_by_itself_is_not_applied_twice(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+        # The plan reached line 1 on its own while the press was on its way.
+        h.store.states[event_id].update({"step": "1", "step_started_ms": str(h.clock.now)})
+
+        state = await h.engine.seek(event_id, plan_id, 1, expected_step=0)
+
+        assert state.step == 1
+        assert len(h.sent) == 1
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_line_already_sent_early_is_not_sent_again_by_a_seek_to_it(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        await _yield()
+
+        await h.engine.seek(event_id, _plan_id(h, event_id), 1, expected_step=0)
+
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0", "bo-1"]
+        assert h.store.states[event_id]["step"] == "1"
+        assert h.store.states[event_id]["step_started_ms"] != ""
+        h.engine._forget_runner(event_id)
+        paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_a_seek_for_a_plan_that_is_not_running_is_refused(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        plan_id = _plan_id(h, event_id)
+
+        with pytest.raises(AutoplayCommandRefused):
+            await h.engine.seek(event_id, "another-plan", 1)
+        with pytest.raises(AutoplayCommandRefused):
+            await h.engine.seek(uuid4(), plan_id, 1)
+        assert len(h.sent) == 1
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_step_past_the_end_of_the_plan_is_refused(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        plan_id = _plan_id(h, event_id)
+
+        with pytest.raises(AutoplayCommandRefused):
+            await h.engine.seek(event_id, plan_id, 2)
+        h.engine._forget_runner(event_id)
+
+
+class TestLearningThePace:
+
+    @pytest.mark.asyncio
+    async def test_ending_a_line_early_speeds_up_the_rest_of_the_plan(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+
+        h.clock.now += 500
+        state = await h.engine.seek(event_id, _plan_id(h, event_id), 1, expected_step=0)
+
+        assert state.tempo == pytest.approx(next_tempo(1.0, 1000, 500))
+        assert state.tempo < 1.0
+        assert state.step_duration_ms == effective_duration_ms(1000, state.tempo)
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_the_line_goes_out_before_the_pace_is_worked_out(self):
+        """Learning the pace costs Redis round trips; the room is not kept
+        waiting on them."""
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        lines_out_when_learned = []
+        write = h.store.write_settings
+
+        async def recording_write(event, fields):
+            lines_out_when_learned.append(len(h.sent))
+            await write(event, fields)
+
+        h.store.write_settings = recording_write
+        h.clock.now += 500
+        await h.engine.seek(event_id, _plan_id(h, event_id), 1, expected_step=0)
+
+        assert lines_out_when_learned == [2]
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_line_held_past_its_time_slows_the_rest_of_the_plan(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+
+        h.clock.now += 900
+        await h.engine.hold(event_id, plan_id)
+        h.clock.now += 600
+        state = await h.engine.seek(event_id, plan_id, 1, expected_step=0)
+
+        assert state.tempo == pytest.approx(next_tempo(1.0, 1000, 1500))
+        assert state.tempo > 1.0
+        assert state.held is False
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_press_on_a_line_the_plan_has_passed_does_not_move_it_back(self):
+        """The operator's screen was behind: they ended line 1 after the plan
+        had already reached line 3 by itself."""
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+        await h.engine.seek(event_id, plan_id, 3)
+        sent_before = len(h.sent)
+
+        state = await h.engine.seek(event_id, plan_id, 2, expected_step=1)
+
+        assert state.step == 3
+        assert len(h.sent) == sent_before
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_deliberate_move_back_is_still_applied(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+        await h.engine.seek(event_id, plan_id, 3)
+
+        state = await h.engine.seek(event_id, plan_id, 1, expected_step=3)
+
+        assert state.step == 1
+        assert h.sent[-1][1][-1] == "bo-1"
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_jump_elsewhere_says_nothing_about_the_pace(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+
+        h.clock.now += 200
+        state = await h.engine.seek(event_id, _plan_id(h, event_id), 2, expected_step=0)
+
+        assert state.tempo == 1.0
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_double_press_says_nothing_about_the_pace(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+
+        h.clock.now += 50
+        state = await h.engine.seek(event_id, _plan_id(h, event_id), 1, expected_step=0)
+
+        assert state.tempo == 1.0
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_the_pace_stretches_every_line_the_runner_holds(self):
+        h = Harness()
+        event_id = uuid4()
+        h.store.settings[event_id] = {"tempo": "1.5"}
+        began = h.clock.now
+
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await h.settle(event_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (1500, "bo-1")]
+
+    @pytest.mark.asyncio
+    async def test_the_pace_can_be_set_and_reset_by_hand(self):
+        h = Harness()
+        event_id = uuid4()
+
+        state = await h.engine.update_settings(event_id, tempo=1.3, lead_ms=500)
+        assert (state.tempo, state.lead_ms) == (pytest.approx(1.3), 500)
+        state = await h.engine.update_settings(event_id, tempo=1.0)
+        assert (state.tempo, state.lead_ms) == (1.0, 500)
+        assert h.store.published[-1]["tempo"] == 1.0
+
+
+class TestHolding:
+
+    @pytest.mark.asyncio
+    async def test_a_held_line_keeps_what_was_left_of_its_time(self):
+        h = Harness()
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: True)
+        await h.engine.start(event_id, _steps(1000, 1000))
+        plan_id = _plan_id(h, event_id)
+
+        h.clock.now += 400
+        held = await h.engine.hold(event_id, plan_id)
+        h.clock.now += 2000
+        resumed = await h.engine.resume(event_id, plan_id)
+        paused.until = lambda: False
+        paused.gate.set()
+        await h.settle(event_id)
+
+        assert held.held is True
+        assert held.held_at_ms == began + 400
+        assert resumed.held is False
+        assert resumed.step_started_at_ms == began + 2000
+        assert _sent(h, began) == [(0, "bo-0"), (3000, "bo-1")]
+
+    @pytest.mark.asyncio
+    async def test_a_held_plan_does_not_move_on(self):
+        h = Harness()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await h.engine.hold(event_id)
+
+        await _yield(200)
+
+        assert h.clock.now > 1_000_000 + 5000
+        assert len(h.sent) == 1
+        assert (await h.engine.state(event_id)).held is True
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_holding_takes_back_a_line_sent_early(self):
+        """The room had been sent the next line ahead of its time; the operator
+        holds this one, so the room is put back on it."""
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await _yield()
+
+        h.clock.now = began + 800
+        paused.until = lambda: True
+        state = await h.engine.hold(event_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (700, "bo-1"), (800, "bo-0")]
+        assert state.step == 0
+        assert h.store.states[event_id]["pre_sent"] == ""
+        h.engine._forget_runner(event_id)
+        paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_pausing_takes_back_a_line_sent_early(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await _yield()
+
+        h.clock.now = began + 800
+        paused.until = lambda: True
+        state = await h.engine.stop(event_id)
+
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0", "bo-1", "bo-0"]
+        assert state.status == "stopped"
+        paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_ending_the_session_does_not_put_the_room_back(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await _yield()
+
+        await h.engine.stop(event_id, reason="ended")
+
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0", "bo-1"]
+        paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_holding_while_the_early_line_is_on_its_way_still_takes_it_back(self):
+        """The early line is out but not yet noted as sent when the hold lands:
+        the hold must still see it and put the room back."""
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+        out = asyncio.Event()
+        stuck = asyncio.Event()
+
+        async def record(_, frames):
+            h.sent.append((h.clock(), [f.segment_id for f in frames], frames))
+            if frames[-1].segment_id == "bo-1" and not out.is_set():
+                out.set()
+                await stuck.wait()
+
+        h.emit.side_effect = record
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await asyncio.wait_for(out.wait(), timeout=5)
+
+        state = await h.engine.hold(event_id)
+
+        assert _sent(h, began)[-2:] == [(700, "bo-1"), (700, "bo-0")]
+        assert state.held is True
+        assert h.store.states[event_id]["pre_sent"] == ""
+        assert h.store.states[event_id]["pre_sending"] == ""
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_hold_that_lands_first_stops_the_early_line_going(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        plan_id = _plan_id(h, event_id)
+        started = h.store.states[event_id]["step_started_ms"]
+        await h.store.hold(event_id, plan_id, h.clock(), "A")
+
+        plan = h.engine._plans[event_id][1]
+        sent = await h.engine._send_early(event_id, plan_id, plan, 0, started)
+
+        assert sent is False
+        assert [segments[-1] for _, segments, _ in h.sent] == ["bo-0"]
+        h.engine._forget_runner(event_id)
+
+    @pytest.mark.asyncio
+    async def test_a_pause_whose_take_back_fails_is_not_reported_and_can_be_retried(self):
+        h = _with_lead(300)
+        event_id = uuid4()
+        began = h.clock.now
+        paused = _Paused(h, until=lambda: h.store.states[event_id].get("pre_sent") == "1")
+        failing = {"on": False}
+
+        async def record(_, frames):
+            if failing["on"]:
+                failing["on"] = False
+                raise RuntimeError("redis went away")
+            h.sent.append((h.clock(), [f.segment_id for f in frames], frames))
+
+        h.emit.side_effect = record
+        await h.engine.start(event_id, _steps(1000, 1000))
+        await _yield()
+
+        h.clock.now = began + 800
+        paused.until = lambda: True
+        failing["on"] = True
+        with pytest.raises(RuntimeError):
+            await h.engine.stop(event_id)
+
+        assert h.store.states[event_id]["status"] == "running"
+        assert h.store.states[event_id]["held"] == "1"
+        assert _sent(h, began) == [(0, "bo-0"), (700, "bo-1")]
+
+        state = await h.engine.stop(event_id)
+
+        assert state.status == "stopped"
+        assert _sent(h, began) == [(0, "bo-0"), (700, "bo-1"), (800, "bo-0")]
+        paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_holding_or_resuming_with_no_plan_is_refused(self):
+        h = Harness()
+        with pytest.raises(AutoplayCommandRefused):
+            await h.engine.hold(uuid4())
+        with pytest.raises(AutoplayCommandRefused):
+            await h.engine.resume(uuid4())
+
+
+class TestPaceAndLeadArithmetic:
+
+    def test_one_press_moves_the_pace_only_part_of_the_way(self):
+        assert next_tempo(1.0, 1000, 500) == pytest.approx(0.825)
+        assert next_tempo(1.0, 1000, 1000) == 1.0
+
+    def test_a_wild_press_is_capped_before_it_is_weighed(self):
+        assert next_tempo(1.0, 1000, 60_000) == pytest.approx(1.35)
+
+    def test_the_pace_stays_within_its_bounds(self):
+        tempo = 1.0
+        for _ in range(50):
+            tempo = next_tempo(tempo, 1000, 100)
+        assert tempo == pytest.approx(0.6)
+
+    def test_a_held_line_is_never_shorter_than_a_line_can_be_recited(self):
+        assert effective_duration_ms(400, 0.6) == 300
+
+    def test_the_lead_is_never_more_than_half_the_line(self):
+        assert lead_for(1000, 300) == 300
+        assert lead_for(400, 300) == 200
+        assert lead_for(1000, 0) == 0
+
+    def test_unreadable_settings_fall_back_to_their_defaults(self):
+        settings = _settings_from({"tempo": "fast", "lead_ms": "soon"})
+        assert settings.tempo == 1.0
+        assert settings.lead_ms == 300
+        assert _settings_from({"tempo": "9", "lead_ms": "99999"}).tempo == 1.6
+        assert _settings_from({"lead_ms": "99999"}).lead_ms == 2000
+
+
+class TestCommandScripts:
+    """The store hands each command to Redis as one script, so the change and
+    taking the lease cannot come apart."""
+
+    @staticmethod
+    def _redis(result):
+        redis = MagicMock()
+        redis.eval = AsyncMock(return_value=result)
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_seek_names_the_plan_step_and_the_step_the_operator_saw(self):
+        redis = self._redis([1, "3", "1234"])
+        event_id = uuid4()
+
+        outcome = await AutoplayStore(redis).seek(event_id, "plan-1", 4, 3, "A")
+
+        assert outcome == SeekOutcome("moved", 3, 1234)
+        args = redis.eval.await_args.args
+        assert list(args[2:4]) == [
+            f"recitation:event:{event_id}:autoplay",
+            f"recitation:event:{event_id}:autoplay-lease",
+        ]
+        assert list(args[4:]) == ["plan-1", "4", "3", "A", str(LEASE_MS)]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_seek_reads_as_refused(self):
+        outcome = await AutoplayStore(self._redis([0, "", ""])).seek(uuid4(), "p", 1, None, "A")
+        assert outcome.result == "refused"
+
+    @pytest.mark.asyncio
+    async def test_hold_reports_whether_the_room_must_be_put_back(self):
+        redis = self._redis([1, "plan-1", "2", "999", 1])
+
+        outcome = await AutoplayStore(redis).hold(uuid4(), None, 5000, "A")
+
+        assert outcome == HoldOutcome("held", "plan-1", 2, "999", True)
+        assert list(redis.eval.await_args.args[4:]) == ["", "5000", "A", str(LEASE_MS)]
+
+    @pytest.mark.asyncio
+    async def test_resume_reports_the_plan(self):
+        redis = self._redis([1, "plan-1"])
+        assert await AutoplayStore(redis).resume(uuid4(), "plan-1", 5000, "A") == (
+            "resumed",
+            "plan-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_settings_are_kept_apart_from_the_plan(self):
+        redis = MagicMock()
+        redis.hgetall = AsyncMock(return_value={"tempo": "1.2", "lead_ms": "450"})
+        event_id = uuid4()
+
+        settings = await AutoplayStore(redis).read_settings(event_id)
+
+        redis.hgetall.assert_awaited_once_with(f"recitation:event:{event_id}:autoplay-settings")
+        assert (settings.tempo, settings.lead_ms) == (1.2, 450)

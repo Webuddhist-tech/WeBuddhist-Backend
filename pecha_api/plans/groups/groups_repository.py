@@ -2,12 +2,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
-from sqlalchemy import and_, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from pecha_api.plans.groups.groups_enums import (
     AuthorGroupInviteStatus,
     AuthorGroupJoinRequestStatus,
+    AuthorGroupMemberRole,
     AuthorGroupStatus,
     AuthorGroupType,
 )
@@ -1149,6 +1150,7 @@ def list_group_joiners_paginated(
     group_id: UUID,
     skip: int,
     limit: int,
+    order_by_role: bool = False,
 ) -> Tuple[List[Users], int]:
     query = (
         db.query(Users)
@@ -1156,8 +1158,31 @@ def list_group_joiners_paginated(
         .filter(author_group_joins.c.group_id == group_id)
     )
     total = query.count()
+    ordering = [author_group_joins.c.created_at.desc()]
+    if order_by_role:
+        # Owner first, then admins, then everyone else. A scalar subquery (not a
+        # join) so a user linked to several Authors still yields a single row.
+        role_rank = (
+            select(
+                func.min(
+                    case(
+                        (AuthorGroupMember.role == AuthorGroupMemberRole.OWNER, 0),
+                        (AuthorGroupMember.role == AuthorGroupMemberRole.ADMIN, 1),
+                        else_=2,
+                    )
+                )
+            )
+            .join(Author, Author.id == AuthorGroupMember.author_id)
+            .where(
+                AuthorGroupMember.group_id == group_id,
+                Author.user_id == Users.id,
+            )
+            .correlate(Users)
+            .scalar_subquery()
+        )
+        ordering.insert(0, func.coalesce(role_rank, 2))
     users = (
-        query.order_by(author_group_joins.c.created_at.desc())
+        query.order_by(*ordering)
         .offset(skip)
         .limit(limit)
         .all()
