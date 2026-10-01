@@ -118,23 +118,39 @@ class TestBuildCommentDto:
 class TestListVerseCommentsService:
 
     @pytest.mark.asyncio
+    @patch(
+        "pecha_api.verse_of_day.comment_service.batch_check_comments_liked_by_user",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "pecha_api.verse_of_day.comment_service.batch_count_comment_likes",
+        new_callable=AsyncMock,
+    )
     @patch("pecha_api.verse_of_day.comment_service.get_verse_comments", new_callable=AsyncMock)
     @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
     async def test_list_comments_success(
         self,
         mock_require: AsyncMock,
         mock_get_comments: AsyncMock,
+        mock_batch_counts: AsyncMock,
+        mock_batch_liked: AsyncMock,
     ) -> None:
         verse_id = uuid4()
         user = MockUser(firstname="Commenter")
         comment = MockComment(user=user, verse_id=verse_id)
         mock_get_comments.return_value = ([comment], 1)
+        mock_batch_counts.return_value = {comment.id: 3}
+        mock_batch_liked.return_value = {comment.id}
 
-        result = await list_verse_comments_service(verse_id=verse_id, skip=0, limit=20)
+        result = await list_verse_comments_service(
+            verse_id=verse_id, skip=0, limit=20, user_id=uuid4()
+        )
 
         assert result.total == 1
         assert result.comments[0].text == "Hello"
         assert result.comments[0].user.first_name == "Commenter"
+        assert result.comments[0].like_count == 3
+        assert result.comments[0].liked_by_me is True
 
     @pytest.mark.asyncio
     @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)

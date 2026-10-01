@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional
 from uuid import UUID
 
@@ -5,19 +6,27 @@ from fastapi import HTTPException
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 
+from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.response_message import NOT_FOUND
+from pecha_api.uploads.S3_utils import generate_presigned_access_url
+from pecha_api.users.users_models import Users
 from pecha_api.verse_of_day.like_repository import (
     count_verse_likes,
     create_like,
     delete_like,
+    get_verse_likers,
     like_exists,
 )
 from pecha_api.verse_of_day.like_response_models import (
     LikeVerseOfDayResponse,
+    VerseOfDayLikerDTO,
+    VerseOfDayLikersResponse,
     VerseOfDayLikesResponse,
 )
 from pecha_api.verse_of_day.verse_of_day_repository import get_verse_of_day_by_id
+
+logger = logging.getLogger(__name__)
 
 
 def _isoformat(value: Any) -> Optional[str]:
@@ -37,6 +46,25 @@ async def _require_verse(verse_id: UUID) -> None:
                 )
 
     await run_in_threadpool(_check)
+
+
+def _liker_first_name(user: Optional[Users]) -> str:
+    if not user:
+        return "Unknown"
+    return (user.firstname or "").strip() or "User"
+
+
+def _liker_avatar_url(user: Optional[Users]) -> Optional[str]:
+    if not user or not user.avatar_url:
+        return None
+    try:
+        return generate_presigned_access_url(
+            bucket_name=get("AWS_BUCKET_NAME"),
+            s3_key=user.avatar_url,
+        )
+    except Exception:
+        logger.exception("Failed to generate verse liker avatar URL")
+        return None
 
 
 async def like_verse_of_day_service(
@@ -61,6 +89,30 @@ async def like_verse_of_day_service(
 async def unlike_verse_of_day_service(verse_id: UUID, user_id: UUID) -> None:
     await _require_verse(verse_id)
     await delete_like(verse_id=verse_id, user_id=user_id)
+
+
+async def list_verse_likers_service(
+    verse_id: UUID,
+    skip: int = 0,
+    limit: int = 20,
+) -> VerseOfDayLikersResponse:
+    await _require_verse(verse_id)
+    likes, total = await get_verse_likers(verse_id=verse_id, skip=skip, limit=limit)
+    return VerseOfDayLikersResponse(
+        likes=[
+            VerseOfDayLikerDTO(
+                user_id=like.user_id,
+                first_name=_liker_first_name(like.user),
+                last_name=like.user.lastname if like.user else None,
+                avatar_url=_liker_avatar_url(like.user),
+                created_at=_isoformat(like.created_at),
+            )
+            for like in likes
+        ],
+        skip=skip,
+        limit=limit,
+        total=total,
+    )
 
 
 async def get_verse_likes_service(

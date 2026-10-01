@@ -52,6 +52,7 @@ from pecha_api.group_posts.comment_models import GroupPostComment
 from pecha_api.group_posts.like_models import GroupPostLike
 from pecha_api.verse_of_day.like_models import VerseOfDayLike
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
+from pecha_api.verse_of_day.comment_like_models import VerseOfDayCommentLike
 from pecha_api.mantra.mantra_metadata_model import MantraMetadata
 from pecha_api.traditions.tradition_models import Tradition, TraditionMetadata, UserTradition
 from pecha_api.region_restrictions.region_restriction_models import ChinaRestrictedItem
