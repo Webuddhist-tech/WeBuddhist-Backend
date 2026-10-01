@@ -355,6 +355,24 @@ class TestCommandScripts:
         assert (await store.resume(event_id, None, 1, "B"))[0] == "not_held"
 
     @pytest.mark.asyncio
+    async def test_a_held_line_never_sent_is_sent_by_every_hold_until_it_is(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(3), total=3, owner="A")
+        await store.seek(event_id, "p1", 1, None, "A")
+
+        held = await store.hold(event_id, "p1", 100, "B")
+        assert (held.result, held.step, held.resend) == ("held", 1, True)
+        # Its send failed: the next hold is told to send it, and takes the lease.
+        again = await store.hold(event_id, None, 150, "C")
+        assert (again.result, again.resend) == ("already_held", True)
+        assert await redis.get(f"recitation:event:{event_id}:autoplay-lease") == "C"
+        assert await store.advance(event_id, "C", "p1", 1, "", {"step_started_ms": "200"})
+        again = await store.hold(event_id, None, 250, "B")
+        assert (again.result, again.resend) == ("already_held", False)
+        assert await redis.get(f"recitation:event:{event_id}:autoplay-lease") == "C"
+
+    @pytest.mark.asyncio
     async def test_an_early_line_is_noted_going_then_gone_and_never_while_held(self, redis):
         store = AutoplayStore(redis)
         event_id = uuid4()

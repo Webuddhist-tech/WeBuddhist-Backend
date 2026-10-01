@@ -203,11 +203,13 @@ return {1, current, started}
 """
 
 # Holds the plan on its step. Returns {outcome, plan, step, when it went out,
-# resend}: 1 held, 2 already held, 0 refused. `resend` is 1 when the next line
-# went to the room early, in whole or in part: the room is put back on this
-# one. The marks stay until that resend has landed (_CLEAR_EARLY_SCRIPT), so a
-# hold whose resend failed is retried by the next hold rather than forgotten;
-# the lease is taken for it then too.
+# resend}: 1 held, 2 already held, 0 refused. `resend` is 1 when the room may
+# not be on this step: the next line went to the room early, in whole or in
+# part, and the room is put back on this one; or this step was never marked
+# sent, and it is sent. Neither mark is cleared until that send has landed
+# (_CLEAR_EARLY_SCRIPT, or the step marked sent), so a hold whose send failed
+# is retried by the next hold rather than forgotten - the runner never sends
+# while held - and the lease is taken for it then too.
 _HOLD_SCRIPT = """
 if redis.call('HGET', KEYS[1], 'status') ~= 'running' then return {0, '', '', '', 0} end
 local plan_id = redis.call('HGET', KEYS[1], 'plan_id')
@@ -217,8 +219,8 @@ local started = redis.call('HGET', KEYS[1], 'step_started_ms') or ''
 local pre_sent = redis.call('HGET', KEYS[1], 'pre_sent') or ''
 local pre_sending = redis.call('HGET', KEYS[1], 'pre_sending') or ''
 local resend = 0
-if started ~= '' and ((pre_sent ~= '' and pre_sent ~= step)
-    or (pre_sending ~= '' and pre_sending ~= step)) then
+if started == '' or (pre_sent ~= '' and pre_sent ~= step)
+    or (pre_sending ~= '' and pre_sending ~= step) then
     resend = 1
 end
 local outcome = 1
@@ -300,7 +302,8 @@ class SeekOutcome:
 @dataclass(frozen=True)
 class HoldOutcome:
     """What a hold did, and the step it holds: `held`, `already_held` or
-    `refused`. `resend` says the next line had gone to the room early."""
+    `refused`. `resend` says the room is to be sent the held step: the next
+    line had gone to the room early, or the step itself was never sent."""
 
     result: str
     plan_id: Optional[str] = None
@@ -924,10 +927,10 @@ class AutoplayEngine:
             return outcome
         if outcome.result == "already_held" and not outcome.resend:
             return outcome
-        # Held now, or held before with a take-back that never landed: either
-        # way this instance has the lease.
+        # Held now, or held before with a send that never landed: either way
+        # this instance has the lease.
         self._forget_runner(event_id)
-        if outcome.resend or not outcome.step_started_ms:
+        if outcome.resend:
             await self._show_held_step(event_id, outcome)
         await self._spawn_if_current(event_id, outcome.plan_id)
         return outcome
@@ -941,12 +944,17 @@ class AutoplayEngine:
         which is then refused. Then the step is sent here, held from now:
         otherwise the room stays on the line before while the stage and the
         operator are on this one, until the plan is resumed.
+
+        A send that fails raises, leaving the step unmarked: the next hold is
+        told to send it again (_HOLD_SCRIPT).
         """
         plan = await self._plan_for(event_id, outcome.plan_id)
         if not plan or not 0 <= outcome.step < len(plan):
             return
         if not outcome.step_started_ms:
             state = await self.store.read(event_id) or {}
+            # False: another command took the plan or the lease while this was
+            # sending - a seek, a stop, or a later hold that sends it itself.
             await self._send_step(
                 event_id,
                 outcome.plan_id,

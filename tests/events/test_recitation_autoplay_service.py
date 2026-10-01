@@ -97,7 +97,7 @@ class FakeStore:
             return HoldOutcome("refused")
         step, started = int(state["step"]), state["step_started_ms"]
         marks = (state.get("pre_sent", ""), state.get("pre_sending", ""))
-        resend = bool(started) and any(m and m != state["step"] for m in marks)
+        resend = not started or any(m and m != state["step"] for m in marks)
         result = "already_held" if state.get("held") == "1" else "held"
         if result == "held":
             state.update({"held": "1", "held_at_ms": str(now_ms)})
@@ -1380,6 +1380,47 @@ class TestHolding:
         second.engine._forget_runner(event_id)
         first_paused.gate.set()
         second_paused.gate.set()
+
+    @pytest.mark.asyncio
+    async def test_a_held_line_whose_send_failed_is_sent_by_the_next_hold(self):
+        """The hold lands on a line the plan has moved to but not sent, and
+        sending it fails. The runner never sends while held, so the next hold
+        must send it rather than find the plan already held and stop there."""
+        h = Harness()
+        paused = _Paused(h, until=lambda: True)
+        failing = {"on": False}
+
+        async def record(_, frames):
+            if failing["on"]:
+                failing["on"] = False
+                raise RuntimeError("redis went away")
+            h.sent.append((h.clock(), [f.segment_id for f in frames], frames))
+
+        h.emit.side_effect = record
+        event_id = uuid4()
+        began = h.clock.now
+        await h.engine.start(event_id, _steps(1000, 1000, 1000))
+        plan_id = _plan_id(h, event_id)
+        await h.store.seek(event_id, plan_id, 1, None, "B")
+
+        h.clock.now += 200
+        failing["on"] = True
+        with pytest.raises(RuntimeError):
+            await h.engine.hold(event_id, plan_id)
+
+        assert _sent(h, began) == [(0, "bo-0")]
+        assert h.store.states[event_id]["held"] == "1"
+        assert h.store.states[event_id]["step_started_ms"] == ""
+
+        h.clock.now += 100
+        state = await h.engine.hold(event_id, plan_id)
+
+        assert _sent(h, began) == [(0, "bo-0"), (300, "bo-1")]
+        assert state.step == 1
+        assert state.held is True
+        assert state.step_started_at_ms == began + 300
+        h.engine._forget_runner(event_id)
+        paused.gate.set()
 
     @pytest.mark.asyncio
     async def test_a_hold_that_lands_first_stops_the_early_line_going(self):
