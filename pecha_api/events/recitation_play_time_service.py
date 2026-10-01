@@ -91,13 +91,14 @@ async def record_segment_play_time(
     the mark store, which hands back nothing from a session that has ended.
 
     `elapsed_ms` is how long the controller held the line being left, by its own
-    clock, and is what gets recorded when it is there. Subtracting the two marks
-    here measures the gap between two HTTP arrivals instead: it carries the
-    network, this endpoint's own liveness check and throttle, and the
-    controller's send pacing - and grows with the number of editions the
-    operator has ticked, since the leading edition is posted behind them. That
-    is time the room was not reciting. The subtraction stays as the fallback for
-    a controller that reports nothing.
+    clock, and it is the only figure ever recorded. Whether a line's play time
+    is stored or updated is the controller's call: a move without it is still
+    marked, so the next move knows where the room was, but nothing is saved -
+    the stored time stays as it was. The two marks are never subtracted for a
+    figure here: that would measure the gap between two HTTP arrivals - the
+    network, this endpoint's liveness check and throttle, the controller's send
+    pacing - not the room reciting, and would overwrite a time the controller
+    chose not to touch.
 
     What is measured is settled here either way. The controller only says how
     long; the marks say whether these two lines may be timed against each other
@@ -118,12 +119,12 @@ async def record_segment_play_time(
             line=line,
             run=run,
         )
-        if previous is None or autoplay:
+        if previous is None or autoplay or elapsed_ms is None:
             return
         parsed = _parse_mark(previous)
         if parsed is None:
             return
-        started_at_ms, started_by_autoplay, previous_run, previous_index, previous_segment_id = parsed
+        _, started_by_autoplay, previous_run, previous_index, previous_segment_id = parsed
         if started_by_autoplay:
             return
         if not run or previous_run != run:
@@ -138,7 +139,7 @@ async def record_segment_play_time(
         )
         if not (steps_on or follows_on):
             return
-        duration_ms = elapsed_ms if elapsed_ms is not None else accepted_at_ms - started_at_ms
+        duration_ms = elapsed_ms
         # Clamped whichever it came from: the controller is authorised by a
         # shared secret, so its figure is taken as a claim, not a fact.
         if not MIN_SEGMENT_PLAY_MS <= duration_ms <= MAX_SEGMENT_PLAY_MS:
