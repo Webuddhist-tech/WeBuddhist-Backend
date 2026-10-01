@@ -70,9 +70,15 @@ poetry run uvicorn pecha_api.app:api --reload
 poetry run pytest
 ```
 
+CI (SonarQube) runs the same suite with coverage and does **not** require a local
+database. A few optional integration modules run only when `TEST_DATABASE_URL`
+points at a **reachable** Postgres instance (for example after
+`local_setup/docker-compose.yml`, which exposes Postgres on port **5434**).
+If that variable is unset or the database is down, those tests are skipped.
+
 Coverage:
 
 ```sh
-poetry run pytest --cov=pecha_api
+poetry run pytest --cov=pecha_api --cov=openpecha_api --cov-report=xml --cov-fail-under=80
 poetry run coverage html
 ```
