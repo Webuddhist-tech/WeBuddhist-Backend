@@ -1,4 +1,3 @@
-import os
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -16,11 +15,12 @@ from pecha_api.users.user_metadata_repository import (
     upsert_user_language,
 )
 from pecha_api.plans.plans_enums import LanguageCode
+from tests.postgres_integration import postgres_integration_url
 
-DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+DATABASE_URL = postgres_integration_url()
 if not DATABASE_URL:
     pytest.skip(
-        "Set TEST_DATABASE_URL to a PostgreSQL database URL to run these tests.",
+        "Set TEST_DATABASE_URL to a reachable PostgreSQL database to run these tests.",
         allow_module_level=True,
     )
 

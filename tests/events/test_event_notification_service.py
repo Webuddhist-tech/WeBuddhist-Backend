@@ -258,7 +258,10 @@ class TestCreateEventEnqueuesNotification:
             return_value=saved,
         ), patch(
             "pecha_api.events.event_service.enqueue_event_notification",
-        ) as mock_enqueue:
+        ) as mock_enqueue, patch(
+            "pecha_api.events.event_service._intention_dtos_for_event",
+            return_value=[],
+        ):
             create_event_service(token="token", request=request)
 
         mock_enqueue.assert_called_once_with(saved.id)

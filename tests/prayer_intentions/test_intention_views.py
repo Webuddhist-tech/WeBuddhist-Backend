@@ -1,6 +1,7 @@
 import asyncio
 from typing import Any, Callable, TypeVar
 from unittest.mock import patch
+from uuid import uuid4
 
 from pecha_api.prayer_intentions.prayer_intention_response_models import (
     PrayerIntentionDTO,
@@ -40,4 +41,19 @@ class TestGetPrayerIntentions:
             result = asyncio.run(get_prayer_intentions())
 
         assert result == expected
-        mock_service.assert_called_once_with()
+        mock_service.assert_called_once_with(None)
+
+    @patch("pecha_api.prayer_intentions.prayer_intention_views.get_all_prayer_intentions_service")
+    def test_forwards_event_filter(self, mock_service):
+        event_id = uuid4()
+        expected = PrayerIntentionsResponse(intentions=[])
+        mock_service.return_value = expected
+
+        with patch(
+            "pecha_api.prayer_intentions.prayer_intention_views.run_in_threadpool",
+            side_effect=fake_run_in_threadpool,
+        ):
+            result = asyncio.run(get_prayer_intentions(event=event_id))
+
+        assert result == expected
+        mock_service.assert_called_once_with(event_id)

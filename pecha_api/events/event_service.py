@@ -57,6 +57,18 @@ from pecha_api.plans.shared.permissions import (
     is_super_admin,
 )
 from pecha_api.users.users_service import validate_and_extract_user_details
+from pecha_api.prayer_intentions.prayer_intention_response_models import (
+    PrayerIntentionDTO,
+)
+from pecha_api.prayer_intentions.prayer_intention_repository import (
+    list_prayer_intentions_for_event,
+    list_prayer_intentions_grouped_by_event_id,
+    replace_event_prayer_intentions,
+    count_event_prayer_intention_links,
+)
+from pecha_api.prayer_intentions.prayer_intention_service import (
+    prayer_intention_to_dto,
+)
 
 from .event_model import Event
 from .event_enums import EventLinkType
@@ -484,6 +496,23 @@ def _chat_room_ids_for_events(*, db, event_ids) -> dict:
     return get_room_ids_by_event_ids(db=db, event_ids=event_ids)
 
 
+def _intention_dtos_for_event(db: Session, event_id: UUID) -> List[PrayerIntentionDTO]:
+    if count_event_prayer_intention_links(db=db, event_id=event_id) == 0:
+        return []
+    rows = list_prayer_intentions_for_event(db=db, event_id=event_id)
+    return [prayer_intention_to_dto(row) for row in rows]
+
+
+def _intention_dtos_map_for_events(
+    db: Session, event_ids: Sequence[UUID]
+) -> Dict[UUID, List[PrayerIntentionDTO]]:
+    grouped = list_prayer_intentions_grouped_by_event_id(db=db, event_ids=event_ids)
+    return {
+        event_id: [prayer_intention_to_dto(row) for row in rows]
+        for event_id, rows in grouped.items()
+    }
+
+
 def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
     """How many live prayer requests exist in the event's chat room."""
     from pecha_api.chat.repository import (
@@ -511,6 +540,7 @@ def _event_to_dto(
     end_date: Optional[datetime] = None,
     chat_room_id: Optional[UUID] = None,
     prayer_request_count: int = 0,
+    intentions: Optional[List[PrayerIntentionDTO]] = None,
 ) -> EventDTO:
     recurrence_dto = None
     if event.is_recurring:
@@ -576,6 +606,7 @@ def _event_to_dto(
         group_avatar_url=group_avatar_url,
         participant_count=participant_count,
         prayer_request_count=prayer_request_count,
+        intentions=intentions if intentions is not None else [],
         is_joined=is_joined,
         my_participation_type=my_participation_type,
         created_at=event.created_at,
@@ -995,6 +1026,7 @@ def _build_listing_event_dtos(
     event_ids = list({item["event"].id for item in paginated_items})
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
     chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
+    intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
     group_ids = list({item["event"].group_id for item in paginated_items})
     group_cards = _group_card_map(db, group_ids)
 
@@ -1015,6 +1047,7 @@ def _build_listing_event_dtos(
                 start_date=item["start_date"],
                 end_date=item["end_date"],
                 chat_room_id=chat_rooms_by_event.get(event.id),
+                intentions=intentions_by_event.get(event.id, []),
             )
         )
     return event_dtos
@@ -1192,6 +1225,7 @@ def get_cms_event_by_id_service(
             start_date=start_date,
             end_date=end_date,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
+            intentions=_intention_dtos_for_event(db=db, event_id=event.id),
         )
 
 
@@ -1262,6 +1296,7 @@ def get_event_by_id_service(
             prayer_request_count=_prayer_request_count_for_event(
                 db=db, event_id=event.id
             ),
+            intentions=_intention_dtos_for_event(db=db, event_id=event.id),
         )
 
 
@@ -1357,6 +1392,12 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
             # are owed is decided in event_reminder_service, which also holds
             # the flag that keeps them off until the rollout says otherwise.
             schedule_event_reminders(db, flushed_event)
+            if request.intention_ids:
+                replace_event_prayer_intentions(
+                    db=db,
+                    event_id=flushed_event.id,
+                    intention_ids=request.intention_ids,
+                )
 
         saved = save_event(
             db, event, request.metadata, request.links,
@@ -1368,7 +1409,8 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         )
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
-        return _event_to_dto(saved)
+        intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
+        return _event_to_dto(saved, intentions=intentions)
 
 
 def _resolve_recurrence_time_window(
@@ -1607,6 +1649,14 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         # stale/canceled against an unchanged event.
         _sync_event_reminders(db, event, should_rebuild_reminders)
 
+        intention_ids_updated = "intention_ids" in request.model_fields_set
+        if intention_ids_updated:
+            replace_event_prayer_intentions(
+                db=db,
+                event_id=event.id,
+                intention_ids=request.intention_ids or [],
+            )
+
         saved = update_event(
             db, event,
             metadata_entries=request.metadata,
@@ -1625,9 +1675,11 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
         if chat_was_enabled and not bool(getattr(saved, "chat_enabled", True)):
             _close_event_chat_sockets_best_effort(event_id=saved.id)
 
+        intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
         return _event_to_dto(
             saved,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=saved.id),
+            intentions=intentions,
         )
 
 
@@ -1714,6 +1766,7 @@ def get_featured_events_service(
         event_ids = list({item['event'].id for item in paginated_items})
         counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
         chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
+        intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
         group_cards = _group_card_map(db, [item['event'].group_id for item in paginated_items])
 
         joined_ids: set[UUID] = set()
@@ -1751,6 +1804,7 @@ def get_featured_events_service(
                     start_date=item['start_date'],
                     end_date=item['end_date'],
                     chat_room_id=chat_rooms_by_event.get(event.id),
+                    intentions=intentions_by_event.get(event.id, []),
                 )
             )
 

@@ -8,6 +8,9 @@ from pecha_api.config import get, get_int
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.timezone_utils import normalize_timezone_name
+from pecha_api.prayer_intentions.prayer_intention_response_models import (
+    PrayerIntentionDTO,
+)
 from .location_response_models import LocationDTO
 from .event_enums import RecurrenceFrequency, RecurrenceDateSystem, EventLinkType, ParticipationType
 
@@ -246,6 +249,13 @@ class EventDTO(BaseModel):
         0,
         description="Non-deleted prayer requests in the event chat room (0 if no room yet)",
     )
+    intentions: List[PrayerIntentionDTO] = Field(
+        default_factory=list,
+        description=(
+            "Prayer intentions allowed for this event when restricted; "
+            "empty when any catalog intention is allowed"
+        ),
+    )
     is_joined: Optional[bool] = Field(
         None,
         description="Whether the authenticated user has joined (null when unauthenticated)",
@@ -322,6 +332,13 @@ class CreateEventRequest(BaseModel):
     chat_enabled: bool = True
     # The organizer's switch for every push this event can send.
     notifications_enabled: bool = True
+    intention_ids: List[UUID] = Field(
+        default_factory=list,
+        description=(
+            "When non-empty, prayer requests in this event's chat may only "
+            "use these catalog intentions"
+        ),
+    )
 
     @field_validator("metadata")
     @classmethod
@@ -370,6 +387,13 @@ class UpdateEventRequest(BaseModel):
     event_format: Optional[EventFormat] = None
     chat_enabled: Optional[bool] = None
     notifications_enabled: Optional[bool] = None
+    intention_ids: Optional[List[UUID]] = Field(
+        None,
+        description=(
+            "Replace the event's allowed prayer intentions; send an empty list "
+            "to allow any catalog intention"
+        ),
+    )
 
     @field_validator("event_format")
     @classmethod
