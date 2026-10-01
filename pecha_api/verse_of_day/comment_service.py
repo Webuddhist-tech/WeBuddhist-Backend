@@ -12,6 +12,7 @@ from pecha_api.plans.response_message import NOT_FOUND
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.users.users_models import Users
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
+from pecha_api.verse_of_day.comment_like_repository import batch_comment_like_state
 from pecha_api.verse_of_day.comment_repository import (
     create_comment,
     delete_comment,
@@ -58,7 +59,11 @@ def _build_comment_user(user: Optional[Users]) -> VerseOfDayCommentUserDTO:
     )
 
 
-def build_comment_dto(comment: VerseOfDayComment) -> VerseOfDayCommentDTO:
+def build_comment_dto(
+    comment: VerseOfDayComment,
+    like_count: int = 0,
+    liked_by_me: bool = False,
+) -> VerseOfDayCommentDTO:
     return VerseOfDayCommentDTO(
         id=comment.id,
         verse_id=comment.verse_id,
@@ -66,6 +71,8 @@ def build_comment_dto(comment: VerseOfDayComment) -> VerseOfDayCommentDTO:
         text=comment.text,
         created_at=_isoformat(comment.created_at),
         updated_at=_isoformat(comment.updated_at),
+        like_count=like_count,
+        liked_by_me=liked_by_me,
     )
 
 
@@ -86,6 +93,7 @@ async def list_verse_comments_service(
     verse_id: UUID,
     skip: int = 0,
     limit: int = 20,
+    user_id: Optional[UUID] = None,
 ) -> VerseOfDayCommentsResponse:
     await _require_verse(verse_id)
     comments, total = await get_verse_comments(
@@ -93,8 +101,20 @@ async def list_verse_comments_service(
         skip=skip,
         limit=limit,
     )
+    comment_ids = [comment.id for comment in comments]
+    like_counts, liked_comment_ids = await batch_comment_like_state(
+        comment_ids=comment_ids,
+        user_id=user_id,
+    )
     return VerseOfDayCommentsResponse(
-        comments=[build_comment_dto(comment) for comment in comments],
+        comments=[
+            build_comment_dto(
+                comment,
+                like_count=like_counts.get(comment.id, 0),
+                liked_by_me=comment.id in liked_comment_ids,
+            )
+            for comment in comments
+        ],
         skip=skip,
         limit=limit,
         total=total,

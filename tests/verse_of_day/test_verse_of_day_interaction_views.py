@@ -13,6 +13,9 @@ from pecha_api.verse_of_day.comment_response_models import (
     VerseOfDayCommentDTO,
     VerseOfDayCommentsResponse,
 )
+from pecha_api.verse_of_day.comment_like_response_models import (
+    LikeVerseOfDayCommentResponse,
+)
 from pecha_api.verse_of_day.like_response_models import (
     LikeVerseOfDayResponse,
     VerseOfDayLikesResponse,
@@ -257,6 +260,57 @@ class TestVerseOfDayCommentViews:
 
         response = client.delete(
             f"/verse-of-day/comments/{comment_id}",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_204_NO_CONTENT
+        mock_service.assert_awaited_once()
+
+
+class TestVerseOfDayCommentLikeViews:
+
+    @patch(
+        "pecha_api.verse_of_day.comment_like_views.like_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_like_comment_new(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        comment_id = uuid4()
+        user_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=user_id)
+        mock_service.return_value = LikeVerseOfDayCommentResponse(
+            comment_id=comment_id,
+            user_id=user_id,
+            liked=True,
+            like_count=1,
+            created_at=datetime.now(tz.utc).isoformat(),
+            is_new=True,
+        )
+
+        response = client.post(
+            f"/verse-of-day/comments/{comment_id}/likes",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.json()["like_count"] == 1
+        mock_service.assert_awaited_once_with(comment_id=comment_id, user_id=user_id)
+
+    @patch(
+        "pecha_api.verse_of_day.comment_like_views.unlike_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_like_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_unlike_comment(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        comment_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=uuid4())
+
+        response = client.delete(
+            f"/verse-of-day/comments/{comment_id}/likes",
             headers=AUTH_HEADERS,
         )
 
