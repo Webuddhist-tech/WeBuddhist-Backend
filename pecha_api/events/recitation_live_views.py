@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from pecha_api.events.recitation_autoplay_service import (
+    AutoplayCommandRefused,
     current_autoplay_send_permit,
     get_autoplay_engine,
 )
@@ -29,6 +30,9 @@ from pecha_api.events.recitation_dependencies import (
     verify_recitation_emit_token,
 )
 from pecha_api.events.recitation_live_models import (
+    AutoplayPlanCommand,
+    AutoplaySeekRequest,
+    AutoplaySettingsRequest,
     AutoplayStartRequest,
     AutoplayStateResponse,
     MoveAcceptedResponse,
@@ -59,6 +63,9 @@ recitation_live_router = APIRouter(
     prefix="/events",
     tags=["Live Recitation"],
 )
+
+
+THROTTLED_MESSAGE = "Too many positions for this event; slow down"
 
 
 def _iso(moment: datetime) -> str:
@@ -222,7 +229,7 @@ async def _socket_move(
         return refused("VALIDATION_ERROR", str(e.errors()[0].get("msg", "Invalid move")))
 
     if not await broadcaster.allow_set(event_id):
-        return refused("THROTTLED", "Too many positions for this event; slow down")
+        return refused("THROTTLED", THROTTLED_MESSAGE)
 
     try:
         accepted = await emit_positions(broadcaster, event_id, move.positions)
@@ -234,6 +241,86 @@ async def _socket_move(
         "move_id": move_id,
         "ok": True,
         "revisions": [position.revision for position in accepted],
+    }
+
+
+# Operator commands to a running plan, by socket frame type. Each has an HTTP
+# twin under `.../recitation/autoplay/<name>` for a controller with no socket.
+AUTOPLAY_COMMANDS = {
+    "autoplay_seek": "seek",
+    "autoplay_hold": "hold",
+    "autoplay_resume": "resume",
+    "autoplay_settings": "settings",
+}
+# These put a line in front of the room, so they share the move throttle.
+_THROTTLED_COMMANDS = {"seek", "hold"}
+
+
+async def run_autoplay_command(
+    event_id: UUID, command: str, data: dict
+) -> AutoplayStateResponse:
+    """Apply one operator command to the event's autoplay.
+
+    Raises `ValidationError` for a malformed command and
+    `AutoplayCommandRefused` when there is no plan for it to act on.
+    """
+    engine = get_autoplay_engine()
+    if command == "seek":
+        request = AutoplaySeekRequest.model_validate(data)
+        return await engine.seek(
+            event_id, request.plan_id, request.step, expected_step=request.expected_step
+        )
+    if command == "settings":
+        settings = AutoplaySettingsRequest.model_validate(data)
+        return await engine.update_settings(
+            event_id, lead_ms=settings.lead_ms, tempo=settings.tempo
+        )
+    plan = AutoplayPlanCommand.model_validate(data)
+    if command == "hold":
+        return await engine.hold(event_id, plan.plan_id)
+    return await engine.resume(event_id, plan.plan_id)
+
+
+async def _socket_autoplay_command(
+    broadcaster: RecitationBroadcaster, event_id: UUID, frame_type: str, data: dict
+) -> dict:
+    """An `autoplay_*` frame, answered with an `autoplay_ack` naming it. The
+    new state also goes out on the operator's autoplay frames, as every change
+    does."""
+    command_id = data.get("command_id")
+    command_id = command_id if isinstance(command_id, str) and len(command_id) <= 64 else None
+    command = AUTOPLAY_COMMANDS[frame_type]
+
+    def refused(code: str, message: str) -> dict:
+        return {
+            "type": "autoplay_ack",
+            "command_id": command_id,
+            "command": command,
+            "ok": False,
+            "code": code,
+            "message": message,
+        }
+
+    if command in _THROTTLED_COMMANDS and not await broadcaster.allow_set(event_id):
+        return refused("THROTTLED", THROTTLED_MESSAGE)
+    try:
+        state = await run_autoplay_command(event_id, command, data)
+    except ValidationError as e:
+        return refused("VALIDATION_ERROR", str(e.errors()[0].get("msg", "Invalid command")))
+    except AutoplayCommandRefused as e:
+        return refused("NOT_RUNNING", str(e))
+    except RuntimeError as e:
+        logger.exception("Recitation autoplay not initialized: %s", e)
+        return refused("UNAVAILABLE", "Autoplay is unavailable")
+    except Exception as e:
+        logger.exception("Autoplay %s failed for event %s: %s", command, event_id, e)
+        return refused("SERVER_ERROR", f"Failed to {command} autoplay")
+    return {
+        "type": "autoplay_ack",
+        "command_id": command_id,
+        "command": command,
+        "ok": True,
+        "state": state.model_dump(mode="json"),
     }
 
 
@@ -265,7 +352,7 @@ async def publish_recitation_position(
     if not await broadcaster.allow_set(event_id):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many positions for this event; slow down",
+            detail=THROTTLED_MESSAGE,
         )
 
     accepted_at = datetime.now(timezone.utc)
@@ -339,7 +426,7 @@ async def publish_recitation_move(
     if not await broadcaster.allow_set(event_id):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many positions for this event; slow down",
+            detail=THROTTLED_MESSAGE,
         )
 
     try:
@@ -396,6 +483,75 @@ async def stop_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to stop autoplay; retry",
         )
+
+
+async def _http_autoplay_command(
+    event_id: UUID, command: str, data: dict
+) -> AutoplayStateResponse:
+    """An operator command over HTTP: the `autoplay_*` frames' twin."""
+    broadcaster = _require_broadcaster()
+    _require_autoplay()
+    if command in _THROTTLED_COMMANDS and not await broadcaster.allow_set(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=THROTTLED_MESSAGE
+        )
+    try:
+        return await run_autoplay_command(event_id, command, data)
+    except AutoplayCommandRefused as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except Exception as e:
+        logger.exception("Autoplay %s failed for event %s: %s", command, event_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to {command} autoplay; retry",
+        )
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay/seek",
+    summary="Move the running plan to one of its steps, now",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def seek_recitation_autoplay(
+    event_id: UUID, request: AutoplaySeekRequest
+) -> AutoplayStateResponse:
+    """A hand move while autoplay runs: no new plan, just a step number."""
+    return await _http_autoplay_command(event_id, "seek", request.model_dump())
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay/hold",
+    summary="Hold the running plan on its line",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def hold_recitation_autoplay(
+    event_id: UUID, request: AutoplayPlanCommand
+) -> AutoplayStateResponse:
+    return await _http_autoplay_command(event_id, "hold", request.model_dump())
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay/resume",
+    summary="Let a held plan go on",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def resume_recitation_autoplay(
+    event_id: UUID, request: AutoplayPlanCommand
+) -> AutoplayStateResponse:
+    return await _http_autoplay_command(event_id, "resume", request.model_dump())
+
+
+@recitation_live_router.post(
+    "/{event_id}/recitation/autoplay/settings",
+    summary="Set autoplay's lead and pace for this event",
+    dependencies=[Depends(verify_recitation_emit_token)],
+)
+async def update_recitation_autoplay_settings(
+    event_id: UUID, request: AutoplaySettingsRequest
+) -> AutoplayStateResponse:
+    return await _http_autoplay_command(
+        event_id, "settings", request.model_dump(exclude_none=True)
+    )
 
 
 @recitation_live_router.get(
@@ -494,6 +650,11 @@ async def websocket_recitation_live(
       {"type": "move", "move_id": "...", "positions": [<set fields>, ...]}   (operator only;
           every edition of one move, sent to the room in that order, answered by a move_ack)
       {"type": "end"}                                                       (operator only)
+      {"type": "autoplay_seek", "command_id": "...", "plan_id": "...", "step": 5,
+       "expected_step": 4}                                                  (operator only)
+      {"type": "autoplay_hold" | "autoplay_resume", "command_id": "...", "plan_id": "..."}
+      {"type": "autoplay_settings", "command_id": "...", "lead_ms": 300, "tempo": 1.0}
+          (operator only; each answered by an autoplay_ack)
       {"type": "ping"}
 
     Server -> client events:
@@ -507,8 +668,11 @@ async def websocket_recitation_live(
       {"type": "session_ended", "event_id": "..."}
       {"type": "move_ack", "move_id": "...", "ok": true, "revisions": [...]}
           (operator only; or "ok": false with "code" and "message")
-      {"type": "autoplay", "status": "running|stopped", "step": 4, ...}
+      {"type": "autoplay", "status": "running|stopped", "step": 4, "held": false,
+       "tempo": 1.0, "lead_ms": 300, ...}
           (operator only: on connect, then whenever autoplay moves on or stops)
+      {"type": "autoplay_ack", "command_id": "...", "command": "seek", "ok": true, "state": {...}}
+          (operator only; or "ok": false with "code" and "message")
       {"type": "pong"}
       {"type": "error", "code": "...", "message": "..."}
     """
@@ -733,7 +897,7 @@ async def websocket_recitation_live(
                     await websocket.send_json({"type": "pong"})
                     continue
 
-                if frame_type not in ("set", "end", "move"):
+                if frame_type not in ("set", "end", "move") and frame_type not in AUTOPLAY_COMMANDS:
                     # Unknown types are ignored, matching the other endpoints.
                     continue
 
@@ -745,6 +909,12 @@ async def websocket_recitation_live(
 
                 if frame_type == "move":
                     await websocket.send_json(await _socket_move(broadcaster, event_id, data))
+                    continue
+
+                if frame_type in AUTOPLAY_COMMANDS:
+                    await websocket.send_json(
+                        await _socket_autoplay_command(broadcaster, event_id, frame_type, data)
+                    )
                     continue
 
                 if frame_type == "end":

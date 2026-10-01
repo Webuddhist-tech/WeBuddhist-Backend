@@ -221,6 +221,8 @@ class TestEngineOnRedis:
 
         engine = AutoplayEngine(AutoplayStore(redis), emit, owner="A")
         event_id = uuid4()
+        # Each line on time, so the gaps are the hold times themselves.
+        await engine.update_settings(event_id, lead_ms=0)
 
         await engine.start(event_id, _steps(3, 300))
         await asyncio.wait_for(engine._runners[event_id], timeout=5)
@@ -282,3 +284,76 @@ class TestEngineOnRedis:
         await asyncio.sleep(0.5)
 
         assert sent == ["bo-0", "bo-chosen"]
+
+
+class TestCommandScripts:
+    """The operator's commands: each makes its change and takes the lease in
+    one step, wherever the runner happens to be."""
+
+    @pytest.mark.asyncio
+    async def test_seek_moves_the_plan_takes_the_lease_and_reports_the_step_left(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(4), total=4, owner="A")
+        await store.advance(event_id, "A", "p1", 0, "", {"step_started_ms": "1000"})
+
+        outcome = await store.seek(event_id, "p1", 1, 0, "B")
+
+        assert (outcome.result, outcome.previous_step, outcome.previous_started_ms) == ("moved", 0, 1000)
+        state = await store.read(event_id)
+        assert (state["step"], state["step_started_ms"]) == ("1", "")
+        assert await redis.get(f"recitation:event:{event_id}:autoplay-lease") == "B"
+
+    @pytest.mark.asyncio
+    async def test_a_press_racing_the_plan_is_not_applied_twice(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(4), total=4, owner="A")
+        await store.advance(event_id, "A", "p1", 0, "", {"step": "1"})
+
+        assert (await store.seek(event_id, "p1", 1, 0, "B")).result == "already_there"
+        assert await redis.get(f"recitation:event:{event_id}:autoplay-lease") == "A"
+
+    @pytest.mark.asyncio
+    async def test_seek_is_refused_past_the_end_for_another_plan_or_once_stopped(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(2), total=2, owner="A")
+
+        assert (await store.seek(event_id, "p1", 2, None, "B")).result == "refused"
+        assert (await store.seek(event_id, "p2", 1, None, "B")).result == "refused"
+        await store.stop(event_id, "stopped")
+        assert (await store.seek(event_id, "p1", 1, None, "B")).result == "refused"
+
+    @pytest.mark.asyncio
+    async def test_hold_takes_back_a_line_sent_early_and_resume_keeps_the_rest_of_the_line(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.begin(event_id, "p1", _plan_json(3), total=3, owner="A")
+        await store.advance(
+            event_id, "A", "p1", 0, "", {"step_started_ms": "1759300000000", "pre_sent": "1"}
+        )
+
+        held = await store.hold(event_id, "p1", 1759300000400, "B")
+        assert (held.result, held.step, held.resend) == ("held", 0, True)
+        state = await store.read(event_id)
+        assert (state["held"], state["pre_sent"]) == ("1", "")
+        assert (await store.hold(event_id, None, 1759300000500, "B")).result == "already_held"
+
+        assert await store.resume(event_id, "p1", 1759300009400, "B") == ("resumed", "p1")
+        state = await store.read(event_id)
+        assert state["step_started_ms"] == "1759300009000"
+        assert state["held"] == ""
+        assert (await store.resume(event_id, None, 1, "B"))[0] == "not_held"
+
+    @pytest.mark.asyncio
+    async def test_settings_outlive_the_plan(self, redis):
+        store = AutoplayStore(redis)
+        event_id = uuid4()
+        await store.write_settings(event_id, {"tempo": "1.2500", "lead_ms": "450"})
+        await store.begin(event_id, "p1", _plan_json(), total=2, owner="A")
+
+        settings = await store.read_settings(event_id)
+
+        assert (settings.tempo, settings.lead_ms) == (1.25, 450)
+        assert await redis.ttl(f"recitation:event:{event_id}:autoplay-settings") > 0

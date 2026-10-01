@@ -74,6 +74,27 @@ X-Recitation-Token: <shared secret>
 
 The throttle budget is shared with the socket, so alternating routes does not double it.
 
+## Autoplay: correcting it, and keeping phones level with the stage
+
+`POST .../recitation/autoplay` hands the backend a plan (each step a line in every edition, with how long the room holds it), and the backend moves the room on by itself. Phones cannot be changed for this, so everything below is the operator's side; a phone still just applies each `position` the moment it lands.
+
+**Correcting a running plan.** A hand move is a step of the plan already running, not a new plan, so it reaches the room in one hop. Each command takes over the plan wherever it runs and is answered with `autoplay_ack` (socket) or the new state (HTTP). Commands are operator-only; `seek` and `hold` share the move throttle.
+
+| Socket frame | HTTP twin (`X-Recitation-Token`) | Does |
+|--------------|----------------------------------|------|
+| `{"type": "autoplay_seek", "command_id": "c1", "plan_id": "…", "step": 5, "expected_step": 4}` | `POST .../recitation/autoplay/seek` | Sends step 5 now and carries on from there. If the plan already reached `step` by itself, does nothing (a press racing the plan is not applied twice). |
+| `{"type": "autoplay_hold", "plan_id": "…"}` | `POST .../recitation/autoplay/hold` | Keeps the room on its line past its time. |
+| `{"type": "autoplay_resume", "plan_id": "…"}` | `POST .../recitation/autoplay/resume` | Goes on; the line keeps what was left of its time. |
+| `{"type": "autoplay_settings", "lead_ms": 300, "tempo": 1.0}` | `POST .../recitation/autoplay/settings` | Sets the phone lead and/or the pace (both optional). |
+
+`plan_id` must still be the plan running, or the command is refused (`NOT_RUNNING` / `409`).
+
+**Phone lead (`lead_ms`, default 300, max 2000).** The next line is published to the room `lead_ms` before its time, so after network and render delay it lands on phones as the stage moves on. The operator's `autoplay` state still changes at the line's real time. A lead is never more than half the line. Holding (or pausing) after the next line already went early puts the room back on the held line.
+
+**Room pace (`tempo`, 0.6–1.6).** Every recorded time is multiplied by it. A `seek` to `expected_step + 1` is the operator ending that line; the time it actually took moves the pace 35% of the way toward what that line says, so autoplay settles on today's pace within a few presses. Setting `tempo: 1.0` resets it. Lead and pace are per event and outlive any one plan.
+
+The `autoplay` state frame carries `held`, `held_at_ms`, `tempo`, `lead_ms`, and `step_duration_ms` with the pace applied.
+
 ## Server → client
 
 | Frame | When |
@@ -82,6 +103,8 @@ The throttle budget is shared with the socket, so alternating routes does not do
 | `presence` | Whenever someone joins or leaves. `count` is the new total |
 | `position` | On connect (if a position exists) and on every operator `set` |
 | `session_ended` | Operator sent `end`; the server closes the socket right after |
+| `autoplay` | Operator only: on connect, then whenever autoplay moves on, holds, stops or changes settings |
+| `move_ack` / `autoplay_ack` | Operator only: the answer to a `move` / `autoplay_*` frame |
 | `pong` | Reply to `ping` |
 | `error` | `UNAUTHORIZED`, `FORBIDDEN`, `VALIDATION_ERROR`, `SERVER_ERROR`, or a 404/403 detail on connect |
 

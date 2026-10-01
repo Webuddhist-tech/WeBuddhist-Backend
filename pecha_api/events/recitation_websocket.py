@@ -62,6 +62,12 @@ def autoplay_plan_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:autoplay-plan"
 
 
+def autoplay_settings_key(event_id: UUID) -> str:
+    """The event's autoplay settings - the room's pace and how early steps are
+    sent - which outlive any one plan."""
+    return f"recitation:event:{event_id}:autoplay-settings"
+
+
 def autoplay_lease_key(event_id: UUID) -> str:
     """The instance running this event's autoplay. Exactly one does, and another
     takes over once the lease lapses - a deploy or a crash does not end it."""
