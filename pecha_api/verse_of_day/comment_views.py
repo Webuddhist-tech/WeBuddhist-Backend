@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 
+from pecha_api.openapi_config import OPTIONAL_BEARER_OPENAPI_SECURITY
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.verse_of_day.comment_response_models import (
     CreateVerseOfDayCommentRequest,
@@ -36,6 +37,7 @@ verse_of_day_comment_actions_router = APIRouter(
     "",
     status_code=status.HTTP_200_OK,
     response_model=VerseOfDayCommentsResponse,
+    openapi_extra={"security": OPTIONAL_BEARER_OPENAPI_SECURITY},
 )
 async def list_verse_comments(
     verse_id: UUID,

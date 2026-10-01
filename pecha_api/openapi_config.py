@@ -38,6 +38,9 @@ USER_TAGS = frozenset(
 
 BEARER_SECURITY_SCHEME = "BearerAuth"
 
+# OpenAPI: either no auth or Bearer (optional authentication).
+OPTIONAL_BEARER_OPENAPI_SECURITY = [{}, {BEARER_SECURITY_SCHEME: []}]
+
 
 def normalize_openapi_security_schemes(schema: dict) -> None:
     """Collapse HTTP bearer schemes into a single documented BearerAuth entry."""

@@ -28,6 +28,10 @@ verse_of_day_comment_likes_router = APIRouter(
 @verse_of_day_comment_likes_router.post(
     "",
     response_model=LikeVerseOfDayCommentResponse,
+    responses={
+        status.HTTP_201_CREATED: {"description": "New like created"},
+        status.HTTP_200_OK: {"description": "Comment was already liked"},
+    },
 )
 async def like_verse_comment(
     comment_id: UUID,
