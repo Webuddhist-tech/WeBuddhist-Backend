@@ -31,23 +31,9 @@ verse_of_day_likes_router = APIRouter(
 @verse_of_day_likes_router.get(
     "",
     status_code=status.HTTP_200_OK,
-    response_model=VerseOfDayLikersResponse,
-)
-async def list_verse_likers(
-    verse_id: UUID,
-    skip: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> VerseOfDayLikersResponse:
-    """List users who liked this verse (newest first). Public, no auth required."""
-    return await list_verse_likers_service(verse_id=verse_id, skip=skip, limit=limit)
-
-
-@verse_of_day_likes_router.get(
-    "/summary",
-    status_code=status.HTTP_200_OK,
     response_model=VerseOfDayLikesResponse,
 )
-async def get_verse_likes_summary(
+async def get_verse_likes(
     verse_id: UUID,
     authentication_credential: Annotated[
         Optional[HTTPAuthorizationCredentials], Depends(oauth2_scheme_optional)
@@ -66,6 +52,20 @@ async def get_verse_likes_summary(
             if exc.status_code != status.HTTP_401_UNAUTHORIZED:
                 raise
     return await get_verse_likes_service(verse_id=verse_id, user_id=user_id)
+
+
+@verse_of_day_likes_router.get(
+    "/users",
+    status_code=status.HTTP_200_OK,
+    response_model=VerseOfDayLikersResponse,
+)
+async def list_verse_likers(
+    verse_id: UUID,
+    skip: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> VerseOfDayLikersResponse:
+    """List users who liked this verse (newest first). Public, no auth required."""
+    return await list_verse_likers_service(verse_id=verse_id, skip=skip, limit=limit)
 
 
 @verse_of_day_likes_router.post(

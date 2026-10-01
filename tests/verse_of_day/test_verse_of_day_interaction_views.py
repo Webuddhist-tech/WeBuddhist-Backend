@@ -54,14 +54,14 @@ class TestVerseOfDayLikeViews:
             total=5,
         )
 
-        response = client.get(f"/verse-of-day/{verse_id}/likes")
+        response = client.get(f"/verse-of-day/{verse_id}/likes/users")
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 5
         mock_service.assert_awaited_once_with(verse_id=verse_id, skip=0, limit=20)
 
     @patch("pecha_api.verse_of_day.like_views.get_verse_likes_service", new_callable=AsyncMock)
-    def test_get_likes_summary(self, mock_service: AsyncMock) -> None:
+    def test_get_likes(self, mock_service: AsyncMock) -> None:
         verse_id = uuid4()
         mock_service.return_value = VerseOfDayLikesResponse(
             verse_id=verse_id,
@@ -69,7 +69,7 @@ class TestVerseOfDayLikeViews:
             liked_by_me=False,
         )
 
-        response = client.get(f"/verse-of-day/{verse_id}/likes/summary")
+        response = client.get(f"/verse-of-day/{verse_id}/likes")
 
         assert response.status_code == status.HTTP_200_OK
         body = response.json()
@@ -91,7 +91,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes/summary",
+            f"/verse-of-day/{verse_id}/likes",
             headers=AUTH_HEADERS,
         )
 
@@ -110,7 +110,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes/summary",
+            f"/verse-of-day/{verse_id}/likes",
             headers=AUTH_HEADERS,
         )
 
@@ -134,7 +134,7 @@ class TestVerseOfDayLikeViews:
         )
 
         response = client.get(
-            f"/verse-of-day/{verse_id}/likes/summary",
+            f"/verse-of-day/{verse_id}/likes",
             headers=AUTH_HEADERS,
         )
 
@@ -151,7 +151,7 @@ class TestVerseOfDayLikeViews:
 
         with pytest.raises(RuntimeError, match="database unavailable"):
             client.get(
-                f"/verse-of-day/{verse_id}/likes/summary",
+                f"/verse-of-day/{verse_id}/likes",
                 headers=AUTH_HEADERS,
             )
 
