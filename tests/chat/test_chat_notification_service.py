@@ -682,9 +682,12 @@ class TestGetChatNotificationTargets:
         mock_devices,
         _get_int,
     ):
-        mock_session.return_value.__enter__.return_value = MagicMock()
         sender_id = uuid4()
         peer_id = uuid4()
+        db = MagicMock()
+        # Chat is opt-in: the peer hears it only through a row turning it on.
+        db.execute.return_value.all.return_value = [(peer_id, True, None, None)]
+        mock_session.return_value.__enter__.return_value = db
         room = MockRoom(sender_id=sender_id, receiver_id=peer_id, name="DM")
         message = MockMessage(sender_id=sender_id, room=room, body="Hello")
         mock_get_message.return_value = message
@@ -702,6 +705,36 @@ class TestGetChatNotificationTargets:
         assert result.recipients[0].push_devices[0].platform == "ios"
         assert result.total == 1
         assert result.has_more is False
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_private_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Alice Doe")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_private_target_with_no_saved_setting_gets_no_push(
+        self,
+        mock_session,
+        mock_get_message,
+        _sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+    ):
+        sender_id = uuid4()
+        peer_id = uuid4()
+        db = MagicMock()
+        db.execute.return_value.all.return_value = []
+        mock_session.return_value.__enter__.return_value = db
+        room = MockRoom(sender_id=sender_id, receiver_id=peer_id, name="DM")
+        mock_get_message.return_value = MockMessage(sender_id=sender_id, room=room, body="Hello")
+        mock_recipients.return_value = [peer_id]
+        mock_devices.return_value = {}
+
+        result = get_chat_notification_targets(message_id=uuid4())
+
+        assert result.recipients == []
+        assert result.total == 0
 
     @patch("pecha_api.chat.notification_service._generate_presigned_url", return_value=None)
     @patch("pecha_api.chat.notification_service.get_group_avatar_key", return_value=None)

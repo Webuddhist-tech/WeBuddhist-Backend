@@ -24,6 +24,12 @@ from pecha_api.plans.groups.groups_models import (
     author_group_joins,
     author_group_tags,
 )
+from pecha_api.notification.notification_preference_enums import (
+    NotificationChannel,
+    NotificationScope,
+    NotificationType,
+)
+from pecha_api.notification.notification_preference_repository import upsert_preference
 from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
@@ -1103,6 +1109,19 @@ def upsert_group_join(
     # leave_group_chat_room recorded, so the group's room comes back to the
     # user's inbox instead of waiting for their next message.
     rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
+    # Every join starts with the group's chat silenced, even for a user who
+    # turned chat on globally; they turn it on for this group themselves.
+    # Upserted, so a rejoin resets whatever they had chosen before they left.
+    upsert_preference(
+        db=db,
+        user_id=user_id,
+        notification_type=NotificationType.CHAT_MESSAGE,
+        channel=NotificationChannel.PUSH,
+        scope_id=group_id,
+        scope_type=NotificationScope.GROUP,
+        enabled=False,
+        set_enabled=True,
+    )
     if commit:
         db.commit()
 

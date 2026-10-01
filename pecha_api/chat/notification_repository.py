@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, true
+from sqlalchemy import and_, false, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
 from pecha_api.chat.models import ChatRoom, ChatRoomMember
@@ -11,6 +11,7 @@ from pecha_api.notification.notification_preference_enums import (
     NotificationChannel,
     NotificationScope,
     NotificationType,
+    default_enabled,
 )
 from pecha_api.notification.notification_preference_models import (
     UserNotificationPreference,
@@ -50,7 +51,7 @@ def _preference_filtered_join(
 
     Returns the join source plus the conditions that implement the resolution
     rule: `enabled` is most-specific-wins (a GROUP row beats a GLOBAL one,
-    absent means allowed), while an unexpired `muted_until` on *any* row
+    absent falls back to the type's default), while an unexpired `muted_until` on *any* row
     suppresses — a global snooze silences a group the user explicitly enabled.
 
     With `event_id`, an EVENT row joins the chain ahead of the group one, so a
@@ -104,8 +105,9 @@ def _preference_filtered_join(
             or_(event_pref.muted_until.is_(None), event_pref.muted_until <= func.now())
         )
 
+    fallback = true() if default_enabled(notification_type) else false()
     conditions = [
-        func.coalesce(*enabled_chain, true()).is_(True),
+        func.coalesce(*enabled_chain, fallback).is_(True),
         *mute_conditions,
     ]
     return source, conditions
@@ -251,7 +253,10 @@ def filter_users_by_notification_preference(
             if muted_until > now:
                 blocked.add(user_id)
 
-    for user_id, (enabled, _) in enabled_by_user.items():
+    # A user with no row falls back to the type's default.
+    fallback = default_enabled(notification_type)
+    for user_id in user_ids:
+        enabled, _ = enabled_by_user.get(user_id, (fallback, False))
         if not enabled:
             blocked.add(user_id)
 
