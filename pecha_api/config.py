@@ -230,6 +230,9 @@ DEFAULTS = dict(
     PRAYER_NOTIFICATION_MAX_HOLD_SECONDS=900,
     # How often held prayer-received pushes are checked and sent.
     PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15,
+    # Percent of prayer-received pushes that read "Someone prayed for you"
+    # instead of naming who prayed. 0 always names them; 100 never does.
+    PRAYER_NOTIFICATION_ANONYMOUS_PERCENT=10,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",

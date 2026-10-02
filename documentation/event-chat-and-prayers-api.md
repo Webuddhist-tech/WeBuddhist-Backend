@@ -230,14 +230,19 @@ payload, so the tap can deep-link to the request itself.
   counted in it.
 - **One push per request per interval:**
   `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140). Each push
-  summarises every prayer since the previous one for that request, without
-  naming anyone:
+  summarises every prayer since the previous one for that request, naming the
+  person who prayed most recently:
 
   | People | Prayers | Title |
   |--------|---------|-------|
-  | 1 | 1 | `Someone prayed for you` |
-  | 1 | > 1 | `Someone prayed for you 10 times` |
-  | > 1 | any | `Someone with 9 others prayed for you 100 times` |
+  | 1 | 1 | `Tenzin Dolma prayed for you` |
+  | 1 | > 1 | `Tenzin Dolma prayed for you 10 times` |
+  | > 1 | any | `Tenzin Dolma with 9 others prayed for you 100 times` |
+
+  About one push in ten (`PRAYER_NOTIFICATION_ANONYMOUS_PERCENT`, default 10)
+  reads `Someone` in place of the name. Which ones is decided from the push's
+  id, so a retried push keeps its title. If the person who prayed has since
+  deleted their account, `A member` stands in for the name.
 
   The body is the room's name (the event's name, for an event room), and the
   push carries an image: the event's image for an event room, falling back to

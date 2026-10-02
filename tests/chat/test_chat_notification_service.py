@@ -20,6 +20,7 @@ from pecha_api.chat.notification_service import (
     _build_prayer_notification_copy,
     _count_held_prayer_requests,
     _preview_body,
+    _shows_prayer_name,
     deactivate_push_device_service,
     get_chat_notification_targets,
     get_prayer_notification_targets,
@@ -1024,32 +1025,64 @@ class TestPrayerNotificationCopy:
 
     def test_one_person_one_prayer(self):
         title, body = _build_prayer_notification_copy(
-            room_name="Medicine Buddha Puja", people_count=1, prayer_total=1
+            room_name="Medicine Buddha Puja",
+            people_count=1,
+            prayer_total=1,
+            latest_prayer_name="Tenzin Dolma",
         )
 
-        assert title == "Someone prayed for you"
+        assert title == "Tenzin Dolma prayed for you"
         assert body == "Medicine Buddha Puja"
 
     def test_one_person_many_prayers(self):
         title, _ = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=1, prayer_total=10
+            room_name="Sangha", people_count=1, prayer_total=10, latest_prayer_name="Kunsang"
         )
 
-        assert title == "Someone prayed for you 10 times"
+        assert title == "Kunsang prayed for you 10 times"
 
     def test_many_people_many_prayers(self):
         title, _ = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=10, prayer_total=100
+            room_name="Sangha", people_count=10, prayer_total=100, latest_prayer_name="Dolma"
         )
 
-        assert title == "Someone with 9 others prayed for you 100 times"
+        assert title == "Dolma with 9 others prayed for you 100 times"
 
     def test_two_people_reads_one_other(self):
         title, _ = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=2, prayer_total=2
+            room_name="Sangha", people_count=2, prayer_total=2, latest_prayer_name="Dolma"
         )
 
-        assert title == "Someone with 1 other prayed for you 2 times"
+        assert title == "Dolma with 1 other prayed for you 2 times"
+
+
+class TestPrayerNameShare:
+    """About 90% of prayer-received pushes name who prayed; the rest read
+    "Someone"."""
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=10)
+    def test_roughly_one_in_ten_is_anonymous(self, _percent):
+        ids = [uuid4() for _ in range(20000)]
+
+        anonymous = sum(not _shows_prayer_name(push_id) for push_id in ids)
+
+        assert 0.08 < anonymous / len(ids) < 0.12
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=10)
+    def test_the_same_push_always_gets_the_same_title(self, _percent):
+        """The worker can fetch one push twice; it must not flip between a
+        name and "Someone"."""
+        push_id = uuid4()
+
+        assert len({_shows_prayer_name(push_id) for _ in range(50)}) == 1
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=0)
+    def test_zero_percent_always_names(self, _percent):
+        assert all(_shows_prayer_name(uuid4()) for _ in range(1000))
+
+    @patch("pecha_api.chat.notification_service.get_int", return_value=100)
+    def test_hundred_percent_never_names(self, _percent):
+        assert not any(_shows_prayer_name(uuid4()) for _ in range(1000))
 
 
 PRAYER_TARGETS = "pecha_api.chat.notification_service"
@@ -1074,6 +1107,14 @@ def _prayer_notification(message_id, people_count=10, prayer_total=100, latest_u
 @patch(f"{PRAYER_TARGETS}.get_prayer_notification_by_id")
 @patch(f"{PRAYER_TARGETS}.SessionLocal")
 class TestGetPrayerNotificationTargets:
+
+    @pytest.fixture(autouse=True)
+    def _names_shown(self):
+        # Push ids are random here; pin the name-or-"Someone" split so these
+        # tests do not read "Someone" one run in ten.
+        with patch(f"{PRAYER_TARGETS}._shows_prayer_name", return_value=True) as shows:
+            self.shows_name = shows
+            yield
 
     def _message(self, group_id):
         room = MockRoom(group_id=group_id, name="Sangha")
@@ -1107,15 +1148,69 @@ class TestGetPrayerNotificationTargets:
         assert mock_get_notification.call_args.kwargs["notification_id"] == notification.id
         assert result.prayer_id == notification.id
         assert result.requester_id == message.sender_id
-        assert result.title == "Someone with 9 others prayed for you 100 times"
-        # Never names who prayed, so never looks them up.
-        mock_name.assert_not_called()
+        assert result.title == "Kunsang with 9 others prayed for you 100 times"
+        assert mock_name.call_args.kwargs["sender_id"] == notification.latest_user_id
         assert result.body == "Sangha"
         assert result.image_url is None
         assert result.prayer_count == 12
         assert result.people_count == 10
         assert result.prayer_total == 100
         assert [r.user_id for r in result.recipients] == [message.sender_id]
+
+    def test_an_anonymous_push_reads_someone_and_looks_nobody_up(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        mock_name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        self.shows_name.return_value = False
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        mock_group.return_value = group_id
+        message = self._message(group_id)
+        notification = _prayer_notification(message.id)
+        mock_get_notification.return_value = notification
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {}
+
+        result = get_prayer_notification_targets(prayer_id=notification.id)
+
+        assert result.title == "Someone with 9 others prayed for you 100 times"
+        assert self.shows_name.call_args.args[0] == notification.id
+        mock_name.assert_not_called()
+
+    def test_a_deleted_account_is_named_as_a_member(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        mock_name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        group_id = uuid4()
+        mock_group.return_value = group_id
+        message = self._message(group_id)
+        notification = _prayer_notification(message.id, people_count=1, prayer_total=1)
+        notification.latest_user_id = None
+        mock_get_notification.return_value = notification
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {}
+
+        result = get_prayer_notification_targets(prayer_id=notification.id)
+
+        assert result.title == "A member prayed for you"
+        mock_name.assert_not_called()
 
     def test_honours_the_requesters_preference(
         self,
@@ -1195,7 +1290,7 @@ class TestGetPrayerNotificationTargets:
 
         assert mock_get_message.call_args.kwargs["message_id"] == message.id
         assert result.prayer_id == legacy.id
-        assert result.title == "Someone prayed for you"
+        assert result.title == "Kunsang prayed for you"
         assert result.people_count == 1
         assert result.prayer_total == 1
         assert [r.user_id for r in result.recipients] == [message.sender_id]

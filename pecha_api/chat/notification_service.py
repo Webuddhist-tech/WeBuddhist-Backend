@@ -340,24 +340,55 @@ def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDev
         )
 
 
+# Named in place of a person who prayed and has since deleted their account.
+_DELETED_PRAYER_NAME = "A member"
+# Stands in for the name on the share of pushes that do not name anyone.
+_ANONYMOUS_PRAYER_NAME = "Someone"
+
+
+def _shows_prayer_name(push_id: UUID) -> bool:
+    """Whether this push names who prayed. Most do; PRAYER_NOTIFICATION_ANONYMOUS_PERCENT
+    of them read "Someone" instead.
+
+    Decided from the push id rather than at random, so a worker that fetches
+    the same push twice renders the same title both times. Push ids are
+    random UUIDs, so across pushes the split matches the setting."""
+    anonymous_percent = min(max(get_int("PRAYER_NOTIFICATION_ANONYMOUS_PERCENT"), 0), 100)
+    return push_id.int % 100 >= anonymous_percent
+
+
+def _latest_prayer_name(*, db: Session, notification: "_PrayerPush") -> str:
+    if not _shows_prayer_name(notification.id):
+        return _ANONYMOUS_PRAYER_NAME
+    # latest_user_id is cleared when that account is deleted.
+    if notification.latest_user_id is None:
+        return _DELETED_PRAYER_NAME
+    return get_sender_display_name(db=db, sender_id=notification.latest_user_id)
+
+
 def _build_prayer_notification_copy(
     *,
     room_name: str,
     people_count: int,
     prayer_total: int,
+    latest_prayer_name: str,
 ) -> tuple[str, str]:
     """Copy reads from the push's stored summary: everyone who prayed since
     the previous push for this request, and how many prayers they added.
 
-    The push never names the people praying, only how many. The room (the
-    event, for an event room) says where, beside the image that comes with it."""
+    The title names whoever prayed most recently; the rest are a count. The
+    room (the event, for an event room) says where, beside the image that comes
+    with it."""
     if people_count <= 1:
         if prayer_total <= 1:
-            return "Someone prayed for you", room_name
-        return f"Someone prayed for you {prayer_total} times", room_name
+            return f"{latest_prayer_name} prayed for you", room_name
+        return f"{latest_prayer_name} prayed for you {prayer_total} times", room_name
     others = people_count - 1
     others_label = "1 other" if others == 1 else f"{others} others"
-    return f"Someone with {others_label} prayed for you {prayer_total} times", room_name
+    return (
+        f"{latest_prayer_name} with {others_label} prayed for you {prayer_total} times",
+        room_name,
+    )
 
 
 def _prayer_notification_image_url(*, db, room) -> str | None:
@@ -439,6 +470,7 @@ def get_prayer_notification_targets(
             room_name=room.name,
             people_count=notification.people_count,
             prayer_total=int(notification.prayer_total),
+            latest_prayer_name=_latest_prayer_name(db=db, notification=notification),
         )
         image_url = _prayer_notification_image_url(db=db, room=room)
 
