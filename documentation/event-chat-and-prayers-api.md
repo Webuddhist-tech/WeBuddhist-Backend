@@ -245,10 +245,18 @@ payload, so the tap can deep-link to the request itself.
 
 - Prayers inside the interval are carried by the next push. The interval does
   not tick by itself: if nobody prays afterwards, no push goes out for them.
+- **Never beside a prayer-request push:** the push is held for
+  `PRAYER_NOTIFICATION_GAP_SECONDS` (default 120) after the prayer, so a
+  request the person who prayed posts straight afterwards reaches the requester
+  first. It then waits until the requester has had no prayer-request push for
+  that long, so the two prayer pushes never arrive together.
+  `PRAYER_NOTIFICATION_MAX_HOLD_SECONDS` (default 900) caps the wait; `0` for
+  the gap sends at once.
 
 Posting a prayer request is the other notification, and a separate rule. It is
-an ordinary `CHAT_MESSAGE` with `message_type: "PRAYER"`, so it goes to every
-member of the room.
+a `CHAT_MESSAGE` event with `message_type: "PRAYER"`, and it goes to every
+member of the room whatever their chat notification setting: turning chat
+pushes off does not silence prayer requests.
 
 - **One push per room per interval:**
   `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140, nineteen
@@ -262,9 +270,9 @@ member of the room.
   buzz, and a member of three sanghas should not have one of them silence the
   other two.
 - Ordinary `TEXT` chat is not gated.
-- Users can mute it globally or per group, like `CHAT_MESSAGE`
-  (`PRAYER_RECEIVED` is a group-scoped notification type) — see
-  [notification-preferences-api.md](./notification-preferences-api.md).
+- The prayer-received push, not the request, is the one users can mute,
+  globally or per group (`PRAYER_RECEIVED` is a group-scoped notification
+  type) — see [notification-preferences-api.md](./notification-preferences-api.md).
 
 ---
 

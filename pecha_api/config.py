@@ -220,6 +220,16 @@ DEFAULTS = dict(
     # Also paces prayer-received pushes: at most one per request per interval,
     # summarising every prayer since the previous one. 0 pushes on every pray.
     PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
+    # A "someone prayed for you" push never lands beside a prayer-request push
+    # to the same person. It waits this long after the prayer, so a request
+    # posted straight after praying goes out first, and then until that person
+    # has had no prayer-request push for this long. 0 sends it at once.
+    PRAYER_NOTIFICATION_GAP_SECONDS=120,
+    # Longest a prayer-received push is held, for someone whose rooms are busy
+    # enough to keep that gap from ever opening.
+    PRAYER_NOTIFICATION_MAX_HOLD_SECONDS=900,
+    # How often held prayer-received pushes are checked and sent.
+    PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",

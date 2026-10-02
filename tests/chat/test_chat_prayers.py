@@ -745,14 +745,17 @@ class TestNotifyPrayersForRequest:
         assert notify_prayers_for_request(uuid4(), uuid4()) is None
         mock_gate.assert_not_called()
 
+    @patch(f"{DISPATCH}.get_int", return_value=0)
+    @patch(f"{DISPATCH}.claim_prayer_notification_for_dispatch", return_value=True)
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
     @patch(f"{DISPATCH}.SessionLocal")
     @patch(f"{DISPATCH}.send_prayer_notification_message", return_value="sqs-1")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
     @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_sends_the_notification_id_as_prayer_id(
-        self, _configured, mock_gate, mock_send, mock_session, mock_mark
+        self, _configured, mock_gate, mock_send, mock_session, mock_mark, mock_claim, _gap
     ):
+        """With no gap configured the push is claimed and sent straight away."""
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
         _session(mock_session)
@@ -761,11 +764,48 @@ class TestNotifyPrayersForRequest:
 
         assert notify_prayers_for_request(uuid4(), uuid4()) == "sqs-1"
 
+        assert mock_claim.call_args.kwargs["notification_id"] == notification_id
         body = mock_send.call_args.args[0]
         assert body["event_type"] == "PRAYER_RECEIVED"
         assert body["prayer_id"] == str(notification_id)
         assert mock_mark.call_args.kwargs["notification_id"] == notification_id
         assert mock_mark.call_args.kwargs["sqs_message_id"] == "sqs-1"
+
+    @patch(f"{DISPATCH}.get_int", return_value=120)
+    @patch(f"{DISPATCH}.claim_prayer_notification_for_dispatch")
+    @patch(f"{DISPATCH}.send_prayer_notification_message")
+    @patch(f"{DISPATCH}._create_prayer_notification_if_due")
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
+    def test_with_a_gap_the_push_is_recorded_and_left_for_the_dispatcher(
+        self, _configured, mock_gate, mock_send, mock_claim, _gap
+    ):
+        """The person who prayed often posts their own request next; sending
+        now would land on top of it."""
+        from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
+
+        mock_gate.return_value = uuid4()
+
+        assert notify_prayers_for_request(uuid4(), uuid4()) is None
+        mock_gate.assert_called_once()
+        mock_claim.assert_not_called()
+        mock_send.assert_not_called()
+
+    @patch(f"{DISPATCH}.get_int", return_value=0)
+    @patch(f"{DISPATCH}.claim_prayer_notification_for_dispatch", return_value=False)
+    @patch(f"{DISPATCH}.SessionLocal")
+    @patch(f"{DISPATCH}.send_prayer_notification_message")
+    @patch(f"{DISPATCH}._create_prayer_notification_if_due")
+    @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
+    def test_a_push_claimed_elsewhere_is_not_sent_twice(
+        self, _configured, mock_gate, mock_send, mock_session, _claim, _gap
+    ):
+        from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
+
+        _session(mock_session)
+        mock_gate.return_value = uuid4()
+
+        assert notify_prayers_for_request(uuid4(), uuid4()) is None
+        mock_send.assert_not_called()
 
     @patch(f"{DISPATCH}.send_prayer_notification_message")
     @patch(f"{DISPATCH}._create_prayer_notification_if_due", return_value=None)
@@ -783,19 +823,142 @@ class TestNotifyPrayersForRequest:
 
         assert notify_prayers_for_request(uuid4(), uuid4()) is None
 
+    @patch(f"{DISPATCH}.get_int", return_value=0)
+    @patch(f"{DISPATCH}.claim_prayer_notification_for_dispatch", return_value=True)
+    @patch(f"{DISPATCH}.SessionLocal")
     @patch(f"{DISPATCH}.mark_prayer_notification_dispatched")
     @patch(f"{DISPATCH}.send_prayer_notification_message", side_effect=RuntimeError)
     @patch(f"{DISPATCH}._create_prayer_notification_if_due")
     @patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
     def test_a_failed_send_leaves_the_row_for_reconcile(
-        self, _configured, mock_gate, _send, mock_mark
+        self, _configured, mock_gate, _send, mock_mark, mock_session, _claim, _gap
     ):
         from pecha_api.chat.notification_dispatch_service import notify_prayers_for_request
 
+        _session(mock_session)
         mock_gate.return_value = uuid4()
 
         assert notify_prayers_for_request(uuid4(), uuid4()) is None
         mock_mark.assert_not_called()
+
+
+def _due(minutes_ago=3, requester_id=None):
+    from pecha_api.chat.repository import DuePrayerNotification
+
+    return DuePrayerNotification(
+        id=uuid4(),
+        requester_id=requester_id or uuid4(),
+        created_at=datetime.now(tz.utc) - timedelta(minutes=minutes_ago),
+    )
+
+
+def _settings(gap=120, max_hold=900, batch=50):
+    values = {
+        "PRAYER_NOTIFICATION_GAP_SECONDS": gap,
+        "PRAYER_NOTIFICATION_MAX_HOLD_SECONDS": max_hold,
+        "CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE": batch,
+    }
+    return lambda key: values[key]
+
+
+@patch(f"{DISPATCH}._claim_and_send_prayer_notification", return_value="sqs-3")
+@patch(f"{DISPATCH}.last_prayer_request_push_to_user", return_value=None)
+@patch(f"{DISPATCH}.list_due_prayer_notifications")
+@patch(f"{DISPATCH}.SessionLocal")
+@patch(f"{DISPATCH}.is_prayer_notification_sqs_configured", return_value=True)
+class TestDispatchDuePrayerNotifications:
+    """"Someone prayed for you" and "X is requesting a prayer" never arrive
+    together: the prayer-received push waits for a quiet gap."""
+
+    def _run(self, mock_session, **settings):
+        from pecha_api.chat.notification_dispatch_service import (
+            dispatch_due_prayer_notifications,
+        )
+
+        _session(mock_session)
+        with patch(f"{DISPATCH}.get_int", side_effect=_settings(**settings)):
+            return dispatch_due_prayer_notifications()
+
+    def test_only_pushes_older_than_the_gap_are_listed(
+        self, _configured, mock_session, mock_list, _last, _send
+    ):
+        mock_list.return_value = []
+
+        before = datetime.now(tz.utc)
+        self._run(mock_session, gap=120)
+        after = datetime.now(tz.utc)
+
+        created_before = mock_list.call_args.kwargs["created_before"]
+        gap = timedelta(seconds=120)
+        assert before - gap <= created_before <= after - gap
+
+    def test_sends_when_the_requester_had_no_recent_prayer_request_push(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        due = _due()
+        mock_list.return_value = [due]
+
+        assert self._run(mock_session) == 1
+
+        mock_send.assert_called_once_with(due.id)
+        assert mock_last.call_args.kwargs["user_id"] == due.requester_id
+
+    def test_holds_while_a_prayer_request_push_just_reached_the_requester(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        """Tenzin prayed for Kunsang's request, then posted a request too.
+        Kunsang hears Tenzin's request now and the prayer later."""
+        mock_list.return_value = [_due(minutes_ago=3)]
+        mock_last.return_value = datetime.now(tz.utc) - timedelta(seconds=30)
+
+        assert self._run(mock_session) == 0
+        mock_send.assert_not_called()
+
+    def test_held_no_longer_than_the_max_hold(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        mock_list.return_value = [_due(minutes_ago=16)]
+        mock_last.return_value = datetime.now(tz.utc) - timedelta(seconds=30)
+
+        assert self._run(mock_session, max_hold=900) == 1
+        mock_send.assert_called_once()
+
+    def test_a_failed_check_sends_rather_than_holds(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        mock_list.return_value = [_due()]
+        mock_last.side_effect = RuntimeError
+
+        assert self._run(mock_session) == 1
+
+    def test_one_held_push_does_not_block_another_requesters(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        busy, quiet = _due(), _due()
+        mock_list.return_value = [busy, quiet]
+        recent = datetime.now(tz.utc) - timedelta(seconds=10)
+        mock_last.side_effect = lambda **kwargs: (
+            recent if kwargs["user_id"] == busy.requester_id else None
+        )
+
+        assert self._run(mock_session) == 1
+        mock_send.assert_called_once_with(quiet.id)
+
+    def test_gap_zero_sends_without_checking(
+        self, _configured, mock_session, mock_list, mock_last, mock_send
+    ):
+        mock_list.return_value = [_due(minutes_ago=0)]
+
+        assert self._run(mock_session, gap=0) == 1
+        mock_last.assert_not_called()
+
+    def test_no_queue_does_nothing(
+        self, mock_configured, mock_session, mock_list, _last, mock_send
+    ):
+        mock_configured.return_value = False
+
+        assert self._run(mock_session) == 0
+        mock_list.assert_not_called()
 
 
 class TestReconcilePrayerNotifications:

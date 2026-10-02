@@ -172,7 +172,12 @@ def _list_notification_recipient_ids(
     sender_id: UUID,
     skip: int,
     limit: int,
+    is_prayer: bool = False,
 ) -> tuple[list[UUID], int]:
+    # A prayer request reaches every member of the room. It is not a chat
+    # message, so the CHAT_MESSAGE opt-in - off by default - must not silence
+    # it; None skips preference filtering. DMs cannot carry prayer requests.
+    notification_type = None if is_prayer else NotificationType.CHAT_MESSAGE
     if chat_kind == ChatRoomKind.PRIVATE.value:
         all_recipient_ids = list_private_chat_recipient_user_ids(
             room=room,
@@ -195,7 +200,7 @@ def _list_notification_recipient_ids(
             group_id=_owning_group_id(db=db, room=room),
             skip=skip,
             limit=limit,
-            notification_type=NotificationType.CHAT_MESSAGE,
+            notification_type=notification_type,
         )
     return list_group_chat_recipient_user_ids(
         db=db,
@@ -203,7 +208,7 @@ def _list_notification_recipient_ids(
         sender_id=sender_id,
         skip=skip,
         limit=limit,
-        notification_type=NotificationType.CHAT_MESSAGE,
+        notification_type=notification_type,
     )
 
 
@@ -302,6 +307,7 @@ def get_chat_notification_targets(
             sender_id=message.sender_id,
             skip=skip,
             limit=limit,
+            is_prayer=is_prayer,
         )
         recipients = _build_notification_recipients(db=db, user_ids=recipient_ids)
 
