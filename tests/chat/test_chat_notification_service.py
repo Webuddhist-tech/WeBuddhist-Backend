@@ -947,11 +947,34 @@ class TestGetChatNotificationTargets:
 
 class TestPrayerNotificationCopy:
 
-    def test_title_is_anonymous_and_body_is_the_room(self):
-        title, body = _build_prayer_notification_copy(room_name="Medicine Buddha Puja")
+    def test_one_person_one_prayer(self):
+        title, body = _build_prayer_notification_copy(
+            room_name="Medicine Buddha Puja", people_count=1, prayer_total=1
+        )
 
-        assert title == "Someone just prayed for you"
+        assert title == "Someone prayed for you"
         assert body == "Medicine Buddha Puja"
+
+    def test_one_person_many_prayers(self):
+        title, _ = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=1, prayer_total=10
+        )
+
+        assert title == "Someone prayed for you 10 times"
+
+    def test_many_people_many_prayers(self):
+        title, _ = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=10, prayer_total=100
+        )
+
+        assert title == "Someone with 9 others prayed for you 100 times"
+
+    def test_two_people_reads_one_other(self):
+        title, _ = _build_prayer_notification_copy(
+            room_name="Sangha", people_count=2, prayer_total=2
+        )
+
+        assert title == "Someone with 1 other prayed for you 2 times"
 
 
 PRAYER_TARGETS = "pecha_api.chat.notification_service"
@@ -1009,7 +1032,7 @@ class TestGetPrayerNotificationTargets:
         assert mock_get_notification.call_args.kwargs["notification_id"] == notification.id
         assert result.prayer_id == notification.id
         assert result.requester_id == message.sender_id
-        assert result.title == "Someone just prayed for you"
+        assert result.title == "Someone with 9 others prayed for you 100 times"
         # Never names who prayed, so never looks them up.
         mock_name.assert_not_called()
         assert result.body == "Sangha"
@@ -1097,7 +1120,7 @@ class TestGetPrayerNotificationTargets:
 
         assert mock_get_message.call_args.kwargs["message_id"] == message.id
         assert result.prayer_id == legacy.id
-        assert result.title == "Someone just prayed for you"
+        assert result.title == "Someone prayed for you"
         assert result.people_count == 1
         assert result.prayer_total == 1
         assert [r.user_id for r in result.recipients] == [message.sender_id]

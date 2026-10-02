@@ -334,14 +334,24 @@ def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDev
         )
 
 
-PRAYER_RECEIVED_TITLE = "Someone just prayed for you"
+def _build_prayer_notification_copy(
+    *,
+    room_name: str,
+    people_count: int,
+    prayer_total: int,
+) -> tuple[str, str]:
+    """Copy reads from the push's stored summary: everyone who prayed since
+    the previous push for this request, and how many prayers they added.
 
-
-def _build_prayer_notification_copy(*, room_name: str) -> tuple[str, str]:
-    """The same anonymous line whoever prayed and however many times: the push
-    never names the people praying. The room (the event, for an event room)
-    says where, beside the image that comes with it."""
-    return PRAYER_RECEIVED_TITLE, room_name
+    The push never names the people praying, only how many. The room (the
+    event, for an event room) says where, beside the image that comes with it."""
+    if people_count <= 1:
+        if prayer_total <= 1:
+            return "Someone prayed for you", room_name
+        return f"Someone prayed for you {prayer_total} times", room_name
+    others = people_count - 1
+    others_label = "1 other" if others == 1 else f"{others} others"
+    return f"Someone with {others_label} prayed for you {prayer_total} times", room_name
 
 
 def _prayer_notification_image_url(*, db, room) -> str | None:
@@ -419,7 +429,11 @@ def get_prayer_notification_targets(
         group_id = _owning_group_id(db=db, room=room)
 
         prayer_count = count_message_prayers(db=db, message_id=message.id)
-        title, body = _build_prayer_notification_copy(room_name=room.name)
+        title, body = _build_prayer_notification_copy(
+            room_name=room.name,
+            people_count=notification.people_count,
+            prayer_total=int(notification.prayer_total),
+        )
         image_url = _prayer_notification_image_url(db=db, room=room)
 
         # The requester alone, and never for their own prayer. The gate never
