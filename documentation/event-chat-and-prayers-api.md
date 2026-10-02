@@ -229,8 +229,8 @@ payload, so the tap can deep-link to the request itself.
 - Never fires for praying for your own request, and your own prayers are not
   counted in it.
 - **One push per request per interval:**
-  `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140). Each push
-  summarises every prayer since the previous one for that request, naming the
+  `PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS` (default 900, fifteen
+  minutes). Each push summarises every prayer since the previous one for that request, naming the
   person who prayed most recently:
 
   | People | Prayers | Title |
@@ -248,8 +248,10 @@ payload, so the tap can deep-link to the request itself.
   push carries an image: the event's image for an event room, falling back to
   the room's image, and the room's image otherwise.
 
-- Prayers inside the interval are carried by the next push. The interval does
-  not tick by itself: if nobody prays afterwards, no push goes out for them.
+- Prayers inside the interval are carried by the next push. That push goes out
+  on the next prayer after the interval, or, if nobody prays again, from the
+  dispatcher (every `PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS`) once the
+  interval has passed. No prayers in the interval, no push.
 - **Never beside a prayer-request push:** the push is held for
   `PRAYER_NOTIFICATION_GAP_SECONDS` (default 120) after the prayer, so a
   request the person who prayed posts straight afterwards reaches the requester

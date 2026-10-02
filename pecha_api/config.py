@@ -217,9 +217,12 @@ DEFAULTS = dict(
     # requests posted inside it are held: the room shows them at once, and the
     # next push that goes out carries them as "+N other prayer requests".
     # 0 sends a push for every prayer request. TEXT messages are unaffected.
-    # Also paces prayer-received pushes: at most one per request per interval,
-    # summarising every prayer since the previous one. 0 pushes on every pray.
     PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
+    # At most one "X prayed for you" push per request per this many seconds,
+    # summarising every prayer since the previous one. Prayers inside it are
+    # held, and the next push goes out once it has passed - on the next pray,
+    # or from the dispatcher if nobody prays again. 0 pushes on every pray.
+    PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS=900,
     # A "someone prayed for you" push never lands beside a prayer-request push
     # to the same person. It waits this long after the prayer, so a request
     # posted straight after praying goes out first, and then until that person

@@ -720,6 +720,25 @@ class TestPrayerNotificationGate:
         assert self._run(mock_session, uuid4()) is not None
         assert mock_create.call_args.kwargs["prayer_total"] == 1
 
+    def test_the_sweep_records_held_prayers_without_a_prayer_user(
+        self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
+    ):
+        """Nobody prayed again after the interval; the dispatcher collects
+        what was held."""
+        mock_lock.return_value = MockMessage()
+        mock_last.return_value = _previous_push(datetime.now(tz.utc) - timedelta(minutes=20))
+        pema, sonam = _unreported(count=1, minutes_ago=15), _unreported(count=2, minutes_ago=10)
+        mock_claim.return_value = [pema, sonam]
+        notification_id = uuid4()
+        mock_create.return_value = MagicMock(id=notification_id)
+
+        assert self._run(mock_session, None) == notification_id
+
+        kwargs = mock_create.call_args.kwargs
+        assert kwargs["people_count"] == 2
+        assert kwargs["prayer_total"] == 3
+        assert kwargs["latest_user_id"] == sonam.user_id
+
     def test_the_request_is_locked_before_the_last_push_is_read(
         self, mock_session, mock_lock, mock_last, mock_claim, mock_create, _get_int
     ):
@@ -861,6 +880,7 @@ def _settings(gap=120, max_hold=900, batch=50):
     return lambda key: values[key]
 
 
+@patch(f"{DISPATCH}._record_held_prayer_notifications", return_value=0)
 @patch(f"{DISPATCH}._claim_and_send_prayer_notification", return_value="sqs-3")
 @patch(f"{DISPATCH}.last_prayer_request_push_to_user", return_value=None)
 @patch(f"{DISPATCH}.list_due_prayer_notifications")
@@ -880,7 +900,7 @@ class TestDispatchDuePrayerNotifications:
             return dispatch_due_prayer_notifications()
 
     def test_only_pushes_older_than_the_gap_are_listed(
-        self, _configured, mock_session, mock_list, _last, _send
+        self, _configured, mock_session, mock_list, _last, _send, _record
     ):
         mock_list.return_value = []
 
@@ -893,7 +913,7 @@ class TestDispatchDuePrayerNotifications:
         assert before - gap <= created_before <= after - gap
 
     def test_sends_when_the_requester_had_no_recent_prayer_request_push(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         due = _due()
         mock_list.return_value = [due]
@@ -904,7 +924,7 @@ class TestDispatchDuePrayerNotifications:
         assert mock_last.call_args.kwargs["user_id"] == due.requester_id
 
     def test_holds_while_a_prayer_request_push_just_reached_the_requester(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         """Tenzin prayed for Kunsang's request, then posted a request too.
         Kunsang hears Tenzin's request now and the prayer later."""
@@ -915,7 +935,7 @@ class TestDispatchDuePrayerNotifications:
         mock_send.assert_not_called()
 
     def test_held_no_longer_than_the_max_hold(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         mock_list.return_value = [_due(minutes_ago=16)]
         mock_last.return_value = datetime.now(tz.utc) - timedelta(seconds=30)
@@ -924,7 +944,7 @@ class TestDispatchDuePrayerNotifications:
         mock_send.assert_called_once()
 
     def test_a_failed_check_sends_rather_than_holds(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         mock_list.return_value = [_due()]
         mock_last.side_effect = RuntimeError
@@ -932,7 +952,7 @@ class TestDispatchDuePrayerNotifications:
         assert self._run(mock_session) == 1
 
     def test_one_held_push_does_not_block_another_requesters(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         busy, quiet = _due(), _due()
         mock_list.return_value = [busy, quiet]
@@ -945,7 +965,7 @@ class TestDispatchDuePrayerNotifications:
         mock_send.assert_called_once_with(quiet.id)
 
     def test_gap_zero_sends_without_checking(
-        self, _configured, mock_session, mock_list, mock_last, mock_send
+        self, _configured, mock_session, mock_list, mock_last, mock_send, _record
     ):
         mock_list.return_value = [_due(minutes_ago=0)]
 
@@ -953,12 +973,92 @@ class TestDispatchDuePrayerNotifications:
         mock_last.assert_not_called()
 
     def test_no_queue_does_nothing(
-        self, mock_configured, mock_session, mock_list, _last, mock_send
+        self, mock_configured, mock_session, mock_list, _last, mock_send, _record
     ):
         mock_configured.return_value = False
 
         assert self._run(mock_session) == 0
         mock_list.assert_not_called()
+
+    def test_held_prayers_are_recorded_before_due_pushes_are_listed(
+        self, _configured, mock_session, mock_list, _last, _send, mock_record
+    ):
+        """A push recorded by the sweep goes through the same gap as any other."""
+        order = []
+        mock_record.side_effect = lambda: order.append("record") or 0
+        mock_list.side_effect = lambda **_: order.append("list") or []
+
+        self._run(mock_session)
+
+        assert order == ["record", "list"]
+
+    def test_no_queue_records_nothing(
+        self, mock_configured, mock_session, mock_list, _last, _send, mock_record
+    ):
+        mock_configured.return_value = False
+
+        self._run(mock_session)
+
+        mock_record.assert_not_called()
+
+
+@patch(f"{DISPATCH}._create_prayer_notification_if_due")
+@patch(f"{DISPATCH}.list_prayer_requests_with_held_prayers")
+@patch(f"{DISPATCH}.SessionLocal")
+class TestRecordHeldPrayerNotifications:
+    """Prayers the interval held are reported once it passes, even when nobody
+    prays for the request again."""
+
+    def _run(self, mock_session, interval=900):
+        from pecha_api.chat.notification_dispatch_service import (
+            _record_held_prayer_notifications,
+        )
+
+        _session(mock_session)
+        values = {
+            "PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS": interval,
+            "CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE": 50,
+        }
+        with patch(f"{DISPATCH}.get_int", side_effect=lambda key: values[key]):
+            return _record_held_prayer_notifications()
+
+    def test_lists_requests_whose_last_push_is_older_than_the_interval(
+        self, mock_session, mock_list, _create
+    ):
+        mock_list.return_value = []
+
+        before = datetime.now(tz.utc)
+        self._run(mock_session, interval=900)
+        after = datetime.now(tz.utc)
+
+        kwargs = mock_list.call_args.kwargs
+        interval = timedelta(seconds=900)
+        assert before - interval <= kwargs["last_push_before"] <= after - interval
+        assert kwargs["limit"] == 50
+
+    def test_records_a_push_for_each_due_request(self, mock_session, mock_list, mock_create):
+        first, second = uuid4(), uuid4()
+        mock_list.return_value = [first, second]
+        mock_create.side_effect = [uuid4(), None]
+
+        assert self._run(mock_session) == 1
+
+        assert [call.kwargs for call in mock_create.call_args_list] == [
+            {"message_id": first},
+            {"message_id": second},
+        ]
+
+    def test_one_failure_does_not_stop_the_rest(self, mock_session, mock_list, mock_create):
+        mock_list.return_value = [uuid4(), uuid4()]
+        mock_create.side_effect = [RuntimeError, uuid4()]
+
+        assert self._run(mock_session) == 1
+
+    def test_a_failed_listing_records_nothing(self, mock_session, mock_list, mock_create):
+        mock_list.side_effect = RuntimeError
+
+        assert self._run(mock_session) == 0
+        mock_create.assert_not_called()
 
 
 class TestReconcilePrayerNotifications:

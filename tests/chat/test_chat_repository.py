@@ -30,6 +30,7 @@ from pecha_api.chat.repository import (
     claim_unreported_prayers,
     last_prayer_request_push_to_user,
     list_due_prayer_notifications,
+    list_prayer_requests_with_held_prayers,
     list_undispatched_prayer_notifications,
     get_my_prayer_counts_map,
     leave_member,
@@ -808,6 +809,32 @@ class TestHeldPrayerNotificationQueries:
         conditions = _compiled_conditions(query)
         assert any("notification_dispatched_at IS NULL" in c for c in conditions)
         assert any("notification_sqs_message_id IS NULL" in c for c in conditions)
+
+    def test_held_prayers_from_others_on_live_requests_past_the_interval(self):
+        """A request is due when someone other than the requester has prayers
+        waiting and its last push is older than the interval, or it never had
+        one. Deleted requests are left alone."""
+        db = MagicMock()
+        message_id = uuid4()
+        query = _query_chain(db, results=[(message_id,)])
+        query.group_by.return_value = query
+
+        due = list_prayer_requests_with_held_prayers(
+            db=db, last_push_before=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc), limit=50
+        )
+
+        assert due == [message_id]
+        conditions = _compiled_conditions(query)
+        assert any("unreported_count >" in c for c in conditions)
+        assert any(
+            "chat_message_prayer_counts.user_id != chat_messages.sender_id" in c
+            for c in conditions
+        )
+        assert any("chat_messages.deleted_at IS NULL" in c for c in conditions)
+        last_push = next(c for c in conditions if "chat_prayer_notifications" in c)
+        assert "IS NULL" in last_push
+        assert "<=" in last_push
+        query.limit.assert_called_once_with(50)
 
     def test_claim_wins_only_an_unclaimed_row(self):
         db = MagicMock()

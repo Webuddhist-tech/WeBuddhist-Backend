@@ -965,6 +965,43 @@ def get_last_prayer_notification(
     )
 
 
+def list_prayer_requests_with_held_prayers(
+    db: Session,
+    *,
+    last_push_before: datetime,
+    limit: int,
+) -> List[UUID]:
+    """Prayer requests holding prayers no push has reported, whose last
+    prayer-received push was recorded before `last_push_before` (or that never
+    had one), oldest held prayer first.
+
+    These are the requests the interval held and nobody prayed for again
+    afterwards, so no pray call is coming to send their push. The requester's
+    own prayers are never reported, so they alone do not make a request due.
+    """
+    last_push = (
+        select(func.max(ChatPrayerNotification.created_at))
+        .where(ChatPrayerNotification.message_id == ChatMessage.id)
+        .correlate(ChatMessage)
+        .scalar_subquery()
+    )
+    rows = (
+        db.query(ChatMessage.id)
+        .join(ChatMessagePrayerCount, ChatMessagePrayerCount.message_id == ChatMessage.id)
+        .filter(
+            ChatMessagePrayerCount.unreported_count > 0,
+            ChatMessagePrayerCount.user_id != ChatMessage.sender_id,
+            ChatMessage.deleted_at.is_(None),
+            or_(last_push.is_(None), last_push <= last_push_before),
+        )
+        .group_by(ChatMessage.id)
+        .order_by(func.min(ChatMessagePrayerCount.last_prayed_at).asc())
+        .limit(limit)
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
 class UnreportedPrayers(NamedTuple):
     """One person's prayers for a request that no push has reported yet."""
 
