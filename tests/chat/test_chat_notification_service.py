@@ -947,34 +947,11 @@ class TestGetChatNotificationTargets:
 
 class TestPrayerNotificationCopy:
 
-    def test_one_person_one_prayer(self):
-        title, body = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=1, prayer_total=1, latest_prayer_name="Kunsang"
-        )
+    def test_title_is_anonymous_and_body_is_the_room(self):
+        title, body = _build_prayer_notification_copy(room_name="Medicine Buddha Puja")
 
-        assert title == "Sangha"
-        assert body == "Kunsang prayed for you"
-
-    def test_one_person_many_prayers(self):
-        _, body = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=1, prayer_total=10, latest_prayer_name="Kunsang"
-        )
-
-        assert body == "Kunsang prayed for you 10 times"
-
-    def test_many_people_many_prayers(self):
-        _, body = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=10, prayer_total=100, latest_prayer_name="Kunsang"
-        )
-
-        assert body == "Kunsang with 9 others prayed for you 100 times"
-
-    def test_two_people_reads_one_other(self):
-        _, body = _build_prayer_notification_copy(
-            room_name="Sangha", people_count=2, prayer_total=2, latest_prayer_name="Dolma"
-        )
-
-        assert body == "Dolma with 1 other prayed for you 2 times"
+        assert title == "Someone just prayed for you"
+        assert body == "Medicine Buddha Puja"
 
 
 PRAYER_TARGETS = "pecha_api.chat.notification_service"
@@ -1011,7 +988,7 @@ class TestGetPrayerNotificationTargets:
         mock_get_notification,
         mock_get_message,
         mock_group,
-        _name,
+        mock_name,
         _count,
         mock_filter,
         mock_devices,
@@ -1032,8 +1009,11 @@ class TestGetPrayerNotificationTargets:
         assert mock_get_notification.call_args.kwargs["notification_id"] == notification.id
         assert result.prayer_id == notification.id
         assert result.requester_id == message.sender_id
-        assert result.title == "Sangha"
-        assert result.body == "Kunsang with 9 others prayed for you 100 times"
+        assert result.title == "Someone just prayed for you"
+        # Never names who prayed, so never looks them up.
+        mock_name.assert_not_called()
+        assert result.body == "Sangha"
+        assert result.image_url is None
         assert result.prayer_count == 12
         assert result.people_count == 10
         assert result.prayer_total == 100
@@ -1117,7 +1097,7 @@ class TestGetPrayerNotificationTargets:
 
         assert mock_get_message.call_args.kwargs["message_id"] == message.id
         assert result.prayer_id == legacy.id
-        assert result.body == "Kunsang prayed for you"
+        assert result.title == "Someone just prayed for you"
         assert result.people_count == 1
         assert result.prayer_total == 1
         assert [r.user_id for r in result.recipients] == [message.sender_id]
@@ -1148,6 +1128,88 @@ class TestGetPrayerNotificationTargets:
 
         assert result.recipients == []
         assert result.total == 0
+
+    def _event_room_message(self, room_img_url):
+        room = MockRoom(group_id=None, name="Medicine Buddha Puja", img_url=room_img_url)
+        room.event_id = uuid4()
+        return MockMessage(room=room, message_type="PRAYER")
+
+    def _resolve_for(self, message, mock_get_notification, mock_get_message, mock_group, mock_filter, mock_devices):
+        mock_group.return_value = uuid4()
+        mock_get_notification.return_value = _prayer_notification(message.id)
+        mock_get_message.return_value = message
+        mock_filter.side_effect = lambda db, user_ids, notification_type, scope_id: user_ids
+        mock_devices.return_value = {}
+
+    def test_an_event_room_carries_the_events_image_under_its_name(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        message = self._event_room_message(room_img_url="rooms/stale.jpg")
+        self._resolve_for(message, mock_get_notification, mock_get_message, mock_group, mock_filter, mock_devices)
+        event = SimpleNamespace(image_url="events/puja.jpg")
+
+        with patch(f"{PRAYER_TARGETS}.get_event_by_id", return_value=event) as mock_event, \
+                patch(f"{PRAYER_TARGETS}._generate_presigned_url", side_effect=lambda key: f"signed:{key}"):
+            result = get_prayer_notification_targets(prayer_id=uuid4())
+
+        assert mock_event.call_args.args[1] == message.room.event_id
+        assert result.image_url == "signed:events/puja.jpg"
+        assert result.body == "Medicine Buddha Puja"
+        assert result.event_id == message.room.event_id
+
+    def test_an_event_without_an_image_falls_back_to_the_rooms(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        message = self._event_room_message(room_img_url="rooms/puja.jpg")
+        self._resolve_for(message, mock_get_notification, mock_get_message, mock_group, mock_filter, mock_devices)
+
+        with patch(f"{PRAYER_TARGETS}.get_event_by_id", return_value=SimpleNamespace(image_url=None)), \
+                patch(f"{PRAYER_TARGETS}._generate_presigned_url", side_effect=lambda key: f"signed:{key}"):
+            result = get_prayer_notification_targets(prayer_id=uuid4())
+
+        assert result.image_url == "signed:rooms/puja.jpg"
+
+    def test_a_group_room_carries_the_rooms_image(
+        self,
+        mock_session,
+        mock_get_notification,
+        mock_get_message,
+        mock_group,
+        _name,
+        _count,
+        mock_filter,
+        mock_devices,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        room = MockRoom(group_id=uuid4(), name="Sangha", img_url="groups/avatar.jpg")
+        room.event_id = None
+        message = MockMessage(room=room, message_type="PRAYER")
+        self._resolve_for(message, mock_get_notification, mock_get_message, mock_group, mock_filter, mock_devices)
+
+        with patch(f"{PRAYER_TARGETS}.get_event_by_id") as mock_event, \
+                patch(f"{PRAYER_TARGETS}._generate_presigned_url", side_effect=lambda key: f"signed:{key}"):
+            result = get_prayer_notification_targets(prayer_id=uuid4())
+
+        mock_event.assert_not_called()
+        assert result.image_url == "signed:groups/avatar.jpg"
 
 
 class TestDeactivatePushDeviceService:

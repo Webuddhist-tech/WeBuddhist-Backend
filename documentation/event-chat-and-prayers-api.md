@@ -230,13 +230,13 @@ payload, so the tap can deep-link to the request itself.
   counted in it.
 - **One push per request per interval:**
   `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140). Each push
-  summarises every prayer since the previous one for that request:
+  stands for every prayer since the previous one for that request.
 
-  | People | Prayers | Body |
-  |--------|---------|------|
-  | 1 | 1 | `Kunsang prayed for you` |
-  | 1 | > 1 | `Kunsang prayed for you 10 times` |
-  | > 1 | any | `Kunsang with 9 others prayed for you 100 times` |
+  The title is always `Someone just prayed for you`: the push never names who
+  prayed or how many times. The body is the room's name (the event's name, for
+  an event room), and the push carries an image: the event's image for an event
+  room, falling back to the room's image, and the room's image otherwise. The
+  counts are still in the data payload (`prayer_count`) for the app to use.
 
 - Prayers inside the interval are carried by the next push. The interval does
   not tick by itself: if nobody prays afterwards, no push goes out for them.
