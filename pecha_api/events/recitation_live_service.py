@@ -9,16 +9,10 @@ from starlette import status
 
 from pecha_api.events.event_model import Event
 from pecha_api.events.event_repository import get_event_by_id
-from pecha_api.plans.groups.groups_repository import (
-    is_group_id_published,
-    is_user_following_group,
-    is_user_joined_group,
-)
+from pecha_api.plans.groups.groups_repository import is_group_id_published
 from pecha_api.plans.response_message import NOT_FOUND
 
 logger = logging.getLogger(__name__)
-
-NOT_ELIGIBLE = "Only joined or following members of this event's group can follow its recitation"
 
 
 def load_live_event(db: Session, event_id: UUID) -> Event:
@@ -33,16 +27,6 @@ def load_live_event(db: Session, event_id: UUID) -> Event:
     if not is_group_id_published(db=db, group_id=event.group_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
     return event
-
-
-def require_subscriber(db: Session, event: Event, user_id: UUID) -> None:
-    """Anyone who can see the event can follow along: same joiner/follower rule
-    the event's chat room uses, so this introduces no new permission concept."""
-    eligible = is_user_joined_group(
-        db=db, group_id=event.group_id, user_id=user_id
-    ) or is_user_following_group(db=db, group_id=event.group_id, user_id=user_id)
-    if not eligible:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=NOT_ELIGIBLE)
 
 
 def is_event_operator(db: Session, event: Event, token: str) -> bool:
@@ -83,9 +67,10 @@ def is_event_operator(db: Session, event: Event, token: str) -> bool:
 def assert_live_event(event_id: UUID) -> None:
     """404 unless the event exists and its group is published.
 
-    All a token-authenticated machine can be checked against: there is no user
-    or Author behind a shared-secret request, so this is about the event being
-    a real, reachable target - not about who is driving it.
+    All that can be checked when there is nobody behind the socket or request:
+    a machine holding the shared secret has no user or Author, and neither has
+    a signed-out viewer. So this is about the event being a real, reachable
+    target - not about who is driving it or watching it.
     """
     from pecha_api.db.database import SessionLocal
 
@@ -98,8 +83,8 @@ class RecitationCaller:
     """Who is on the socket.
 
     `presence_id` keys the shared roster. `user_id` is the website User behind
-    the token, and is what eligibility is checked against - a Studio author
-    with no linked User has the first without the second.
+    the token - a Studio author with no linked User has the first without the
+    second.
     """
 
     presence_id: UUID
@@ -146,31 +131,21 @@ def resolve_recitation_caller(token: str) -> RecitationCaller:
     )
 
 
-def resolve_recitation_access(
-    event_id: UUID, user_id: Optional[UUID], token: str
-) -> bool:
-    """Gate a connecting socket and say whether it may publish.
+def resolve_recitation_access(event_id: UUID, token: str) -> bool:
+    """Gate a signed-in socket and say whether it may publish.
 
-    Raises 404 for an unreachable event and 403 for an ineligible viewer;
-    returns True when the caller is the operator.
+    Raises 404 for an unreachable event; otherwise returns True when the caller
+    is the operator, and False for everyone else, who may follow along.
 
-    The operator check runs first, and passing it is enough on its own: CMS
-    rights live on the Author, while joining or following is something the
-    person does in the app, and the one driving the puja often has the former
-    without the latter. Gating them on a join would lock the group's own admins
-    out of their event.
+    Following asks for no join or follow of the event's group: a published
+    group's puja is open to anyone who can reach the event, signed out
+    included, and holding someone to more for having signed in would be
+    backwards. All that is still decided here is who drives the room - CMS
+    rights on the event, which live on the Author and so are checked against
+    the token alone.
     """
     from pecha_api.db.database import SessionLocal
 
     with SessionLocal() as db:
         event = load_live_event(db=db, event_id=event_id)
-        if is_event_operator(db=db, event=event, token=token):
-            return True
-        if user_id is None:
-            # A Studio author who cannot edit this event has no app identity to
-            # check a join or a follow against.
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail=NOT_ELIGIBLE
-            )
-        require_subscriber(db=db, event=event, user_id=user_id)
-        return False
+        return is_event_operator(db=db, event=event, token=token)

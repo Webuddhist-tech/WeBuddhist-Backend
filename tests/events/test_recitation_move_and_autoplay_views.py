@@ -309,6 +309,9 @@ class TestAutoplayRoutes:
 
 
 def _ws(event_id, token=SECRET):
+    """`token=None` is a signed-out viewer: no query parameter at all."""
+    if token is None:
+        return f"/events/{event_id}/recitation/live"
     return f"/events/{event_id}/recitation/live?token={token}"
 
 
@@ -396,6 +399,31 @@ class TestControllerSocket:
 
         assert message["code"] == "FORBIDDEN"
         broadcaster.broadcast_position.assert_not_awaited()
+
+    def test_a_signed_out_viewer_cannot_move_the_room(self):
+        """A socket with no token follows along; it is never the controller,
+        however the event's emit secret is configured."""
+        event_id = uuid4()
+        with _env() as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                info = websocket.receive_json()
+                websocket.send_json({"type": "move", "move_id": "m-5", "positions": [_position("bo", "a")]})
+                message = websocket.receive_json()
+
+        assert info["is_operator"] is False
+        assert message["code"] == "FORBIDDEN"
+        broadcaster.allow_set.assert_not_awaited()
+        broadcaster.broadcast_position.assert_not_awaited()
+        broadcaster.caller.assert_not_called()
+
+    def test_a_signed_out_viewer_never_hears_about_autoplay(self):
+        event_id = uuid4()
+        with _env(engine=_engine(event_id)) as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                websocket.receive_json()
+                _sync(websocket)
+
+        broadcaster.subscribe_to_autoplay.assert_not_awaited()
 
     def test_the_operator_is_told_where_autoplay_is_and_every_change(self):
         event_id = uuid4()
@@ -663,3 +691,29 @@ class TestAutoplayCommandsOverTheSocket:
 
         assert message["code"] == "FORBIDDEN"
         engine.hold.assert_not_awaited()
+
+    def test_a_signed_out_viewer_cannot_command_autoplay(self):
+        """Every operator command, not just one: a socket with no token must
+        not be able to touch a running plan."""
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        frames = [
+            {"type": "autoplay_seek", "plan_id": "p-1", "step": 4},
+            {"type": "autoplay_hold", "plan_id": "p-1"},
+            {"type": "autoplay_resume", "plan_id": "p-1"},
+            {"type": "autoplay_settings", "tempo": 1.1},
+        ]
+        with _env(engine=engine) as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                websocket.receive_json()
+                answers = []
+                for frame in frames:
+                    websocket.send_json(frame)
+                    answers.append(websocket.receive_json())
+
+        assert [a["code"] for a in answers] == ["FORBIDDEN"] * len(frames)
+        engine.seek.assert_not_awaited()
+        engine.hold.assert_not_awaited()
+        engine.resume.assert_not_awaited()
+        engine.update_settings.assert_not_awaited()
+        broadcaster.allow_set.assert_not_awaited()

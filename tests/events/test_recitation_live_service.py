@@ -10,7 +10,6 @@ from pecha_api.events.recitation_live_service import (
     RecitationCaller,
     is_event_operator,
     load_live_event,
-    require_subscriber,
     resolve_recitation_access,
     resolve_recitation_caller,
 )
@@ -53,27 +52,6 @@ class TestLoadLiveEvent:
         with patch(f"{MODULE}.get_event_by_id", return_value=event), \
              patch(f"{MODULE}.is_group_id_published", return_value=True):
             assert load_live_event(db=MagicMock(), event_id=event.id) is event
-
-
-class TestRequireSubscriber:
-
-    def test_allows_joined_member(self):
-        with patch(f"{MODULE}.is_user_joined_group", return_value=True), \
-             patch(f"{MODULE}.is_user_following_group", return_value=False):
-            require_subscriber(db=MagicMock(), event=_event(), user_id=uuid4())
-
-    def test_allows_follower(self):
-        with patch(f"{MODULE}.is_user_joined_group", return_value=False), \
-             patch(f"{MODULE}.is_user_following_group", return_value=True):
-            require_subscriber(db=MagicMock(), event=_event(), user_id=uuid4())
-
-    def test_rejects_outsider(self):
-        with patch(f"{MODULE}.is_user_joined_group", return_value=False), \
-             patch(f"{MODULE}.is_user_following_group", return_value=False):
-            with pytest.raises(HTTPException) as exc:
-                require_subscriber(db=MagicMock(), event=_event(), user_id=uuid4())
-
-        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
 
 
 class TestIsEventOperator:
@@ -122,80 +100,49 @@ class TestIsEventOperator:
 class TestResolveRecitationAccess:
 
     @staticmethod
-    def _patched(is_operator, require_error=None, load_error=None):
+    def _patched(is_operator, load_error=None):
         stack = ExitStack()
         stack.enter_context(patch("pecha_api.db.database.SessionLocal"))
         mock_load = stack.enter_context(patch(f"{MODULE}.load_live_event", return_value=_event()))
         if load_error is not None:
             mock_load.side_effect = load_error
-        mock_require = stack.enter_context(patch(f"{MODULE}.require_subscriber"))
-        if require_error is not None:
-            mock_require.side_effect = require_error
         mock_operator = stack.enter_context(
             patch(f"{MODULE}.is_event_operator", return_value=is_operator)
         )
-        return stack, mock_load, mock_require, mock_operator
+        return stack, mock_load, mock_operator
 
     def test_operator_is_allowed_without_joining_the_group(self):
         """CMS rights live on the Author and joining is an app action, so the
         person driving the puja often has one without the other. Requiring both
         would lock a group's own admins out of their event."""
-        stack, _, mock_require, _ = self._patched(is_operator=True)
+        stack, _, mock_operator = self._patched(is_operator=True)
         with stack:
-            assert resolve_recitation_access(uuid4(), uuid4(), "t") is True
+            assert resolve_recitation_access(uuid4(), "t") is True
 
-        mock_require.assert_not_called()
+        assert mock_operator.call_args.kwargs["token"] == "t"
 
-    def test_non_operator_must_be_a_subscriber(self):
-        stack, mock_load, mock_require, _ = self._patched(is_operator=False)
+    def test_non_member_follows_as_a_viewer(self):
+        """A published group's puja is open to anyone who can reach the event,
+        signed out included, so a signed-in user who never joined or followed
+        the group - or a Studio author with no rights on this event - follows
+        along rather than being turned away."""
+        stack, mock_load, _ = self._patched(is_operator=False)
         with stack:
-            assert resolve_recitation_access(uuid4(), uuid4(), "t") is False
+            assert resolve_recitation_access(uuid4(), "t") is False
 
         mock_load.assert_called_once()
-        mock_require.assert_called_once()
-
-    def test_ineligible_non_operator_is_rejected(self):
-        stack, _, _, _ = self._patched(
-            is_operator=False,
-            require_error=HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no"),
-        )
-        with stack:
-            with pytest.raises(HTTPException) as exc:
-                resolve_recitation_access(uuid4(), uuid4(), "t")
-
-        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
-
-    def test_operator_without_an_app_identity_is_still_allowed(self):
-        """A Studio author driving the puja may have no website User at all."""
-        stack, _, mock_require, _ = self._patched(is_operator=True)
-        with stack:
-            assert resolve_recitation_access(uuid4(), None, "t") is True
-
-        mock_require.assert_not_called()
-
-    def test_non_operator_without_an_app_identity_is_rejected(self):
-        # Nothing to check a join or a follow against, so this cannot be waved
-        # through on the strength of a CMS login alone.
-        stack, _, mock_require, _ = self._patched(is_operator=False)
-        with stack:
-            with pytest.raises(HTTPException) as exc:
-                resolve_recitation_access(uuid4(), None, "t")
-
-        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
-        mock_require.assert_not_called()
 
     def test_unreachable_event_is_rejected_before_any_permission_check(self):
-        stack, _, mock_require, mock_operator = self._patched(
+        stack, _, mock_operator = self._patched(
             is_operator=True,
             load_error=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found"),
         )
         with stack:
             with pytest.raises(HTTPException) as exc:
-                resolve_recitation_access(uuid4(), uuid4(), "t")
+                resolve_recitation_access(uuid4(), "t")
 
         assert exc.value.status_code == status.HTTP_404_NOT_FOUND
         mock_operator.assert_not_called()
-        mock_require.assert_not_called()
 
 
 class TestResolveRecitationCaller:
@@ -245,8 +192,7 @@ class TestResolveRecitationCaller:
         with stack:
             caller = resolve_recitation_caller(token="cms-token")
 
-        # No website User behind this author, so the Author id keys the roster
-        # and there is no identity to check a join against.
+        # No website User behind this author, so the Author id keys the roster.
         assert caller == RecitationCaller(presence_id=author.id, user_id=None)
 
     def test_deactivated_studio_author_is_rejected(self):

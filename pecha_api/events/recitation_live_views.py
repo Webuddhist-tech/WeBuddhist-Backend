@@ -631,7 +631,7 @@ async def read_segment_play_times(text_id: str) -> SegmentPlayTimesResponse:
 async def websocket_recitation_live(
     websocket: WebSocket,
     event_id: UUID,
-    token: str = Query(...),
+    token: Optional[str] = Query(None),
 ) -> None:
     """Live recitation position for an event (WebSocket).
 
@@ -641,9 +641,14 @@ async def websocket_recitation_live(
     language through the segment's existing mappings, and follow `text_id` when
     the operator moves on to the next liturgy in the event's collection.
 
-    `token` is a user's session token, or the emit secret - the live controller
-    has no session. A socket opened with the secret is the operator, and is not
-    counted among the people in the room.
+    `token` is optional. Without one the socket is a signed-out viewer: a
+    published group's puja is open to anyone who can reach the event, so
+    following it needs no account. With one it is an app user's or a Studio
+    author's session token - the operator when they may edit the event in the
+    CMS, a viewer otherwise - or the emit secret, since the live controller has
+    no session. A socket opened with the secret is the operator, and is not
+    counted among the people in the room. A token that is present but resolves
+    to nobody is refused rather than treated as signed out.
 
     Client -> server messages:
       {"type": "set", "text_id": "...", "segment_id": "...", "index": 12, "round_number": 3}  (operator only)
@@ -690,11 +695,16 @@ async def websocket_recitation_live(
     # it does for the HTTP routes. Such a socket drives the room but is nobody
     # in it: it is not counted among the people present.
     by_emit_secret = is_recitation_emit_secret(token)
+    # No token is a signed-out viewer, who follows along like anyone else but
+    # has no session to check anything against.
+    anonymous = not token
     presence_id: Optional[UUID] = None
     autoplay_subscriber = None
 
     try:
-        if by_emit_secret:
+        if by_emit_secret or anonymous:
+            # Neither has a person behind it to check, so all that is left is
+            # whether the event is a real, published target.
             try:
                 await run_in_threadpool(assert_live_event, event_id=event_id)
             except HTTPException as access_error:
@@ -704,12 +714,20 @@ async def websocket_recitation_live(
                 )
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
-            is_operator = True
+            # The secret drives the room; a signed-out viewer only ever follows
+            # it, so every operator-only frame below is refused to them.
+            is_operator = by_emit_secret
+            # A fresh id per socket: an anonymous viewer has no identity to
+            # share a roster slot with, so each one counts as its own person.
             presence_id = uuid4()
         else:
             try:
                 caller = await run_in_threadpool(resolve_recitation_caller, token=token)
             except HTTPException as auth_error:
+                # Refused, not quietly downgraded to a signed-out viewer: an
+                # operator reconnecting on a lapsed session must find out, not
+                # carry on clicking from a socket that cannot publish. A client
+                # that only wants to watch reconnects without a token.
                 logger.warning("Recitation WebSocket auth failed: %s", auth_error.detail)
                 await websocket.accept()
                 await websocket.send_json(_error("UNAUTHORIZED", str(auth_error.detail)))
@@ -722,7 +740,6 @@ async def websocket_recitation_live(
                 is_operator = await run_in_threadpool(
                     resolve_recitation_access,
                     event_id=event_id,
-                    user_id=caller.user_id,
                     token=token,
                 )
             except HTTPException as access_error:

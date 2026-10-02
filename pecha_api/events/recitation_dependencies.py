@@ -1,4 +1,5 @@
 import secrets
+from typing import Optional
 
 from fastapi import Header, HTTPException
 from starlette import status
@@ -6,10 +7,11 @@ from starlette import status
 from pecha_api.config import get
 
 
-def is_recitation_emit_secret(token: str) -> bool:
+def is_recitation_emit_secret(token: Optional[str]) -> bool:
     """Whether `token` is the emit secret - for the socket, which takes its
     token in the query string rather than the header. False when no secret is
-    configured, so an unconfigured server never opens that door."""
+    configured, so an unconfigured server never opens that door, and for a
+    socket opened with no token at all."""
     expected = get("RECITATION_EMIT_SECRET_TOKEN")
     if not expected or not token:
         return False
