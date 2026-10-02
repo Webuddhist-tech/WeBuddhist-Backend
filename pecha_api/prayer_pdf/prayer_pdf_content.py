@@ -200,3 +200,31 @@ def tibetan_digits(number: int) -> str:
 
 def lines(value: Optional[str]) -> Sequence[str]:
     return [line.strip() for line in (value or "").splitlines() if line.strip()]
+
+
+# Shown in the Studio preview when the chosen day has no prayer requests, so
+# the layout can be judged before the first one arrives. Mixed lengths and
+# scripts, like a real day; one is long enough to span two columns.
+SAMPLE_ROWS = (
+    PrayerRow("sample-1", "Tenzin Dolma", "Please pray for my mother, who is in hospital after surgery. May she recover quickly and without pain."),
+    PrayerRow("sample-2", "李明", "為所有眾生祈禱平安喜樂，願一切病苦早日消除。"),
+    PrayerRow("sample-3", "Karma Wangdu", "བླ་མ་མཁྱེན། ང་ཚོའི་ཨ་ཕ་ལགས་ཀྱི་སྐུ་ཚེ་བརྟན་པ་དང་སྐུ་ཁམས་བཟང་པོ་ཡོང་བའི་སྨོན་ལམ་ཞུ་རོགས་གནང་།"),
+    PrayerRow("sample-4", "Anna Weber", "For everyone affected by the floods this week. May they find shelter and safety."),
+    PrayerRow("sample-5", "沈旭艺", "願父母身體健康，家庭和睦，工作順利。"),
+    PrayerRow("sample-6", "Webuddhist _user_102", "May all beings be free from suffering."),
+    PrayerRow(
+        "sample-7",
+        "Sonam Lhamo",
+        "May the Supreme Holy Tara bestow her blessings on my teachers, my family and all my Dharma friends. "
+        "May all suffering beings of the six realms, foremost those on the dedication list of this puja, "
+        "be freed from fear, illness and sorrow, and swiftly attain the state of perfect awakening. "
+        "May those who have passed away this year be reborn in a pure land, and may those who are left behind "
+        "find comfort and strength. May the Dharma flourish and the lives of all the great teachers be long and stable. "
+        "May all the wishes of the people who asked for prayers today be fulfilled in accordance with the Dharma.",
+    ),
+    PrayerRow("sample-8", "Nguyen Thi Mai", "Con xin cầu nguyện cho ông bà được an lành."),
+    PrayerRow("sample-9", "Pema Choedon", "For my brother's safe journey home."),
+    PrayerRow("sample-10", "བསྟན་འཛིན་ནོར་བུ", "སེམས་ཅན་ཐམས་ཅད་བདེ་བ་དང་ལྡན་པར་གྱུར་ཅིག"),
+    PrayerRow("sample-11", "Maria Lopez", "May my daughter pass her exams and find her path with a peaceful heart."),
+    PrayerRow("sample-12", "王芳", "願世界和平，眾生離苦得樂。"),
+)

@@ -30,6 +30,20 @@ _FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 _RENDER_SLOTS = asyncio.Semaphore(2)
 _LOAD_TIMEOUT_MS = 30_000
 
+# Fonts the page uses, by the name the preview fetches them under.
+# EB Garamond (SIL OFL) stands in for the action's Microsoft Garamond, which
+# may not be redistributed; Monlam Uni OuChan2 is the Tibetan face both use.
+FONT_FILES = {
+    "EBGaramond.ttf": "prayer_pdf/EBGaramond.ttf",
+    "EBGaramond-Italic.ttf": "prayer_pdf/EBGaramond-Italic.ttf",
+    "MonlamUniOuChan2.ttf": "bo.ttf",
+}
+_FONT_ROLES = {
+    "garamond": "EBGaramond.ttf",
+    "garamond_italic": "EBGaramond-Italic.ttf",
+    "tibetan": "MonlamUniOuChan2.ttf",
+}
+
 # Paper in mm, and the printable area inside the @page margins
 # (16mm top, 18mm bottom, 15mm each side, plus 2mm of slack at the foot).
 _PAGES_MM = {"A3": (297, 420), "A4": (210, 297)}
@@ -112,23 +126,30 @@ def _font_data_uri(relative_path: str) -> str:
     return f"data:font/ttf;base64,{encoded}"
 
 
+def font_path(name: str) -> Optional[Path]:
+    relative = FONT_FILES.get(name)
+    return _FONTS_DIR / relative if relative else None
+
+
 def content_size_mm(page_size: str) -> tuple:
     width, height = _PAGES_MM.get(page_size, _PAGES_MM["A3"])
     return width - 30, height - 36
 
 
-def render_html(document: PrayerPdfDocument) -> str:
+def render_html(document: PrayerPdfDocument, *, preview: bool = False) -> str:
+    """The page Chromium prints, or with `preview` the same page for the
+    Studio to show: fonts by relative URL ("fonts/<name>", resolved by the
+    <base> the Studio sets) instead of inlined, laid out as soon as it loads
+    and drawn as sheets of paper."""
     content_w, content_h = content_size_mm(document.page_size)
     template = _environment().get_template("prayer_requests.html.j2")
+    if preview:
+        fonts = {role: f"fonts/{name}" for role, name in _FONT_ROLES.items()}
+    else:
+        fonts = {role: _font_data_uri(FONT_FILES[name]) for role, name in _FONT_ROLES.items()}
     return template.render(
-        fonts={
-            # EB Garamond (SIL OFL) stands in for the action's Microsoft
-            # Garamond, which may not be redistributed; Monlam Uni OuChan2 is
-            # the Tibetan face both use.
-            "garamond": _font_data_uri("prayer_pdf/EBGaramond.ttf"),
-            "garamond_italic": _font_data_uri("prayer_pdf/EBGaramond-Italic.ttf"),
-            "tibetan": _font_data_uri("bo.ttf"),
-        },
+        preview=preview,
+        fonts=fonts,
         page_size=document.page_size if document.page_size in _PAGES_MM else "A3",
         content_w_mm=content_w,
         content_h_mm=content_h,
@@ -153,8 +174,14 @@ def render_html(document: PrayerPdfDocument) -> str:
         closing_en=document.closing_en,
         closing_emoji=document.closing_emoji,
         layout_json=json.dumps(
-            {"columns": document.columns, "contentW": content_w, "contentH": content_h}
-        ),
+            {
+                "columns": document.columns,
+                "contentW": content_w,
+                "contentH": content_h,
+                "dateLabel": document.date_label,
+            },
+            ensure_ascii=False,
+        ).replace("<", "\\u003c"),  # it sits inside <script>
     )
 
 

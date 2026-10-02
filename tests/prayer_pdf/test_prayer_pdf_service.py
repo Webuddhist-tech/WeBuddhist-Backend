@@ -287,3 +287,43 @@ class TestRender:
         assert pdf.filename == "Prayer_Requests_2026-10-01_A3.pdf"
         mock_pdf.assert_awaited_once_with("<html>", date_label="1 October 2026", color="#b8872b")
         assert mock_member.call_args.kwargs["group_id"] == target.group_id
+
+
+class TestPreview:
+    def _run(self, *, rows=(), day=date(2026, 10, 1), request=None):
+        request = request or UpdatePrayerPdfSettingsRequest(title="Prayer Requests", columns=4)
+        with patch(f"{_SVC}.validate_cms_author_details"), patch(f"{_SVC}.require_group_member") as mock_member, patch(
+            f"{_SVC}.SessionLocal"
+        ), patch(f"{_SVC}._load_event_target", return_value=_target(event_id=uuid4())), patch(
+            f"{_SVC}.get_room_by_event_id", return_value=SimpleNamespace(id=uuid4())
+        ), patch(f"{_SVC}.list_prayer_requests", return_value=list(rows)), patch(
+            f"{_SVC}.preview_avatar_url", side_effect=lambda ref: f"https://signed/{ref}" if ref else None
+        ), patch(f"{_SVC}.load_avatars") as mock_download:
+            response = service.preview_event_prayer_pdf_service(token="t", event_id=uuid4(), request=request, day=day)
+        mock_download.assert_not_called()  # previews link photos, they never download them
+        mock_member.assert_called_once()
+        return response
+
+    def test_samples_when_the_day_is_empty(self):
+        response = self._run()
+        assert response.is_sample is True
+        assert response.prayer_count == 0
+        assert response.day == date(2026, 10, 1)
+        assert "Tenzin Dolma" in response.html
+        assert "<h1>Prayer Requests</h1>" in response.html
+        assert '"columns": 4' in response.html
+
+    def test_real_requests_with_linked_photos(self):
+        user = _user()
+        response = self._run(rows=[(_message("Peace for all beings"), user)])
+        assert response.is_sample is False
+        assert response.prayer_count == 1
+        assert "Peace for all beings" in response.html
+        assert 'src="https://signed/avatars/u.jpg"' in response.html
+        assert "Tenzin Dolma" in response.html
+
+    def test_uses_unsaved_settings(self):
+        request = UpdatePrayerPdfSettingsRequest(title="Unsaved title", title_zh=None, closing_en=None, closing_emoji=None)
+        response = self._run(request=request, rows=[(_message(), _user())])
+        assert "<h1>Unsaved title</h1>" in response.html
+        assert 'class="zht"' not in response.html

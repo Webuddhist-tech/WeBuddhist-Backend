@@ -119,4 +119,37 @@ window.layout=function(){
  pool.remove(); return best.pages;
 };
 {%- endraw %}
-</script></body></html>
+</script>
+{%- if preview %}
+{#- Studio preview: the same layout, shown as sheets of paper with the
+    print margins and footer, scaled to fit the frame. -#}
+<style>{% raw %}
+@media screen{
+html{background:#d9d4cc}
+body{margin:0;padding:12px 0}
+.sheet{position:relative;box-sizing:content-box;width:var(--content-w);height:var(--content-h);padding:16mm 15mm 18mm;margin:0 auto 18px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.sheet .pagefoot{position:absolute;right:15mm;bottom:7mm;font-size:9pt;color:var(--gold);font-family:serif}
+}
+{% endraw %}</style>
+<script>{% raw %}
+(async function(){
+ try{await document.fonts.ready}catch(e){}
+ await new Promise(r=>setTimeout(r,50));
+ const total=window.layout();
+ [...document.querySelectorAll('.page')].forEach((p,i)=>{
+   const s=document.createElement('div');s.className='sheet';p.parentNode.insertBefore(s,p);s.appendChild(p);
+   const f=document.createElement('div');f.className='pagefoot';f.textContent=window.PRAYER_LAYOUT.dateLabel+'  ·  '+(i+1)+' / '+total;s.appendChild(f);
+ });
+ const fit=()=>{const s=document.querySelector('.sheet');if(!s)return;document.body.style.zoom='1';
+   document.body.style.zoom=String(Math.min(1,(document.documentElement.clientWidth-16)/s.getBoundingClientRect().width))};
+ fit();window.addEventListener('resize',fit);
+ // Keep the reader's place across refreshes: the Studio hands the last
+ // position back in window.__previewScroll and is told where it is now.
+ const room=()=>Math.max(1,document.documentElement.scrollHeight-window.innerHeight);
+ window.scrollTo(0,(window.__previewScroll||0)*room());
+ let t;window.addEventListener('scroll',()=>{clearTimeout(t);t=setTimeout(()=>
+   parent.postMessage({type:'prayer-pdf-preview-scroll',ratio:window.scrollY/room()},'*'),100)});
+})();
+{% endraw %}</script>
+{%- endif %}
+</body></html>

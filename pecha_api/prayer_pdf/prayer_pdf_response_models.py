@@ -107,3 +107,14 @@ class UpdatePrayerPdfSettingsRequest(_PrayerPdfFields):
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"Unknown timezone '{value}'") from exc
         return value
+
+
+class PrayerPdfPreviewResponse(BaseModel):
+    """The page for the Studio's live preview, laid out by its own script.
+    Fonts are relative URLs ("fonts/<name>") under /cms/prayer-pdf/."""
+
+    html: str
+    day: date
+    # Requests on that day; 0 when the preview shows samples instead.
+    prayer_count: int
+    is_sample: bool

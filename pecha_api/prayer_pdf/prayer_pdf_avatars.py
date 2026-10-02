@@ -18,7 +18,7 @@ import httpx
 from PIL import Image
 
 from pecha_api.config import get
-from pecha_api.uploads.S3_utils import download_bytes
+from pecha_api.uploads.S3_utils import download_bytes, generate_presigned_access_url
 from pecha_api.utils import Utils
 
 logger = logging.getLogger(__name__)
@@ -104,3 +104,20 @@ def load_avatars(references: Iterable[Tuple[str, Optional[str]]]) -> Dict[str, O
     with ThreadPoolExecutor(max_workers=min(_WORKERS, len(unique))) as pool:
         results = pool.map(load_avatar, unique.values())
         return dict(zip(unique.keys(), results))
+
+
+def preview_avatar_url(reference: Optional[str]) -> Optional[str]:
+    """A URL the Studio's browser can load the photo from, for the live
+    preview: a signed S3 link, or the identity provider's own URL. Nothing is
+    downloaded, so this is quick enough to run on every keystroke."""
+    if not reference or not reference.strip():
+        return None
+    reference = reference.strip()
+    if reference.startswith(("https://", "http://")):
+        if is_placeholder_url(reference) or not Utils.is_social_picture_url(reference):
+            return None
+        return reference
+    try:
+        return generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=reference.lstrip("/")) or None
+    except Exception:  # an unsignable photo just shows initials
+        return None

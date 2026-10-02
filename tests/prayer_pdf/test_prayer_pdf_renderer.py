@@ -91,7 +91,7 @@ def test_closing_block_and_its_absence():
 def test_layout_config_and_colors():
     html = render_html(_document(page_size="A4", columns=3, primary_color="#112233"))
     config = json.loads(re.search(r"window.PRAYER_LAYOUT=(\{.*?\});", html).group(1))
-    assert config == {"columns": 3, "contentW": 180, "contentH": 261}
+    assert config == {"columns": 3, "contentW": 180, "contentH": 261, "dateLabel": "26 September 2026"}
     assert "@page{size:A4;" in html
     assert "--maroon:#112233" in html
     assert content_size_mm("A3") == (267, 384)
@@ -106,3 +106,29 @@ def test_footer_template_escapes():
     footer = footer_template("<b>26 September</b>", "#b8872b")
     assert "&lt;b&gt;26 September&lt;/b&gt;" in footer
     assert "pageNumber" in footer and "totalPages" in footer
+
+
+def test_preview_mode_links_fonts_and_lays_out_itself():
+    html = render_html(_document(), preview=True)
+    assert 'src:url("fonts/EBGaramond.ttf")' in html
+    assert 'src:url("fonts/MonlamUniOuChan2.ttf")' in html
+    assert "data:font/ttf" not in html
+    assert "class='sheet'" in html or "className='sheet'" in html
+    assert "prayer-pdf-preview-scroll" in html
+    print_html = render_html(_document())
+    assert "prayer-pdf-preview-scroll" not in print_html
+
+
+def test_layout_json_cannot_close_the_script():
+    html = render_html(_document(date_label="</script><b>x"))
+    config = re.search(r"window.PRAYER_LAYOUT=(\{.*?\});", html).group(1)
+    assert "</script>" not in config
+    assert json.loads(config)["dateLabel"] == "</script><b>x"
+
+
+def test_font_path_only_serves_known_fonts():
+    from pecha_api.prayer_pdf.prayer_pdf_renderer import font_path
+
+    assert font_path("EBGaramond.ttf").is_file()
+    assert font_path("MonlamUniOuChan2.ttf").is_file()
+    assert font_path("../../config.py") is None

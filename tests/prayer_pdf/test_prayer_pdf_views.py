@@ -130,3 +130,42 @@ def test_download_rejects_bad_date():
         f"/cms/prayer-pdf/groups/{uuid4()}/download", headers=_AUTH, params={"date": "yesterday"}
     )
     assert response.status_code == 422
+
+
+def test_preview_group_passes_settings_and_day():
+    from pecha_api.prayer_pdf.prayer_pdf_response_models import PrayerPdfPreviewResponse
+
+    group_id = uuid4()
+    preview = PrayerPdfPreviewResponse(html="<html></html>", day="2026-10-01", prayer_count=0, is_sample=True)
+    with patch(f"{_VIEWS}.preview_group_prayer_pdf_service", return_value=preview) as mock_preview:
+        response = client.post(
+            f"/cms/prayer-pdf/groups/{group_id}/preview",
+            headers=_AUTH,
+            params={"date": "2026-10-01"},
+            json={"title": "  Prayer Requests ", "columns": 3},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"html": "<html></html>", "day": "2026-10-01", "prayer_count": 0, "is_sample": True}
+    kwargs = mock_preview.call_args.kwargs
+    assert kwargs["request"].title == "Prayer Requests"
+    assert kwargs["request"].columns == 3
+    assert str(kwargs["day"]) == "2026-10-01"
+
+
+def test_preview_event_rejects_bad_settings():
+    response = client.post(f"/cms/prayer-pdf/events/{uuid4()}/preview", headers=_AUTH, json={"primary_color": "red"})
+    assert response.status_code == 422
+
+
+def test_font_route_is_public_and_cached():
+    response = client.get("/cms/prayer-pdf/fonts/EBGaramond.ttf")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "font/ttf"
+    assert "max-age" in response.headers["cache-control"]
+    assert len(response.content) > 100_000
+
+
+def test_font_route_refuses_other_files():
+    assert client.get("/cms/prayer-pdf/fonts/bo.ttf").status_code == 404
+    assert client.get("/cms/prayer-pdf/fonts/..%2F..%2Fconfig.py").status_code == 404

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -22,8 +22,10 @@ from pecha_api.plans.shared.permissions import (
     require_group_member,
 )
 
-from .prayer_pdf_avatars import load_avatars
+from .prayer_pdf_avatars import load_avatars, preview_avatar_url
 from .prayer_pdf_content import (
+    SAMPLE_ROWS,
+    CardList,
     PrayerRow,
     build_cards,
     day_number,
@@ -43,6 +45,7 @@ from .prayer_pdf_repository import (
 from .prayer_pdf_response_models import (
     DEFAULT_TEXTS,
     DEFAULT_TIMEZONE,
+    PrayerPdfPreviewResponse,
     PrayerPdfSettingsDTO,
     PrayerPdfSettingsSource,
     UpdatePrayerPdfSettingsRequest,
@@ -235,35 +238,31 @@ def _posted_by(user) -> str:
     return f"{user.firstname or ''} {user.lastname or ''}".strip()
 
 
-def _build_document(db: Session, target: _Target, day: Optional[date]) -> Tuple[PrayerPdfDocument, date]:
-    row, _ = _resolve_settings(db, target)
-    settings = _settings_dto(target, row, PrayerPdfSettingsSource.DEFAULT)
-    zone = ZoneInfo(settings.timezone or DEFAULT_TIMEZONE)
-    day = day or datetime.now(zone).date()
-
+def _room_rows(db: Session, target: _Target, day: date, tz_name: str):
     room = (
         get_room_by_event_id(db=db, event_id=target.event_id)
         if target.event_id is not None
         else get_room_by_group_id(db=db, group_id=target.group_id)
     )
-    rows = []
-    if room is not None:
-        start_utc, end_utc = day_window_utc(day, settings.timezone)
-        rows = list_prayer_requests(db, room_id=room.id, start_utc=start_utc, end_utc=end_utc)
+    if room is None:
+        return []
+    start_utc, end_utc = day_window_utc(day, tz_name)
+    return list_prayer_requests(db, room_id=room.id, start_utc=start_utc, end_utc=end_utc)
 
-    card_list = build_cards(
+
+def _cards_from_rows(rows, settings) -> CardList:
+    return build_cards(
         (PrayerRow(user_id=str(user.id), posted_by=_posted_by(user), message=message.body) for message, user in rows),
         skip=parse_skip_messages(settings.skip_messages),
         columns=settings.columns,
     )
-    if not card_list.cards:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NO_PRAYER_REQUESTS)
 
-    avatar_urls = {str(user.id): user.avatar_url for _, user in rows}
-    avatars = load_avatars((card.user_id, avatar_urls.get(card.user_id)) for card in card_list.cards)
 
+def _document(settings, card_list: CardList, avatars: Dict[str, Optional[str]], day: date) -> PrayerPdfDocument:
+    """`settings` is anything with the settings fields: the saved DTO when
+    printing, the unsaved form when previewing."""
     number = day_number(day, settings.day_one)
-    document = PrayerPdfDocument(
+    return PrayerPdfDocument(
         title_bo=settings.title_bo,
         title=settings.title,
         title_zh=settings.title_zh,
@@ -285,7 +284,25 @@ def _build_document(db: Session, target: _Target, day: Optional[date]) -> Tuple[
         secondary_color=settings.secondary_color,
         cards=[RenderCard(card=card, avatar=avatars.get(card.user_id)) for card in card_list.cards],
     )
-    return document, day
+
+
+def _today(tz_name: Optional[str]) -> date:
+    return datetime.now(ZoneInfo(tz_name or DEFAULT_TIMEZONE)).date()
+
+
+def _build_document(db: Session, target: _Target, day: Optional[date]) -> Tuple[PrayerPdfDocument, date]:
+    row, _ = _resolve_settings(db, target)
+    settings = _settings_dto(target, row, PrayerPdfSettingsSource.DEFAULT)
+    day = day or _today(settings.timezone)
+
+    rows = _room_rows(db, target, day, settings.timezone)
+    card_list = _cards_from_rows(rows, settings)
+    if not card_list.cards:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NO_PRAYER_REQUESTS)
+
+    avatar_urls = {str(user.id): user.avatar_url for _, user in rows}
+    avatars = load_avatars((card.user_id, avatar_urls.get(card.user_id)) for card in card_list.cards)
+    return _document(settings, card_list, avatars, day), day
 
 
 def _prepare(token: str, load_target, day: Optional[date]) -> Tuple[PrayerPdfDocument, str]:
@@ -306,6 +323,52 @@ async def _render(token: str, load_target, day: Optional[date]) -> PrayerPdfFile
         color=document.secondary_color,
     )
     return PrayerPdfFile(content=content, filename=filename, prayer_count=len(document.cards))
+
+
+# --------------------------------------------------------------- preview
+
+
+def _preview(
+    token: str, load_target, request: UpdatePrayerPdfSettingsRequest, day: Optional[date]
+) -> PrayerPdfPreviewResponse:
+    """The page as the PDF would print it with these (unsaved) settings, as
+    HTML for the Studio to show. Uses that day's requests, or samples when
+    there are none. Photos are linked rather than downloaded and checked, so
+    a generated letter avatar can show here that the PDF would replace with
+    initials."""
+    author = validate_cms_author_details(token=token)
+    with SessionLocal() as db:
+        target = load_target(db)
+        _require_can_manage(db, target.group_id, author)
+        day = day or _today(request.timezone)
+        rows = _room_rows(db, target, day, request.timezone)
+        card_list = _cards_from_rows(rows, request)
+        is_sample = not card_list.cards
+        if is_sample:
+            card_list = build_cards(SAMPLE_ROWS, skip=set(), columns=request.columns)
+            avatars = {}
+        else:
+            avatar_urls = {str(user.id): user.avatar_url for _, user in rows}
+            avatars = {card.user_id: preview_avatar_url(avatar_urls.get(card.user_id)) for card in card_list.cards}
+        document = _document(request, card_list, avatars, day)
+        return PrayerPdfPreviewResponse(
+            html=render_html(document, preview=True),
+            day=day,
+            prayer_count=0 if is_sample else len(card_list.cards),
+            is_sample=is_sample,
+        )
+
+
+def preview_group_prayer_pdf_service(
+    token: str, group_id: UUID, request: UpdatePrayerPdfSettingsRequest, day: Optional[date]
+) -> PrayerPdfPreviewResponse:
+    return _preview(token, lambda db: _load_group_target(db, group_id), request, day)
+
+
+def preview_event_prayer_pdf_service(
+    token: str, event_id: UUID, request: UpdatePrayerPdfSettingsRequest, day: Optional[date]
+) -> PrayerPdfPreviewResponse:
+    return _preview(token, lambda db: _load_event_target(db, event_id), request, day)
 
 
 async def build_group_prayer_pdf_service(token: str, group_id: UUID, day: Optional[date]) -> PrayerPdfFile:
