@@ -79,15 +79,17 @@ class _Target:
 
 
 def _pick_en(entries, attribute: str, fallback: str) -> str:
-    entries = list(entries or [])
-    for entry in entries:
+    first = None
+    for entry in entries or []:
+        if first is None:
+            first = entry
         language = entry.language
         code = language.value if hasattr(language, "value") else str(language)
         if code.upper() == "EN":
             return getattr(entry, attribute) or fallback
-    if not entries:
+    if first is None:
         return fallback
-    return getattr(entries[0], attribute) or fallback
+    return getattr(first, attribute) or fallback
 
 
 def _load_group_target(db: Session, group_id: UUID) -> _Target:
