@@ -57,6 +57,7 @@ from pecha_api.mantra.mantra_metadata_model import MantraMetadata
 from pecha_api.traditions.tradition_models import Tradition, TraditionMetadata, UserTradition
 from pecha_api.region_restrictions.region_restriction_models import ChinaRestrictedItem
 from pecha_api.notification.notification_preference_models import UserNotificationPreference
+from pecha_api.prayer_pdf.prayer_pdf_model import PrayerPdfSettings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

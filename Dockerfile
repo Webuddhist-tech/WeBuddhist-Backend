@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     libraqm-dev \
     fontconfig \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the pyproject.toml and poetry.lock files to the container
@@ -36,6 +38,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         sleep $((attempt * 15)); \
     done; \
     exit 1
+
+# Headless Chromium for the prayer-request PDF (pecha_api/prayer_pdf). Only the
+# headless shell is installed; --with-deps pulls in the system libraries it needs.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN poetry run playwright install --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the rest of the application code to the container
 COPY . /app
