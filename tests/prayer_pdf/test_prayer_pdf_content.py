@@ -22,6 +22,11 @@ class TestCleanName:
     def test_strips_user_suffix_and_title_cases(self):
         assert clean_name("tenzin  DOLMA_user_42") == "Tenzin Dolma"
 
+    def test_strips_user_suffix_with_space_before_it(self):
+        assert clean_name("karma \t _user_5") == "Karma"
+        assert clean_name("Tenzin _user_7 Dolma") == "Tenzin Dolma"
+        assert clean_name("Tenzin\n\n_user_7  _user_8") == "Tenzin"
+
     def test_collapses_repeated_name(self):
         assert clean_name("cathy cathy") == "Cathy"
 

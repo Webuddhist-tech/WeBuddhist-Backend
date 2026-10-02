@@ -81,12 +81,12 @@ def get_prayer_pdf_font(name: str) -> FileResponse:
 # ----------------------------------------------------------------- groups
 
 
-@cms_prayer_pdf_router.get("/groups/{group_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.get("/groups/{group_id}", status_code=status.HTTP_200_OK)
 def get_group_prayer_pdf_settings(group_id: UUID, credentials: Credentials) -> PrayerPdfSettingsDTO:
     return get_group_prayer_pdf_settings_service(token=credentials.credentials, group_id=group_id)
 
 
-@cms_prayer_pdf_router.put("/groups/{group_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.put("/groups/{group_id}", status_code=status.HTTP_200_OK)
 def update_group_prayer_pdf_settings(
     group_id: UUID, request: UpdatePrayerPdfSettingsRequest, credentials: Credentials
 ) -> PrayerPdfSettingsDTO:
@@ -95,7 +95,7 @@ def update_group_prayer_pdf_settings(
     )
 
 
-@cms_prayer_pdf_router.delete("/groups/{group_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.delete("/groups/{group_id}", status_code=status.HTTP_200_OK)
 def reset_group_prayer_pdf_settings(group_id: UUID, credentials: Credentials) -> PrayerPdfSettingsDTO:
     return reset_group_prayer_pdf_settings_service(token=credentials.credentials, group_id=group_id)
 
@@ -106,9 +106,7 @@ async def download_group_prayer_pdf(group_id: UUID, credentials: Credentials, da
     return _pdf_response(pdf)
 
 
-@cms_prayer_pdf_router.post(
-    "/groups/{group_id}/preview", status_code=status.HTTP_200_OK, response_model=PrayerPdfPreviewResponse
-)
+@cms_prayer_pdf_router.post("/groups/{group_id}/preview", status_code=status.HTTP_200_OK)
 def preview_group_prayer_pdf(
     group_id: UUID, request: UpdatePrayerPdfSettingsRequest, credentials: Credentials, day: DayQuery = None
 ) -> PrayerPdfPreviewResponse:
@@ -120,12 +118,12 @@ def preview_group_prayer_pdf(
 # ----------------------------------------------------------------- events
 
 
-@cms_prayer_pdf_router.get("/events/{event_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.get("/events/{event_id}", status_code=status.HTTP_200_OK)
 def get_event_prayer_pdf_settings(event_id: UUID, credentials: Credentials) -> PrayerPdfSettingsDTO:
     return get_event_prayer_pdf_settings_service(token=credentials.credentials, event_id=event_id)
 
 
-@cms_prayer_pdf_router.put("/events/{event_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.put("/events/{event_id}", status_code=status.HTTP_200_OK)
 def update_event_prayer_pdf_settings(
     event_id: UUID, request: UpdatePrayerPdfSettingsRequest, credentials: Credentials
 ) -> PrayerPdfSettingsDTO:
@@ -134,7 +132,7 @@ def update_event_prayer_pdf_settings(
     )
 
 
-@cms_prayer_pdf_router.delete("/events/{event_id}", status_code=status.HTTP_200_OK, response_model=PrayerPdfSettingsDTO)
+@cms_prayer_pdf_router.delete("/events/{event_id}", status_code=status.HTTP_200_OK)
 def reset_event_prayer_pdf_settings(event_id: UUID, credentials: Credentials) -> PrayerPdfSettingsDTO:
     return reset_event_prayer_pdf_settings_service(token=credentials.credentials, event_id=event_id)
 
@@ -145,9 +143,7 @@ async def download_event_prayer_pdf(event_id: UUID, credentials: Credentials, da
     return _pdf_response(pdf)
 
 
-@cms_prayer_pdf_router.post(
-    "/events/{event_id}/preview", status_code=status.HTTP_200_OK, response_model=PrayerPdfPreviewResponse
-)
+@cms_prayer_pdf_router.post("/events/{event_id}/preview", status_code=status.HTTP_200_OK)
 def preview_event_prayer_pdf(
     event_id: UUID, request: UpdatePrayerPdfSettingsRequest, credentials: Credentials, day: DayQuery = None
 ) -> PrayerPdfPreviewResponse:

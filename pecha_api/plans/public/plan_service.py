@@ -731,6 +731,126 @@ async def get_plan_daily_content(
     return response
 
 
+def _resolve_daily_day_window(plan, requested_date: Optional[DateType], total_days: int):
+    """Work out the plan's date range, the date to show and its day number."""
+    today = dt.now(timezone.utc).date()
+
+    if plan.start_date:
+        start = _to_plan_date(plan.start_date)
+    else:
+        start = today
+
+    end = start + timedelta(days=total_days - 1)
+
+    if requested_date is None:
+        if plan.start_date and not start <= today <= end:
+            requested_date = start
+        else:
+            requested_date = today
+
+    day_number = (requested_date - start).days + 1
+
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No content for date {requested_date}. Plan runs from {start} to {end}."
+        )
+    return start, end, requested_date, day_number
+
+
+def _build_daily_series_dto(
+    db,
+    plan,
+    language: Optional[str],
+    navigation_language: str,
+    requested_date: DateType,
+) -> Optional[SeriesDTO]:
+    if not plan.series:
+        return None
+
+    series_image = build_image_url(image_url=plan.series.image)
+    metadata_entries = getattr(plan.series, "metadata_entries", None) or []
+    if language:
+        metadata_entries = _filter_series_metadata_by_language(
+            metadata_entries,
+            language=language,
+        )
+    series_metadata = [
+        SeriesMetadataDTO(
+            id=entry.id,
+            title=entry.title,
+            sub_title=entry.sub_title if isinstance(entry.sub_title, str) else None,
+            description=entry.description,
+            language=entry.language.value
+            if hasattr(entry.language, "value")
+            else str(entry.language),
+        )
+        for entry in sorted(
+            metadata_entries,
+            key=lambda item: item.language.value
+            if hasattr(item.language, "value")
+            else str(item.language),
+        )
+    ]
+    series_plans = get_published_plans_in_series(
+        db=db,
+        series_id=plan.series_id,
+        language=navigation_language,
+    )
+    series_start, _, series_total_days = _series_schedule_from_plans(
+        series_plans,
+        published_only=True,
+        language=navigation_language,
+    )
+    return SeriesDTO(
+        id=plan.series.id,
+        metadata=format_metadata_response(series_metadata, language=language),
+        image=series_image,
+        progress=compute_series_progress(
+            start_date=series_start,
+            total_days=series_total_days,
+            reference_date=requested_date,
+        ),
+    )
+
+
+def _resolve_adjacent_plan_ids(
+    db,
+    plan,
+    navigation_language: str,
+    previous_date: Optional[DateType],
+    next_date: Optional[DateType],
+):
+    """Neighbouring plans in the series, only at the plan's first/last day."""
+    previous_plan_id = None
+    next_plan_id = None
+
+    if not plan.series_id or plan.display_order is None:
+        return previous_plan_id, next_plan_id
+
+    if previous_date is None:
+        previous_plan = get_previous_plan_in_series(
+            db=db,
+            series_id=plan.series_id,
+            current_display_order=plan.display_order,
+            language=navigation_language,
+        )
+        if previous_plan:
+            previous_plan_id = previous_plan.id
+
+    if next_date is None:
+        next_plan = get_next_plan_in_series(
+            db=db,
+            series_id=plan.series_id,
+            current_display_order=plan.display_order,
+            language=navigation_language,
+        )
+        if next_plan:
+            next_plan_id = next_plan.id
+
+    return previous_plan_id, next_plan_id
+
+
 def _load_plan_daily_content(
     plan_id: UUID,
     requested_date: Optional[DateType] = None,
@@ -753,13 +873,6 @@ def _load_plan_daily_content(
                 else str(plan.language)
             )
 
-        today = dt.now(timezone.utc).date()
-
-        if plan.start_date:
-            start = _to_plan_date(plan.start_date)
-        else:
-            start = today
-
         total_days = db.query(PlanItem).filter(PlanItem.plan_id == plan.id).count()
         if total_days == 0:
             raise HTTPException(
@@ -767,24 +880,9 @@ def _load_plan_daily_content(
                 detail="This plan has no content yet."
             )
 
-        end = start + timedelta(days=total_days - 1)
-
-        if requested_date is None:
-            if plan.start_date:
-                if start <= today <= end:
-                    requested_date = today
-                else:
-                    requested_date = start
-            else:
-                requested_date = today
-
-        day_number = (requested_date - start).days + 1
-
-        if day_number < 1 or day_number > total_days:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No content for date {requested_date}. Plan runs from {start} to {end}."
-            )
+        start, end, requested_date, day_number = _resolve_daily_day_window(
+            plan, requested_date, total_days
+        )
 
         plan_item = get_plan_day_with_tasks_and_subtasks(
             db=db, plan_id=plan.id, day_number=day_number
@@ -792,79 +890,24 @@ def _load_plan_daily_content(
 
         plan_image = build_image_url(image_url=plan.image_url)
 
-        series_dto = None
-        if plan.series:
-            series_image = build_image_url(image_url=plan.series.image)
-            metadata_entries = getattr(plan.series, "metadata_entries", None) or []
-            if language:
-                metadata_entries = _filter_series_metadata_by_language(
-                    metadata_entries,
-                    language=language,
-                )
-            series_metadata = [
-                SeriesMetadataDTO(
-                    id=entry.id,
-                    title=entry.title,
-                    sub_title=entry.sub_title if isinstance(entry.sub_title, str) else None,
-                    description=entry.description,
-                    language=entry.language.value
-                    if hasattr(entry.language, "value")
-                    else str(entry.language),
-                )
-                for entry in sorted(
-                    metadata_entries,
-                    key=lambda item: item.language.value
-                    if hasattr(item.language, "value")
-                    else str(item.language),
-                )
-            ]
-            series_plans = get_published_plans_in_series(
-                db=db,
-                series_id=plan.series_id,
-                language=navigation_language,
-            )
-            series_start, _, series_total_days = _series_schedule_from_plans(
-                series_plans,
-                published_only=True,
-                language=navigation_language,
-            )
-            series_dto = SeriesDTO(
-                id=plan.series.id,
-                metadata=format_metadata_response(series_metadata, language=language),
-                image=series_image,
-                progress=compute_series_progress(
-                    start_date=series_start,
-                    total_days=series_total_days,
-                    reference_date=requested_date,
-                ),
-            )
+        series_dto = _build_daily_series_dto(
+            db,
+            plan,
+            language=language,
+            navigation_language=navigation_language,
+            requested_date=requested_date,
+        )
 
         previous_date = requested_date - timedelta(days=1) if day_number > 1 else None
         next_date = requested_date + timedelta(days=1) if day_number < total_days else None
 
-        previous_plan_id = None
-        next_plan_id = None
-
-        if plan.series_id and plan.display_order is not None:
-            if previous_date is None:
-                previous_plan = get_previous_plan_in_series(
-                    db=db,
-                    series_id=plan.series_id,
-                    current_display_order=plan.display_order,
-                    language=navigation_language,
-                )
-                if previous_plan:
-                    previous_plan_id = previous_plan.id
-
-            if next_date is None:
-                next_plan = get_next_plan_in_series(
-                    db=db,
-                    series_id=plan.series_id,
-                    current_display_order=plan.display_order,
-                    language=navigation_language,
-                )
-                if next_plan:
-                    next_plan_id = next_plan.id
+        previous_plan_id, next_plan_id = _resolve_adjacent_plan_ids(
+            db,
+            plan,
+            navigation_language=navigation_language,
+            previous_date=previous_date,
+            next_date=next_date,
+        )
 
         audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
         response = DailyPlanResponse(

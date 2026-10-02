@@ -152,13 +152,12 @@ class TestSettingsServices:
     @patch(f"{_SVC}.require_cms_write_access")
     @patch(f"{_SVC}.validate_cms_author_details")
     def test_update_forbidden_for_non_member(self, mock_validate, mock_write, mock_member, session):
+        group_id, request = uuid4(), UpdatePrayerPdfSettingsRequest()
         with patch(f"{_SVC}._load_group_target", return_value=_target()), patch(
             f"{_SVC}.upsert_settings"
         ) as mock_upsert:
             with pytest.raises(HTTPException) as exc:
-                service.update_group_prayer_pdf_settings_service(
-                    token="t", group_id=uuid4(), request=UpdatePrayerPdfSettingsRequest()
-                )
+                service.update_group_prayer_pdf_settings_service(token="t", group_id=group_id, request=request)
         assert exc.value.status_code == 403
         mock_upsert.assert_not_called()
 
@@ -182,9 +181,10 @@ class TestSettingsServices:
 
 class TestTargets:
     def test_missing_group_is_404(self):
+        db, group_id = MagicMock(), uuid4()
         with patch(f"{_SVC}.get_group_by_id", return_value=None):
             with pytest.raises(HTTPException) as exc:
-                service._load_group_target(MagicMock(), uuid4())
+                service._load_group_target(db, group_id)
         assert exc.value.status_code == 404
 
     def test_event_target_uses_en_name_and_group(self):
@@ -218,13 +218,16 @@ class TestBuildDocument:
         return document, resolved_day, mock_avatars
 
     def test_no_room_is_404(self):
+        target, day = _target(), date(2026, 10, 1)
         with pytest.raises(HTTPException) as exc:
-            self._run(_target(), date(2026, 10, 1), room=False)
+            self._run(target, day, room=False)
         assert exc.value.detail == service.NO_PRAYER_REQUESTS
 
     def test_only_feedback_is_404(self):
+        target, day = _target(), date(2026, 10, 1)
+        rows = [(_message("no video la"), _user())]
         with pytest.raises(HTTPException) as exc:
-            self._run(_target(), date(2026, 10, 1), rows=[(_message("no video la"), _user())])
+            self._run(target, day, rows=rows)
         assert exc.value.status_code == 404
 
     def test_document_from_rows(self):

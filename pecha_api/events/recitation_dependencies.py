@@ -18,7 +18,7 @@ def is_recitation_emit_secret(token: Optional[str]) -> bool:
     return secrets.compare_digest(token, expected)
 
 
-async def verify_recitation_emit_token(
+def verify_recitation_emit_token(
     x_recitation_token: str = Header(..., alias="X-Recitation-Token"),
 ) -> None:
     """Authenticate a machine emitting recitation positions.

@@ -198,25 +198,24 @@ def footer_template(date_label: str, color: str) -> str:
 async def html_to_pdf(html_content: str, *, date_label: str, color: str) -> bytes:
     from playwright.async_api import async_playwright
 
-    async with _RENDER_SLOTS:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch()
-            try:
-                page = await browser.new_page()
-                # Fonts and photos are inlined as data: URIs, so the page has
-                # nothing to fetch; refuse anything it tries.
-                await page.route("**/*", lambda route: route.abort())
-                await page.set_content(html_content, wait_until="load", timeout=_LOAD_TIMEOUT_MS)
-                await page.evaluate("document.fonts.ready.then(() => true)")
-                await page.wait_for_timeout(300)
-                pages = await page.evaluate("window.layout()")
-                logger.info("Prayer PDF laid out on %s page(s)", pages)
-                return await page.pdf(
-                    prefer_css_page_size=True,
-                    print_background=True,
-                    display_header_footer=True,
-                    header_template="<div></div>",
-                    footer_template=footer_template(date_label, color),
-                )
-            finally:
-                await browser.close()
+    async with _RENDER_SLOTS, async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            page = await browser.new_page()
+            # Fonts and photos are inlined as data: URIs, so the page has
+            # nothing to fetch; refuse anything it tries.
+            await page.route("**/*", lambda route: route.abort())
+            await page.set_content(html_content, wait_until="load", timeout=_LOAD_TIMEOUT_MS)
+            await page.evaluate("document.fonts.ready.then(() => true)")
+            await page.wait_for_timeout(300)
+            pages = await page.evaluate("window.layout()")
+            logger.info("Prayer PDF laid out on %s page(s)", pages)
+            return await page.pdf(
+                prefer_css_page_size=True,
+                print_background=True,
+                display_header_footer=True,
+                header_template="<div></div>",
+                footer_template=footer_template(date_label, color),
+            )
+        finally:
+            await browser.close()

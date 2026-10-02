@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 HAN = re.compile(r"^[㐀-鿿]+$")
-EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️\U0001F3FB-\U0001F3FF‍]")
+EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️‍]")
 # WeChat reaction codes such as [合十] or [Worship].
 WECHAT = re.compile(r"\[(?:[A-Za-z]{2,15}|[一-鿿]{1,4})\]")
 BO = r"([ༀ-࿿][ༀ-࿿ ]*)"
@@ -61,7 +61,8 @@ def clean_name(raw: Optional[str]) -> str:
     n = re.sub(r"\s+", " ", raw or "").strip()
     if n.lower().startswith("webuddhist"):
         return PLACEHOLDER_NAME
-    n = re.sub(r"\s*_user_\d+", "", n).strip()
+    # Whitespace is already collapsed to single spaces, so " ?" is "\s*".
+    n = re.sub(r" ?_user_\d+", "", n).strip()
     parts = n.split(" ")
     if len(parts) == 2 and parts[0].lower() == parts[1].lower() and parts[0].isascii():
         parts = [parts[0]]
@@ -96,12 +97,18 @@ def initials_html(name: str) -> str:
     if re.match(r"^[㐀-鿿]", name):
         return html.escape(name[0])
     words = [w for w in name.split() if w]
-    letters = (words[0][0] + (words[1][0] if len(words) > 1 else "")).upper() if words else "?"
-    return html.escape(letters)
+    if not words:
+        return "?"
+    letters = words[0][0]
+    if len(words) > 1:
+        letters += words[1][0]
+    return html.escape(letters.upper())
 
 
 def initials_color(name: str) -> str:
-    return AVATAR_PALETTE[int(hashlib.md5(name.encode()).hexdigest(), 16) % len(AVATAR_PALETTE)]
+    # A colour pick, not security: MD5 keeps each name on the action's colour.
+    digest = hashlib.md5(name.encode(), usedforsecurity=False).hexdigest()
+    return AVATAR_PALETTE[int(digest, 16) % len(AVATAR_PALETTE)]
 
 
 def _normalise(text: str) -> str:
@@ -124,7 +131,14 @@ def card_span(message: str, columns: int) -> int:
     """How many columns a card spans: long prayers run across 2, 3 or 5."""
     text = re.sub("<[^>]+>", "", message)
     weight = len(text) + sum(1 for ch in text if _is_wide_char(ch)) * 1.2
-    span = 5 if weight > 2600 else 3 if weight > 1300 else 2 if weight > 520 else 1
+    if weight > 2600:
+        span = 5
+    elif weight > 1300:
+        span = 3
+    elif weight > 520:
+        span = 2
+    else:
+        span = 1
     return min(span, columns)
 
 
@@ -132,34 +146,47 @@ def parse_skip_messages(value: Optional[str]) -> Set[str]:
     return {line.strip().lower() for line in (value or "").splitlines() if line.strip()}
 
 
+_Kept = Tuple[str, str, str, str, str]  # name, html, user, key, raw
+
+
+def _is_near_duplicate(key: str, other: str) -> bool:
+    return key == other or (
+        min(_effective_length(key), _effective_length(other)) >= 20
+        and difflib.SequenceMatcher(None, key, other).ratio() >= NEAR_DUPLICATE
+    )
+
+
+def _find_duplicate(key: str, indexes: Iterable[int], kept: Sequence[_Kept]) -> Optional[int]:
+    """The first of a person's kept cards that `key` repeats, if any."""
+    return next((index for index in indexes if _is_near_duplicate(key, kept[index][3])), None)
+
+
+def _drop_reason(raw: str, m: str, skip: Set[str]) -> Optional[str]:
+    if raw.lower() in skip:
+        return "feedback"
+    if not re.sub("<[^>]+>", "", m).strip():
+        return "emoji-only/empty"
+    return None
+
+
 def build_cards(rows: Iterable[PrayerRow], *, skip: Set[str], columns: int) -> CardList:
     """Cards in posting order, with feedback, empty and duplicate requests
     dropped. A person's near-identical repeats become one card holding the
     fuller wording, in the place of the first."""
     result = CardList()
-    kept: List[Tuple[str, str, str, str, str]] = []  # name, html, user, key, raw
+    kept: List[_Kept] = []
     by_user: dict = {}
     for row in rows:
         raw = (row.message or "").strip()
-        if raw.lower() in skip:
-            result.dropped.append(("feedback", raw))
-            continue
         m = message_html(raw)
-        if not re.sub("<[^>]+>", "", m).strip():
-            result.dropped.append(("emoji-only/empty", raw))
+        reason = _drop_reason(raw, m, skip)
+        if reason is not None:
+            result.dropped.append((reason, raw))
             continue
         name = clean_name(row.posted_by)
         who = row.user_id or name
         key = _normalise(raw)
-        duplicate_of = None
-        for index in by_user.get(who, []):
-            other = kept[index][3]
-            if key == other or (
-                min(_effective_length(key), _effective_length(other)) >= 20
-                and difflib.SequenceMatcher(None, key, other).ratio() >= NEAR_DUPLICATE
-            ):
-                duplicate_of = index
-                break
+        duplicate_of = _find_duplicate(key, by_user.get(who, []), kept)
         if duplicate_of is not None:
             old = kept[duplicate_of]
             if len(key) > len(old[3]):

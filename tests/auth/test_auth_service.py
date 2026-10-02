@@ -953,7 +953,8 @@ def test_random_names_are_valid_usernames() -> None:
     assert len(names) >= 100
     assert len(set(names)) == len(names)
     for name in names:
-        assert name.isalnum() and name == name.lower()
+        assert name.isalnum()
+        assert name == name.lower()
         assert not is_reserved_username(name)
 
 

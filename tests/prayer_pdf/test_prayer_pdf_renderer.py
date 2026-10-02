@@ -51,7 +51,9 @@ def test_header_and_meta():
     assert "Received during &lt;Zabtik&gt;" in html
     assert "26 September 2026 &nbsp;·&nbsp; 2 requests" in html
     assert "2026年9月26日 &nbsp;2 則祈願" in html
-    assert "Day: 2" in html and "ཉིན། ༢" in html and "第 2 天" in html
+    assert "Day: 2" in html
+    assert "ཉིན། ༢" in html
+    assert "第 2 天" in html
 
 
 def test_empty_header_fields_are_left_out():
@@ -65,7 +67,8 @@ def test_empty_header_fields_are_left_out():
 
 def test_cards_numbered_with_spans_and_initials():
     html = render_html(_document())
-    assert "No. 01" in html and "No. 02" in html
+    assert "No. 01" in html
+    assert "No. 02" in html
     assert 'class="e" data-span="1"' in html
     assert 'class="e wide w2" data-span="2"' in html
     assert 'class="av ini"' in html
@@ -105,7 +108,8 @@ def test_fonts_are_embedded():
 def test_footer_template_escapes():
     footer = footer_template("<b>26 September</b>", "#b8872b")
     assert "&lt;b&gt;26 September&lt;/b&gt;" in footer
-    assert "pageNumber" in footer and "totalPages" in footer
+    assert "pageNumber" in footer
+    assert "totalPages" in footer
 
 
 def test_preview_mode_links_fonts_and_lays_out_itself():

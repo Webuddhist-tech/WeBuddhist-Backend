@@ -85,7 +85,9 @@ def _pick_en(entries, attribute: str, fallback: str) -> str:
         code = language.value if hasattr(language, "value") else str(language)
         if code.upper() == "EN":
             return getattr(entry, attribute) or fallback
-    return (getattr(entries[0], attribute) if entries else None) or fallback
+    if not entries:
+        return fallback
+    return getattr(entries[0], attribute) or fallback
 
 
 def _load_group_target(db: Session, group_id: UUID) -> _Target:
@@ -123,7 +125,7 @@ def _resolve_settings(
 def _settings_dto(
     target: _Target, row: Optional[PrayerPdfSettings], source: PrayerPdfSettingsSource
 ) -> PrayerPdfSettingsDTO:
-    base = dict(group_id=target.group_id, event_id=target.event_id, source=source)
+    base = {"group_id": target.group_id, "event_id": target.event_id, "source": source}
     if row is None:
         return PrayerPdfSettingsDTO(
             **base,

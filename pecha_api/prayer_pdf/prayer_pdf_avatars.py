@@ -58,16 +58,18 @@ def _fetch_bytes(reference: str) -> Optional[bytes]:
     if reference.startswith(("https://", "http://")):
         if is_placeholder_url(reference) or not Utils.is_social_picture_url(reference):
             return None
-        with httpx.Client(timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            with client.stream("GET", reference) as response:
-                if response.status_code != 200:
+        with (
+            httpx.Client(timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=False) as client,
+            client.stream("GET", reference) as response,
+        ):
+            if response.status_code != 200:
+                return None
+            body = b""
+            for chunk in response.iter_bytes():
+                body += chunk
+                if len(body) > MAX_AVATAR_BYTES:
                     return None
-                body = b""
-                for chunk in response.iter_bytes():
-                    body += chunk
-                    if len(body) > MAX_AVATAR_BYTES:
-                        return None
-                return body
+            return body
     return download_bytes(bucket_name=get("AWS_BUCKET_NAME"), s3_key=reference.lstrip("/"), max_bytes=MAX_AVATAR_BYTES)
 
 

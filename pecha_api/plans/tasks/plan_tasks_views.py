@@ -76,7 +76,7 @@ async def update_task_title(
         update_request=update_request,
     )
 
-@plans_router.put("/{task_id}/settings", response_model=TaskSettingsDTO)
+@plans_router.put("/{task_id}/settings")
 async def update_task_settings(
     task_id: UUID,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],

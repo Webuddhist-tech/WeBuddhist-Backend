@@ -144,12 +144,13 @@ def _ws_env(
 class TestRecitationConnection:
 
     def test_closes_when_broadcaster_unavailable(self):
+        url = _ws_url(uuid4())
         with patch(
             "pecha_api.events.recitation_live_views.get_broadcaster",
             side_effect=RuntimeError("Redis down"),
         ):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4())):
+                with client.websocket_connect(url):
                     pass
 
     def test_rejects_invalid_token(self):
@@ -576,8 +577,10 @@ class TestAnonymousViewer:
                 refused_end = websocket.receive_json()
                 _sync(websocket)
 
-        assert refused_set["type"] == "error" and refused_set["code"] == "FORBIDDEN"
-        assert refused_end["type"] == "error" and refused_end["code"] == "FORBIDDEN"
+        assert refused_set["type"] == "error"
+        assert refused_set["code"] == "FORBIDDEN"
+        assert refused_end["type"] == "error"
+        assert refused_end["code"] == "FORBIDDEN"
         broadcaster.allow_set.assert_not_awaited()
         broadcaster.broadcast_position.assert_not_awaited()
         broadcaster.clear_position.assert_not_awaited()

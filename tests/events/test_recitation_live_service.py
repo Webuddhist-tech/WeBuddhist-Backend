@@ -30,17 +30,19 @@ class TestLoadLiveEvent:
             assert load_live_event(db=MagicMock(), event_id=event.id) is event
 
     def test_404_when_event_missing(self):
+        db, event_id = MagicMock(), uuid4()
         with patch(f"{MODULE}.get_event_by_id", return_value=None):
             with pytest.raises(HTTPException) as exc:
-                load_live_event(db=MagicMock(), event_id=uuid4())
+                load_live_event(db=db, event_id=event_id)
 
         assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 
     def test_404_when_group_unpublished(self):
+        db, event_id = MagicMock(), uuid4()
         with patch(f"{MODULE}.get_event_by_id", return_value=_event()), \
              patch(f"{MODULE}.is_group_id_published", return_value=False):
             with pytest.raises(HTTPException) as exc:
-                load_live_event(db=MagicMock(), event_id=uuid4())
+                load_live_event(db=db, event_id=event_id)
 
         assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 
