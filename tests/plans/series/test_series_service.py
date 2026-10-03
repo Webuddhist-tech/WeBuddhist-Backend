@@ -96,14 +96,14 @@ def test_get_filtered_series_maps_rows_to_response():
 
     mock_repo.assert_called_once()
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["search"] is None
+    assert call_kwargs["series_filter"].search is None
     assert call_kwargs["skip"] == 2
     assert call_kwargs["limit"] == 5
-    assert call_kwargs["include_deleted"] is False
+    assert call_kwargs["series_filter"].include_deleted is False
     assert call_kwargs["order_by_field"] == Series.created_at
     assert call_kwargs["order_desc"] is True
-    assert call_kwargs["status"] == PlanStatus.PUBLISHED
-    assert call_kwargs["exclude_event_linked"] is True
+    assert call_kwargs["series_filter"].status == PlanStatus.PUBLISHED
+    assert call_kwargs["series_filter"].exclude_event_linked is True
 
     assert isinstance(result, SeriesListResponse)
     assert result.skip == 2
@@ -1697,9 +1697,9 @@ def test_get_cms_filtered_series_scopes_to_current_author_when_not_admin():
         result = get_cms_filtered_series(token="dummy", search=None, skip=0, limit=10)
 
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["author_id"] is None
-    assert call_kwargs["group_ids"] == _MEMBER_GROUP_IDS
-    assert call_kwargs["search"] is None
+    assert call_kwargs["series_filter"].author_id is None
+    assert call_kwargs["series_filter"].group_ids == _MEMBER_GROUP_IDS
+    assert call_kwargs["series_filter"].search is None
     assert call_kwargs["skip"] == 0
     assert call_kwargs["limit"] == 10
     assert call_kwargs["order_by_field"] == Series.created_at
@@ -1734,7 +1734,7 @@ def test_get_cms_filtered_series_admin_sees_all_authors():
         get_cms_filtered_series(token="dummy", search=None, skip=0, limit=10)
 
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["author_id"] is None
+    assert call_kwargs["series_filter"].author_id is None
 
 
 def test_get_cms_filtered_series_passes_search_and_pagination():
@@ -1751,11 +1751,11 @@ def test_get_cms_filtered_series_passes_search_and_pagination():
         get_cms_filtered_series(token="dummy", search="meditation", skip=5, limit=20)
 
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["search"] == "meditation"
+    assert call_kwargs["series_filter"].search == "meditation"
     assert call_kwargs["skip"] == 5
     assert call_kwargs["limit"] == 20
-    assert call_kwargs["author_id"] is None
-    assert call_kwargs["group_ids"] == _MEMBER_GROUP_IDS
+    assert call_kwargs["series_filter"].author_id is None
+    assert call_kwargs["series_filter"].group_ids == _MEMBER_GROUP_IDS
 
 
 def test_get_filtered_series_passes_language_to_repository():
@@ -1767,10 +1767,10 @@ def test_get_filtered_series_passes_language_to_repository():
         get_filtered_series(search=None, skip=0, limit=10, language="zh")
 
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["language"] == "zh"
-    assert call_kwargs["status"] == PlanStatus.PUBLISHED
+    assert call_kwargs["series_filter"].language == "zh"
+    assert call_kwargs["series_filter"].status == PlanStatus.PUBLISHED
     # Public listing must opt into fallback so untranslated series still appear.
-    assert call_kwargs["language_fallback"] is True
+    assert call_kwargs["series_filter"].language_fallback is True
 
 
 def test_get_cms_filtered_series_keeps_strict_language_filter():
@@ -1785,7 +1785,7 @@ def test_get_cms_filtered_series_keeps_strict_language_filter():
 
         get_cms_filtered_series(token="dummy", search=None, skip=0, limit=10, language="ne")
 
-    assert mock_repo.call_args.kwargs.get("language_fallback") in (None, False)
+    assert mock_repo.call_args.kwargs["series_filter"].language_fallback is False
 
 
 def test_get_random_featured_series_defaults_to_english_when_language_not_provided():
@@ -2339,7 +2339,7 @@ def test_get_cms_filtered_series_passes_language_to_repository():
 
         get_cms_filtered_series(token="dummy", search=None, skip=0, limit=10, language="en")
 
-    assert mock_repo.call_args.kwargs["language"] == "en"
+    assert mock_repo.call_args.kwargs["series_filter"].language == "en"
 
 
 def test_get_cms_filtered_series_admin_passes_status_featured_and_author_filters():
@@ -2364,9 +2364,9 @@ def test_get_cms_filtered_series_admin_passes_status_featured_and_author_filters
         )
 
     call_kwargs = mock_repo.call_args.kwargs
-    assert call_kwargs["author_id"] == filter_author_id
-    assert call_kwargs["status"] == PlanStatus.DRAFT
-    assert call_kwargs["featured"] is False
+    assert call_kwargs["series_filter"].author_id == filter_author_id
+    assert call_kwargs["series_filter"].status == PlanStatus.DRAFT
+    assert call_kwargs["series_filter"].featured is False
 
 
 def test_get_cms_filtered_series_non_admin_cannot_filter_by_other_author():
@@ -2387,8 +2387,8 @@ def test_get_cms_filtered_series_non_admin_cannot_filter_by_other_author():
             filter_author_id=other_author_id,
         )
 
-    assert mock_repo.call_args.kwargs["author_id"] is None
-    assert mock_repo.call_args.kwargs["group_ids"] == _MEMBER_GROUP_IDS
+    assert mock_repo.call_args.kwargs["series_filter"].author_id is None
+    assert mock_repo.call_args.kwargs["series_filter"].group_ids == _MEMBER_GROUP_IDS
 
 
 # ---------------------------------------------------------------------------

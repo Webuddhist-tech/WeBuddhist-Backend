@@ -1,6 +1,8 @@
+import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import jwt
@@ -406,6 +408,18 @@ _USERNAME_MAX_LENGTH = 255
 _BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _BASE36_WIDTH = 5
 
+# Signups whose first or last name contains this get a random handle instead,
+# so nobody gets a name-based username that reads as the platform.
+_PLATFORM_NAME_MARKER = "webuddhist"
+_RANDOM_NAMES_PATH = Path(__file__).resolve().parent.parent / "assets" / "random_usernames.json"
+_RANDOM_NUMBER_WIDTH = 4
+
+
+@lru_cache(maxsize=1)
+def _get_random_names() -> tuple[str, ...]:
+    with _RANDOM_NAMES_PATH.open(encoding="utf-8") as names_file:
+        return tuple(json.load(names_file))
+
 
 def _name_part(name: str | None) -> str:
     if not name:
@@ -435,24 +449,32 @@ def _random_base36(width: int = _BASE36_WIDTH) -> str:
     return "".join(reversed(chars))
 
 
+def _random_digits(width: int = _RANDOM_NUMBER_WIDTH) -> str:
+    return str(secrets.randbelow(10 ** width)).zfill(width)
+
+
 def _random_marked_suffix() -> str:
-    return "a" + str(secrets.randbelow(10000)).zfill(4)
+    return "a" + _random_digits()
 
 
 def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate a public username.
 
+    Either name contains "webuddhist": {random_name}_{dddd}, name from random_usernames.json
     Both names present: {firstname}_{lastname}_{base36}_a{dddd}
     Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
 
     Names are shortened so the result always fits users.username. The phone
     number is never included. It stays on users.phone_number.
     """
-    token = _random_base36()
-    marked_suffix = _random_marked_suffix()
     first = _name_part(first_name)
     last = _name_part(last_name)
+    if _PLATFORM_NAME_MARKER in first or _PLATFORM_NAME_MARKER in last:
+        return f"{secrets.choice(_get_random_names())}_{_random_digits()}"
+
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
     if not first or not last:
         return f"webuddhist_user_{token}_{marked_suffix}"
 

@@ -11,6 +11,7 @@ from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.series.series_repository import (
     get_series_by_id,
     get_series_paginated,
+    SeriesListFilter,
     get_random_featured_published_series,
     get_series_plan_schedule_by_series_ids,
     save_series_with_plans,
@@ -93,7 +94,7 @@ def test_get_series_paginated_no_search_returns_rows_and_total():
 
     db.query.return_value = _paginated_query_chain([row1, row2], 2)
 
-    rows, total = get_series_paginated(db=db, search=None, skip=0, limit=10)
+    rows, total = get_series_paginated(db=db, skip=0, limit=10)
 
     assert total == 2
     assert rows == [(row1, 0, 0), (row2, 0, 0)]
@@ -110,7 +111,7 @@ def test_get_series_paginated_with_include_deleted():
     db.query.return_value = _paginated_query_chain([row], 1, with_filter=False)
 
     rows, total = get_series_paginated(
-        db=db, search=None, skip=0, limit=10, include_deleted=True
+        db=db, skip=0, limit=10, series_filter=SeriesListFilter(include_deleted=True)
     )
 
     assert total == 1
@@ -126,7 +127,6 @@ def test_get_series_paginated_with_custom_ordering():
 
     rows, total = get_series_paginated(
         db=db,
-        search=None,
         skip=0,
         limit=10,
         order_by_field=Series.created_at,
@@ -143,7 +143,9 @@ def test_get_series_paginated_with_search_applies_filter_and_pagination():
 
     db.query.return_value = _paginated_query_chain([], 0)
 
-    rows, total = get_series_paginated(db=db, search="meditation", skip=5, limit=20)
+    rows, total = get_series_paginated(
+        db=db, skip=5, limit=20, series_filter=SeriesListFilter(search="meditation")
+    )
 
     assert rows == []
     assert total == 0
@@ -164,7 +166,7 @@ def test_get_series_paginated_with_author_id_applies_filter():
     db.query.return_value = _paginated_query_chain([row], 1)
 
     rows, total = get_series_paginated(
-        db=db, search=None, skip=0, limit=10, author_id=author_id
+        db=db, skip=0, limit=10, series_filter=SeriesListFilter(author_id=author_id)
     )
 
     assert rows == [(row, 0, 0)]
@@ -180,7 +182,9 @@ def test_get_series_paginated_with_language_applies_metadata_filter():
 
     db.query.return_value = _paginated_query_chain([], 0)
 
-    rows, total = get_series_paginated(db=db, search=None, skip=0, limit=10, language="bo")
+    rows, total = get_series_paginated(
+        db=db, skip=0, limit=10, series_filter=SeriesListFilter(language="bo")
+    )
 
     assert rows == []
     assert total == 0
@@ -202,7 +206,10 @@ def test_get_series_paginated_language_fallback_skips_metadata_filter():
     db.query.return_value = _paginated_query_chain([row], 1)
 
     rows, total = get_series_paginated(
-        db=db, search=None, skip=0, limit=10, language="ne", language_fallback=True
+        db=db,
+        skip=0,
+        limit=10,
+        series_filter=SeriesListFilter(language="ne", language_fallback=True),
     )
 
     assert rows == [(row, 0, 0)]
@@ -219,7 +226,7 @@ def test_get_series_paginated_returns_series_with_plan_count():
 
     db.query.return_value = _paginated_query_chain([row], 1, plan_counts=[5])
 
-    rows, total = get_series_paginated(db=db, search=None, skip=0, limit=10)
+    rows, total = get_series_paginated(db=db, skip=0, limit=10)
 
     assert total == 1
     assert rows == [(row, 5, 0)]
@@ -232,11 +239,9 @@ def test_get_series_paginated_with_status_and_featured_applies_filters():
 
     rows, total = get_series_paginated(
         db=db,
-        search=None,
         skip=0,
         limit=10,
-        status=PlanStatus.PUBLISHED,
-        featured=True,
+        series_filter=SeriesListFilter(status=PlanStatus.PUBLISHED, featured=True),
     )
 
     assert rows == []
@@ -589,7 +594,7 @@ def test_get_series_paginated_defaults_published_only_false():
 
     db.query.return_value = _paginated_query_chain([row], 1, plan_counts=[7])
 
-    rows, total = get_series_paginated(db=db, search=None, skip=0, limit=10)
+    rows, total = get_series_paginated(db=db, skip=0, limit=10)
 
     assert total == 1
     assert rows == [(row, 7, 0)]
@@ -602,7 +607,7 @@ def test_get_series_paginated_accepts_published_only_true():
     db.query.return_value = _paginated_query_chain([row], 1, plan_counts=[3])
 
     rows, total = get_series_paginated(
-        db=db, search=None, skip=0, limit=10, published_only=True
+        db=db, skip=0, limit=10, published_only=True
     )
 
     assert total == 1
@@ -616,11 +621,9 @@ def test_get_series_paginated_published_only_does_not_add_series_filter():
 
     rows, total = get_series_paginated(
         db=db,
-        search=None,
         skip=0,
         limit=10,
-        status=PlanStatus.PUBLISHED,
-        featured=True,
+        series_filter=SeriesListFilter(status=PlanStatus.PUBLISHED, featured=True),
         published_only=True,
     )
 

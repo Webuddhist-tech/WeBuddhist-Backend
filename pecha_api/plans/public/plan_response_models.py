@@ -1,4 +1,5 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO
 from typing import Optional, List, Union
 from pecha_api.plans.plans_enums import DifficultyLevel, PlanStatus,ContentType
 from uuid import UUID
@@ -75,6 +76,7 @@ class TaskDTO(BaseModel):
     estimated_time: Optional[int] = None
     display_order: Optional[int] = None
     subtasks: List[SubTaskDTO] = []
+    settings: TaskSettingsDTO = Field(default_factory=TaskSettingsDTO)
 
 class DayVideoSummaryDTO(BaseModel):
     id: UUID

@@ -89,6 +89,8 @@ from pecha_api.prayer_intentions import (
     cms_prayer_intentions_router,
     prayer_intention_router,
 )
+from pecha_api.prayer_pdf.prayer_pdf_views import cms_prayer_pdf_router
+from pecha_api.events.in_person_count_views import cms_in_person_counts_router
 from pecha_api.accumulator import accumulator_router, accumulator_cms_router
 from pecha_api.group_accumulator import group_accumulator_router, group_accumulator_cms_router
 from pecha_api.daily_log import daily_log_views
@@ -228,6 +230,8 @@ api.include_router(ambient_sound_router)
 api.include_router(ambient_sound_cms_router)
 api.include_router(prayer_intention_router)
 api.include_router(cms_prayer_intentions_router)
+api.include_router(cms_prayer_pdf_router)
+api.include_router(cms_in_person_counts_router)
 api.include_router(accumulator_router)
 api.include_router(accumulator_cms_router)
 api.include_router(group_accumulator_router)
@@ -254,6 +258,8 @@ api.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The prayer PDF download names its file and count in headers the Studio reads.
+    expose_headers=["Content-Disposition", "X-Prayer-Count"],
 )
 api.add_middleware(RequestObservabilityMiddleware)
 # A short DB_POOL_TIMEOUT means saturation surfaces as an exception rather

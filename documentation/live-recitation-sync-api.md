@@ -6,9 +6,16 @@ One WebSocket. The operator publishes a position; every phone and overlay in the
 
 ```
 wss://{host}/api/v1/events/{event_id}/recitation/live?token={auth_token}
+wss://{host}/api/v1/events/{event_id}/recitation/live
 ```
 
-`token` is the normal bearer token. Anyone joined to or following the event's group may connect. Whoever may edit the event in the CMS (group owner / admin / author, or a super admin) gets `is_operator: true` and may publish — and connects on that basis alone, without having joined or followed the group in the app, since the person driving the puja usually never tapped "join".
+`token` is optional. Anyone may follow a published group's live event — signed in or not, and without having joined or followed the group:
+
+- **No token** (or an empty one): a signed-out viewer. `is_operator` is always `false`, and each such socket counts as its own person in `count`.
+- **The normal bearer token** (an app user's, or a Studio author's): whoever may edit the event in the CMS (group owner / admin / author, or a super admin) gets `is_operator: true` and may publish; everyone else follows as a viewer. Joining or following the group plays no part either way — the person driving the puja usually never tapped "join".
+- **A token that is present but invalid or expired** is refused with an `UNAUTHORIZED` error frame and close code `1008`, not quietly treated as signed out, so an operator on a lapsed session finds out before the puja. A client that only wants to watch reconnects without the token.
+
+An unknown event, or one whose group is unpublished, gets an `error` frame carrying the 404 detail and close code `1008`, whatever the token.
 
 The server sends two frames on connect:
 
@@ -33,7 +40,7 @@ The `position` frame is sent **only if the operator has already set one** — th
 | `{"type": "end"}` | operator | Ends the puja: clears the position and releases every socket |
 | `{"type": "ping"}` | anyone | Replies `{"type": "pong"}`. Send every ~30s so sleeping phones are noticed |
 
-`set` or `end` from a non-operator gets an `error` frame with code `FORBIDDEN`; the socket stays open. Malformed JSON and unknown `type` values are ignored silently. Publishes are throttled to 10/s per event, and anything beyond that is dropped.
+`set`, `end`, or any other operator-only frame (`move`, `autoplay_*`) from a non-operator — signed-out viewers included — gets an `error` frame with code `FORBIDDEN`; the socket stays open. Malformed JSON and unknown `type` values are ignored silently. Publishes are throttled to 10/s per event, and anything beyond that is dropped.
 
 ## Emitting without a socket (HTTP)
 
@@ -106,7 +113,7 @@ The `autoplay` state frame carries `held`, `held_at_ms`, `tempo`, `lead_ms`, and
 | `autoplay` | Operator only: on connect, then whenever autoplay moves on, holds, stops or changes settings |
 | `move_ack` / `autoplay_ack` | Operator only: the answer to a `move` / `autoplay_*` frame |
 | `pong` | Reply to `ping` |
-| `error` | `UNAUTHORIZED`, `FORBIDDEN`, `VALIDATION_ERROR`, `SERVER_ERROR`, or a 404/403 detail on connect |
+| `error` | `UNAUTHORIZED`, `FORBIDDEN`, `VALIDATION_ERROR`, `SERVER_ERROR`, or a 404 detail on connect |
 
 ## Rendering a `position`
 

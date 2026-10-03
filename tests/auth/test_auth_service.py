@@ -23,8 +23,10 @@ from pecha_api.auth.auth_service import (
     validate_username,
     generate_username,
     generate_and_validate_username,
-    retrieve_client_info
+    retrieve_client_info,
+    _get_random_names,
 )
+from pecha_api.users.reserved_usernames import is_reserved_username
 from pecha_api.auth.auth_models import CreateUserRequest
 from pecha_api.auth.auth_enums import RegistrationSource
 from fastapi import HTTPException
@@ -924,6 +926,46 @@ def test_generate_username_falls_back_when_names_are_missing() -> None:
         username = generate_username(first_name=first_name, last_name=last_name)
         assert username.startswith("webuddhist_user_")
         _assert_random_tail(username.removeprefix("webuddhist_user_"))
+
+
+def _assert_random_name_username(username: str) -> None:
+    name, number = username.rsplit("_", 1)
+    assert name in _get_random_names()
+    assert len(number) == 4
+    assert number.isdigit()
+
+
+def test_generate_username_uses_random_name_when_names_contain_webuddhist() -> None:
+    for first_name, last_name in (
+        ("WeBuddhist", "Doe"),
+        ("John", "webuddhist"),
+        ("The WeBuddhist Team", None),
+        (None, "We-Buddhist"),
+        ("mywebuddhistaccount", ""),
+    ):
+        username = generate_username(first_name=first_name, last_name=last_name)
+        _assert_random_name_username(username)
+
+
+def test_random_names_are_valid_usernames() -> None:
+    names = _get_random_names()
+
+    assert len(names) >= 100
+    assert len(set(names)) == len(names)
+    for name in names:
+        assert name.isalnum()
+        assert name == name.lower()
+        assert not is_reserved_username(name)
+
+
+def test_generate_and_validate_username_retries_random_name_until_unique() -> None:
+    with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
+        mock_validate_username.side_effect = [False, False, True]
+
+        username = generate_and_validate_username(first_name="WeBuddhist", last_name="Admin")
+
+        assert mock_validate_username.call_count == 3
+        _assert_random_name_username(username)
 
 
 def test_generate_and_validate_username_success() -> None:

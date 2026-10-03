@@ -177,6 +177,9 @@ DEFAULTS = dict(
     SQS_TIMEOUT=1800,
 
     GROUP_INVITE_EXPIRY_MINUTES=30,
+    # The account that holds counts made at an event in person (by people not
+    # using the app). Group managers record them per day in the Studio.
+    IN_PERSON_USER_ID="7cafd4eb-d996-437f-83f7-d9359c7ef40f",
     WEBUDDHIST_EMAIL_LOGO_URL="https://studio.webuddhist.com/assets/pecha_icon-DkKJLXuA.png",
 
     # When true, sync_alembic_stamp.py may advance alembic_version to match detected
@@ -217,9 +220,25 @@ DEFAULTS = dict(
     # requests posted inside it are held: the room shows them at once, and the
     # next push that goes out carries them as "+N other prayer requests".
     # 0 sends a push for every prayer request. TEXT messages are unaffected.
-    # Also paces prayer-received pushes: at most one per request per interval,
-    # summarising every prayer since the previous one. 0 pushes on every pray.
     PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
+    # At most one "X prayed for you" push per request per this many seconds,
+    # summarising every prayer since the previous one. Prayers inside it are
+    # held, and the next push goes out once it has passed - on the next pray,
+    # or from the dispatcher if nobody prays again. 0 pushes on every pray.
+    PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS=900,
+    # A "someone prayed for you" push never lands beside a prayer-request push
+    # to the same person. It waits this long after the prayer, so a request
+    # posted straight after praying goes out first, and then until that person
+    # has had no prayer-request push for this long. 0 sends it at once.
+    PRAYER_NOTIFICATION_GAP_SECONDS=120,
+    # Longest a prayer-received push is held, for someone whose rooms are busy
+    # enough to keep that gap from ever opening.
+    PRAYER_NOTIFICATION_MAX_HOLD_SECONDS=900,
+    # How often held prayer-received pushes are checked and sent.
+    PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15,
+    # Percent of prayer-received pushes that read "Someone prayed for you"
+    # instead of naming who prayed. 0 always names them; 100 never does.
+    PRAYER_NOTIFICATION_ANONYMOUS_PERCENT=10,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",

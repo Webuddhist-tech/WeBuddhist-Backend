@@ -229,21 +229,41 @@ payload, so the tap can deep-link to the request itself.
 - Never fires for praying for your own request, and your own prayers are not
   counted in it.
 - **One push per request per interval:**
-  `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140). Each push
-  summarises every prayer since the previous one for that request:
+  `PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS` (default 900, fifteen
+  minutes). Each push summarises every prayer since the previous one for that request, naming the
+  person who prayed most recently:
 
-  | People | Prayers | Body |
-  |--------|---------|------|
-  | 1 | 1 | `Kunsang prayed for you` |
-  | 1 | > 1 | `Kunsang prayed for you 10 times` |
-  | > 1 | any | `Kunsang with 9 others prayed for you 100 times` |
+  | People | Prayers | Title |
+  |--------|---------|-------|
+  | 1 | 1 | `Tenzin Dolma prayed for you` |
+  | 1 | > 1 | `Tenzin Dolma prayed for you 10 times` |
+  | > 1 | any | `Tenzin Dolma with 9 others prayed for you 100 times` |
 
-- Prayers inside the interval are carried by the next push. The interval does
-  not tick by itself: if nobody prays afterwards, no push goes out for them.
+  About one push in ten (`PRAYER_NOTIFICATION_ANONYMOUS_PERCENT`, default 10)
+  reads `Someone` in place of the name. Which ones is decided from the push's
+  id, so a retried push keeps its title. If the person who prayed has since
+  deleted their account, `A member` stands in for the name.
+
+  The body is the room's name (the event's name, for an event room), and the
+  push carries an image: the event's image for an event room, falling back to
+  the room's image, and the room's image otherwise.
+
+- Prayers inside the interval are carried by the next push. That push goes out
+  on the next prayer after the interval, or, if nobody prays again, from the
+  dispatcher (every `PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS`) once the
+  interval has passed. No prayers in the interval, no push.
+- **Never beside a prayer-request push:** the push is held for
+  `PRAYER_NOTIFICATION_GAP_SECONDS` (default 120) after the prayer, so a
+  request the person who prayed posts straight afterwards reaches the requester
+  first. It then waits until the requester has had no prayer-request push for
+  that long, so the two prayer pushes never arrive together.
+  `PRAYER_NOTIFICATION_MAX_HOLD_SECONDS` (default 900) caps the wait; `0` for
+  the gap sends at once.
 
 Posting a prayer request is the other notification, and a separate rule. It is
-an ordinary `CHAT_MESSAGE` with `message_type: "PRAYER"`, so it goes to every
-member of the room.
+a `CHAT_MESSAGE` event with `message_type: "PRAYER"`, and it goes to every
+member of the room whatever their chat notification setting: turning chat
+pushes off does not silence prayer requests.
 
 - **One push per room per interval:**
   `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140, nineteen
@@ -257,9 +277,9 @@ member of the room.
   buzz, and a member of three sanghas should not have one of them silence the
   other two.
 - Ordinary `TEXT` chat is not gated.
-- Users can mute it globally or per group, like `CHAT_MESSAGE`
-  (`PRAYER_RECEIVED` is a group-scoped notification type) — see
-  [notification-preferences-api.md](./notification-preferences-api.md).
+- The prayer-received push, not the request, is the one users can mute,
+  globally or per group (`PRAYER_RECEIVED` is a group-scoped notification
+  type) — see [notification-preferences-api.md](./notification-preferences-api.md).
 
 ---
 

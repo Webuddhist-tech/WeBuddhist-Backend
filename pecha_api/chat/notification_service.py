@@ -172,7 +172,12 @@ def _list_notification_recipient_ids(
     sender_id: UUID,
     skip: int,
     limit: int,
+    is_prayer: bool = False,
 ) -> tuple[list[UUID], int]:
+    # A prayer request reaches every member of the room. It is not a chat
+    # message, so the CHAT_MESSAGE opt-in - off by default - must not silence
+    # it; None skips preference filtering. DMs cannot carry prayer requests.
+    notification_type = None if is_prayer else NotificationType.CHAT_MESSAGE
     if chat_kind == ChatRoomKind.PRIVATE.value:
         all_recipient_ids = list_private_chat_recipient_user_ids(
             room=room,
@@ -195,7 +200,7 @@ def _list_notification_recipient_ids(
             group_id=_owning_group_id(db=db, room=room),
             skip=skip,
             limit=limit,
-            notification_type=NotificationType.CHAT_MESSAGE,
+            notification_type=notification_type,
         )
     return list_group_chat_recipient_user_ids(
         db=db,
@@ -203,7 +208,7 @@ def _list_notification_recipient_ids(
         sender_id=sender_id,
         skip=skip,
         limit=limit,
-        notification_type=NotificationType.CHAT_MESSAGE,
+        notification_type=notification_type,
     )
 
 
@@ -302,6 +307,7 @@ def get_chat_notification_targets(
             sender_id=message.sender_id,
             skip=skip,
             limit=limit,
+            is_prayer=is_prayer,
         )
         recipients = _build_notification_recipients(db=db, user_ids=recipient_ids)
 
@@ -334,6 +340,32 @@ def deactivate_push_device_service(*, push_device_id: UUID) -> DeactivatePushDev
         )
 
 
+# Named in place of a person who prayed and has since deleted their account.
+_DELETED_PRAYER_NAME = "A member"
+# Stands in for the name on the share of pushes that do not name anyone.
+_ANONYMOUS_PRAYER_NAME = "Someone"
+
+
+def _shows_prayer_name(push_id: UUID) -> bool:
+    """Whether this push names who prayed. Most do; PRAYER_NOTIFICATION_ANONYMOUS_PERCENT
+    of them read "Someone" instead.
+
+    Decided from the push id rather than at random, so a worker that fetches
+    the same push twice renders the same title both times. Push ids are
+    random UUIDs, so across pushes the split matches the setting."""
+    anonymous_percent = min(max(get_int("PRAYER_NOTIFICATION_ANONYMOUS_PERCENT"), 0), 100)
+    return push_id.int % 100 >= anonymous_percent
+
+
+def _latest_prayer_name(*, db: Session, notification: "_PrayerPush") -> str:
+    if not _shows_prayer_name(notification.id):
+        return _ANONYMOUS_PRAYER_NAME
+    # latest_user_id is cleared when that account is deleted.
+    if notification.latest_user_id is None:
+        return _DELETED_PRAYER_NAME
+    return get_sender_display_name(db=db, sender_id=notification.latest_user_id)
+
+
 def _build_prayer_notification_copy(
     *,
     room_name: str,
@@ -342,17 +374,30 @@ def _build_prayer_notification_copy(
     latest_prayer_name: str,
 ) -> tuple[str, str]:
     """Copy reads from the push's stored summary: everyone who prayed since
-    the previous push for this request, and how many prayers they added."""
+    the previous push for this request, and how many prayers they added.
+
+    The title names whoever prayed most recently; the rest are a count. The
+    room (the event, for an event room) says where, beside the image that comes
+    with it."""
     if people_count <= 1:
         if prayer_total <= 1:
-            return room_name, f"{latest_prayer_name} prayed for you"
-        return room_name, f"{latest_prayer_name} prayed for you {prayer_total} times"
+            return f"{latest_prayer_name} prayed for you", room_name
+        return f"{latest_prayer_name} prayed for you {prayer_total} times", room_name
     others = people_count - 1
     others_label = "1 other" if others == 1 else f"{others} others"
     return (
-        room_name,
         f"{latest_prayer_name} with {others_label} prayed for you {prayer_total} times",
+        room_name,
     )
+
+
+def _prayer_notification_image_url(*, db, room) -> str | None:
+    """An event room carries the event's current image, falling back to the
+    room's own (a snapshot of it taken when the room was created) when the
+    event has none. Any other room carries the room's image, as its prayer
+    request push did."""
+    event = get_event_by_id(db, room.event_id) if getattr(room, "event_id", None) else None
+    return _generate_presigned_url((event.image_url if event else None) or room.img_url)
 
 
 class _PrayerPush(NamedTuple):
@@ -425,12 +470,9 @@ def get_prayer_notification_targets(
             room_name=room.name,
             people_count=notification.people_count,
             prayer_total=int(notification.prayer_total),
-            latest_prayer_name=(
-                get_sender_display_name(db=db, sender_id=notification.latest_user_id)
-                if notification.latest_user_id
-                else "Someone"
-            ),
+            latest_prayer_name=_latest_prayer_name(db=db, notification=notification),
         )
+        image_url = _prayer_notification_image_url(db=db, room=room)
 
         # The requester alone, and never for their own prayer. The gate never
         # names the requester; the check guards a legacy prayer id.
@@ -479,6 +521,7 @@ def get_prayer_notification_targets(
             prayer_count=prayer_count,
             people_count=notification.people_count,
             prayer_total=int(notification.prayer_total),
+            image_url=image_url,
             title=title,
             body=body,
             recipients=recipients,
