@@ -330,3 +330,46 @@ class TestPreview:
         response = self._run(request=request, rows=[(_message(), _user())])
         assert "<h1>Unsaved title</h1>" in response.html
         assert 'class="zht"' not in response.html
+
+
+class TestListRequests:
+    def _run(self, *, day=None, settings=None, room=SimpleNamespace(id=uuid4()), page=([], 0)):
+        with patch(f"{_SVC}.validate_cms_author_details"), patch(f"{_SVC}.require_group_member") as mock_member, patch(
+            f"{_SVC}.SessionLocal"
+        ), patch(f"{_SVC}._load_group_target", return_value=_target()), patch(
+            f"{_SVC}._resolve_settings", return_value=(settings, PrayerPdfSettingsSource.GROUP)
+        ), patch(f"{_SVC}.get_room_by_group_id", return_value=room), patch(
+            f"{_SVC}.page_prayer_requests", return_value=page
+        ) as mock_page, patch(
+            f"{_SVC}.preview_avatar_url", side_effect=lambda ref: f"https://signed/{ref}" if ref else None
+        ):
+            response = service.list_group_prayer_requests_service(token="t", group_id=uuid4(), day=day, skip=20, limit=10)
+        mock_member.assert_called_once()
+        return response, mock_page
+
+    def test_every_day_when_no_day(self):
+        message = SimpleNamespace(**vars(_message("Peace")), intention="peace", is_edited=False)
+        user = _user()
+        response, mock_page = self._run(page=([(message, user)], 31))
+        kwargs = mock_page.call_args.kwargs
+        assert kwargs["start_utc"] is None and kwargs["end_utc"] is None
+        assert (kwargs["skip"], kwargs["limit"]) == (20, 10)
+        assert response.total == 31
+        assert response.day is None
+        assert response.timezone == "Asia/Kolkata"
+        item = response.items[0]
+        assert item.message == "Peace"
+        assert item.posted_by == "Tenzin Dolma"
+        assert item.intention == "peace"
+        assert item.avatar_url == "https://signed/avatars/u.jpg"
+
+    def test_one_day_in_the_settings_timezone(self):
+        _, mock_page = self._run(day=date(2026, 10, 1), settings=_settings_row(timezone="America/New_York"))
+        kwargs = mock_page.call_args.kwargs
+        assert kwargs["start_utc"] == datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc)
+        assert kwargs["end_utc"] == datetime(2026, 10, 2, 4, 0, tzinfo=timezone.utc)
+
+    def test_no_room_is_empty(self):
+        response, mock_page = self._run(room=None)
+        mock_page.assert_not_called()
+        assert response.items == [] and response.total == 0

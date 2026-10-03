@@ -85,3 +85,38 @@ def list_prayer_requests(
         .order_by(ChatMessage.created_at.asc())
         .all()
     )
+
+
+def page_prayer_requests(
+    db: Session,
+    *,
+    room_id: UUID,
+    start_utc: Optional[datetime],
+    end_utc: Optional[datetime],
+    skip: int,
+    limit: int,
+) -> Tuple[List[Tuple[ChatMessage, Users]], int]:
+    """One page of a room's live prayer requests, newest first, each with the
+    person who asked, and how many there are in all. Without a window it
+    pages through every request the room has had."""
+    query = (
+        db.query(ChatMessage, Users)
+        .join(Users, Users.id == ChatMessage.sender_id)
+        .filter(
+            ChatMessage.room_id == room_id,
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+        )
+    )
+    if start_utc is not None:
+        query = query.filter(ChatMessage.created_at >= start_utc)
+    if end_utc is not None:
+        query = query.filter(ChatMessage.created_at < end_utc)
+    total = query.count()
+    rows = (
+        query.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return rows, total

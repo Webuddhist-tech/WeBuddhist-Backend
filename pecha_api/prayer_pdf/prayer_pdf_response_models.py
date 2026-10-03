@@ -118,3 +118,27 @@ class PrayerPdfPreviewResponse(BaseModel):
     # Requests on that day; 0 when the preview shows samples instead.
     prayer_count: int
     is_sample: bool
+
+
+class PrayerRequestDTO(BaseModel):
+    """One prayer request as posted in the room, before the PDF's clean-up."""
+
+    id: UUID
+    user_id: UUID
+    posted_by: str
+    avatar_url: Optional[str] = None
+    message: str
+    intention: Optional[str] = None
+    is_edited: bool = False
+    created_at: datetime
+
+
+class PrayerRequestListResponse(BaseModel):
+    items: list[PrayerRequestDTO]
+    total: int
+    skip: int
+    limit: int
+    # The day listed, or null when every day is.
+    day: Optional[date] = None
+    # The settings' timezone, which days are counted in.
+    timezone: str

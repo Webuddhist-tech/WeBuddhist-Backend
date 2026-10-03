@@ -11,6 +11,7 @@ from .prayer_pdf_renderer import font_path
 from .prayer_pdf_response_models import (
     PrayerPdfPreviewResponse,
     PrayerPdfSettingsDTO,
+    PrayerRequestListResponse,
     UpdatePrayerPdfSettingsRequest,
 )
 from .prayer_pdf_service import (
@@ -19,6 +20,8 @@ from .prayer_pdf_service import (
     build_group_prayer_pdf_service,
     get_event_prayer_pdf_settings_service,
     get_group_prayer_pdf_settings_service,
+    list_event_prayer_requests_service,
+    list_group_prayer_requests_service,
     preview_event_prayer_pdf_service,
     preview_group_prayer_pdf_service,
     reset_event_prayer_pdf_settings_service,
@@ -42,6 +45,16 @@ DayQuery = Annotated[
         description="Day to export (YYYY-MM-DD) in the settings' timezone. Defaults to today there.",
     ),
 ]
+
+ListDayQuery = Annotated[
+    Optional[date],
+    Query(
+        alias="date",
+        description="Only this day (YYYY-MM-DD) in the settings' timezone. Omit to list every day.",
+    ),
+]
+SkipQuery = Annotated[int, Query(ge=0)]
+LimitQuery = Annotated[int, Query(ge=1, le=100)]
 
 _PDF_RESPONSES = {
     200: {"content": {"application/pdf": {}}, "description": "The PDF, as an attachment."},
@@ -115,6 +128,19 @@ def preview_group_prayer_pdf(
     )
 
 
+@cms_prayer_pdf_router.get("/groups/{group_id}/requests", status_code=status.HTTP_200_OK)
+def list_group_prayer_requests(
+    group_id: UUID,
+    credentials: Credentials,
+    day: ListDayQuery = None,
+    skip: SkipQuery = 0,
+    limit: LimitQuery = 20,
+) -> PrayerRequestListResponse:
+    return list_group_prayer_requests_service(
+        token=credentials.credentials, group_id=group_id, day=day, skip=skip, limit=limit
+    )
+
+
 # ----------------------------------------------------------------- events
 
 
@@ -149,4 +175,17 @@ def preview_event_prayer_pdf(
 ) -> PrayerPdfPreviewResponse:
     return preview_event_prayer_pdf_service(
         token=credentials.credentials, event_id=event_id, request=request, day=day
+    )
+
+
+@cms_prayer_pdf_router.get("/events/{event_id}/requests", status_code=status.HTTP_200_OK)
+def list_event_prayer_requests(
+    event_id: UUID,
+    credentials: Credentials,
+    day: ListDayQuery = None,
+    skip: SkipQuery = 0,
+    limit: LimitQuery = 20,
+) -> PrayerRequestListResponse:
+    return list_event_prayer_requests_service(
+        token=credentials.credentials, event_id=event_id, day=day, skip=skip, limit=limit
     )

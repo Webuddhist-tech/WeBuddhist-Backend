@@ -8,6 +8,7 @@ from pecha_api.app import api
 from pecha_api.prayer_pdf.prayer_pdf_response_models import (
     PrayerPdfSettingsDTO,
     PrayerPdfSettingsSource,
+    PrayerRequestListResponse,
 )
 from pecha_api.prayer_pdf.prayer_pdf_service import PrayerPdfFile
 
@@ -169,3 +170,35 @@ def test_font_route_is_public_and_cached():
 def test_font_route_refuses_other_files():
     assert client.get("/cms/prayer-pdf/fonts/bo.ttf").status_code == 404
     assert client.get("/cms/prayer-pdf/fonts/..%2F..%2Fconfig.py").status_code == 404
+
+
+def test_list_group_requests_pages_every_day_by_default():
+    group_id = uuid4()
+    body = PrayerRequestListResponse(items=[], total=0, skip=0, limit=20, timezone="Asia/Kolkata")
+    with patch(f"{_VIEWS}.list_group_prayer_requests_service", return_value=body) as mock_list:
+        response = client.get(f"/cms/prayer-pdf/groups/{group_id}/requests", headers=_AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["day"] is None
+    mock_list.assert_called_once_with(token="dummy", group_id=group_id, day=None, skip=0, limit=20)
+
+
+def test_list_event_requests_for_a_day():
+    event_id = uuid4()
+    body = PrayerRequestListResponse(items=[], total=0, skip=40, limit=20, timezone="Asia/Kolkata")
+    with patch(f"{_VIEWS}.list_event_prayer_requests_service", return_value=body) as mock_list:
+        response = client.get(
+            f"/cms/prayer-pdf/events/{event_id}/requests",
+            headers=_AUTH,
+            params={"date": "2026-10-01", "skip": 40, "limit": 20},
+        )
+
+    assert response.status_code == 200
+    assert str(mock_list.call_args.kwargs["day"]) == "2026-10-01"
+    assert mock_list.call_args.kwargs["skip"] == 40
+
+
+def test_list_requests_rejects_bad_paging():
+    for params in ({"limit": 0}, {"limit": 101}, {"skip": -1}, {"date": "someday"}):
+        response = client.get(f"/cms/prayer-pdf/groups/{uuid4()}/requests", headers=_AUTH, params=params)
+        assert response.status_code == 422, params

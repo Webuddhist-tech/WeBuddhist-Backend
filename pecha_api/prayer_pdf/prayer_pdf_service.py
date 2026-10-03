@@ -40,6 +40,7 @@ from .prayer_pdf_repository import (
     get_event_settings,
     get_group_settings,
     list_prayer_requests,
+    page_prayer_requests,
     upsert_settings,
 )
 from .prayer_pdf_response_models import (
@@ -48,6 +49,8 @@ from .prayer_pdf_response_models import (
     PrayerPdfPreviewResponse,
     PrayerPdfSettingsDTO,
     PrayerPdfSettingsSource,
+    PrayerRequestDTO,
+    PrayerRequestListResponse,
     UpdatePrayerPdfSettingsRequest,
 )
 
@@ -242,12 +245,16 @@ def _posted_by(user) -> str:
     return f"{user.firstname or ''} {user.lastname or ''}".strip()
 
 
-def _room_rows(db: Session, target: _Target, day: date, tz_name: str):
-    room = (
+def _room(db: Session, target: _Target):
+    return (
         get_room_by_event_id(db=db, event_id=target.event_id)
         if target.event_id is not None
         else get_room_by_group_id(db=db, group_id=target.group_id)
     )
+
+
+def _room_rows(db: Session, target: _Target, day: date, tz_name: str):
+    room = _room(db, target)
     if room is None:
         return []
     start_utc, end_utc = day_window_utc(day, tz_name)
@@ -381,3 +388,59 @@ async def build_group_prayer_pdf_service(token: str, group_id: UUID, day: Option
 
 async def build_event_prayer_pdf_service(token: str, event_id: UUID, day: Optional[date]) -> PrayerPdfFile:
     return await _render(token, lambda db: _load_event_target(db, event_id), day)
+
+
+# ------------------------------------------------------------------- list
+
+
+def _list_requests(
+    token: str, load_target, day: Optional[date], skip: int, limit: int
+) -> PrayerRequestListResponse:
+    """The room's prayer requests as posted, newest first: one day's (in the
+    settings' timezone) or, without a day, every day's. Same access as the
+    PDF, since it shows the same names and requests."""
+    author = validate_cms_author_details(token=token)
+    with SessionLocal() as db:
+        target = load_target(db)
+        _require_can_manage(db, target.group_id, author)
+        row, _ = _resolve_settings(db, target)
+        tz_name = row.timezone if row is not None and row.timezone else DEFAULT_TIMEZONE
+        room = _room(db, target)
+        rows, total = [], 0
+        if room is not None:
+            start_utc, end_utc = day_window_utc(day, tz_name) if day is not None else (None, None)
+            rows, total = page_prayer_requests(
+                db, room_id=room.id, start_utc=start_utc, end_utc=end_utc, skip=skip, limit=limit
+            )
+        return PrayerRequestListResponse(
+            items=[
+                PrayerRequestDTO(
+                    id=message.id,
+                    user_id=user.id,
+                    posted_by=_posted_by(user),
+                    avatar_url=preview_avatar_url(user.avatar_url),
+                    message=message.body,
+                    intention=message.intention,
+                    is_edited=bool(message.is_edited),
+                    created_at=message.created_at,
+                )
+                for message, user in rows
+            ],
+            total=total,
+            skip=skip,
+            limit=limit,
+            day=day,
+            timezone=tz_name,
+        )
+
+
+def list_group_prayer_requests_service(
+    token: str, group_id: UUID, day: Optional[date], skip: int, limit: int
+) -> PrayerRequestListResponse:
+    return _list_requests(token, lambda db: _load_group_target(db, group_id), day, skip, limit)
+
+
+def list_event_prayer_requests_service(
+    token: str, event_id: UUID, day: Optional[date], skip: int, limit: int
+) -> PrayerRequestListResponse:
+    return _list_requests(token, lambda db: _load_event_target(db, event_id), day, skip, limit)

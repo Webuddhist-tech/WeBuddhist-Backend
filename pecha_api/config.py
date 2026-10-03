@@ -177,6 +177,9 @@ DEFAULTS = dict(
     SQS_TIMEOUT=1800,
 
     GROUP_INVITE_EXPIRY_MINUTES=30,
+    # The account that holds counts made at an event in person (by people not
+    # using the app). Group managers record them per day in the Studio.
+    IN_PERSON_USER_ID="7cafd4eb-d996-437f-83f7-d9359c7ef40f",
     WEBUDDHIST_EMAIL_LOGO_URL="https://studio.webuddhist.com/assets/pecha_icon-DkKJLXuA.png",
 
     # When true, sync_alembic_stamp.py may advance alembic_version to match detected

@@ -90,6 +90,7 @@ from pecha_api.prayer_intentions import (
     prayer_intention_router,
 )
 from pecha_api.prayer_pdf.prayer_pdf_views import cms_prayer_pdf_router
+from pecha_api.events.in_person_count_views import cms_in_person_counts_router
 from pecha_api.accumulator import accumulator_router, accumulator_cms_router
 from pecha_api.group_accumulator import group_accumulator_router, group_accumulator_cms_router
 from pecha_api.daily_log import daily_log_views
@@ -230,6 +231,7 @@ api.include_router(ambient_sound_cms_router)
 api.include_router(prayer_intention_router)
 api.include_router(cms_prayer_intentions_router)
 api.include_router(cms_prayer_pdf_router)
+api.include_router(cms_in_person_counts_router)
 api.include_router(accumulator_router)
 api.include_router(accumulator_cms_router)
 api.include_router(group_accumulator_router)
