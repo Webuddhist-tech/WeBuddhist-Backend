@@ -192,6 +192,8 @@ class TestTargets:
         event = SimpleNamespace(
             id=uuid4(),
             group_id=group_id,
+            start_date=datetime(2026, 9, 25, 3, 30, tzinfo=timezone.utc),
+            timezone="Asia/Kolkata",
             metadata_entries=[
                 SimpleNamespace(language=SimpleNamespace(value="BO"), name="བོད་"),
                 SimpleNamespace(language=SimpleNamespace(value="EN"), name="Drolchok"),
@@ -202,6 +204,8 @@ class TestTargets:
         assert target.name == "Drolchok"
         assert target.group_id == group_id
         assert target.event_id == event.id
+        assert target.starts_at == event.start_date
+        assert target.timezone == "Asia/Kolkata"
 
 
 class TestBuildDocument:
@@ -262,6 +266,34 @@ class TestBuildDocument:
         assert document.title == "Prayer Requests"
         assert document.day_number == 0
         assert document.closing_en == [DEFAULT_TEXTS["closing_en"]]
+
+    def test_day_counts_from_the_event_start_when_settings_have_none(self):
+        # 8pm UTC on 24 Sep is already 25 Sep in Kolkata, the event's timezone.
+        target = service._Target(
+            group_id=uuid4(),
+            event_id=uuid4(),
+            name="Zabtik Drolchok",
+            starts_at=datetime(2026, 9, 24, 20, 0, tzinfo=timezone.utc),
+            timezone="Asia/Kolkata",
+        )
+        document, _, _ = self._run(target, date(2026, 10, 2), rows=[(_message(), _user())])
+        assert document.day_number == 8
+        assert document.day_number_bo == "༨"
+
+    def test_saved_day_one_wins_over_the_event_start(self):
+        target = service._Target(
+            group_id=uuid4(), event_id=uuid4(), name="Drolchok", starts_at=datetime(2026, 9, 1, tzinfo=timezone.utc)
+        )
+        settings = _settings_row(day_one=date(2026, 9, 25))
+        document, _, _ = self._run(target, date(2026, 10, 2), settings=settings, rows=[(_message(), _user())])
+        assert document.day_number == 8
+
+    def test_no_badge_before_the_event_starts(self):
+        target = service._Target(
+            group_id=uuid4(), event_id=uuid4(), name="Drolchok", starts_at=datetime(2026, 10, 5, tzinfo=timezone.utc)
+        )
+        document, _, _ = self._run(target, date(2026, 10, 2), rows=[(_message(), _user())])
+        assert document.day_number == 0
 
     def test_day_defaults_to_today_in_settings_timezone(self):
         with patch(f"{_SVC}.datetime") as mock_datetime:

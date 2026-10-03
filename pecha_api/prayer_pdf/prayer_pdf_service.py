@@ -21,6 +21,7 @@ from pecha_api.plans.shared.permissions import (
     require_cms_write_access,
     require_group_member,
 )
+from pecha_api.timezone_utils import get_date_in_timezone
 
 from .prayer_pdf_avatars import load_avatars, preview_avatar_url
 from .prayer_pdf_content import (
@@ -76,6 +77,10 @@ class _Target:
     group_id: UUID
     event_id: Optional[UUID]
     name: str
+    # An event's start, which day 1 of the "Day: n" badge falls back to
+    # when the settings don't pin one.
+    starts_at: Optional[datetime] = None
+    timezone: Optional[str] = None
 
 
 # ---------------------------------------------------------------- lookups
@@ -106,7 +111,13 @@ def _load_event_target(db: Session, event_id: UUID) -> _Target:
     event = get_event_by_id(db=db, event_id=event_id)
     if event is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-    return _Target(group_id=event.group_id, event_id=event.id, name=_pick_en(event.metadata_entries, "name", "Event"))
+    return _Target(
+        group_id=event.group_id,
+        event_id=event.id,
+        name=_pick_en(event.metadata_entries, "name", "Event"),
+        starts_at=event.start_date,
+        timezone=event.timezone,
+    )
 
 
 def _require_can_manage(db: Session, group_id: UUID, author: Author) -> None:
@@ -269,10 +280,23 @@ def _cards_from_rows(rows, settings) -> CardList:
     )
 
 
-def _document(settings, card_list: CardList, avatars: Dict[str, Optional[str]], day: date) -> PrayerPdfDocument:
+def _day_one(target: _Target, settings) -> Optional[date]:
+    """Day 1 of the badge: the date saved in the settings, else the date the
+    event starts on in its own timezone. A group has no start, so without a
+    saved date its PDF has no badge."""
+    if settings.day_one is not None:
+        return settings.day_one
+    if target.starts_at is None:
+        return None
+    return get_date_in_timezone(target.timezone or settings.timezone, at=target.starts_at)
+
+
+def _document(
+    target: _Target, settings, card_list: CardList, avatars: Dict[str, Optional[str]], day: date
+) -> PrayerPdfDocument:
     """`settings` is anything with the settings fields: the saved DTO when
     printing, the unsaved form when previewing."""
-    number = day_number(day, settings.day_one)
+    number = day_number(day, _day_one(target, settings))
     return PrayerPdfDocument(
         title_bo=settings.title_bo,
         title=settings.title,
@@ -313,7 +337,7 @@ def _build_document(db: Session, target: _Target, day: Optional[date]) -> Tuple[
 
     avatar_urls = {str(user.id): user.avatar_url for _, user in rows}
     avatars = load_avatars((card.user_id, avatar_urls.get(card.user_id)) for card in card_list.cards)
-    return _document(settings, card_list, avatars, day), day
+    return _document(target, settings, card_list, avatars, day), day
 
 
 def _prepare(token: str, load_target, day: Optional[date]) -> Tuple[PrayerPdfDocument, str]:
@@ -361,7 +385,7 @@ def _preview(
         else:
             avatar_urls = {str(user.id): user.avatar_url for _, user in rows}
             avatars = {card.user_id: preview_avatar_url(avatar_urls.get(card.user_id)) for card in card_list.cards}
-        document = _document(request, card_list, avatars, day)
+        document = _document(target, request, card_list, avatars, day)
         return PrayerPdfPreviewResponse(
             html=render_html(document, preview=True),
             day=day,
