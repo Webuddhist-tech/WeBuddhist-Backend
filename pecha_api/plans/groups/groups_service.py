@@ -1,4 +1,7 @@
 import logging
+import re
+import secrets
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional, Sequence
 from uuid import UUID
@@ -408,6 +411,47 @@ def _assert_group_name_clean(*, slug: Optional[str], metadata: Optional[Sequence
                 "message": GROUP_NAME_INAPPROPRIATE_MESSAGE,
             },
         )
+
+
+_SLUG_BASE_MAX_LENGTH = 60
+_SLUG_FALLBACK_BASE = "space"
+_SLUG_SUFFIX_DIGITS = 4
+_SLUG_ATTEMPTS = 20
+
+
+def _slug_base(title: Optional[str]) -> str:
+    """"Dharma Circle (Kathmandu)!" -> "dharma-circle-kathmandu". Accents are
+    folded to ASCII; a title with no Latin letters or digits at all (Tibetan,
+    Chinese...) gives "" and the caller falls back."""
+    ascii_title = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii")
+    base = re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-")
+    return base[:_SLUG_BASE_MAX_LENGTH].rstrip("-")
+
+
+def generate_group_slug(db, metadata) -> str:
+    """A unique slug from the group's name plus a random number after an
+    underscore: "Dharma Circle" -> "dharma-circle_4821". Uses the English
+    title when there is one, otherwise the first title given."""
+    titles = {_metadata_language(item): item.title for item in metadata or []}
+    title = titles.get("EN") or next(iter(titles.values()), None)
+    base = _slug_base(title) or _SLUG_FALLBACK_BASE
+    digits = _SLUG_SUFFIX_DIGITS
+    for attempt in range(_SLUG_ATTEMPTS):
+        if attempt == _SLUG_ATTEMPTS // 2:
+            digits *= 2  # this name is crowded; widen the number
+        number = secrets.randbelow(9 * 10 ** (digits - 1)) + 10 ** (digits - 1)
+        slug = f"{base}_{number}"
+        if get_group_by_slug(db=db, slug=slug) is None:
+            return slug
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Could not generate a unique address for this group. Please try again.",
+    )
+
+
+def _metadata_language(item) -> str:
+    language = item.language.value if hasattr(item.language, "value") else item.language
+    return str(language).upper()
 
 
 def _assert_metadata_valid(metadata_entries: List) -> None:
@@ -828,7 +872,10 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
     author = validate_and_extract_author_details(token=token)
 
     with SessionLocal() as db:
-        if get_group_by_slug(db=db, slug=request.slug):
+        slug = (request.slug or "").strip()
+        if not slug:
+            slug = generate_group_slug(db, request.metadata)
+        elif get_group_by_slug(db=db, slug=slug):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
 
         metadata_entries = [
@@ -842,7 +889,7 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
             for item in request.metadata
         ]
         group = AuthorGroup(
-            slug=request.slug,
+            slug=slug,
             group_type=request.group_type.value,
             is_public=request.is_public,
             avatar_key=request.avatar_key,

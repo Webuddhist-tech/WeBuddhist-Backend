@@ -555,3 +555,100 @@ def test_changing_a_group_slug_goes_through_the_filter():
     _assert_rejected(exc)
     update.assert_not_called()
     assert group.slug == "dharma-circle"
+
+
+# ------------------------------------------------------ generated group slug
+
+import re  # noqa: E402
+
+from pecha_api.plans.groups.groups_service import _slug_base, generate_group_slug  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Dharma Circle", "dharma-circle"),
+        ("  Dharma Circle (Kathmandu)!  ", "dharma-circle-kathmandu"),
+        ("Café Zen — Morning Sit", "cafe-zen-morning-sit"),
+        ("Lamrim 2026", "lamrim-2026"),
+        ("བཀྲ་ཤིས་བདེ་ལེགས", ""),
+        ("x" * 200, "x" * 60),
+    ],
+)
+def test_slug_base(title, expected):
+    assert _slug_base(title) == expected
+
+
+def _meta(*pairs):
+    return [GroupMetadataInput(title=title, language=language) for language, title in pairs]
+
+
+def test_generated_slug_is_the_name_then_a_random_number():
+    with patch(f"{GROUPS}.get_group_by_slug", return_value=None):
+        slug = generate_group_slug(MagicMock(), _meta(("BO", "བཀྲ་ཤིས"), ("EN", "Dharma Circle")))
+    assert re.fullmatch(r"dharma-circle_\d{4}", slug)
+
+
+def test_generated_slug_for_a_name_without_latin_letters():
+    with patch(f"{GROUPS}.get_group_by_slug", return_value=None):
+        slug = generate_group_slug(MagicMock(), _meta(("BO", "བཀྲ་ཤིས་བདེ་ལེགས")))
+    assert re.fullmatch(r"space_\d{4}", slug)
+
+
+def test_generated_slug_retries_until_unique():
+    taken = [MagicMock(), MagicMock(), None]
+    with patch(f"{GROUPS}.get_group_by_slug", side_effect=taken) as lookup:
+        slug = generate_group_slug(MagicMock(), _meta(("EN", "Dharma Circle")))
+    assert lookup.call_count == 3
+    assert re.fullmatch(r"dharma-circle_\d{4}", slug)
+
+
+def test_generated_slug_widens_the_number_for_a_crowded_name():
+    lookups = []
+
+    def _lookup(db, slug):
+        lookups.append(slug)
+        return MagicMock() if len(lookups) <= 10 else None
+
+    with patch(f"{GROUPS}.get_group_by_slug", side_effect=_lookup):
+        slug = generate_group_slug(MagicMock(), _meta(("EN", "Dharma Circle")))
+    assert re.fullmatch(r"dharma-circle_\d{8}", slug)
+
+
+def test_generated_slug_gives_up_eventually():
+    with patch(f"{GROUPS}.get_group_by_slug", return_value=MagicMock()):
+        with pytest.raises(HTTPException) as exc:
+            generate_group_slug(MagicMock(), _meta(("EN", "Dharma Circle")))
+    assert exc.value.status_code == 409
+
+
+def test_create_group_without_a_slug_generates_one():
+    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author), \
+            patch(f"{GROUPS}.SessionLocal") as session_local, \
+            patch(f"{GROUPS}.get_group_by_slug", return_value=None), \
+            patch(f"{GROUPS}.create_group", return_value=SimpleNamespace(id=uuid4())) as create, \
+            patch(f"{GROUPS}.get_group_by_id"), \
+            patch(f"{GROUPS}._group_to_detail"):
+        _session(session_local)
+        create_author_group(
+            token="t",
+            request=CreateAuthorGroupRequest(group_type="COMMUNITY", metadata=_metadata("Morning Sit")),
+        )
+    assert re.fullmatch(r"morning-sit_\d{4}", create.call_args.kwargs["group"].slug)
+
+
+def test_create_group_still_honours_a_given_slug():
+    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author), \
+            patch(f"{GROUPS}.SessionLocal") as session_local, \
+            patch(f"{GROUPS}.get_group_by_slug", return_value=None), \
+            patch(f"{GROUPS}.create_group", return_value=SimpleNamespace(id=uuid4())) as create, \
+            patch(f"{GROUPS}.get_group_by_id"), \
+            patch(f"{GROUPS}._group_to_detail"):
+        _session(session_local)
+        create_author_group(
+            token="t",
+            request=CreateAuthorGroupRequest(slug="bodhichitta-authors", metadata=_metadata("Bodhichitta Authors")),
+        )
+    assert create.call_args.kwargs["group"].slug == "bodhichitta-authors"

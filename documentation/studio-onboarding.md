@@ -46,6 +46,16 @@ runs on create (`POST /cms/author/groups`) and on rename
 The filter has the same limits as in chat. It matches whole English words, so
 joined-up spellings ("badwordgroup") and non-English titles pass.
 
+### Generated slugs
+
+`slug` is optional on `POST /cms/author/groups`. When it's left out (the Studio
+no longer asks for one when creating a practice space), the backend builds it
+from the English title, or the first title if there's no English one: the name
+in lowercase with hyphens, then `_` and a random number, e.g.
+`dharma-circle_4821`. A title with no Latin letters (Tibetan, Chinese) gives
+`space_4821`. The number is re-drawn until the slug is unique. Pages still send
+their own slug.
+
 ### Safety rules
 
 - **Suspension is final.** SuperAdmin suspend sets `authors.suspended_at`. A

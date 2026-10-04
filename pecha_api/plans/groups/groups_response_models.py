@@ -195,7 +195,9 @@ class UserJoinedAuthorGroupListResponse(BaseModel):
 
 
 class CreateAuthorGroupRequest(BaseModel):
-    slug: str
+    # Left out (the Studio no longer asks for one for practice spaces), it is
+    # generated from the group's name - see groups_service.generate_group_slug.
+    slug: Optional[str] = None
     group_type: AuthorGroupType = AuthorGroupType.PAGE
     is_public: bool = True
     avatar_key: Optional[str] = None
