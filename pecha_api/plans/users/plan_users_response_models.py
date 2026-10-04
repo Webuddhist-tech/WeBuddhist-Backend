@@ -1,5 +1,6 @@
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from uuid import UUID
 from datetime import datetime
@@ -99,6 +100,7 @@ class UserTaskDTO(BaseModel):
     display_order: int
     is_completed: bool
     sub_tasks: List[UserSubTaskDTO] = []
+    settings: TaskSettingsDTO = Field(default_factory=TaskSettingsDTO)
 
 class UserPlanDayDetailsResponse(BaseModel):
     id: UUID

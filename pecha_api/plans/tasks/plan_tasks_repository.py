@@ -75,6 +75,35 @@ def update_task_title(db: Session, updated_task: PlanTask) -> PlanTask:
     db.refresh(updated_task)
     return updated_task
 
+def clear_live_tasks_in_day(db: Session, plan_item_id: UUID, except_task_id: UUID) -> None:
+    """Unset `is_live` on every other task of the day.
+
+    Locks the day row first, so two tasks of one day going live at the same
+    time queue up instead of both passing and one failing on
+    uq_tasks_one_live_per_day.
+    """
+    from pecha_api.plans.items.plan_items_models import PlanItem
+
+    db.query(PlanItem).filter(PlanItem.id == plan_item_id).with_for_update().first()
+    (
+        db.query(PlanTask)
+        .filter(
+            PlanTask.plan_item_id == plan_item_id,
+            PlanTask.id != except_task_id,
+            PlanTask.is_live.is_(True),
+        )
+        .update({PlanTask.is_live: False}, synchronize_session=False)
+    )
+
+def update_task_settings(db: Session, updated_task: PlanTask) -> PlanTask:
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ResponseError(error=BAD_REQUEST, message=str(e.orig)).model_dump())
+    db.refresh(updated_task)
+    return updated_task
+
 def get_tasks_by_plan_item_id(db: Session, plan_item_id: UUID) -> List[PlanTask]:
     return (db.query(PlanTask)
         .filter(PlanTask.plan_item_id == plan_item_id)

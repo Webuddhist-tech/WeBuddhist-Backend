@@ -965,6 +965,43 @@ def get_last_prayer_notification(
     )
 
 
+def list_prayer_requests_with_held_prayers(
+    db: Session,
+    *,
+    last_push_before: datetime,
+    limit: int,
+) -> List[UUID]:
+    """Prayer requests holding prayers no push has reported, whose last
+    prayer-received push was recorded before `last_push_before` (or that never
+    had one), oldest held prayer first.
+
+    These are the requests the interval held and nobody prayed for again
+    afterwards, so no pray call is coming to send their push. The requester's
+    own prayers are never reported, so they alone do not make a request due.
+    """
+    last_push = (
+        select(func.max(ChatPrayerNotification.created_at))
+        .where(ChatPrayerNotification.message_id == ChatMessage.id)
+        .correlate(ChatMessage)
+        .scalar_subquery()
+    )
+    rows = (
+        db.query(ChatMessage.id)
+        .join(ChatMessagePrayerCount, ChatMessagePrayerCount.message_id == ChatMessage.id)
+        .filter(
+            ChatMessagePrayerCount.unreported_count > 0,
+            ChatMessagePrayerCount.user_id != ChatMessage.sender_id,
+            ChatMessage.deleted_at.is_(None),
+            or_(last_push.is_(None), last_push <= last_push_before),
+        )
+        .group_by(ChatMessage.id)
+        .order_by(func.min(ChatMessagePrayerCount.last_prayed_at).asc())
+        .limit(limit)
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
 class UnreportedPrayers(NamedTuple):
     """One person's prayers for a request that no push has reported yet."""
 
@@ -1052,22 +1089,126 @@ def mark_prayer_notification_dispatched(
     return notification
 
 
+class DuePrayerNotification(NamedTuple):
+    """A recorded prayer-received push nobody has started sending yet."""
+
+    id: UUID
+    requester_id: UUID
+    created_at: datetime
+
+
+def list_due_prayer_notifications(
+    db: Session,
+    *,
+    created_before: datetime,
+    limit: int,
+) -> List[DuePrayerNotification]:
+    """Prayer-received pushes recorded before `created_before` and never
+    claimed for sending, oldest first, each with the requester it goes to."""
+    rows = (
+        db.query(
+            ChatPrayerNotification.id,
+            ChatMessage.sender_id,
+            ChatPrayerNotification.created_at,
+        )
+        .join(ChatMessage, ChatMessage.id == ChatPrayerNotification.message_id)
+        .filter(
+            ChatPrayerNotification.notification_sqs_message_id.is_(None),
+            ChatPrayerNotification.notification_dispatched_at.is_(None),
+            ChatPrayerNotification.created_at <= created_before,
+        )
+        .order_by(ChatPrayerNotification.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        DuePrayerNotification(
+            id=row[0], requester_id=row[1], created_at=_as_utc(row[2])
+        )
+        for row in rows
+    ]
+
+
+def claim_prayer_notification_for_dispatch(
+    db: Session, notification_id: UUID
+) -> bool:
+    """Stamp dispatched_at before the SQS send, so two replicas polling at
+    once cannot both send the same push. True if this call won the claim."""
+    result = (
+        db.query(ChatPrayerNotification)
+        .filter(
+            ChatPrayerNotification.id == notification_id,
+            ChatPrayerNotification.notification_dispatched_at.is_(None),
+        )
+        .update(
+            {ChatPrayerNotification.notification_dispatched_at: datetime.now(timezone.utc)},
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    return result == 1
+
+
 def list_undispatched_prayer_notifications(
     db: Session,
     *,
     older_than: datetime,
     limit: int,
 ) -> List[ChatPrayerNotification]:
+    """Pushes claimed for sending before `older_than` that never recorded an
+    SQS MessageId: the crash window between claim and send. Unclaimed rows are
+    not here - they are still waiting their turn, not stuck."""
     return (
         db.query(ChatPrayerNotification)
         .filter(
             ChatPrayerNotification.notification_sqs_message_id.is_(None),
-            ChatPrayerNotification.created_at <= older_than,
+            ChatPrayerNotification.notification_dispatched_at.isnot(None),
+            ChatPrayerNotification.notification_dispatched_at <= older_than,
         )
-        .order_by(ChatPrayerNotification.created_at.asc())
+        .order_by(ChatPrayerNotification.notification_dispatched_at.asc())
         .limit(limit)
         .all()
     )
+
+
+def last_prayer_request_push_to_user(
+    db: Session,
+    *,
+    user_id: UUID,
+    since: datetime,
+) -> Optional[datetime]:
+    """When `user_id` was last sent a prayer-request push, if later than `since`.
+
+    Mirrors who a prayer-request push reaches: every joiner of a group room,
+    every active member of an event room, never the request's own sender.
+    Requests the room's interval held reached nobody and do not count.
+    """
+    joined_group_ids = select(author_group_joins.c.group_id).where(
+        author_group_joins.c.user_id == user_id
+    )
+    member_room_ids = select(ChatRoomMember.room_id).where(
+        ChatRoomMember.user_id == user_id,
+        ChatRoomMember.left_at.is_(None),
+    )
+    value = (
+        db.query(func.max(ChatMessage.notification_dispatched_at))
+        .join(ChatRoom, ChatRoom.id == ChatMessage.room_id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.sender_id != user_id,
+            ChatMessage.notification_sqs_message_id.isnot(None),
+            ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+            ChatMessage.notification_dispatched_at > since,
+            or_(
+                ChatRoom.group_id.in_(joined_group_ids),
+                (ChatRoom.group_id.is_(None))
+                & ChatRoom.event_id.isnot(None)
+                & ChatRoom.id.in_(member_room_ids),
+            ),
+        )
+        .scalar()
+    )
+    return _as_utc(value)
 
 
 def get_report_by_message_and_reporter(

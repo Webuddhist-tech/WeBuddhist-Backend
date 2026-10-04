@@ -17,6 +17,7 @@ from pecha_api.plans.plans_enums import UserPlanStatus, EnrollmentSource, Series
 from pecha_api.plans.shared.utils import load_plans_from_json, convert_plan_model_to_dto
 from pecha_api.plans.users.plan_users_models import UserPlanProgress, UserSubTaskCompletion, UserTaskCompletion, UserDayCompletion, UserSeriesEnrollment
 from pecha_api.plans.series.series_model import Series
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.users.plan_users_response_models import (
     UserPlanDayCompletionStatus,
     UserPlanDayCompletionStatusResponse,
@@ -827,7 +828,8 @@ def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlan
                 estimated_time=task.estimated_time,
                 display_order=task.display_order,
                 is_completed=(task.id in completed_task_ids),
-                sub_tasks=sub_tasks_dto
+                sub_tasks=sub_tasks_dto,
+                settings=build_task_settings(task),
             ) for task, sub_tasks_dto in zip(plan_item.tasks, tasks_sub_tasks)
         ],
         videos=[
@@ -1051,6 +1053,31 @@ def _assert_may_join_partner_group(db: Session, group_id: UUID, user_id: UUID) -
     assert_user_not_banned_from_group(db=db, group_id=group_id, user_id=user_id)
 
 
+def _update_existing_series_enrollment_partner(
+    db: Session,
+    existing_enrollment: UserSeriesEnrollment,
+    enroll_request: UserSeriesEnrollRequest,
+    user_id: UUID,
+) -> None:
+    """Switch the partner group of an enrollment the user already has."""
+    if "group_id" not in enroll_request.model_fields_set:
+        return
+
+    new_partner_id = _resolve_series_partner_id(
+        db, enroll_request.series_id, enroll_request.group_id
+    )
+    # Checked before anything is written, so a banned user is turned
+    # away rather than left with the partner switched and no membership.
+    if enroll_request.group_id is not None:
+        _assert_may_join_partner_group(db, enroll_request.group_id, user_id)
+    if existing_enrollment.series_partner_id != new_partner_id:
+        existing_enrollment.series_partner_id = new_partner_id
+        update_user_series_enrollment(db, existing_enrollment)
+
+    if enroll_request.group_id is not None:
+        upsert_group_join(db, enroll_request.group_id, user_id)
+
+
 def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -> None:
     """Enroll user in a series, or update partner group when already enrolled."""
     current_user = validate_and_extract_user_details(token=token)
@@ -1066,22 +1093,9 @@ def enroll_user_in_series(token: str, enroll_request: UserSeriesEnrollRequest) -
             db, current_user.id, enroll_request.series_id
         )
         if existing_enrollment:
-            if "group_id" not in enroll_request.model_fields_set:
-                return
-
-            new_partner_id = _resolve_series_partner_id(
-                db, enroll_request.series_id, enroll_request.group_id
+            _update_existing_series_enrollment_partner(
+                db, existing_enrollment, enroll_request, current_user.id
             )
-            # Checked before anything is written, so a banned user is turned
-            # away rather than left with the partner switched and no membership.
-            if enroll_request.group_id is not None:
-                _assert_may_join_partner_group(db, enroll_request.group_id, current_user.id)
-            if existing_enrollment.series_partner_id != new_partner_id:
-                existing_enrollment.series_partner_id = new_partner_id
-                update_user_series_enrollment(db, existing_enrollment)
-
-            if enroll_request.group_id is not None:
-                upsert_group_join(db, enroll_request.group_id, current_user.id)
             return
 
         new_partner_id = _resolve_series_partner_id(

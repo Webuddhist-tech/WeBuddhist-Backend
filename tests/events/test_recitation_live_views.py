@@ -10,9 +10,14 @@ from starlette import status
 from starlette.websockets import WebSocketDisconnect
 
 from pecha_api.app import api
-from pecha_api.events.recitation_live_service import RecitationCaller
+from pecha_api.events.recitation_live_service import (
+    RecitationCaller,
+    resolve_recitation_access,
+)
 
 client = TestClient(api)
+
+SERVICE = "pecha_api.events.recitation_live_service"
 
 
 class MockUser:
@@ -50,6 +55,10 @@ class FakeSubscriber:
 
 
 def _ws_url(event_id, token="test-token"):
+    """`token=None` opens the socket the way a signed-out page does: no query
+    parameter at all."""
+    if token is None:
+        return f"/events/{event_id}/recitation/live"
     return f"/events/{event_id}/recitation/live?token={token}"
 
 
@@ -66,6 +75,7 @@ def _ws_env(
     caller=None,
     auth_error=None,
     access_error=None,
+    event_error=None,
     is_operator=True,
     broadcaster=None,
     subscriber=None,
@@ -95,7 +105,7 @@ def _ws_env(
         elif caller is not None:
             mock_validate.return_value = caller
         else:
-            # An app user: one identity serves as both roster key and eligibility.
+            # An app user: one identity is both the roster key and the User.
             resolved = user or MockUser()
             mock_validate.return_value = RecitationCaller(
                 presence_id=resolved.id, user_id=resolved.id
@@ -118,6 +128,15 @@ def _ws_env(
             mock_access.side_effect = access_error
         else:
             mock_access.return_value = is_operator
+        # What a socket with no token is checked against, in place of the two
+        # above. Kept on the broadcaster, as the caller lookup is, so every
+        # existing test keeps unpacking the same pair.
+        broadcaster.live_event = stack.enter_context(
+            patch("pecha_api.events.recitation_live_views.assert_live_event")
+        )
+        if event_error is not None:
+            broadcaster.live_event.side_effect = event_error
+        broadcaster.caller = mock_validate
 
         yield broadcaster, mock_access
 
@@ -125,12 +144,13 @@ def _ws_env(
 class TestRecitationConnection:
 
     def test_closes_when_broadcaster_unavailable(self):
+        url = _ws_url(uuid4())
         with patch(
             "pecha_api.events.recitation_live_views.get_broadcaster",
             side_effect=RuntimeError("Redis down"),
         ):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(_ws_url(uuid4())):
+                with client.websocket_connect(url):
                     pass
 
     def test_rejects_invalid_token(self):
@@ -140,19 +160,39 @@ class TestRecitationConnection:
         with _ws_env(auth_error=auth_error) as (broadcaster, _):
             with client.websocket_connect(_ws_url(uuid4(), token="bad")) as websocket:
                 message = websocket.receive_json()
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_json()
 
         assert message["type"] == "error"
         assert message["code"] == "UNAUTHORIZED"
+        assert closed.value.code == status.WS_1008_POLICY_VIOLATION
         broadcaster.add_connection.assert_not_called()
+        # Refused outright, not let in as a signed-out viewer: the client is
+        # the one that decides to reconnect without its token.
+        broadcaster.live_event.assert_not_called()
 
-    def test_rejects_ineligible_subscriber(self):
-        access_error = HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
-        with _ws_env(access_error=access_error) as (broadcaster, _):
-            with client.websocket_connect(_ws_url(uuid4())) as websocket:
+    def test_signed_in_non_member_can_follow(self):
+        """Following a published group's puja asks for no join or follow, so a
+        signed-in user in no relation to the group lands as a viewer - through
+        the real access check, not a stubbed one."""
+        user = MockUser()
+        event_id = uuid4()
+        with _ws_env(user=user) as (broadcaster, mock_access), \
+             patch("pecha_api.db.database.SessionLocal"), \
+             patch(f"{SERVICE}.load_live_event", return_value=MagicMock(group_id=uuid4())), \
+             patch(f"{SERVICE}.is_event_operator", return_value=False):
+            mock_access.side_effect = resolve_recitation_access
+            with client.websocket_connect(_ws_url(event_id)) as websocket:
                 message = websocket.receive_json()
+                _sync(websocket)
 
-        assert message["code"] == "Forbidden"
-        broadcaster.add_connection.assert_not_called()
+        assert message == {
+            "type": "session_info",
+            "event_id": str(event_id),
+            "is_operator": False,
+            "count": 1,
+        }
+        broadcaster.mark_present.assert_awaited_once_with(event_id, user.id)
 
     def test_closes_for_unknown_event(self):
         access_error = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
@@ -204,8 +244,9 @@ class TestRecitationConnection:
 
         assert message["type"] == "session_info"
         assert message["is_operator"] is True
-        # Eligibility is checked against the app identity, which is absent here.
-        assert mock_access.call_args.kwargs["user_id"] is None
+        # Operator rights are decided by the token alone; there is no app
+        # identity behind it to pass along.
+        assert mock_access.call_args.kwargs == {"event_id": event_id, "token": "test-token"}
         broadcaster.mark_present.assert_awaited_once_with(event_id, author_id)
         broadcaster.remove_connection.assert_called_once_with(event_id, author_id)
 
@@ -440,6 +481,110 @@ class TestRecitationConnection:
                 assert websocket.receive_json() == ended
                 with pytest.raises(WebSocketDisconnect):
                     websocket.receive_json()
+
+
+class TestAnonymousViewer:
+    """A signed-out page follows a published group's puja with no token at
+    all: it is counted in the room and lands on the live line like anyone
+    else, but never drives it."""
+
+    def test_connects_without_a_token_and_lands_on_the_live_line(self):
+        event_id = uuid4()
+        position = {
+            "type": "position",
+            "event_id": str(event_id),
+            "text_id": "text-7",
+            "segment_id": "seg-7",
+            "index": 12,
+            "round_number": 3,
+            "server_time": "2026-09-14T09:30:00Z",
+            "revision": 57,
+        }
+        with _ws_env(position=position) as (broadcaster, mock_access):
+            with client.websocket_connect(_ws_url(event_id, token=None)) as websocket:
+                info = websocket.receive_json()
+                current = websocket.receive_json()
+                _sync(websocket)
+
+        assert info == {
+            "type": "session_info",
+            "event_id": str(event_id),
+            "is_operator": False,
+            "count": 1,
+        }
+        assert current == position
+        broadcaster.live_event.assert_called_once_with(event_id=event_id)
+        # No session, so nothing to resolve a person or operator rights from.
+        broadcaster.caller.assert_not_called()
+        mock_access.assert_not_called()
+        # Counted in the room, announced, and released on close, under one id.
+        broadcaster.mark_present.assert_awaited_once()
+        presence_event, presence_id = broadcaster.mark_present.await_args.args
+        assert presence_event == event_id
+        broadcaster.broadcast_presence.assert_awaited_with(event_id)
+        broadcaster.mark_absent.assert_awaited_once_with(event_id, presence_id, "presence-token")
+        broadcaster.remove_connection.assert_called_once_with(event_id, presence_id)
+        # A viewer never hears where autoplay is.
+        broadcaster.subscribe_to_autoplay.assert_not_awaited()
+
+    def test_an_empty_token_is_a_signed_out_viewer(self):
+        """A page with no session may still send the parameter, just empty."""
+        with _ws_env() as (broadcaster, mock_access):
+            with client.websocket_connect(_ws_url(uuid4(), token="")) as websocket:
+                info = websocket.receive_json()
+                _sync(websocket)
+
+        assert info["is_operator"] is False
+        broadcaster.caller.assert_not_called()
+        mock_access.assert_not_called()
+        broadcaster.mark_present.assert_awaited_once()
+
+    def test_each_anonymous_socket_is_its_own_person(self):
+        """Nothing ties two signed-out sockets together, so sharing a roster
+        slot would undercount the room."""
+        event_id = uuid4()
+        with _ws_env() as (broadcaster, _):
+            for _ in range(2):
+                with client.websocket_connect(_ws_url(event_id, token=None)) as websocket:
+                    websocket.receive_json()
+                    _sync(websocket)
+
+        first, second = (call.args[1] for call in broadcaster.mark_present.await_args_list)
+        assert first != second
+
+    def test_refused_for_a_missing_or_unpublished_event(self):
+        detail = "Not found"
+        event_error = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        with _ws_env(event_error=event_error) as (broadcaster, _):
+            with client.websocket_connect(_ws_url(uuid4(), token=None)) as websocket:
+                message = websocket.receive_json()
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_json()
+
+        assert message == {"type": "error", "code": detail, "message": detail}
+        assert closed.value.code == status.WS_1008_POLICY_VIOLATION
+        broadcaster.add_connection.assert_not_called()
+        broadcaster.mark_present.assert_not_awaited()
+        broadcaster.mark_absent.assert_not_awaited()
+
+    def test_set_and_end_are_refused(self):
+        with _ws_env() as (broadcaster, _):
+            with client.websocket_connect(_ws_url(uuid4(), token=None)) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "set", "text_id": "text-7", "segment_id": "seg-1"})
+                refused_set = websocket.receive_json()
+                websocket.send_json({"type": "end"})
+                refused_end = websocket.receive_json()
+                _sync(websocket)
+
+        assert refused_set["type"] == "error"
+        assert refused_set["code"] == "FORBIDDEN"
+        assert refused_end["type"] == "error"
+        assert refused_end["code"] == "FORBIDDEN"
+        broadcaster.allow_set.assert_not_awaited()
+        broadcaster.broadcast_position.assert_not_awaited()
+        broadcaster.clear_position.assert_not_awaited()
+        broadcaster.broadcast_session_ended.assert_not_awaited()
 
 
 class TestOperatorPublishing:
