@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 
-from pecha_api.config import get, get_int
+from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id, \
@@ -30,6 +30,11 @@ from pecha_api.notification.notification_repository import (
 )
 from pecha_api.notification.notification_service import create_notification_record
 from pecha_api.plans.groups.group_invite_email import send_group_invitation_email
+from pecha_api.plans.groups.group_invite_token import (
+    create_invite_token,
+    decode_invite_token,
+    invite_expiry_minutes,
+)
 from pecha_api.plans.groups.join_request_dispatch_service import (
     enqueue_join_request_created,
     enqueue_join_request_decided,
@@ -61,6 +66,7 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
     get_joined_group_accumulator_ids_by_user,
     remove_group_accumulator_joins_for_group,
 )
+from pecha_api.chat.moderation_service import INAPPROPRIATE_LANGUAGE, contains_inappropriate_language
 from pecha_api.chat.repository import get_room_by_group_id
 from pecha_api.chat.service import leave_group_chat_room
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
@@ -160,9 +166,13 @@ from pecha_api.plans.groups.groups_response_models import (
     AuthorGroupMembersListResponse,
     AuthorGroupSummaryDTO,
     CreateAuthorGroupRequest,
+    BulkGroupInviteRequest,
+    BulkGroupInviteResponse,
+    BulkGroupInviteSkippedDTO,
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupInvitePreviewDTO,
     GroupBanDTO,
     GroupBanListResponse,
     GroupInviteCreatedResponse,
@@ -225,6 +235,9 @@ from pecha_api.region_restrictions.region_restriction_service import (
 )
 
 GROUP_NOT_FOUND = "Group not found"
+GROUP_NAME_INAPPROPRIATE_MESSAGE = (
+    "The group name contains inappropriate language. Please change it and try again."
+)
 INVITE_NOT_FOUND = "Invite not found"
 OWNER_ROLE_NOT_ASSIGNABLE = (
     "The OWNER role cannot be assigned via invite or role change; use transfer ownership"
@@ -374,6 +387,27 @@ def _group_tag_names(tags) -> List[str]:
     active = [tag for tag in tags if tag.deleted_at is None]
     names = (name for name in (_tag_name(tag) for tag in active) if name)
     return sorted(names, key=str.lower)
+
+
+def _assert_group_name_clean(*, slug: Optional[str], metadata: Optional[Sequence]) -> None:
+    """Run what names a group - its title and subtitle in every language, and
+    the slug in its URL - through the same term filter as chat messages.
+    Anyone who signs in to the Studio can create a group, so its name is the
+    first thing an abuser would reach for."""
+    texts = []
+    if slug:
+        texts.append(slug.replace("-", " ").replace("_", " "))
+    for item in metadata or []:
+        texts.extend(text for text in (item.title, item.sub_title) if text)
+    if any(contains_inappropriate_language(text) for text in texts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": INAPPROPRIATE_LANGUAGE,
+                "message": GROUP_NAME_INAPPROPRIATE_MESSAGE,
+            },
+        )
 
 
 def _assert_metadata_valid(metadata_entries: List) -> None:
@@ -790,6 +824,7 @@ def _group_to_detail(
 
 def create_author_group(token: str, request: CreateAuthorGroupRequest) -> AuthorGroupDetailDTO:
     _assert_metadata_valid(request.metadata)
+    _assert_group_name_clean(slug=request.slug, metadata=request.metadata)
     author = validate_and_extract_author_details(token=token)
 
     with SessionLocal() as db:
@@ -837,6 +872,10 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
             _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
 
         fields_set = request.model_fields_set
+        _assert_group_name_clean(
+            slug=request.slug if "slug" in fields_set else None,
+            metadata=request.metadata if "metadata" in fields_set else None,
+        )
 
         if "slug" in fields_set:
             if request.slug != group.slug:
@@ -2206,10 +2245,8 @@ def _group_title_from_metadata(metadata_entries) -> str:
 
 
 def _invite_expires_at() -> datetime:
-    """Invite TTL is minutes only (default 30), not days — see GROUP_INVITE_EXPIRY_MINUTES."""
-    minutes = get_int("GROUP_INVITE_EXPIRY_MINUTES")
-    minutes = max(1, min(minutes, 24 * 60))
-    return datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    """Invite TTL comes from GROUP_INVITE_EXPIRY_MINUTES (default 7 days)."""
+    return datetime.now(timezone.utc) + timedelta(minutes=invite_expiry_minutes())
 
 
 def _assert_invite_pending_for_recipient(invite: AuthorGroupInvite, author_email: str) -> None:
@@ -2242,6 +2279,9 @@ def notify_pending_group_invites(author) -> None:
     author's email that were sent before they had a Studio account. Called
     once an author becomes verified so the invite is already waiting for them
     the first time they can see the Studio."""
+    if not author.email:
+        # Phone-only authors can't be invited by email; join links reach them.
+        return
     try:
         with SessionLocal() as db:
             pending = list_pending_invites_by_email(db=db, target_email=author.email)
@@ -2267,30 +2307,44 @@ def notify_pending_group_invites(author) -> None:
         logging.exception("Failed to backfill group invite notifications for %s", author.email)
 
 
-def create_group_member_invite(
-    token: str,
-    group_id: UUID,
-    request: CreateGroupInviteRequest,
-) -> GroupInviteCreatedResponse:
-    author = validate_and_extract_author_details(token=token)
-    target_email = request.target_email.strip().lower()
-    if not target_email:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_email is required")
+def _assert_can_manage_group_invites(db, *, group_id: UUID, author) -> str:
+    """404 for an unknown group, 403 unless OWNER/ADMIN (or super admin).
+    Returns the actor's role for the per-role invite rules."""
+    group = get_group_by_id(db=db, group_id=group_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+    actor_role = _resolve_actor_group_role(db, group_id=group_id, author=author)
+    if not is_super_admin(author):
+        member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
+        _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
+    return actor_role
 
-    with SessionLocal() as db:
-        group = get_group_by_id(db=db, group_id=group_id)
-        if not group:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        actor_role = _resolve_actor_group_role(db, group_id=group_id, author=author)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
 
-        _assert_invite_role_allowed(
-            actor_role=actor_role,
-            invite_role=_to_role_value(request.role),
+def _invite_token_or_none(invite: AuthorGroupInvite) -> Optional[str]:
+    try:
+        return create_invite_token(
+            invite_id=invite.id,
+            target_email=invite.target_email,
+            expires_at=invite.expires_at,
         )
+    except Exception:
+        # The email still works without it - its button falls back to the
+        # Studio groups page.
+        logging.exception("Failed to sign invite link for invite %s", invite.id)
+        return None
 
+
+def _send_member_invite(
+    *,
+    author,
+    group_id: UUID,
+    target_email: str,
+    role: AuthorGroupMemberRole,
+) -> GroupInviteCreatedResponse:
+    """Create one invite (the caller has already checked the actor's rights)
+    and send its notification and email. 400 if the address is already a
+    member or already has a pending invite."""
+    with SessionLocal() as db:
         target_author = find_author_by_email(db=db, email=target_email)
         if target_author and get_group_member(db=db, group_id=group_id, author_id=target_author.id):
             raise HTTPException(
@@ -2306,7 +2360,7 @@ def create_group_member_invite(
         invite = AuthorGroupInvite(
             group_id=group_id,
             target_email=target_email,
-            role=request.role,
+            role=role,
             status=AuthorGroupInviteStatus.PENDING.value,
             expires_at=_invite_expires_at(),
             created_by=author.email,
@@ -2318,6 +2372,7 @@ def create_group_member_invite(
         target_author_id = target_author.id if target_author else None
         created_invite_id = created.id
         invite_dto = _invite_to_dto(created, group_name=group_title, db=db)
+        invite_token = _invite_token_or_none(created)
 
     notification = None
     if target_author_id is not None:
@@ -2334,13 +2389,85 @@ def create_group_member_invite(
         inviter_name=inviter_name,
         inviter_email=author.email,
         group_title=group_title,
-        invite_role=_to_role_value(request.role),
+        invite_role=_to_role_value(role),
+        invite_token=invite_token,
     )
 
     return GroupInviteCreatedResponse(
         invite=invite_dto,
         notification_id=notification.id if notification else None,
     )
+
+
+def create_group_member_invite(
+    token: str,
+    group_id: UUID,
+    request: CreateGroupInviteRequest,
+) -> GroupInviteCreatedResponse:
+    author = validate_and_extract_author_details(token=token)
+    target_email = request.target_email.strip().lower()
+    if not target_email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_email is required")
+
+    with SessionLocal() as db:
+        actor_role = _assert_can_manage_group_invites(db, group_id=group_id, author=author)
+    _assert_invite_role_allowed(
+        actor_role=actor_role,
+        invite_role=_to_role_value(request.role),
+    )
+    return _send_member_invite(
+        author=author,
+        group_id=group_id,
+        target_email=target_email,
+        role=request.role,
+    )
+
+
+def _looks_like_email(value: str) -> bool:
+    local, _, domain = value.partition("@")
+    return bool(local) and "." in domain and " " not in value and not domain.startswith(".")
+
+
+def create_group_member_invites_bulk(
+    token: str,
+    group_id: UUID,
+    request: BulkGroupInviteRequest,
+) -> BulkGroupInviteResponse:
+    """Invite a list of addresses with one role. Rights are checked once; each
+    address then either gets an invite or is listed in skipped with the
+    reason, so one bad address never blocks the rest."""
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        actor_role = _assert_can_manage_group_invites(db, group_id=group_id, author=author)
+    _assert_invite_role_allowed(
+        actor_role=actor_role,
+        invite_role=_to_role_value(request.role),
+    )
+
+    invites: List[GroupInviteDTO] = []
+    skipped: List[BulkGroupInviteSkippedDTO] = []
+    seen: set = set()
+    for raw_email in request.target_emails:
+        target_email = (raw_email or "").strip().lower()
+        if not _looks_like_email(target_email):
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=raw_email or "", reason="Not a valid email address"))
+            continue
+        if target_email in seen:
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=target_email, reason="Listed more than once"))
+            continue
+        seen.add(target_email)
+        try:
+            created = _send_member_invite(
+                author=author,
+                group_id=group_id,
+                target_email=target_email,
+                role=request.role,
+            )
+        except HTTPException as exc:
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=target_email, reason=str(exc.detail)))
+            continue
+        invites.append(created.invite)
+    return BulkGroupInviteResponse(invites=invites, skipped=skipped)
 
 
 def list_group_invites(
@@ -2376,48 +2503,103 @@ def list_my_pending_group_invites(token: str) -> GroupInviteListResponse:
     )
 
 
+def _accept_invite(db, *, invite: AuthorGroupInvite, author) -> AuthorGroup:
+    """Make the author a member per a pending invite addressed to them and
+    mark it accepted. Raises the same errors the accept endpoint returns."""
+    _assert_invite_pending_for_recipient(invite=invite, author_email=author.email)
+
+    group = get_group_by_id(db=db, group_id=invite.group_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+
+    invite_role = _to_role_value(invite.role)
+    if invite_role == AuthorGroupMemberRole.OWNER.value and get_owner_count(db=db, group_id=group.id) >= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=GROUP_ALREADY_HAS_OWNER,
+        )
+    _assert_role_not_owner_assignment(invite_role)
+
+    existing_member = get_group_member(db=db, group_id=group.id, author_id=author.id)
+    if existing_member is None:
+        add_group_member(
+            db=db,
+            member=AuthorGroupMember(
+                group_id=group.id,
+                author_id=author.id,
+                role=invite.role,
+                created_by=author.email,
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    invite.status = AuthorGroupInviteStatus.ACCEPTED.value
+    invite.accepted_at = now
+    save_invite(db=db, invite=invite)
+    _mark_invite_notification_read(db=db, recipient_author_id=author.id, invite_id=invite.id)
+    return group
+
+
+def accept_pending_invites_for_author(db, author) -> List[UUID]:
+    """Accept every pending invite addressed to the author's email.
+
+    Called once, when a new author is first let into the Studio because of
+    those invites, so they land inside their groups instead of in an empty
+    Studio with invites to go and find. An invite that can't be accepted is
+    logged and left pending rather than failing the sign-in. Returns the
+    ids of the groups joined."""
+    if not author.email:
+        return []
+    joined: List[UUID] = []
+    for invite in list_pending_invites_by_email(db=db, target_email=author.email):
+        try:
+            group = _accept_invite(db, invite=invite, author=author)
+        except HTTPException as exc:
+            logging.warning("Skipped auto-accepting invite %s for %s: %s", invite.id, author.email, exc.detail)
+            continue
+        joined.append(group.id)
+    return joined
+
+
 def accept_group_invite_by_id(token: str, invite_id: UUID) -> AuthorGroupDetailDTO:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
         invite = get_invite_by_id(db=db, invite_id=invite_id, load_group=True)
         if not invite:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVITE_NOT_FOUND)
-        _assert_invite_pending_for_recipient(invite=invite, author_email=author.email)
-
-        group = get_group_by_id(db=db, group_id=invite.group_id)
-        if not group:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-
-        invite_role = _to_role_value(invite.role)
-        if invite_role == AuthorGroupMemberRole.OWNER.value and get_owner_count(db=db, group_id=group.id) >= 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=GROUP_ALREADY_HAS_OWNER,
-            )
-        _assert_role_not_owner_assignment(invite_role)
-
-        existing_member = get_group_member(db=db, group_id=group.id, author_id=author.id)
-        if existing_member is None:
-            add_group_member(
-                db=db,
-                member=AuthorGroupMember(
-                    group_id=group.id,
-                    author_id=author.id,
-                    role=invite.role,
-                    created_by=author.email,
-                ),
-            )
-
-        now = datetime.now(timezone.utc)
-        invite.status = AuthorGroupInviteStatus.ACCEPTED.value
-        invite.accepted_at = now
-        save_invite(db=db, invite=invite)
-        _mark_invite_notification_read(db=db, recipient_author_id=author.id, invite_id=invite.id)
+        group = _accept_invite(db, invite=invite, author=author)
 
         loaded = get_group_by_id(db=db, group_id=group.id)
         follower_count = get_followers_count_map(db=db, group_ids=[group.id]).get(group.id, 0)
         joiner_count = get_joiners_count_map(db=db, group_ids=[group.id]).get(group.id, 0)
         return _group_to_detail(loaded, follower_count=follower_count, joiner_count=joiner_count, db=db)
+
+
+def get_invite_preview(invite_token: str) -> GroupInvitePreviewDTO:
+    """Public: what the Studio /join?invite= page needs before sign-in. The
+    signed token is the credential, so none of this is visible without the
+    email it was sent in."""
+    invite_id, target_email = decode_invite_token(invite_token)
+    with SessionLocal() as db:
+        invite = get_invite_by_id(db=db, invite_id=invite_id, load_group=True)
+        if not invite or invite.target_email.lower() != target_email:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVITE_NOT_FOUND)
+        invite_status = _to_invite_status(invite.status)
+        if invite_status == AuthorGroupInviteStatus.PENDING and invite.expires_at < datetime.now(timezone.utc):
+            invite_status = AuthorGroupInviteStatus.EXPIRED
+        dto = _invite_to_dto(invite, db=db)
+        account_exists = find_author_by_email(db=db, email=target_email) is not None
+    return GroupInvitePreviewDTO(
+        invite_id=dto.id,
+        group_id=dto.group_id,
+        group_name=dto.group_name,
+        role=dto.role,
+        target_email=dto.target_email,
+        inviter_name=dto.inviter_name,
+        status=invite_status,
+        expires_at=dto.expires_at,
+        account_exists=account_exists,
+    )
 
 
 def reject_group_invite_by_id(token: str, invite_id: UUID) -> GroupInviteDTO:
