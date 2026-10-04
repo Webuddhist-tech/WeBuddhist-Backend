@@ -209,6 +209,13 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
     # Prayer requests and "someone prayed" pushes. Empty = use the chat queue.
     PRAYER_NOTIFICATION_SQS_QUEUE_URL="",
+    # In-app feedback (POST /feedback). Feedback is always stored; it is also
+    # posted to this Discord webhook when set, and left there when not.
+    DISCORD_FEEDBACK_WEBHOOK_URL="",
+    FEEDBACK_MAX_CONTENT_LENGTH=4000,
+    FEEDBACK_MAX_IMAGES=3,
+    # Discord's per-message upload cap; above it the webhook rejects the post.
+    FEEDBACK_MAX_TOTAL_IMAGE_MB=10,
     # /share/image serves an event's own photo, re-encoded as JPEG because the
     # stored WebP is not a format link-preview crawlers render. The endpoint is
     # public, so the fetch is bounded and the bytes are held per process.
