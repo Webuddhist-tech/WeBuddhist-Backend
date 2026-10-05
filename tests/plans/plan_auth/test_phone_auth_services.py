@@ -78,7 +78,8 @@ def test_exchange_creates_verified_inactive_phone_profile(
     assert author_arg.is_active is False
     assert response.status == AuthorStatus.INACTIVE
     assert response.auth is None
-    mock_notify.assert_called_once_with(saved_author)
+    # Email invites can't reach a phone-only author; join links do.
+    mock_notify.assert_not_called()
 
 
 def test_exchange_new_profile_requires_both_names():

@@ -176,7 +176,17 @@ DEFAULTS = dict(
 
     SQS_TIMEOUT=1800,
 
-    GROUP_INVITE_EXPIRY_MINUTES=30,
+    # 7 days. Someone new has to sign up before they can accept, so a short
+    # window just means the owner re-sends. Clamped to 1 minute..30 days.
+    GROUP_INVITE_EXPIRY_MINUTES=10080,
+    # Invite emails link to the Studio's /join?invite= page (one-step sign-up
+    # and accept). Turn on once that page is deployed; until then the email
+    # keeps pointing at /groups.
+    STUDIO_JOIN_PAGE_ENABLED="false",
+    # Shareable group join links (author_group_join_links): default and
+    # maximum lifetime a group manager can give one.
+    GROUP_JOIN_LINK_DEFAULT_EXPIRY_DAYS=14,
+    GROUP_JOIN_LINK_MAX_EXPIRY_DAYS=90,
     # The account that holds counts made at an event in person (by people not
     # using the app). Group managers record them per day in the Studio.
     IN_PERSON_USER_ID="7cafd4eb-d996-437f-83f7-d9359c7ef40f",

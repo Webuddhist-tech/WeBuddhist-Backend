@@ -4,10 +4,14 @@ AUTHOR_NOT_FOUND = "Author not found"
 AUTHOR_UPDATE_INVALID = "Invalid update request"
 AUTHOR_NOT_VERIFIED = "Author not verified"
 AUTHOR_NOT_ACTIVE = "Author not active"
+# Sign-in `message` for a suspended author. The password login keeps
+# AUTHOR_NOT_ACTIVE as its 401 detail, which the Studio matches exactly.
+AUTHOR_SUSPENDED = "Your Studio account has been suspended. Contact a Studio admin."
 REGISTRATION_MESSAGE = "Registration successful. Please check your email to verify your account."
 
 EMAIL_ALREADY_VERIFIED = "Email already verified"
 EMAIL_VERIFIED_SUCCESS = "Email verified successfully. Your account is pending admin approval"
+EMAIL_VERIFIED_ACTIVE = "Email verified successfully. You can sign in to the Studio now."
 
 PASSWORD_EMPTY = "Password cannot be empty"
 PASSWORD_LENGTH_INVALID = "Password must be between 8 and 20 characters"

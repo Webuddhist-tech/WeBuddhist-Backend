@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -14,6 +15,8 @@ from pecha_api.plans.admin.admin_response_models import (
     AdminAuthorListResponse,
     AdminAuthorPlatformRoleUpdate,
 )
+from pecha_api.plans.auth.plan_auth_enums import AuthorStatus
+from pecha_api.plans.auth.studio_access_service import account_status, on_author_activated_by_admin
 from pecha_api.plans.authors.plan_authors_repository import get_author_by_id
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details
 from pecha_api.plans.platform_enums import PlatformRole
@@ -38,7 +41,12 @@ def _author_to_list_item(author) -> AdminAuthorListItemDTO:
         is_active=bool(author.is_active),
         platform_role=role,
         created_at=author.created_at.isoformat() if author.created_at else None,
+        account_status=account_status(author),
     )
+
+
+def _isoformat(value) -> Optional[str]:
+    return value.isoformat() if value else None
 
 
 def _author_to_detail(author) -> AdminAuthorDetailDTO:
@@ -59,6 +67,8 @@ def _author_to_detail(author) -> AdminAuthorDetailDTO:
         platform_role=get_platform_role(author),
         bio=author.bio,
         image_url=image_url,
+        account_status=account_status(author),
+        suspended_at=_isoformat(author.suspended_at),
     )
 
 
@@ -82,6 +92,7 @@ def list_admin_authors(
     is_active: Optional[bool] = None,
     platform_role: Optional[PlatformRole] = None,
     search: Optional[str] = None,
+    account_status_filter: Optional[AuthorStatus] = None,
 ) -> AdminAuthorListResponse:
     author = validate_and_extract_author_details(token=token)
     require_super_admin_or_reviewer(author)
@@ -94,6 +105,7 @@ def list_admin_authors(
             is_active=is_active,
             platform_role=platform_role,
             search=search,
+            account_status=account_status_filter,
         )
     return AdminAuthorListResponse(
         authors=[_author_to_list_item(row) for row in rows],
@@ -116,10 +128,15 @@ def activate_author(token: str, author_id: UUID) -> AdminAuthorActivateResponse:
     require_super_admin(caller)
     with SessionLocal() as db:
         author = get_author_by_id(db=db, author_id=author_id)
+        was_active = bool(author.is_active)
+        was_suspended = author.suspended_at is not None
         author.is_active = True
+        author.suspended_at = None
         author.updated_by = caller.email
         saved = save_author(db=db, author=author)
-    return AdminAuthorActivateResponse(id=saved.id, is_active=bool(saved.is_active))
+        if not was_active:
+            on_author_activated_by_admin(db, saved, was_suspended=was_suspended)
+        return AdminAuthorActivateResponse(id=saved.id, is_active=bool(saved.is_active))
 
 
 def suspend_author(token: str, author_id: UUID) -> AdminAuthorActivateResponse:
@@ -129,6 +146,9 @@ def suspend_author(token: str, author_id: UUID) -> AdminAuthorActivateResponse:
         author = get_author_by_id(db=db, author_id=author_id)
         _guard_last_super_admin(db=db, author=author)
         author.is_active = False
+        # Marks this as a suspension, so signing in again (which activates
+        # everyone else) can't switch the author back on.
+        author.suspended_at = datetime.now(timezone.utc)
         author.updated_by = caller.email
         saved = save_author(db=db, author=author)
     return AdminAuthorActivateResponse(id=saved.id, is_active=bool(saved.is_active))
