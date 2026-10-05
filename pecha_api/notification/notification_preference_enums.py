@@ -75,6 +75,20 @@ NON_TOGGLEABLE_TYPES = frozenset(
     }
 )
 
+# Opt-in types: with no row at all these resolve to disabled, not allowed.
+# A user hears chat only once they turn it on.
+DEFAULT_DISABLED_TYPES = frozenset(
+    {
+        NotificationType.CHAT_MESSAGE,
+    }
+)
+
+
+def default_enabled(notification_type: NotificationType) -> bool:
+    """What a type resolves to when the user has no row for it."""
+    return notification_type not in DEFAULT_DISABLED_TYPES
+
+
 # Types exposed as toggles in v1, in the order clients should render them.
 V1_TOGGLEABLE_TYPES = (
     NotificationType.CHAT_MESSAGE,

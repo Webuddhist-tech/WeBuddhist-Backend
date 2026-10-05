@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from ...db.database import SessionLocal
 from .featured_day_repository import get_all_featured_plan_days
 from .featured_day_response_model import PlanDayDTO, TaskDTO, SubTaskDTO
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from ...uploads.S3_utils import generate_presigned_access_url
 from ...config import get
 from ..plans_enums import ContentType
@@ -42,7 +43,8 @@ async def build_task_dto(task) -> TaskDTO:
         title=task.title,
         estimated_time=task.estimated_time,
         display_order=task.display_order,
-        subtasks=subtasks
+        subtasks=subtasks,
+        settings=build_task_settings(task),
     )
 
 

@@ -44,6 +44,7 @@ from pecha_api.plans.plans_enums import (
     PlanAudioType,
     MonlamVoiceName,
 )
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.plans_response_models import PlansResponse, PlanDTO, CreatePlanRequest, TaskDTO, PlanDayDTO, \
     PlanWithDays, UpdatePlanRequest, PlanStatusUpdate, PlansRepositoryResponse, PlanWithAggregates, AuthorDTO, SubTaskDTO, \
     DayVideoSummaryDTO, PlanVideoSummaryDTO
@@ -669,6 +670,7 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
                         title=task.title,
                         estimated_time=task.estimated_time,
                         display_order=task.display_order,
+                        settings=build_task_settings(task),
                     )
                     for task in tasks_by_item.get(item.id, [])
                 ],
@@ -1030,7 +1032,8 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
                     title=task.title,
                     estimated_time=task.estimated_time,
                     display_order=task.display_order,
-                    subtasks=_get_task_subtasks_dto(task.sub_tasks, db=db, language=plan.language)
+                    subtasks=_get_task_subtasks_dto(task.sub_tasks, db=db, language=plan.language),
+                    settings=build_task_settings(task),
                 )
                 for task in plan_item.tasks
             ]

@@ -1,0 +1,155 @@
+{#- Ported from build_prayer_pdf.py in Webuddhist-tech/Tara-event-prayer-generator.
+    Card, header and closing HTML is built and escaped in Python
+    (prayer_pdf_content.py); settings text is escaped here. -#}
+<!doctype html><html><head><meta charset="utf-8"><style>
+@font-face{font-family:G;src:url("{{ fonts.garamond }}");font-weight:400 800}
+@font-face{font-family:G;src:url("{{ fonts.garamond_italic }}");font-style:italic;font-weight:400 800}
+@font-face{font-family:Bo;src:url("{{ fonts.tibetan }}")}
+@page{size:{{ page_size }};margin:16mm 15mm 18mm}
+:root{--ink:#2b1d14;--maroon:{{ primary_color }};--gold:{{ secondary_color }};--rule:#e2d3b5;--card:#fdf8ee}
+{% raw -%}
+body{margin:0;font-family:G,Bo,"Noto Serif CJK SC",serif;color:var(--ink);font-size:10.5pt;line-height:1.42;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.zh{font-size:.9em}
+.bo{font-family:Bo;font-size:1.12em;line-height:1.35}
+header{position:relative;text-align:center;padding:4mm 0 7mm;border-bottom:2px solid var(--gold)}
+header .dayline{position:absolute;right:0;top:2.5mm}
+.day{display:inline-block;text-align:center;line-height:1.2;border:1px solid var(--rule);border-top:2.5px solid var(--maroon);border-radius:2mm;padding:1.6mm 3.2mm;background:var(--card);box-sizing:border-box}
+.day .en{display:block;font-size:13pt;letter-spacing:.08em;color:var(--gold);margin-top:.8mm}
+.day .zhd{display:block;font-family:'Noto Serif CJK TC',serif;font-size:11pt;color:var(--gold);margin-top:.5mm}
+.day .bo{display:block;font-family:Bo;font-size:14pt;line-height:1.3;color:var(--maroon)}
+header .t{font-family:G,Bo;font-size:28pt;color:var(--maroon);line-height:1.3}
+header h1{font-weight:400;font-size:28pt;letter-spacing:.05em;margin:1mm 0;color:var(--maroon)}
+header .subbo{font-family:Bo;font-size:19pt;color:var(--maroon);line-height:1.4;margin-top:2mm}
+header .sub{font-style:italic;font-size:15pt;color:#5a4636;margin-top:1mm}
+header .zht{font-family:'Noto Serif CJK TC',serif;font-size:17pt;letter-spacing:.12em;color:var(--maroon);margin-top:-.5mm}
+header .subzh{font-family:'Noto Serif CJK TC',serif;font-size:13pt;color:#5a4636;margin-top:1mm}
+header .zhm{font-family:'Noto Serif CJK TC',serif;letter-spacing:.08em}
+header .meta{margin-top:3mm;font-size:12pt;letter-spacing:.22em;text-transform:uppercase;color:var(--gold)}
+.page{position:relative;width:var(--content-w);height:var(--content-h);break-after:page;overflow:hidden}
+.page:last-child{break-after:auto}
+#pool{position:absolute;left:-9999mm;top:0;width:var(--content-w)}
+.placed{position:absolute;margin:0!important}
+.e{background:var(--card);border:1px solid var(--rule);border-top:2.5px solid var(--maroon);border-radius:2mm;padding:2.6mm 3mm 3mm;box-sizing:border-box}
+.e.wide .m{column-gap:5mm;column-rule:.6px solid var(--rule)}
+.e.w2 .m{column-count:2}.e.w3 .m{column-count:3}.e.w4 .m{column-count:4}.e.w5 .m{column-count:5}.e.w6 .m{column-count:6}
+.hd{display:flex;align-items:center;gap:2.2mm;border-bottom:.7px solid var(--rule);padding-bottom:1.5mm;margin-bottom:1.8mm}
+.n{display:block;color:var(--gold);font-size:7.5pt;letter-spacing:.12em;text-transform:uppercase}
+.id{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.av{flex:0 0 9.5mm;width:9.5mm;height:9.5mm;border-radius:50%;object-fit:cover;border:1.5px solid var(--gold);box-sizing:border-box}
+.ini{display:flex;align-items:center;justify-content:center;color:#fdf8ee;font-weight:700;font-size:10pt;letter-spacing:.03em;font-family:G,"Noto Serif CJK SC",serif}
+.ini .bo{font-size:9.5pt;line-height:1}
+.who{font-weight:700;color:var(--maroon);font-size:11pt;letter-spacing:.03em}
+.m{font-size:10.5pt}
+.end{box-sizing:border-box;text-align:center;padding:6mm 2mm 2mm}
+.end .v{display:block;font-family:Bo;color:var(--maroon);font-size:17pt;line-height:1.5}
+.end .mantra{display:block;font-family:Bo;color:var(--gold);font-size:19pt;line-height:1.5;margin-top:1.5mm}
+.end .tr{display:block;margin-top:3.5mm;font-size:11pt;line-height:1.55;color:#5a4636}
+.end .tr.en{font-style:italic;font-size:14pt;line-height:1.45}
+.end .tc{font-family:G,'Noto Serif CJK TC',serif;font-size:11pt}
+.end .emo2{display:block;font-family:'Noto Color Emoji';font-size:13pt;margin-top:3.5mm;letter-spacing:.25em;text-indent:.25em}
+{%- endraw %}
+:root{--content-w:{{ content_w_mm }}mm;--content-h:{{ content_h_mm }}mm}
+</style></head><body>
+<div id="pool"><header>
+{%- if day_number %}<div class="dayline"><div class="day"><span class="bo">ཉིན། {{ day_number_bo }}</span><span class="en">Day: {{ day_number }}</span><span class="zhd">第 {{ day_number }} 天</span></div></div>{% endif -%}
+{%- if title_bo %}<div class="t">{{ title_bo }}</div>{% endif -%}
+{%- if title %}<h1>{{ title }}</h1>{% endif -%}
+{%- if title_zh %}<div class="zht">{{ title_zh }}</div>{% endif %}
+{% if subtitle_bo %}<div class="subbo">{{ subtitle_bo }}</div>{% endif %}
+{% if subtitle %}<div class="sub">{{ subtitle }}</div>{% endif %}
+{% if subtitle_zh %}<div class="subzh">{{ subtitle_zh }}</div>{% endif %}
+<div class="meta">{{ date_label }} &nbsp;·&nbsp; {{ count }} requests{% if title_zh %} &nbsp;·&nbsp; <span class="zhm">{{ zh_date }} &nbsp;{{ count }} 則祈願</span>{% endif %}</div></header>
+{% for card in cards -%}
+<div class="e{% if card.span > 1 %} wide w{{ card.span }}{% endif %}" data-span="{{ card.span }}"><div class="hd">
+{%- if card.avatar %}<img class="av" src="{{ card.avatar }}">{% else %}<span class="av ini" style="background:{{ card.initials_color }}">{{ card.initials_html|safe }}</span>{% endif -%}
+<div class="id"><span class="who">{{ card.name_html|safe }}</span><span class="n">No. {{ "%02d"|format(loop.index) }}</span></div></div><div class="m">{{ card.message_html|safe }}</div></div>
+{% endfor -%}
+{%- if has_closing %}<div class="end">
+{%- for line in closing_bo %}<span class="v">{{ line }}</span>{% endfor -%}
+{%- if closing_mantra %}<span class="mantra">{{ closing_mantra }}</span>{% endif -%}
+{%- if closing_zh %}<span class="tr tc" lang="zh-Hant">{% for line in closing_zh %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span>{% endif -%}
+{%- if closing_en %}<span class="tr en">{% for line in closing_en %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}</span>{% endif -%}
+{%- if closing_emoji %}<span class="emo2">{{ closing_emoji }}</span>{% endif -%}
+</div>{% endif %}</div>
+<script>
+window.PRAYER_LAYOUT={{ layout_json|safe }};
+{% raw -%}
+// Masonry packer: N columns per page; long prayers span several; nothing splits across pages.
+window.layout=function(){
+ const C=window.PRAYER_LAYOUT, N=C.columns, MM=96/25.4, W=C.contentW*MM, H=C.contentH*MM, G=4.5*MM, CW=(W-(N-1)*G)/N;
+ const pool=document.getElementById('pool'), hdr=pool.querySelector('header'), end=pool.querySelector('.end');
+ const span=e=>Math.min(N,Math.max(1,parseInt(e.dataset.span||'1',10)));
+ const wOf=s=>s*CW+(s-1)*G;
+ const items=[...pool.querySelectorAll('.e')].map(e=>{const s=span(e);e.style.width=wOf(s)+'px';return {el:e,s,w:wOf(s),h:e.getBoundingClientRect().height}});
+ hdr.style.width=W+'px'; const hh=hdr.getBoundingClientRect().height+6*MM;
+ const badge=hdr.querySelector('.day'); const bR=badge?badge.getBoundingClientRect():null;
+ const FR=Array(N).fill(bR?bR.height+2*MM+G:0);   // fresh page: the day badge has its own line across the top
+ const fresh=()=>FR.slice();
+ const endH={}; if(end){for(let s=2;s<=N;s++){end.style.width=wOf(s)+'px';endH[s]=end.getBoundingClientRect().height}}
+ function pack(list, endAt, breakAt){
+   let pages=1, cols=Array(N).fill(hh), pl=[['hdr',0,0,0,W]];
+   const fit=(s,h)=>{let b=null;for(let c=0;c+s<=N;c++){const y=Math.max(...cols.slice(c,c+s));if(y+h<=H&&(!b||y<b[1]))b=[c,y]}return b};
+   const place=(el,s,h,f)=>{pl.push([el,pages-1,f[0]*(CW+G),f[1],wOf(s)]);for(let c=f[0];c<f[0]+s;c++)cols[c]=f[1]+h+G};
+   const q=list.slice();
+   if(breakAt!=null) q.splice(breakAt,0,{brk:true});
+   if(endAt!=null&&end) q.splice(endAt,0,{el:'end',s:2,h:endH[2],end:true});
+   let endDone=!end;
+   while(q.length){
+     let ok=false;
+     if(q[0].brk){q.shift();pages++;cols=fresh();continue}
+     for(let k=0;k<Math.min(q.length,5);k++){const it=q[k];if(it.brk)break;
+       let f=null,s=it.s,h=it.h;
+       if(it.end){for(let ss=Math.min(3,N);ss>=2&&!f;ss--){f=fit(ss,endH[ss]);if(f){s=ss;h=endH[ss]}}}
+       else f=fit(s,h);
+       if(f){place(it.el,s,h,f);if(it.end)endDone=true;q.splice(k,1);ok=true;break}}
+     if(!ok){ if(cols.every((v,i)=>v===FR[i])){const it=q.shift();place(it.el,it.s,it.h,[0,Math.max(...FR)]);cols=Array(N).fill(H)} else {pages++;cols=fresh()} }
+   }
+   if(!endDone){let f=null,s;for(s=N;s>=2&&!f;s--)f=fit(s,endH[s]);
+     if(f){s++;place('end',s,endH[s],f)} else {pages++;cols=fresh();place('end',N,endH[N],[0,Math.max(...FR)])}}
+   return {pages,pl};
+ }
+ let best=pack(items,null);
+ const onLast=r=>r.pl.filter(p=>p[1]===r.pages-1&&p[0]!=='end').length;
+ if(end){for(let k=1;k<=Math.min(25,items.length);k++){const r=pack(items,items.length-k);if(r.pages<best.pages){best=r;break}}}
+ // never leave the closing alone on the last page: pull a few cards over with it
+ if(end&&onLast(best)===0&&best.pages>1){for(let k=Math.min(12,items.length-1);k>=3;k--){const r=pack(items,null,items.length-k);if(r.pages===best.pages){best=r;break}}}
+ const pages=[];for(let i=0;i<best.pages;i++){const p=document.createElement('div');p.className='page';document.body.appendChild(p);pages.push(p)}
+ for(const [el,pg,x,y,w] of best.pl){const e=el==='hdr'?hdr:el==='end'?end:el;e.classList.add('placed');e.style.left=x+'px';e.style.top=y+'px';e.style.width=w+'px';pages[pg].appendChild(e)}
+ if(badge){for(let i=1;i<pages.length;i++){const c=badge.cloneNode(true);c.classList.add('placed');c.style.right='0';c.style.left='auto';c.style.top='0';pages[i].appendChild(c)}}
+ pool.remove(); return best.pages;
+};
+{%- endraw %}
+</script>
+{%- if preview %}
+{#- Studio preview: the same layout, shown as sheets of paper with the
+    print margins and footer, scaled to fit the frame. -#}
+<style>{% raw %}
+@media screen{
+html{background:#d9d4cc}
+body{margin:0;padding:12px 0}
+.sheet{position:relative;box-sizing:content-box;width:var(--content-w);height:var(--content-h);padding:16mm 15mm 18mm;margin:0 auto 18px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+.sheet .pagefoot{position:absolute;right:15mm;bottom:7mm;font-size:9pt;color:var(--gold);font-family:serif}
+}
+{% endraw %}</style>
+<script>{% raw %}
+(async function(){
+ try{await document.fonts.ready}catch(e){}
+ await new Promise(r=>setTimeout(r,50));
+ const total=window.layout();
+ [...document.querySelectorAll('.page')].forEach((p,i)=>{
+   const s=document.createElement('div');s.className='sheet';p.parentNode.insertBefore(s,p);s.appendChild(p);
+   const f=document.createElement('div');f.className='pagefoot';f.textContent=window.PRAYER_LAYOUT.dateLabel+'  ·  '+(i+1)+' / '+total;s.appendChild(f);
+ });
+ const fit=()=>{const s=document.querySelector('.sheet');if(!s)return;document.body.style.zoom='1';
+   document.body.style.zoom=String(Math.min(1,(document.documentElement.clientWidth-16)/s.getBoundingClientRect().width))};
+ fit();window.addEventListener('resize',fit);
+ // Keep the reader's place across refreshes: the Studio hands the last
+ // position back in window.__previewScroll and is told where it is now.
+ const room=()=>Math.max(1,document.documentElement.scrollHeight-window.innerHeight);
+ window.scrollTo(0,(window.__previewScroll||0)*room());
+ let t;window.addEventListener('scroll',()=>{clearTimeout(t);t=setTimeout(()=>
+   parent.postMessage({type:'prayer-pdf-preview-scroll',ratio:window.scrollY/room()},'*'),100)});
+})();
+{% endraw %}</script>
+{%- endif %}
+</body></html>

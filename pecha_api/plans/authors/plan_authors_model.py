@@ -26,6 +26,11 @@ class Author(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
     is_verified = Column(Boolean, default=False)
     is_active = Column(Boolean, default=False)
+    # is_active = False covers both "never signed in to the Studio" and
+    # "suspended". A Studio sign-in activates the first kind on its own (see
+    # studio_access_service); only a SuperAdmin suspension sets suspended_at,
+    # and only a SuperAdmin can undo it.
+    suspended_at = Column(DateTime(timezone=True), nullable=True)
     platform_role = Column(PlatformRoleEnum, nullable=False, default="CREATOR")
     created_at = Column(DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc),nullable=False)
     created_by = Column(String(255), nullable=False)

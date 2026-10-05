@@ -55,6 +55,9 @@ class PrayerNotificationTargetsResponse(BaseModel):
     prayer_count: int
     people_count: int
     prayer_total: int
+    # The event's image for an event room, otherwise the room's. Presigned,
+    # so short-lived; None when there is no image or it could not be signed.
+    image_url: Optional[str] = None
     title: str
     body: str
     recipients: List[ChatNotificationRecipientDTO]

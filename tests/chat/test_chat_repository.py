@@ -26,7 +26,12 @@ from pecha_api.chat.repository import (
     get_room_by_pair,
     get_room_messages,
     add_prayers,
+    claim_prayer_notification_for_dispatch,
     claim_unreported_prayers,
+    last_prayer_request_push_to_user,
+    list_due_prayer_notifications,
+    list_prayer_requests_with_held_prayers,
+    list_undispatched_prayer_notifications,
     get_my_prayer_counts_map,
     leave_member,
     lock_prayer_request,
@@ -771,3 +776,131 @@ class TestCountSuppressedPrayerRequests:
         )
 
         assert query.filter.call_count == 1
+
+
+def _compiled_conditions(query):
+    from sqlalchemy.dialects import postgresql
+
+    return [
+        str(arg.compile(dialect=postgresql.dialect()))
+        for arg in query.filter.call_args.args
+    ]
+
+
+class TestHeldPrayerNotificationQueries:
+    """A prayer-received push is recorded first and sent once it is clear of
+    the requester's prayer-request pushes."""
+
+    def test_due_rows_are_unclaimed_and_carry_the_requester(self):
+        db = MagicMock()
+        requester = uuid4()
+        notification_id = uuid4()
+        query = _query_chain(
+            db, results=[(notification_id, requester, datetime(2026, 10, 2, 10, 0))]
+        )
+
+        due = list_due_prayer_notifications(
+            db=db, created_before=datetime(2026, 10, 2, 10, 2, tzinfo=tz.utc), limit=50
+        )
+
+        assert due[0].id == notification_id
+        assert due[0].requester_id == requester
+        assert due[0].created_at.tzinfo is not None
+        conditions = _compiled_conditions(query)
+        assert any("notification_dispatched_at IS NULL" in c for c in conditions)
+        assert any("notification_sqs_message_id IS NULL" in c for c in conditions)
+
+    def test_held_prayers_from_others_on_live_requests_past_the_interval(self):
+        """A request is due when someone other than the requester has prayers
+        waiting and its last push is older than the interval, or it never had
+        one. Deleted requests are left alone."""
+        db = MagicMock()
+        message_id = uuid4()
+        query = _query_chain(db, results=[(message_id,)])
+        query.group_by.return_value = query
+
+        due = list_prayer_requests_with_held_prayers(
+            db=db, last_push_before=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc), limit=50
+        )
+
+        assert due == [message_id]
+        conditions = _compiled_conditions(query)
+        assert any("unreported_count >" in c for c in conditions)
+        assert any(
+            "chat_message_prayer_counts.user_id != chat_messages.sender_id" in c
+            for c in conditions
+        )
+        assert any("chat_messages.deleted_at IS NULL" in c for c in conditions)
+        last_push = next(c for c in conditions if "chat_prayer_notifications" in c)
+        assert "IS NULL" in last_push
+        assert "<=" in last_push
+        query.limit.assert_called_once_with(50)
+
+    def test_claim_wins_only_an_unclaimed_row(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.update.return_value = 1
+
+        assert claim_prayer_notification_for_dispatch(db=db, notification_id=uuid4())
+        assert any(
+            "notification_dispatched_at IS NULL" in c for c in _compiled_conditions(query)
+        )
+        db.commit.assert_called_once()
+
+    def test_claim_lost_to_another_replica(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.update.return_value = 0
+
+        assert not claim_prayer_notification_for_dispatch(db=db, notification_id=uuid4())
+
+    def test_reconcile_only_retries_claimed_rows(self):
+        """A row still waiting out the gap is not stuck; resending it from
+        reconcile would skip the gap entirely."""
+        db = MagicMock()
+        query = _query_chain(db)
+
+        list_undispatched_prayer_notifications(
+            db=db, older_than=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc), limit=50
+        )
+
+        conditions = _compiled_conditions(query)
+        assert any("notification_dispatched_at IS NOT NULL" in c for c in conditions)
+        assert any("notification_sqs_message_id IS NULL" in c for c in conditions)
+
+
+class TestLastPrayerRequestPushToUser:
+
+    def test_reaches_group_joiners_and_event_members_but_not_the_sender(self):
+        db = MagicMock()
+        query = _query_chain(db, total=None)
+
+        last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        )
+
+        conditions = _compiled_conditions(query)
+        assert any("chat_messages.sender_id !=" in c for c in conditions)
+        assert any("notification_sqs_message_id !=" in c for c in conditions)
+        assert any("notification_dispatched_at >" in c for c in conditions)
+        audience = next(c for c in conditions if "author_group_joins" in c)
+        assert "chat_room_members" in audience
+        assert "left_at IS NULL" in audience
+
+    def test_none_when_no_push_reached_them(self):
+        db = MagicMock()
+        _query_chain(db, total=None)
+
+        assert last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        ) is None
+
+    def test_naive_timestamp_comes_back_utc_aware(self):
+        db = MagicMock()
+        _query_chain(db, total=datetime(2026, 10, 2, 10, 1))
+
+        result = last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        )
+
+        assert result == datetime(2026, 10, 2, 10, 1, tzinfo=tz.utc)

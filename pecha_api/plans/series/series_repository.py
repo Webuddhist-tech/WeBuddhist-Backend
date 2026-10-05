@@ -27,6 +27,19 @@ class SeriesPlanScheduleRow(NamedTuple):
     total_days: int
 
 
+class SeriesListFilter(NamedTuple):
+    """Which series ``get_series_paginated`` returns."""
+    search: Optional[str] = None
+    include_deleted: bool = False
+    author_id: Optional[UUID] = None
+    language: Optional[str] = None
+    status: Optional[PlanStatus] = None
+    featured: Optional[bool] = None
+    group_ids: Optional[Sequence[UUID]] = None
+    language_fallback: bool = False
+    exclude_event_linked: bool = False
+
+
 def _series_active_plans_count_subquery(published_only: bool = False):
     conditions = [Plan.series_id == Series.id, Plan.deleted_at.is_(None)]
     if published_only:
@@ -329,6 +342,11 @@ def _clone_task(db: Session, src_task, new_item_id: UUID, created_by: str) -> No
         display_order=src_task.display_order,
         estimated_time=src_task.estimated_time,
         is_required=src_task.is_required,
+        # Reader defaults carry over; live does not - it belongs to one day.
+        is_commentary_open=src_task.is_commentary_open,
+        commentary_text_id=src_task.commentary_text_id,
+        is_translation_open=src_task.is_translation_open,
+        translation_text_id=src_task.translation_text_id,
         created_by=created_by,
         updated_by=created_by,
     )
@@ -676,75 +694,81 @@ def soft_delete_series_with_plan_detach(
     db.commit()
 
 
-def get_series_paginated(
-    db: Session,
-    search: Optional[str],
-    skip: int,
-    limit: int,
-    include_deleted: bool = False,
-    order_by_field=None,
-    order_desc: bool = True,
-    author_id: Optional[UUID] = None,
-    language: Optional[str] = None,
-    status: Optional[PlanStatus] = None,
-    featured: Optional[bool] = None,
-    published_only: bool = False,
-    group_ids: Optional[Sequence[UUID]] = None,
-    language_fallback: bool = False,
-    exclude_event_linked: bool = False,
-) -> Tuple[List[Tuple[Series, int, int]], int]:
-
-    filters = []
-    if not include_deleted:
-        filters.append(Series.deleted_at.is_(None))
-    if exclude_event_linked:
-        filters.append(series_not_linked_to_event())
-    if search:
-        filters.append(
-            exists(
-                select(1).where(
-                    SeriesMetadata.series_id == Series.id,
-                    or_(
-                        SeriesMetadata.title.ilike(f"%{search}%"),
-                        SeriesMetadata.sub_title.ilike(f"%{search}%"),
-                        SeriesMetadata.description.ilike(f"%{search}%"),
-                    ),
-                )
-            )
+def _series_search_filter(search: str):
+    return exists(
+        select(1).where(
+            SeriesMetadata.series_id == Series.id,
+            or_(
+                SeriesMetadata.title.ilike(f"%{search}%"),
+                SeriesMetadata.sub_title.ilike(f"%{search}%"),
+                SeriesMetadata.description.ilike(f"%{search}%"),
+            ),
         )
-    if author_id is not None:
-        filters.append(Series.author_id == author_id)
-    if status is not None:
-        filters.append(Series.status == status)
-    if featured is not None:
-        filters.append(Series.featured == featured)
-    if language and not language_fallback:
+    )
+
+
+def _series_language_filter(language: str):
+    language_upper = language.upper()
+    return exists(
+        select(1).where(
+            SeriesMetadata.series_id == Series.id,
+            SeriesMetadata.language == language_upper,
+        )
+    )
+
+
+def _series_group_filter(group_ids: Sequence[UUID]):
+    return or_(
+        Series.group_id.in_(group_ids),
+        exists(
+            select(1).where(
+                SeriesPartner.series_id == Series.id,
+                SeriesPartner.group_id.in_(group_ids),
+                SeriesPartner.deleted_at.is_(None),
+            )
+        ),
+    )
+
+
+def _build_series_list_filters(series_filter: SeriesListFilter) -> list:
+    filters = []
+    if not series_filter.include_deleted:
+        filters.append(Series.deleted_at.is_(None))
+    if series_filter.exclude_event_linked:
+        filters.append(series_not_linked_to_event())
+    if series_filter.search:
+        filters.append(_series_search_filter(series_filter.search))
+    if series_filter.author_id is not None:
+        filters.append(Series.author_id == series_filter.author_id)
+    if series_filter.status is not None:
+        filters.append(Series.status == series_filter.status)
+    if series_filter.featured is not None:
+        filters.append(Series.featured == series_filter.featured)
+    if series_filter.language and not series_filter.language_fallback:
         # Strict mode (CMS). Public callers skip this so untranslated series
         # are still returned and rendered in English by the service layer.
-        language_upper = language.upper()
-        filters.append(
-            exists(
-                select(1).where(
-                    SeriesMetadata.series_id == Series.id,
-                    SeriesMetadata.language == language_upper,
-                )
-            )
-        )
-    if group_ids is not None:
-        if not group_ids:
-            return [], 0
-        filters.append(
-            or_(
-                Series.group_id.in_(group_ids),
-                exists(
-                    select(1).where(
-                        SeriesPartner.series_id == Series.id,
-                        SeriesPartner.group_id.in_(group_ids),
-                        SeriesPartner.deleted_at.is_(None),
-                    )
-                ),
-            )
-        )
+        filters.append(_series_language_filter(series_filter.language))
+    if series_filter.group_ids is not None:
+        filters.append(_series_group_filter(series_filter.group_ids))
+    return filters
+
+
+def get_series_paginated(
+    db: Session,
+    skip: int,
+    limit: int,
+    series_filter: Optional[SeriesListFilter] = None,
+    order_by_field=None,
+    order_desc: bool = True,
+    published_only: bool = False,
+) -> Tuple[List[Tuple[Series, int, int]], int]:
+    if series_filter is None:
+        series_filter = SeriesListFilter()
+    # An explicit empty group scope matches nothing.
+    if series_filter.group_ids is not None and not series_filter.group_ids:
+        return [], 0
+
+    filters = _build_series_list_filters(series_filter)
 
     plan_count = _series_active_plans_count_subquery(published_only=published_only).label("plan_count")
     query = db.query(Series, plan_count).options(

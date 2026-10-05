@@ -55,6 +55,16 @@ __all__ = [
     "GroupInviteDTO",
     "GroupInviteListResponse",
     "GroupInviteCreatedResponse",
+    "BulkGroupInviteRequest",
+    "BulkGroupInviteSkippedDTO",
+    "BulkGroupInviteResponse",
+    "GroupInvitePreviewDTO",
+    "CreateGroupJoinLinkRequest",
+    "GroupJoinLinkDTO",
+    "GroupJoinLinkListResponse",
+    "GroupJoinLinkPreviewDTO",
+    "RedeemGroupJoinLinkRequest",
+    "GroupJoinLinkRedeemResponse",
     "CreateGroupJoinRequest",
     "GroupJoinRequestDTO",
     "GroupJoinRequestUserDTO",
@@ -185,7 +195,9 @@ class UserJoinedAuthorGroupListResponse(BaseModel):
 
 
 class CreateAuthorGroupRequest(BaseModel):
-    slug: str
+    # Left out (the Studio no longer asks for one for practice spaces), it is
+    # generated from the group's name - see groups_service.generate_group_slug.
+    slug: Optional[str] = None
     group_type: AuthorGroupType = AuthorGroupType.PAGE
     is_public: bool = True
     avatar_key: Optional[str] = None
@@ -480,3 +492,82 @@ class GroupBanListResponse(BaseModel):
     skip: int
     limit: int
     total: int
+
+
+BULK_INVITE_MAX_EMAILS = 50
+
+
+class BulkGroupInviteRequest(BaseModel):
+    target_emails: List[str] = Field(min_length=1, max_length=BULK_INVITE_MAX_EMAILS)
+    role: AuthorGroupMemberRole
+
+
+class BulkGroupInviteSkippedDTO(BaseModel):
+    target_email: str
+    reason: str
+
+
+class BulkGroupInviteResponse(BaseModel):
+    invites: List[GroupInviteDTO]
+    skipped: List[BulkGroupInviteSkippedDTO]
+
+
+class GroupInvitePreviewDTO(BaseModel):
+    """What the Studio /join?invite= page shows before anyone signs in."""
+
+    invite_id: UUID
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    target_email: str
+    inviter_name: str
+    status: AuthorGroupInviteStatus
+    expires_at: datetime
+    # True when a Studio account already uses target_email: the page offers
+    # sign-in instead of the one-step sign-up.
+    account_exists: bool
+
+
+class CreateGroupJoinLinkRequest(BaseModel):
+    role: AuthorGroupMemberRole = AuthorGroupMemberRole.AUTHOR
+    max_uses: Optional[int] = Field(default=None, ge=1, le=1000)
+    expires_in_days: Optional[int] = Field(default=None, ge=1)
+
+
+class GroupJoinLinkDTO(BaseModel):
+    id: UUID
+    group_id: UUID
+    role: AuthorGroupMemberRole
+    token: str
+    url: str
+    max_uses: Optional[int] = None
+    use_count: int
+    expires_at: datetime
+    revoked_at: Optional[datetime] = None
+    created_at: datetime
+    created_by: str
+    is_usable: bool
+
+
+class GroupJoinLinkListResponse(BaseModel):
+    links: List[GroupJoinLinkDTO]
+    total: int
+
+
+class GroupJoinLinkPreviewDTO(BaseModel):
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    expires_at: datetime
+    is_usable: bool
+
+
+class RedeemGroupJoinLinkRequest(BaseModel):
+    token: str
+
+
+class GroupJoinLinkRedeemResponse(BaseModel):
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    already_member: bool

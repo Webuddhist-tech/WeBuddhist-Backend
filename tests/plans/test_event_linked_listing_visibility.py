@@ -30,6 +30,7 @@ from pecha_api.plans.groups.groups_repository import (
     get_standalone_plans_for_group_ids,
 )
 from pecha_api.plans.series.series_repository import (
+    SeriesListFilter,
     get_random_featured_published_series,
     get_series_paginated,
 )
@@ -88,7 +89,10 @@ def _sql(db: Session) -> str:
         (
             "GET /series",
             lambda db: get_series_paginated(
-                db=db, search=None, skip=0, limit=10, exclude_event_linked=True
+                db=db,
+                skip=0,
+                limit=10,
+                series_filter=SeriesListFilter(exclude_event_linked=True),
             ),
             (PLAN_EVENT_GATE, SERIES_EVENT_GATE),
         ),
@@ -143,7 +147,7 @@ def test_public_series_and_practice_listings_exclude_event_linked_content(
 
 
 def test_cms_series_listing_keeps_event_linked_series(db: Session) -> None:
-    get_series_paginated(db=db, search=None, skip=0, limit=10)
+    get_series_paginated(db=db, skip=0, limit=10)
 
     sql = _sql(db)
     assert "events.plan_id" not in sql

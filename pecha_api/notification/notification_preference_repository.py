@@ -2,13 +2,14 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import and_, delete, exists, func, or_, select, true
+from sqlalchemy import and_, delete, exists, false, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
 from pecha_api.notification.notification_preference_enums import (
     NotificationChannel,
     NotificationScope,
     NotificationType,
+    default_enabled,
 )
 from pecha_api.notification.notification_preference_models import (
     UserNotificationPreference,
@@ -94,7 +95,7 @@ def scoped_preference_filter(
     onclause) pair the caller outer-joins onto a query already selecting a
     user id column, and the conditions implement the resolution rule -
     `enabled` is most-specific-wins (a scoped row beats the global one, absent
-    means allowed), while an unexpired `muted_until` on *either* row
+    falls back to the type's default), while an unexpired `muted_until` on *either* row
     suppresses, so a global snooze still silences a scope the user explicitly
     enabled.
 
@@ -127,8 +128,9 @@ def scoped_preference_filter(
     ]
 
     # An IS NULL check covers both the un-matched LEFT JOIN and the un-muted row.
+    fallback = true() if default_enabled(notification_type) else false()
     conditions = [
-        func.coalesce(scoped.enabled, global_row.enabled, true()).is_(True),
+        func.coalesce(scoped.enabled, global_row.enabled, fallback).is_(True),
         or_(scoped.muted_until.is_(None), scoped.muted_until <= func.now()),
         or_(global_row.muted_until.is_(None), global_row.muted_until <= func.now()),
     ]
@@ -204,7 +206,7 @@ def upsert_preference(
             else (scope_type or NotificationScope.GROUP)
         ),
         scope_id=scope_id,
-        enabled=bool(enabled) if set_enabled else True,
+        enabled=bool(enabled) if set_enabled else default_enabled(notification_type),
         muted_until=muted_until if set_muted_until else None,
     )
     db.add(preference)

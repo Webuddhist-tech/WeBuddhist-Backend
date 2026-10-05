@@ -298,6 +298,43 @@ class AuthorGroupInvite(Base):
     )
 
 
+class AuthorGroupJoinLink(Base):
+    """A shareable Studio link that adds whoever opens it to a group.
+
+    Unlike AuthorGroupInvite it is not tied to one email, so it also reaches
+    phone-only authors. Usable while not revoked, not expired and under
+    max_uses (null = unlimited). Redeeming it also activates a pending
+    author: the group manager who shared it is vouching for them.
+    """
+
+    __tablename__ = "author_group_join_links"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    group_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_AUTHOR_GROUPS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    token = Column(String(64), nullable=False)
+    role = Column(AuthorGroupMemberRoleEnum, nullable=False, default="AUTHOR")
+    max_uses = Column(Integer, nullable=True)
+    use_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(String(255), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), nullable=False
+    )
+    created_by = Column(String(255), nullable=False)
+
+    group = relationship("AuthorGroup")
+
+    __table_args__ = (
+        Index("uq_author_group_join_links_token", "token", unique=True),
+        Index("idx_author_group_join_links_group_id", "group_id"),
+    )
+
+
 class AuthorGroupJoinRequest(Base):
     """An app user's request to join a private COMMUNITY group, reviewed in Studio."""
 

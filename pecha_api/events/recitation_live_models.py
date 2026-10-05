@@ -129,6 +129,47 @@ class AutoplayStartRequest(BaseModel):
     first_step_elapsed_ms: Optional[int] = Field(None, ge=0, le=MAX_AUTOPLAY_STEP_MS)
 
 
+# How early a step may be sent to the room ahead of its time. Phones apply a
+# position the moment it lands, so sending it early is the only way to have it
+# land with the stage; anything near this is no longer a network delay.
+MAX_AUTOPLAY_LEAD_MS = 2000
+# How far the room's pace may move autoplay's recorded times either way.
+MIN_AUTOPLAY_TEMPO = 0.6
+MAX_AUTOPLAY_TEMPO = 1.6
+
+
+class AutoplaySeekRequest(BaseModel):
+    """Move a running plan to one of its own steps, at once.
+
+    The plan is already with the backend, so a hand move made while it runs
+    is a step number, not a new plan. `expected_step` is the step the operator
+    was looking at: when the plan has already moved on to `step` by itself,
+    the seek does nothing, so a press that races the plan's own move does not
+    skip a line. A seek to the step after `expected_step` is the operator
+    saying that line is over, and is what the room's pace is learned from.
+    """
+
+    plan_id: str = Field(..., max_length=64)
+    step: int = Field(..., ge=0, lt=MAX_AUTOPLAY_STEPS)
+    expected_step: Optional[int] = Field(None, ge=0, lt=MAX_AUTOPLAY_STEPS)
+
+
+class AutoplayPlanCommand(BaseModel):
+    """Hold or resume the running plan. `plan_id`, when given, must still be
+    the plan running, so a command meant for a plan already replaced is not
+    applied to its successor."""
+
+    plan_id: Optional[str] = Field(None, max_length=64)
+
+
+class AutoplaySettingsRequest(BaseModel):
+    """The event's autoplay settings. Kept apart from any one plan: a new plan
+    keeps the room's pace and the lead as they were."""
+
+    lead_ms: Optional[int] = Field(None, ge=0, le=MAX_AUTOPLAY_LEAD_MS)
+    tempo: Optional[float] = Field(None, ge=MIN_AUTOPLAY_TEMPO, le=MAX_AUTOPLAY_TEMPO)
+
+
 class AutoplayStateResponse(BaseModel):
     """Where autoplay is: sent back by every command, and pushed to the
     operator's socket as a `type: "autoplay"` frame whenever it changes."""
@@ -145,7 +186,17 @@ class AutoplayStateResponse(BaseModel):
     step_started_at_ms: Optional[int] = Field(
         None, description="When the current step went out, epoch ms on the server"
     )
-    step_duration_ms: Optional[int] = None
+    step_duration_ms: Optional[int] = Field(
+        None, description="How long the current step is held, the room's pace applied"
+    )
+    held: bool = Field(False, description="The plan is held on its current step")
+    held_at_ms: Optional[int] = Field(None, description="When the hold began, epoch ms")
+    tempo: float = Field(
+        1.0, description="Factor applied to every recorded time: below 1 is faster"
+    )
+    lead_ms: int = Field(
+        0, description="How far ahead of its time each step is sent to the room"
+    )
     server_time_ms: int = Field(
         ..., description="The server's clock when this was sent, to line the two clocks up"
     )

@@ -4,13 +4,19 @@ from fastapi import APIRouter, Depends
 from starlette import status
 
 from pecha_api.plans.auth.cms_auth_deps import get_cms_author_token
+from pecha_api.plans.groups.groups_response_models import GroupInvitePreviewDTO, GroupJoinLinkPreviewDTO
+from pecha_api.plans.groups.groups_service import get_invite_preview
+from pecha_api.plans.groups.join_links_service import get_join_link_preview
 from .plan_auth_models import (
+    AppLoginRequest,
+    AppLoginResponse,
     AuthorDetails,
     AuthorLoginRequest,
     AuthorLoginResponse,
     AuthorVerificationResponse,
     CreateAuthorRequest,
     EmailReVerificationResponse,
+    InviteRegisterRequest,
     PasswordResetRequest,
     PhoneExchangeRequest,
     PhoneExchangeResponse,
@@ -30,8 +36,10 @@ from .plan_auth_services import (
     exchange_google_token,
     exchange_phone_token,
     link_phone_identity,
+    login_with_app_account,
     refresh_access_token,
     register_author,
+    register_author_from_invite,
     re_verify_email,
     request_reset_password,
     update_password,
@@ -64,7 +72,29 @@ def login_user(author_login_request: AuthorLoginRequest) -> AuthorLoginResponse:
     return authenticate_and_generate_tokens(
         email=author_login_request.email,
         password=author_login_request.password,
+        invite_token=author_login_request.invite_token,
+        join_link_token=author_login_request.join_link_token,
     )
+
+
+@plan_auth_router.get("/invites/preview", status_code=status.HTTP_200_OK, response_model=GroupInvitePreviewDTO)
+def invite_preview(token: str) -> GroupInvitePreviewDTO:
+    return get_invite_preview(invite_token=token)
+
+
+@plan_auth_router.post("/invites/register", status_code=status.HTTP_201_CREATED, response_model=AuthorLoginResponse)
+def invite_register(request: InviteRegisterRequest) -> AuthorLoginResponse:
+    return register_author_from_invite(request)
+
+
+@plan_auth_router.get("/join-links/preview", status_code=status.HTTP_200_OK, response_model=GroupJoinLinkPreviewDTO)
+def join_link_preview(token: str) -> GroupJoinLinkPreviewDTO:
+    return get_join_link_preview(link_token=token)
+
+
+@plan_auth_router.post("/app/login", status_code=status.HTTP_200_OK, response_model=AppLoginResponse)
+def app_login(request: AppLoginRequest) -> AppLoginResponse:
+    return login_with_app_account(request)
 
 
 @plan_auth_router.post("/phone/exchange", status_code=status.HTTP_200_OK)

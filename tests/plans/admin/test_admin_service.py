@@ -45,6 +45,7 @@ def _make_author(
     author.bio = None
     author.image_url = None
     author.created_at = datetime.now(timezone.utc)
+    author.suspended_at = None
     return author
 
 
@@ -163,12 +164,62 @@ def test_activate_author_success():
     ), patch(
         "pecha_api.plans.admin.admin_service.save_author",
         return_value=saved,
-    ):
+    ), patch(
+        "pecha_api.plans.admin.admin_service.on_author_activated_by_admin",
+    ) as mock_approved:
         _session_local_context(mock_session_local)
         resp = activate_author(token="token", author_id=target.id)
 
     assert resp.is_active is True
     assert target.is_active is True
+    mock_approved.assert_called_once()
+    assert mock_approved.call_args.kwargs == {"was_suspended": False}
+
+
+def test_activate_author_clears_suspension_and_reports_it():
+    target = _make_author(is_active=False)
+    target.suspended_at = datetime.now(timezone.utc)
+    caller = _make_author(platform_role=PlatformRole.SUPER_ADMIN)
+
+    with patch(
+        "pecha_api.plans.admin.admin_service.validate_and_extract_author_details",
+        return_value=caller,
+    ), patch("pecha_api.plans.admin.admin_service.SessionLocal") as mock_session_local, patch(
+        "pecha_api.plans.admin.admin_service.get_author_by_id",
+        return_value=target,
+    ), patch(
+        "pecha_api.plans.admin.admin_service.save_author",
+        side_effect=lambda db, author: author,
+    ), patch(
+        "pecha_api.plans.admin.admin_service.on_author_activated_by_admin",
+    ) as mock_approved:
+        _session_local_context(mock_session_local)
+        activate_author(token="token", author_id=target.id)
+
+    assert target.suspended_at is None
+    assert mock_approved.call_args.kwargs == {"was_suspended": True}
+
+
+def test_activate_already_active_author_sends_nothing():
+    target = _make_author(is_active=True)
+    caller = _make_author(platform_role=PlatformRole.SUPER_ADMIN)
+
+    with patch(
+        "pecha_api.plans.admin.admin_service.validate_and_extract_author_details",
+        return_value=caller,
+    ), patch("pecha_api.plans.admin.admin_service.SessionLocal") as mock_session_local, patch(
+        "pecha_api.plans.admin.admin_service.get_author_by_id",
+        return_value=target,
+    ), patch(
+        "pecha_api.plans.admin.admin_service.save_author",
+        side_effect=lambda db, author: author,
+    ), patch(
+        "pecha_api.plans.admin.admin_service.on_author_activated_by_admin",
+    ) as mock_approved:
+        _session_local_context(mock_session_local)
+        activate_author(token="token", author_id=target.id)
+
+    mock_approved.assert_not_called()
 
 
 def test_suspend_author_success():
@@ -194,6 +245,7 @@ def test_suspend_author_success():
         resp = suspend_author(token="token", author_id=target.id)
 
     assert resp.is_active is False
+    assert target.suspended_at is not None
 
 
 def test_get_admin_author_detail_with_image():

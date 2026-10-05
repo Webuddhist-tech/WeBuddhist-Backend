@@ -389,6 +389,13 @@ class ChatMessagePrayerCount(Base):
             "message_id",
             sql_text("last_prayed_at DESC"),
         ),
+        # Backs the dispatcher's sweep for held prayers, which runs every few
+        # seconds; only rows still waiting to be reported are indexed.
+        Index(
+            "idx_chat_message_prayer_counts_unreported",
+            "message_id",
+            postgresql_where=sql_text("unreported_count > 0"),
+        ),
     )
 
 

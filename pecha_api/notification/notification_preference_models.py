@@ -20,7 +20,7 @@ from pecha_api.notification.notification_preference_enums import (
 
 
 class UserNotificationPreference(Base):
-    """A single preference the user has changed. No row means allowed."""
+    """A single preference the user has changed. No row means the type's default."""
 
     __tablename__ = "user_notification_preferences"
 
