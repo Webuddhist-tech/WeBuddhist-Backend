@@ -117,6 +117,7 @@ def test_get_public_groups_success():
         limit=20,
         token=None,
         timezone_name=None,
+        tradition_code=None,
     )
     assert response.json()["total"] == 1
 
@@ -149,6 +150,7 @@ def test_get_public_groups_with_auth_passes_token():
         limit=20,
         token="dummy",
         timezone_name=None,
+        tradition_code=None,
     )
 
 
@@ -358,7 +360,7 @@ def test_get_cms_groups_with_filters():
         return_value=listing,
     ) as mock_service:
         response = client.get(
-            f"/cms/author/groups?search=foo&language=EN&skip=5&limit=10&tag_id={tag_id}",
+            f"/cms/author/groups?search=foo&language=EN&skip=5&limit=10&tag_id={tag_id}&tradition=tibetan",
             headers={"Authorization": "Bearer dummy"},
         )
     assert response.status_code == status.HTTP_200_OK
@@ -370,6 +372,7 @@ def test_get_cms_groups_with_filters():
         is_public=None,
         group_type=None,
         group_status=None,
+        tradition_code="tibetan",
         for_transfer=False,
         skip=5,
         limit=10,

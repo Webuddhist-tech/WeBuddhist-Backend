@@ -137,6 +137,7 @@ def _make_group(
     group.status = group_status
     group.avatar_key = None
     group.banner_key = None
+    group.tradition = None
     group.metadata_entries = []
     group.members = []
     group.social_links = []

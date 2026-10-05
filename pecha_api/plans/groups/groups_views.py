@@ -259,6 +259,10 @@ def get_cms_groups(
             description="Filter by publication status: DRAFT, PUBLISHED or UNPUBLISHED; omit to include all",
         ),
     ] = None,
+    tradition: Annotated[
+        Optional[str],
+        Query(description="Filter by tradition code from GET /traditions (e.g. tibetan)"),
+    ] = None,
     for_transfer: Annotated[bool, Query(description="When true, list all groups for transfer target selection")] = False,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -271,6 +275,7 @@ def get_cms_groups(
         is_public=is_public,
         group_type=group_type,
         group_status=group_status,
+        tradition_code=tradition,
         for_transfer=for_transfer,
         skip=skip,
         limit=limit,
@@ -784,6 +789,10 @@ def get_public_groups(
         AuthorGroupType,
         Query(description="Filter by group type: PAGE or COMMUNITY"),
     ] = AuthorGroupType.COMMUNITY,
+    tradition: Annotated[
+        Optional[str],
+        Query(description="Filter by tradition code from GET /traditions (e.g. tibetan)"),
+    ] = None,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     x_timezone: Annotated[
@@ -800,6 +809,7 @@ def get_public_groups(
         limit=limit,
         token=authentication_credential.credentials if authentication_credential else None,
         timezone_name=x_timezone,
+        tradition_code=tradition,
     )
 
 

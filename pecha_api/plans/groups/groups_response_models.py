@@ -16,6 +16,7 @@ from pecha_api.plans.groups.group_summary_models import (
     AuthorGroupSummaryDTO,
     GroupMetadataDTO,
     GroupMetadataResponse,
+    GroupTraditionDTO,
 )
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.plans_response_models import PlanDTO
@@ -23,6 +24,7 @@ from pecha_api.plans.series.series_response_models import SeriesListItemDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 from pecha_api.group_accumulator.group_accumulator_response_models import GroupAccumulatorDTO
 from pecha_api.group_recitation_collection.response_models import GroupRecitationCollectionDTO
+from pecha_api.traditions.tradition_constants import normalize_tradition_code
 
 # Removing a joined user from a group blocks them from rejoining. The moderator
 # may pick a different length, but this is what Studio sends when they don't.
@@ -37,6 +39,7 @@ __all__ = [
     "AuthorGroupSummaryDTO",
     "GroupMetadataDTO",
     "GroupMetadataResponse",
+    "GroupTraditionDTO",
     "GroupMetadataInput",
     "GroupSocialLinkInput",
     "GroupSocialLinkDTO",
@@ -123,6 +126,7 @@ class AuthorGroupDetailDTO(BaseModel):
     banner_key: Optional[str] = None
     avatar_url: Optional[str] = None
     banner_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     members: List[AuthorGroupMemberDTO] = []
     tags: List[TagSummaryDTO] = []
@@ -194,6 +198,12 @@ class UserJoinedAuthorGroupListResponse(BaseModel):
     total: int
 
 
+def _normalize_optional_tradition_code(value: Optional[str]) -> Optional[str]:
+    if value is None or not value.strip():
+        return None
+    return normalize_tradition_code(value)
+
+
 class CreateAuthorGroupRequest(BaseModel):
     # Left out (the Studio no longer asks for one for practice spaces), it is
     # generated from the group's name - see groups_service.generate_group_slug.
@@ -202,6 +212,8 @@ class CreateAuthorGroupRequest(BaseModel):
     is_public: bool = True
     avatar_key: Optional[str] = None
     banner_key: Optional[str] = None
+    # A code from GET /traditions (e.g. "tibetan"). Optional for now.
+    tradition_code: Optional[str] = None
     metadata: List[GroupMetadataInput]
 
     @field_validator("metadata")
@@ -211,13 +223,25 @@ class CreateAuthorGroupRequest(BaseModel):
             raise ValueError("At least one metadata entry is required")
         return value
 
+    @field_validator("tradition_code")
+    @classmethod
+    def validate_tradition_code(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_tradition_code(value)
+
 
 class UpdateAuthorGroupRequest(BaseModel):
     slug: Optional[str] = None
     is_public: Optional[bool] = None
     avatar_key: Optional[str] = None
     banner_key: Optional[str] = None
+    # Sent as null, clears the group's tradition.
+    tradition_code: Optional[str] = None
     metadata: Optional[List[GroupMetadataInput]] = None
+
+    @field_validator("tradition_code")
+    @classmethod
+    def validate_tradition_code(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_tradition_code(value)
 
 
 class UpdateAuthorGroupStatusRequest(BaseModel):

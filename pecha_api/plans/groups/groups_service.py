@@ -198,6 +198,7 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupPracticesResponse,
     GroupPracticeType,
     GroupSocialLinkDTO,
+    GroupTraditionDTO,
     PublicAuthorGroupDetailDTO,
     PublicAuthorGroupListResponse,
     PublicAuthorGroupSummaryDTO,
@@ -235,6 +236,12 @@ from pecha_api.region_restrictions.region_restriction_enums import RestrictedIte
 from pecha_api.region_restrictions.region_restriction_service import (
     filter_items_for_timezone,
     get_restricted_item_ids,
+)
+from pecha_api.traditions.tradition_constants import is_managed_tradition_code
+from pecha_api.traditions.tradition_models import Tradition
+from pecha_api.traditions.tradition_repository import (
+    get_tradition_by_code,
+    resolve_tradition_metadata,
 )
 
 GROUP_NOT_FOUND = "Group not found"
@@ -713,6 +720,37 @@ def _plans_to_dtos(db: Session, plan_list: List[Plan], group_id: UUID) -> List[P
     ]
 
 
+def _tradition_to_dto(
+    tradition: Optional[Tradition], language: Optional[str] = None
+) -> Optional[GroupTraditionDTO]:
+    if tradition is None:
+        return None
+    metadata = resolve_tradition_metadata(tradition, language)
+    return GroupTraditionDTO(
+        id=tradition.id,
+        code=tradition.code,
+        name=metadata.name if metadata is not None else None,
+    )
+
+
+def _resolve_tradition_id(db: Session, tradition_code: Optional[str]) -> Optional[UUID]:
+    """Map a request's tradition_code to its tradition_list id; None clears it.
+    Legacy rows are not offered by GET /traditions, so they are rejected too."""
+    if tradition_code is None:
+        return None
+    tradition = get_tradition_by_code(db=db, tradition_code=tradition_code)
+    if tradition is None or not is_managed_tradition_code(tradition.code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tradition '{tradition_code}' not found",
+        )
+    return tradition.id
+
+
+def _tradition_filter(tradition_code: Optional[str]) -> Optional[str]:
+    return (tradition_code or "").strip().lower() or None
+
+
 def _group_to_summary(
     group: AuthorGroup,
     follower_count: int = 0,
@@ -739,6 +777,7 @@ def _group_to_summary(
         banner_key=group.banner_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
         banner_url=_generate_group_asset_url(group.banner_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         tags=tags,
         follower_count=follower_count,
@@ -847,6 +886,7 @@ def _group_to_detail(
         banner_key=group.banner_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
         banner_url=_generate_group_asset_url(group.banner_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         members=[] if teaser else _members_to_dtos(group.members),
         tags=tags,
@@ -894,6 +934,7 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
             is_public=request.is_public,
             avatar_key=request.avatar_key,
             banner_key=request.banner_key,
+            tradition_id=_resolve_tradition_id(db, request.tradition_code),
             created_by=author.email,
             updated_by=author.email,
         )
@@ -938,6 +979,9 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
             group.avatar_key = request.avatar_key
         if "banner_key" in fields_set:
             group.banner_key = request.banner_key
+        if "tradition_code" in fields_set:
+            group.tradition_id = _resolve_tradition_id(db, request.tradition_code)
+            db.expire(group, ["tradition"])
         if "metadata" in fields_set:
             _assert_metadata_valid(request.metadata)
             metadata_entries = [
@@ -1555,6 +1599,7 @@ def list_public_groups(
     group_type: AuthorGroupType = AuthorGroupType.COMMUNITY,
     token: Optional[str] = None,
     timezone_name: Optional[str] = None,
+    tradition_code: Optional[str] = None,
 ) -> PublicAuthorGroupListResponse:
     with SessionLocal() as db:
         exclude_group_ids = None
@@ -1580,6 +1625,7 @@ def list_public_groups(
             exclude_group_ids=exclude_group_ids,
             group_type=group_type,
             status=AuthorGroupStatus.PUBLISHED,
+            tradition_code=_tradition_filter(tradition_code),
         )
         groups = filter_items_for_timezone(
             groups,
@@ -1624,6 +1670,7 @@ def list_cms_groups(
     for_transfer: bool = False,
     group_type: Optional[AuthorGroupType] = None,
     group_status: Optional[AuthorGroupStatus] = None,
+    tradition_code: Optional[str] = None,
 ) -> AuthorGroupListResponse:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
@@ -1645,6 +1692,7 @@ def list_cms_groups(
             group_type=group_type,
             # Unset means Studio sees every status.
             status=group_status,
+            tradition_code=_tradition_filter(tradition_code),
         )
         ids = [group.id for group in groups]
         follower_count_map = get_followers_count_map(db=db, group_ids=ids)
