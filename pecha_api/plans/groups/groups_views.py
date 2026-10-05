@@ -793,6 +793,10 @@ def get_public_groups(
         Optional[str],
         Query(description="Filter by tradition code from GET /traditions (e.g. tibetan)"),
     ] = None,
+    include_joined: Annotated[
+        bool,
+        Query(description="Also list the groups the caller has joined. By default a signed-in caller sees only groups they have not joined."),
+    ] = False,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     x_timezone: Annotated[
@@ -801,6 +805,7 @@ def get_public_groups(
     ] = None,
 ):
     return list_public_groups(
+        include_joined=include_joined,
         search=search,
         language=language,
         tag_id=tag_id,

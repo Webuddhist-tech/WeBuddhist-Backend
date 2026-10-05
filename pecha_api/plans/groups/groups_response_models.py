@@ -141,6 +141,8 @@ class PublicAuthorGroupSummaryDTO(AuthorGroupSummaryDTO):
     tags: List[str] = []
     # None when the caller is anonymous or has never requested to join.
     my_join_request_status: Optional[AuthorGroupJoinRequestStatus] = None
+    # None when the caller is anonymous.
+    is_joined: Optional[bool] = None
 
 
 class PublicAuthorGroupDetailDTO(AuthorGroupDetailDTO):

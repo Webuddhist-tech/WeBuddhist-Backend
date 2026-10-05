@@ -759,6 +759,7 @@ def _group_to_summary(
     language: Optional[str] = None,
     my_role: Optional[AuthorGroupMemberRole | str] = None,
     my_join_request_status: Optional[str] = None,
+    is_joined: Optional[bool] = None,
 ) -> AuthorGroupSummaryDTO:
     dto_class = PublicAuthorGroupSummaryDTO if public else AuthorGroupSummaryDTO
     tags = _group_tag_names(group.tags) if public else tags_to_summary_dtos(group.tags)
@@ -789,6 +790,7 @@ def _group_to_summary(
             if public and my_join_request_status
             else {}
         ),
+        **({"is_joined": is_joined} if public and is_joined is not None else {}),
     )
 
 
@@ -1600,16 +1602,18 @@ def list_public_groups(
     token: Optional[str] = None,
     timezone_name: Optional[str] = None,
     tradition_code: Optional[str] = None,
+    include_joined: bool = False,
 ) -> PublicAuthorGroupListResponse:
     with SessionLocal() as db:
         exclude_group_ids = None
         user_id = None
+        joined_ids = []
         if token:
             try:
                 user = validate_and_extract_user_details(token=token, db=db)
                 user_id = user.id
                 joined_ids = get_joined_group_ids_by_user(db=db, user_id=user.id)
-                if joined_ids:
+                if joined_ids and not include_joined:
                     exclude_group_ids = joined_ids
             except Exception:
                 pass
@@ -1641,6 +1645,7 @@ def list_public_groups(
             if user_id is not None
             else {}
         )
+        joined_id_set = set(joined_ids)
         return PublicAuthorGroupListResponse(
             groups=[
                 _group_to_summary(
@@ -1650,6 +1655,7 @@ def list_public_groups(
                     public=True,
                     language=language,
                     my_join_request_status=join_request_status_map.get(item.id),
+                    is_joined=item.id in joined_id_set if user_id is not None else None,
                 )
                 for item in groups
             ],
