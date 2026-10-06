@@ -109,6 +109,7 @@ def test_get_public_groups_success():
 
     assert response.status_code == status.HTTP_200_OK
     mock_service.assert_called_once_with(
+        include_joined=False,
         search=None,
         language=None,
         tag_id=None,
@@ -142,6 +143,7 @@ def test_get_public_groups_with_auth_passes_token():
 
     assert response.status_code == status.HTTP_200_OK
     mock_service.assert_called_once_with(
+        include_joined=False,
         search=None,
         language=None,
         tag_id=None,
