@@ -229,6 +229,18 @@ def test_list_public_groups_filters_by_tradition():
     assert mock_paginated.call_args.kwargs["tradition_code"] == "tibetan"
 
 
+def test_list_public_groups_tradition_filter_matches_request_normalization():
+    with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
+        f"{SERVICE}.get_groups_paginated", return_value=([], 0)
+    ) as mock_paginated, patch(f"{SERVICE}.get_followers_count_map", return_value={}), patch(
+        f"{SERVICE}.get_joiners_count_map", return_value={}
+    ):
+        _session(mock_session)
+        list_public_groups(skip=0, limit=10, tradition_code=" Tibetan-Buddhism ")
+
+    assert mock_paginated.call_args.kwargs["tradition_code"] == "tibetan_buddhism"
+
+
 def test_list_cms_groups_filters_by_tradition():
     with patch(f"{SERVICE}.SessionLocal") as mock_session, patch(
         f"{SERVICE}.validate_and_extract_author_details", return_value=_author()

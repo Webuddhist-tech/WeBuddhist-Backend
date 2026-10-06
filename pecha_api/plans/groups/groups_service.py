@@ -237,7 +237,7 @@ from pecha_api.region_restrictions.region_restriction_service import (
     filter_items_for_timezone,
     get_restricted_item_ids,
 )
-from pecha_api.traditions.tradition_constants import is_managed_tradition_code
+from pecha_api.traditions.tradition_constants import is_managed_tradition_code, normalize_tradition_code
 from pecha_api.traditions.tradition_models import Tradition
 from pecha_api.traditions.tradition_repository import (
     get_tradition_by_code,
@@ -748,7 +748,16 @@ def _resolve_tradition_id(db: Session, tradition_code: Optional[str]) -> Optiona
 
 
 def _tradition_filter(tradition_code: Optional[str]) -> Optional[str]:
-    return (tradition_code or "").strip().lower() or None
+    """Normalize a filter code the same way create/update requests do, so
+    "tibetan-buddhism" finds groups saved as "tibetan_buddhism"."""
+    code = (tradition_code or "").strip()
+    if not code:
+        return None
+    try:
+        return normalize_tradition_code(code)
+    except ValueError:
+        # Not a valid managed code; keep the plain form so it simply matches nothing new.
+        return code.lower()
 
 
 def _group_to_summary(

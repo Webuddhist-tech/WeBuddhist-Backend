@@ -156,6 +156,33 @@ def test_get_public_groups_with_auth_passes_token():
     )
 
 
+def test_get_public_groups_include_joined_query_is_passed_to_service():
+    response_model = AuthorGroupListResponse(groups=[], skip=0, limit=20, total=0)
+    with patch(
+        "pecha_api.plans.groups.groups_views.list_public_groups",
+        return_value=response_model,
+    ) as mock_service:
+        response = client.get(
+            "/author/groups",
+            params={"include_joined": "true"},
+            headers={"Authorization": "Bearer dummy"},
+        )
+
+    assert response.status_code == status.HTTP_200_OK
+    mock_service.assert_called_once_with(
+        include_joined=True,
+        search=None,
+        language=None,
+        tag_id=None,
+        group_type=AuthorGroupType.COMMUNITY,
+        skip=0,
+        limit=20,
+        token="dummy",
+        timezone_name=None,
+        tradition_code=None,
+    )
+
+
 def test_get_public_groups_with_auth_excludes_joined_groups_through_service():
     joined_group_id = uuid4()
     user = MagicMock()
