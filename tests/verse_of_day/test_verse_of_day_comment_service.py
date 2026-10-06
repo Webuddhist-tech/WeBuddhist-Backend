@@ -9,11 +9,13 @@ from fastapi import HTTPException
 from starlette import status
 
 from pecha_api.plans.response_message import NOT_FOUND
+from pecha_api.verse_of_day.comment_errors import ParentCommentNotFoundError
 from pecha_api.verse_of_day.comment_service import (
     _require_verse,
     build_comment_dto,
     create_verse_comment_service,
     delete_verse_comment_service,
+    get_verse_comment_service,
     list_verse_comments_service,
 )
 
@@ -39,11 +41,13 @@ class MockComment:
         user: Optional[MockUser] = None,
         user_id: Optional[UUID] = None,
         verse_id: Optional[UUID] = None,
+        parent_comment_id: Optional[UUID] = None,
         text: str = "Hello",
     ) -> None:
         self.id: UUID = uuid4()
         self.verse_id: UUID = verse_id or uuid4()
         self.user_id: UUID = user_id or (user.id if user else uuid4())
+        self.parent_comment_id = parent_comment_id
         self.user = user
         self.text = text
         self.created_at: datetime = datetime.now(tz.utc)
@@ -56,6 +60,12 @@ class MockVerse:
 
 
 class TestBuildCommentDto:
+
+    def test_includes_user_id(self) -> None:
+        user_id = uuid4()
+        dto = build_comment_dto(MockComment(user_id=user_id, user=MockUser()))
+
+        assert dto.user_id == user_id
 
     def test_omits_email_for_phone_user(self) -> None:
         user = MockUser(firstname="Sam", lastname=None, email=None)
@@ -195,7 +205,64 @@ class TestCreateVerseCommentService:
             verse_id=verse_id,
             user_id=user_id,
             text="Nice",
+            parent_comment_id=None,
         )
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.create_comment", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_create_reply_success(
+        self,
+        mock_require: AsyncMock,
+        mock_create: AsyncMock,
+    ) -> None:
+        verse_id = uuid4()
+        user_id = uuid4()
+        parent_comment_id = uuid4()
+        user = MockUser(firstname="Writer")
+        mock_create.return_value = MockComment(
+            user=user,
+            verse_id=verse_id,
+            parent_comment_id=parent_comment_id,
+            text="Reply",
+        )
+
+        result = await create_verse_comment_service(
+            verse_id=verse_id,
+            user_id=user_id,
+            text="Reply",
+            parent_comment_id=parent_comment_id,
+        )
+
+        assert result.text == "Reply"
+        assert result.parent_comment_id == parent_comment_id
+        mock_create.assert_awaited_once_with(
+            verse_id=verse_id,
+            user_id=user_id,
+            text="Reply",
+            parent_comment_id=parent_comment_id,
+        )
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.verse_of_day.comment_service.create_comment", new_callable=AsyncMock)
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_create_reply_parent_not_found(
+        self,
+        mock_require: AsyncMock,
+        mock_create: AsyncMock,
+    ) -> None:
+        mock_create.side_effect = ParentCommentNotFoundError()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await create_verse_comment_service(
+                verse_id=uuid4(),
+                user_id=uuid4(),
+                text="Reply",
+                parent_comment_id=uuid4(),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert exc_info.value.detail == "Parent comment not found"
 
     @pytest.mark.asyncio
     @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
@@ -212,6 +279,66 @@ class TestCreateVerseCommentService:
                 verse_id=uuid4(),
                 user_id=uuid4(),
                 text="Hi",
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestGetVerseCommentService:
+
+    @pytest.mark.asyncio
+    @patch(
+        "pecha_api.verse_of_day.comment_service.batch_check_comments_liked_by_user",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "pecha_api.verse_of_day.comment_service.batch_count_comment_likes",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "pecha_api.verse_of_day.comment_service.get_comment_by_id_for_verse_with_user",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_get_comment_success(
+        self,
+        mock_require: AsyncMock,
+        mock_get_comment: AsyncMock,
+        mock_batch_counts: AsyncMock,
+        mock_batch_liked: AsyncMock,
+    ) -> None:
+        verse_id = uuid4()
+        comment = MockComment(user=MockUser(firstname="One"), verse_id=verse_id)
+        mock_get_comment.return_value = comment
+        mock_batch_counts.return_value = {comment.id: 2}
+        mock_batch_liked.return_value = {comment.id}
+
+        result = await get_verse_comment_service(
+            verse_id=verse_id,
+            comment_id=comment.id,
+            user_id=uuid4(),
+        )
+
+        assert result.like_count == 2
+        assert result.liked_by_me is True
+
+    @pytest.mark.asyncio
+    @patch(
+        "pecha_api.verse_of_day.comment_service.get_comment_by_id_for_verse_with_user",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_service._require_verse", new_callable=AsyncMock)
+    async def test_get_comment_not_found(
+        self,
+        mock_require: AsyncMock,
+        mock_get_comment: AsyncMock,
+    ) -> None:
+        mock_get_comment.return_value = None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_verse_comment_service(
+                verse_id=uuid4(),
+                comment_id=uuid4(),
             )
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
