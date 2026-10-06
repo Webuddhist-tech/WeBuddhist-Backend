@@ -84,6 +84,7 @@ async def create_verse_comment(
         verse_id=verse_id,
         user_id=user.id,
         text=request.text,
+        parent_comment_id=request.parent_comment_id,
     )
 
 

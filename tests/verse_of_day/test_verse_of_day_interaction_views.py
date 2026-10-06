@@ -27,11 +27,16 @@ client = TestClient(api)
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
 
 
-def _comment_dto(verse_id: Optional[UUID] = None) -> VerseOfDayCommentDTO:
+def _comment_dto(
+    verse_id: Optional[UUID] = None,
+    parent_comment_id: Optional[UUID] = None,
+) -> VerseOfDayCommentDTO:
     now = datetime.now(tz.utc).isoformat()
     return VerseOfDayCommentDTO(
         id=uuid4(),
         verse_id=verse_id or uuid4(),
+        user_id=uuid4(),
+        parent_comment_id=parent_comment_id,
         user={
             "first_name": "First",
             "last_name": "Last",
@@ -245,6 +250,7 @@ class TestVerseOfDayCommentViews:
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 1
         assert response.json()["comments"][0]["text"] == "Lovely verse."
+        assert "user_id" in response.json()["comments"][0]
         assert "email" not in response.json()["comments"][0]["user"]
 
     @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
@@ -270,6 +276,43 @@ class TestVerseOfDayCommentViews:
             verse_id=verse_id,
             user_id=user.id,
             text="Lovely verse.",
+            parent_comment_id=None,
+        )
+
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    @patch(
+        "pecha_api.verse_of_day.comment_views.create_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    def test_create_reply_to_comment(
+        self, mock_service: AsyncMock, mock_threadpool: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        parent_comment_id = uuid4()
+        user = MagicMock()
+        user.id = uuid4()
+        mock_threadpool.return_value = user
+        mock_service.return_value = _comment_dto(
+            verse_id=verse_id,
+            parent_comment_id=parent_comment_id,
+        )
+
+        response = client.post(
+            f"/verse-of-day/{verse_id}/comments",
+            headers=AUTH_HEADERS,
+            json={
+                "text": "Nested reply",
+                "parent_comment_id": str(parent_comment_id),
+            },
+        )
+
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.json()["parent_comment_id"] == str(parent_comment_id)
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            user_id=user.id,
+            text="Nested reply",
+            parent_comment_id=parent_comment_id,
         )
 
     @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)

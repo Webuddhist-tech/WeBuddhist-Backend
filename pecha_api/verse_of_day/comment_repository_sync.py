@@ -53,6 +53,21 @@ def _get_comment_by_id(db: Session, comment_id: UUID) -> Optional[VerseOfDayComm
     )
 
 
+def _get_comment_by_id_for_verse(
+    db: Session,
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    return (
+        db.query(VerseOfDayComment)
+        .filter(
+            VerseOfDayComment.id == comment_id,
+            VerseOfDayComment.verse_id == verse_id,
+        )
+        .first()
+    )
+
+
 def _delete_comment(db: Session, comment: VerseOfDayComment) -> None:
     db.delete(comment)
     db.commit()
@@ -71,14 +86,28 @@ def create_comment_in_session(
     verse_id: UUID,
     user_id: UUID,
     text: str,
+    parent_comment_id: Optional[UUID] = None,
 ) -> VerseOfDayComment:
     with SessionLocal() as db:
         comment = VerseOfDayComment(
             verse_id=verse_id,
             user_id=user_id,
+            parent_comment_id=parent_comment_id,
             text=text,
         )
         return _create_comment(db=db, comment=comment)
+
+
+def get_comment_by_id_for_verse_in_session(
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    with SessionLocal() as db:
+        return _get_comment_by_id_for_verse(
+            db=db,
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
 
 
 def get_comment_by_id_in_session(comment_id: UUID) -> Optional[VerseOfDayComment]:

@@ -9,9 +9,11 @@ from pecha_api.verse_of_day.comment_repository_sync import (
     _create_comment,
     _delete_comment,
     _get_comment_by_id,
+    _get_comment_by_id_for_verse,
     _get_verse_comments,
     create_comment_in_session,
     delete_comment_in_session,
+    get_comment_by_id_for_verse_in_session,
     get_comment_by_id_in_session,
     get_verse_comments_in_session,
 )
@@ -63,6 +65,23 @@ def test_get_comment_by_id() -> None:
     assert _get_comment_by_id(db=db, comment_id=comment_id) is expected
 
 
+def test_get_comment_by_id_for_verse() -> None:
+    db: MagicMock = MagicMock(spec=Session)
+    comment_id = uuid4()
+    verse_id = uuid4()
+    expected = MagicMock()
+    _comment_query(db).filter.return_value.first.return_value = expected
+
+    assert (
+        _get_comment_by_id_for_verse(
+            db=db,
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
+        is expected
+    )
+
+
 def test_delete_comment() -> None:
     db: MagicMock = MagicMock(spec=Session)
     comment = MagicMock()
@@ -106,6 +125,57 @@ def test_create_comment_in_session(
     assert comment.verse_id == verse_id
     assert comment.user_id == user_id
     assert comment.text == "Nice"
+    assert comment.parent_comment_id is None
+
+
+@patch("pecha_api.verse_of_day.comment_repository_sync._create_comment")
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_create_comment_in_session_with_parent(
+    mock_session_local: MagicMock, mock_create: MagicMock
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    verse_id = uuid4()
+    user_id = uuid4()
+    parent_comment_id = uuid4()
+    created = MagicMock()
+    mock_create.return_value = created
+
+    result = create_comment_in_session(
+        verse_id=verse_id,
+        user_id=user_id,
+        text="Reply",
+        parent_comment_id=parent_comment_id,
+    )
+
+    assert result is created
+    comment = mock_create.call_args.kwargs["comment"]
+    assert comment.parent_comment_id == parent_comment_id
+
+
+@patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse")
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_get_comment_by_id_for_verse_in_session(
+    mock_session_local: MagicMock, mock_get: MagicMock
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    comment_id = uuid4()
+    verse_id = uuid4()
+    mock_get.return_value = None
+
+    assert (
+        get_comment_by_id_for_verse_in_session(
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
+        is None
+    )
+    mock_get.assert_called_once_with(
+        db=db,
+        comment_id=comment_id,
+        verse_id=verse_id,
+    )
 
 
 @patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id")

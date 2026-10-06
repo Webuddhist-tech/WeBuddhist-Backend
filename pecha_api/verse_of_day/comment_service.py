@@ -20,6 +20,7 @@ from pecha_api.verse_of_day.comment_repository import (
     create_comment,
     delete_comment,
     get_comment_by_id,
+    get_comment_by_id_for_verse,
     get_verse_comments,
 )
 from pecha_api.verse_of_day.comment_response_models import (
@@ -70,6 +71,8 @@ def build_comment_dto(
     return VerseOfDayCommentDTO(
         id=comment.id,
         verse_id=comment.verse_id,
+        user_id=comment.user_id,
+        parent_comment_id=comment.parent_comment_id,
         user=_build_comment_user(comment.user),
         text=comment.text,
         created_at=_isoformat(comment.created_at),
@@ -130,9 +133,27 @@ async def create_verse_comment_service(
     verse_id: UUID,
     user_id: UUID,
     text: str,
+    parent_comment_id: Optional[UUID] = None,
 ) -> VerseOfDayCommentDTO:
     await _require_verse(verse_id)
-    created = await create_comment(verse_id=verse_id, user_id=user_id, text=text)
+
+    if parent_comment_id is not None:
+        parent_comment = await get_comment_by_id_for_verse(
+            comment_id=parent_comment_id,
+            verse_id=verse_id,
+        )
+        if not parent_comment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Parent comment not found",
+            )
+
+    created = await create_comment(
+        verse_id=verse_id,
+        user_id=user_id,
+        text=text,
+        parent_comment_id=parent_comment_id,
+    )
     return build_comment_dto(created)
 
 

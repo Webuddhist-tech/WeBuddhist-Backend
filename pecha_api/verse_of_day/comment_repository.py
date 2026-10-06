@@ -29,12 +29,25 @@ async def create_comment(
     verse_id: UUID,
     user_id: UUID,
     text: str,
+    parent_comment_id: Optional[UUID] = None,
 ) -> VerseOfDayComment:
     return await run_in_threadpool(
         sync.create_comment_in_session,
         verse_id,
         user_id,
         text,
+        parent_comment_id,
+    )
+
+
+async def get_comment_by_id_for_verse(
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    return await run_in_threadpool(
+        sync.get_comment_by_id_for_verse_in_session,
+        comment_id,
+        verse_id,
     )
 
 
