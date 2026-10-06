@@ -14,8 +14,12 @@ All paths below are relative to the API root **`/api/v1`**.
   `POST /verse-of-day/{verse_id}/comments` and an optional `parent_comment_id`
   in the JSON body.
 - `GET /verse-of-day/{verse_id}/comments` returns a **flat**, paginated list
-  (newest first). Each item may include `parent_comment_id`; the client nests
-  replies under their parent for threaded UI (same as group posts).
+  (newest first). Each item may include `parent_comment_id`. Because pages are
+  newest-first, a page can include a reply **without** its older parent — use
+  `GET /verse-of-day/{verse_id}/comments/{comment_id}` to load a missing parent
+  (or fetch more pages) before nesting in the UI.
+- Deleting a comment **hard-deletes** that row and **all nested replies**
+  (database and ORM cascade). Replies do not become top-level comments.
 
 ---
 
@@ -204,15 +208,27 @@ Newest likes first.
 }
 ```
 
-Use `total` for headers such as “Comments – 2”. Thread replies in the client
-by grouping items with the same `parent_comment_id` (flat feed, same as group
-post comments).
+Use `total` for headers such as “Comments – 2”. Build threads by grouping on
+`parent_comment_id`; fetch missing parents via §6 when needed.
 
 **Errors:** `404` if verse not found.
 
 ---
 
-### 6. Create comment or reply
+### 6. Get one comment
+
+| Method | Path | Auth |
+|--------|------|------|
+| `GET` | `/verse-of-day/{verse_id}/comments/{comment_id}` | Optional Bearer |
+
+**Response `200`** — `VerseOfDayCommentDTO` (same shape as list items, including
+`like_count` / `liked_by_me` when authenticated).
+
+**Errors:** `404` if the verse or comment (on that verse) does not exist.
+
+---
+
+### 7. Create comment or reply
 
 | Method | Path | Auth |
 |--------|------|------|
@@ -252,7 +268,7 @@ post comments).
 
 ---
 
-### 7. Delete comment
+### 8. Delete comment
 
 | Method | Path | Auth |
 |--------|------|------|
@@ -260,7 +276,8 @@ post comments).
 
 **Request body:** none.
 
-**Response `204`** — empty body. Only the comment author may delete.
+**Response `204`** — empty body. Only the comment author may delete. All direct
+and nested replies are removed with the deleted comment (cascade).
 
 **Errors:** `404` comment or verse not found; `403` not the author.
 
@@ -268,7 +285,7 @@ post comments).
 
 ## Comment likes
 
-### 8. List users who liked a comment
+### 9. List users who liked a comment
 
 | Method | Path | Auth |
 |--------|------|------|
@@ -299,7 +316,7 @@ post comments).
 
 ---
 
-### 9. Like a comment
+### 10. Like a comment
 
 | Method | Path | Auth |
 |--------|------|------|
@@ -324,7 +341,7 @@ post comments).
 
 ---
 
-### 10. Unlike a comment
+### 11. Unlike a comment
 
 | Method | Path | Auth |
 |--------|------|------|
@@ -347,8 +364,9 @@ post comments).
 | 3 | POST | `/verse-of-day/{verse_id}/likes` | — | `LikeVerseOfDayResponse` |
 | 4 | DELETE | `/verse-of-day/{verse_id}/likes` | — | `204` |
 | 5 | GET | `/verse-of-day/{verse_id}/comments` | Query: `skip`, `limit` | `VerseOfDayCommentsResponse` |
-| 6 | POST | `/verse-of-day/{verse_id}/comments` | `{ text, parent_comment_id? }` | `VerseOfDayCommentDTO` |
-| 7 | DELETE | `/verse-of-day/comments/{comment_id}` | — | `204` |
-| 8 | GET | `/verse-of-day/comments/{comment_id}/likes/users` | Query: `skip`, `limit` | `VerseOfDayCommentLikersResponse` |
-| 9 | POST | `/verse-of-day/comments/{comment_id}/likes` | — | `LikeVerseOfDayCommentResponse` |
-| 10 | DELETE | `/verse-of-day/comments/{comment_id}/likes` | — | `204` |
+| 6 | GET | `/verse-of-day/{verse_id}/comments/{comment_id}` | — | `VerseOfDayCommentDTO` |
+| 7 | POST | `/verse-of-day/{verse_id}/comments` | `{ text, parent_comment_id? }` | `VerseOfDayCommentDTO` |
+| 8 | DELETE | `/verse-of-day/comments/{comment_id}` | — | `204` |
+| 9 | GET | `/verse-of-day/comments/{comment_id}/likes/users` | Query: `skip`, `limit` | `VerseOfDayCommentLikersResponse` |
+| 10 | POST | `/verse-of-day/comments/{comment_id}/likes` | — | `LikeVerseOfDayCommentResponse` |
+| 11 | DELETE | `/verse-of-day/comments/{comment_id}/likes` | — | `204` |

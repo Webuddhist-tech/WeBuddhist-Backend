@@ -15,6 +15,7 @@ from pecha_api.verse_of_day.comment_response_models import (
 from pecha_api.verse_of_day.comment_service import (
     create_verse_comment_service,
     delete_verse_comment_service,
+    get_verse_comment_service,
     list_verse_comments_service,
 )
 
@@ -61,6 +62,37 @@ async def list_verse_comments(
         verse_id=verse_id,
         skip=skip,
         limit=limit,
+        user_id=user_id,
+    )
+
+
+@verse_of_day_comments_router.get(
+    "/{comment_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=VerseOfDayCommentDTO,
+)
+async def get_verse_comment(
+    verse_id: UUID,
+    comment_id: UUID,
+    authentication_credential: Annotated[
+        Optional[HTTPAuthorizationCredentials], Depends(oauth2_scheme_optional)
+    ] = None,
+) -> VerseOfDayCommentDTO:
+    """Get a single comment on a verse (for threading / missing parents in paged lists)."""
+    user_id = None
+    if authentication_credential:
+        try:
+            user = await run_in_threadpool(
+                validate_and_extract_user_details,
+                token=authentication_credential.credentials,
+            )
+            user_id = user.id
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
+    return await get_verse_comment_service(
+        verse_id=verse_id,
+        comment_id=comment_id,
         user_id=user_id,
     )
 

@@ -2,8 +2,11 @@
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import pytest
+
 from sqlalchemy.orm import Session
 
+from pecha_api.verse_of_day.comment_errors import ParentCommentNotFoundError
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
 from pecha_api.verse_of_day.comment_repository_sync import (
     _create_comment,
@@ -128,10 +131,32 @@ def test_create_comment_in_session(
     assert comment.parent_comment_id is None
 
 
+@patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse")
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_create_comment_in_session_parent_not_found(
+    mock_session_local: MagicMock,
+    mock_get_parent: MagicMock,
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    mock_get_parent.return_value = None
+
+    with pytest.raises(ParentCommentNotFoundError):
+        create_comment_in_session(
+            verse_id=uuid4(),
+            user_id=uuid4(),
+            text="Reply",
+            parent_comment_id=uuid4(),
+        )
+
+
 @patch("pecha_api.verse_of_day.comment_repository_sync._create_comment")
+@patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse")
 @patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
 def test_create_comment_in_session_with_parent(
-    mock_session_local: MagicMock, mock_create: MagicMock
+    mock_session_local: MagicMock,
+    mock_get_parent: MagicMock,
+    mock_create: MagicMock,
 ) -> None:
     db = MagicMock()
     mock_session_local.return_value.__enter__.return_value = db
@@ -139,6 +164,7 @@ def test_create_comment_in_session_with_parent(
     user_id = uuid4()
     parent_comment_id = uuid4()
     created = MagicMock()
+    mock_get_parent.return_value = MagicMock()
     mock_create.return_value = created
 
     result = create_comment_in_session(

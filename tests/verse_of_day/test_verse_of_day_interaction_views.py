@@ -253,6 +253,26 @@ class TestVerseOfDayCommentViews:
         assert "user_id" in response.json()["comments"][0]
         assert "email" not in response.json()["comments"][0]["user"]
 
+    @patch(
+        "pecha_api.verse_of_day.comment_views.get_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    def test_get_comment(self, mock_service: AsyncMock) -> None:
+        verse_id = uuid4()
+        comment_id = uuid4()
+        mock_service.return_value = _comment_dto(verse_id=verse_id)
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments/{comment_id}",
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            comment_id=comment_id,
+            user_id=None,
+        )
+
     @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
     @patch(
         "pecha_api.verse_of_day.comment_views.create_verse_comment_service",

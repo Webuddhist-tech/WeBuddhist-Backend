@@ -16,11 +16,12 @@ from pecha_api.verse_of_day.comment_like_repository import (
     batch_check_comments_liked_by_user,
     batch_count_comment_likes,
 )
+from pecha_api.verse_of_day.comment_errors import ParentCommentNotFoundError
 from pecha_api.verse_of_day.comment_repository import (
     create_comment,
     delete_comment,
     get_comment_by_id,
-    get_comment_by_id_for_verse,
+    get_comment_by_id_for_verse_with_user,
     get_verse_comments,
 )
 from pecha_api.verse_of_day.comment_response_models import (
@@ -129,6 +130,35 @@ async def list_verse_comments_service(
     )
 
 
+async def get_verse_comment_service(
+    verse_id: UUID,
+    comment_id: UUID,
+    user_id: Optional[UUID] = None,
+) -> VerseOfDayCommentDTO:
+    await _require_verse(verse_id)
+    comment = await get_comment_by_id_for_verse_with_user(
+        comment_id=comment_id,
+        verse_id=verse_id,
+    )
+    if comment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=NOT_FOUND,
+        )
+
+    like_counts = await batch_count_comment_likes([comment.id])
+    liked_comments = (
+        await batch_check_comments_liked_by_user([comment.id], user_id)
+        if user_id
+        else set()
+    )
+    return build_comment_dto(
+        comment,
+        like_count=like_counts.get(comment.id, 0),
+        liked_by_me=comment.id in liked_comments,
+    )
+
+
 async def create_verse_comment_service(
     verse_id: UUID,
     user_id: UUID,
@@ -137,23 +167,19 @@ async def create_verse_comment_service(
 ) -> VerseOfDayCommentDTO:
     await _require_verse(verse_id)
 
-    if parent_comment_id is not None:
-        parent_comment = await get_comment_by_id_for_verse(
-            comment_id=parent_comment_id,
+    try:
+        created = await create_comment(
             verse_id=verse_id,
+            user_id=user_id,
+            text=text,
+            parent_comment_id=parent_comment_id,
         )
-        if not parent_comment:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Parent comment not found",
-            )
+    except ParentCommentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Parent comment not found",
+        ) from exc
 
-    created = await create_comment(
-        verse_id=verse_id,
-        user_id=user_id,
-        text=text,
-        parent_comment_id=parent_comment_id,
-    )
     return build_comment_dto(created)
 
 

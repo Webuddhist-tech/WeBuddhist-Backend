@@ -51,6 +51,17 @@ async def get_comment_by_id_for_verse(
     )
 
 
+async def get_comment_by_id_for_verse_with_user(
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    return await run_in_threadpool(
+        sync.get_comment_by_id_for_verse_with_user_in_session,
+        comment_id,
+        verse_id,
+    )
+
+
 async def get_comment_by_id(comment_id: UUID) -> Optional[VerseOfDayComment]:
     return await run_in_threadpool(sync.get_comment_by_id_in_session, comment_id)
 

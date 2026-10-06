@@ -57,6 +57,8 @@ class VerseOfDayComment(Base):
         "VerseOfDayComment",
         foreign_keys=[parent_comment_id],
         back_populates="parent_comment",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     __table_args__ = (
