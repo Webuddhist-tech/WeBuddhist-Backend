@@ -1,6 +1,10 @@
 import os
 import re
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 DEFAULTS = dict(
     SITE_LANGUAGE="en",
     SITE_NAME="Pecha",
@@ -330,6 +334,10 @@ DEFAULTS = dict(
     # every day between here and the typo.
     EVENT_MAX_SPAN_DAYS=366,
     DEFAULT_EVENT_TIMEZONE="Asia/Kolkata",
+
+    # YouTube Data API v3. Used to resolve plan-day video length. Empty
+    # means lookups are skipped; GET paths still return the link.
+    YOUTUBE_API_KEY="",
 
     # Sentry error tracking (disabled unless SENTRY_DSN is set)
     SENTRY_DSN="",

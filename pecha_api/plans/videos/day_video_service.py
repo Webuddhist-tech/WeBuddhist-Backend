@@ -1,6 +1,8 @@
+from typing import Iterable, List, Optional, Sequence
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.db.database import SessionLocal
@@ -31,7 +33,11 @@ from pecha_api.plans.videos.day_video_response_models import (
     DayVideoListResponse,
     ReorderDayVideosRequest,
 )
-from pecha_api.plans.videos.youtube_utils import extract_youtube_video_id
+from pecha_api.plans.videos.youtube_utils import (
+    durations_for_video_ids,
+    extract_youtube_video_id,
+    lookup_youtube_duration_seconds,
+)
 
 
 def _to_dto(video: DayVideo) -> DayVideoDTO:
@@ -41,9 +47,40 @@ def _to_dto(video: DayVideo) -> DayVideoDTO:
         url=video.url,
         video_id=video.video_id,
         title=video.title,
+        duration_seconds=video.duration_seconds,
         display_order=video.display_order,
         created_at=video.created_at,
     )
+
+
+def ensure_day_video_durations(
+    db: Session,
+    videos: Sequence[DayVideo],
+    *,
+    commit: bool = True,
+) -> List[DayVideo]:
+    """Fill missing YouTube lengths, persist any that resolve, leave the rest."""
+    missing = [video for video in videos if video.duration_seconds is None and video.video_id]
+    if missing:
+        durations = durations_for_video_ids(video.video_id for video in missing)
+        updated = False
+        for video in missing:
+            seconds = durations.get(video.video_id)
+            if seconds is not None:
+                video.duration_seconds = seconds
+                updated = True
+        if updated and commit:
+            db.commit()
+    return list(videos)
+
+
+def day_videos_with_durations(
+    db: Session,
+    videos: Iterable[DayVideo],
+    *,
+    commit: bool = True,
+) -> List[DayVideo]:
+    return ensure_day_video_durations(db=db, videos=list(videos), commit=commit)
 
 
 def _get_author_plan_item_by_day_id(db, day_id: UUID, current_author):
@@ -72,7 +109,9 @@ def list_day_videos(token: str, day_id: UUID) -> DayVideoListResponse:
     with SessionLocal() as db:
         current_author = validate_cms_author_details(token=token)
         _get_author_plan_item_by_day_id(db=db, day_id=day_id, current_author=current_author)
-        videos = get_day_videos_by_day_id(db=db, day_id=day_id)
+        videos = day_videos_with_durations(
+            db=db, videos=get_day_videos_by_day_id(db=db, day_id=day_id)
+        )
         return DayVideoListResponse(videos=[_to_dto(video) for video in videos])
 
 
@@ -90,6 +129,7 @@ def add_day_video(token: str, day_id: UUID, request: CreateDayVideoRequest) -> D
         _get_author_plan_item_by_day_id(db=db, day_id=day_id, current_author=current_author)
 
         display_order = get_next_display_order(db=db, day_id=day_id)
+        duration_seconds: Optional[int] = lookup_youtube_duration_seconds(video_id)
         video = create_day_video(
             db=db,
             day_video=DayVideo(
@@ -97,6 +137,7 @@ def add_day_video(token: str, day_id: UUID, request: CreateDayVideoRequest) -> D
                 url=url,
                 video_id=video_id,
                 title=request.title,
+                duration_seconds=duration_seconds,
                 display_order=display_order,
                 created_by=current_author.email,
             ),
@@ -128,5 +169,7 @@ def reorder_day_videos_entries(
         order_by_id = {item.id: item.display_order for item in request.videos}
         reorder_day_videos(db=db, day_id=day_id, order_by_id=order_by_id)
 
-        videos = get_day_videos_by_day_id(db=db, day_id=day_id)
+        videos = day_videos_with_durations(
+            db=db, videos=get_day_videos_by_day_id(db=db, day_id=day_id)
+        )
         return DayVideoListResponse(videos=[_to_dto(video) for video in videos])

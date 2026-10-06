@@ -608,9 +608,13 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
     }
 
     from pecha_api.plans.videos.day_video_repository import get_day_videos_by_day_ids
+    from pecha_api.plans.videos.day_video_service import day_videos_with_durations
 
     videos_by_item: Dict[UUID, List] = {}
-    for video in get_day_videos_by_day_ids(db=db, day_ids=plan_item_ids):
+    day_videos = day_videos_with_durations(
+        db=db, videos=get_day_videos_by_day_ids(db=db, day_ids=plan_item_ids)
+    )
+    for video in day_videos:
         videos_by_item.setdefault(video.day_id, []).append(video)
 
     from pecha_api.plans.shareable_images.day_shareable_image_repository import (
@@ -660,6 +664,7 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
                         url=video.url,
                         video_id=video.video_id,
                         title=video.title,
+                        duration_seconds=video.duration_seconds,
                         display_order=video.display_order,
                     )
                     for video in videos_by_item.get(item.id, [])
@@ -1005,6 +1010,9 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
         thumbnail_url, thumbnail_key, shareable_image_url, shareable_image_key = (
             build_plan_day_shareable_image_fields(plan_item.shareable_images)
         )
+        from pecha_api.plans.videos.day_video_service import day_videos_with_durations
+
+        videos = day_videos_with_durations(db=db, videos=plan_item.videos)
         plan_day_dto: PlanDayDTO = PlanDayDTO(
             id=plan_item.id,
             day_number=plan_item.day_number,
@@ -1022,9 +1030,10 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
                     url=video.url,
                     video_id=video.video_id,
                     title=video.title,
+                    duration_seconds=video.duration_seconds,
                     display_order=video.display_order,
                 )
-                for video in plan_item.videos
+                for video in videos
             ],
             tasks=[
                 TaskDTO(

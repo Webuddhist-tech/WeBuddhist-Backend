@@ -29,6 +29,7 @@ from pecha_api.plans.public.plan_response_models import (
     PlanDayDTO,
     TagsResponse,
     DailyPlanResponse,
+    DayVideoSummaryDTO,
 )
 from pecha_api.plans.tags.tag_response_models import PublicTagsListResponse
 from pecha_api.plans.plans_enums import PlanStatus, DifficultyLevel, LanguageCode
@@ -1321,6 +1322,47 @@ async def test_get_plan_day_details_cache_hit_resolves_series_id():
 
     assert response is cached
     assert response.series_id == series_id
+
+
+@pytest.mark.asyncio
+async def test_get_plan_day_details_skips_cache_when_video_duration_missing():
+    plan_id = uuid4()
+    video_id = uuid4()
+    cached = PlanDayDTO(
+        id=uuid4(),
+        day_number=1,
+        tasks=[],
+        videos=[
+            DayVideoSummaryDTO(
+                id=video_id,
+                url="https://youtu.be/AAAAAAAAAAA",
+                video_id="AAAAAAAAAAA",
+                display_order=0,
+            )
+        ],
+    )
+    rebuilt = PlanDayDTO(
+        id=cached.id,
+        day_number=1,
+        tasks=[],
+        videos=[
+            DayVideoSummaryDTO(
+                id=video_id,
+                url="https://youtu.be/AAAAAAAAAAA",
+                video_id="AAAAAAAAAAA",
+                duration_seconds=253,
+                display_order=0,
+            )
+        ],
+    )
+
+    with patch("pecha_api.plans.public.plan_service.get_plan_day_detail_cache", return_value=cached), \
+         patch("pecha_api.plans.public.plan_service._load_plan_day", return_value=(MagicMock(), None, None, {})), \
+         patch("pecha_api.plans.public.plan_service._build_plan_day_dto", new=AsyncMock(return_value=rebuilt)), \
+         patch("pecha_api.plans.public.plan_service.set_plan_day_detail_cache"):
+        response = await get_plan_day_details(plan_id=plan_id, day_number=1)
+
+    assert response.videos[0].duration_seconds == 253
 
 
 @pytest.mark.asyncio
