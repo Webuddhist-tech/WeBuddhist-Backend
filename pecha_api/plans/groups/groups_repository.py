@@ -40,7 +40,13 @@ from pecha_api.plans.shared.event_linkage import (
 )
 from pecha_api.plans.tags.tag_model import Tag
 from pecha_api.plans.users.plan_users_models import SeriesPartner, UserSeriesEnrollment
+from pecha_api.traditions.tradition_models import Tradition
 from pecha_api.users.users_models import Users
+
+
+def _group_tradition_load():
+    # Group payloads carry the tradition's localized name, so load its metadata too.
+    return selectinload(AuthorGroup.tradition).selectinload(Tradition.metadata_entries)
 
 
 def get_group_ids_by_plan_ids(db: Session, plan_ids: Sequence[UUID]) -> Dict[UUID, UUID]:
@@ -284,6 +290,7 @@ def get_group_by_id(db: Session, group_id: UUID) -> Optional[AuthorGroup]:
             selectinload(AuthorGroup.members).selectinload(AuthorGroupMember.author),
             selectinload(AuthorGroup.social_links),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
+            _group_tradition_load(),
         )
         .filter(AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None))
         .first()
@@ -382,6 +389,7 @@ def get_groups_by_ids(db: Session, group_ids: Sequence[UUID]) -> List[AuthorGrou
             selectinload(AuthorGroup.metadata_entries),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
             selectinload(AuthorGroup.members),
+            _group_tradition_load(),
         )
         .filter(
             AuthorGroup.id.in_(group_ids),
@@ -509,10 +517,13 @@ def get_groups_paginated(
     is_public: Optional[bool] = None,
     group_type: Optional[AuthorGroupType] = None,
     status: Optional[AuthorGroupStatus] = None,
+    tradition_code: Optional[str] = None,
 ) -> Tuple[List[AuthorGroup], int]:
     filters = [AuthorGroup.deleted_at.is_(None)]
     if is_public is not None:
         filters.append(AuthorGroup.is_public.is_(is_public))
+    if tradition_code:
+        filters.append(AuthorGroup.tradition.has(Tradition.code == tradition_code))
     # Optional, not defaulted to PUBLISHED: CMS listings must still see drafts.
     if status is not None:
         filters.append(AuthorGroup.status == status)
@@ -564,6 +575,7 @@ def get_groups_paginated(
             selectinload(AuthorGroup.metadata_entries),
             selectinload(AuthorGroup.members),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
+            _group_tradition_load(),
         )
         .filter(*filters)
 

@@ -149,6 +149,13 @@ class AuthorGroup(Base):
     status = Column(AuthorGroupStatusEnum, nullable=False, default="DRAFT")
     avatar_key = Column(String(1000), nullable=True)
     banner_key = Column(String(1000), nullable=True)
+    # The Buddhist tradition the group practises in. Nullable because groups
+    # created before traditions were tracked have none until set in Studio.
+    tradition_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("tradition_list.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     created_at = Column(
         DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False
@@ -159,6 +166,7 @@ class AuthorGroup(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     deleted_by = Column(String(255), nullable=True)
 
+    tradition = relationship("Tradition", lazy="select")
     metadata_entries = relationship(
         "AuthorGroupMetadata",
         back_populates="group",
@@ -185,6 +193,7 @@ class AuthorGroup(Base):
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        Index("idx_author_groups_tradition_id", "tradition_id"),
     )
 
 

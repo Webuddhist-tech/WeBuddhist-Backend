@@ -23,6 +23,13 @@ class GroupMetadataDTO(BaseModel):
 GroupMetadataResponse = Union[GroupMetadataDTO, List[GroupMetadataDTO], None]
 
 
+class GroupTraditionDTO(BaseModel):
+    id: UUID
+    code: str
+    # Localized to the request language, falling back to EN.
+    name: Optional[str] = None
+
+
 class AuthorGroupSummaryDTO(BaseModel):
     id: UUID
     slug: str
@@ -33,6 +40,7 @@ class AuthorGroupSummaryDTO(BaseModel):
     banner_key: Optional[str] = None
     avatar_url: Optional[str] = None
     banner_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     tags: List[TagSummaryDTO] = []
     follower_count: int = 0
