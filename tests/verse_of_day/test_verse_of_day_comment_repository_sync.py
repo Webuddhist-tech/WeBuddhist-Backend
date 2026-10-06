@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
-
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from pecha_api.verse_of_day.comment_errors import ParentCommentNotFoundError
@@ -13,10 +13,12 @@ from pecha_api.verse_of_day.comment_repository_sync import (
     _delete_comment,
     _get_comment_by_id,
     _get_comment_by_id_for_verse,
+    _get_comment_by_id_for_verse_with_user,
     _get_verse_comments,
     create_comment_in_session,
     delete_comment_in_session,
     get_comment_by_id_for_verse_in_session,
+    get_comment_by_id_for_verse_with_user_in_session,
     get_comment_by_id_in_session,
     get_verse_comments_in_session,
 )
@@ -77,6 +79,25 @@ def test_get_comment_by_id_for_verse() -> None:
 
     assert (
         _get_comment_by_id_for_verse(
+            db=db,
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
+        is expected
+    )
+
+
+def test_get_comment_by_id_for_verse_with_user() -> None:
+    db: MagicMock = MagicMock(spec=Session)
+    comment_id = uuid4()
+    verse_id = uuid4()
+    expected = MagicMock()
+    _comment_query(db).options.return_value.filter.return_value.first.return_value = (
+        expected
+    )
+
+    assert (
+        _get_comment_by_id_for_verse_with_user(
             db=db,
             comment_id=comment_id,
             verse_id=verse_id,
@@ -177,6 +198,80 @@ def test_create_comment_in_session_with_parent(
     assert result is created
     comment = mock_create.call_args.kwargs["comment"]
     assert comment.parent_comment_id == parent_comment_id
+
+
+@patch("pecha_api.verse_of_day.comment_repository_sync._create_comment")
+@patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse")
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_create_comment_in_session_integrity_error_maps_to_parent_not_found(
+    mock_session_local: MagicMock,
+    mock_get_parent: MagicMock,
+    mock_create: MagicMock,
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    mock_get_parent.return_value = MagicMock()
+    mock_create.side_effect = IntegrityError("", {}, Exception())
+
+    with pytest.raises(ParentCommentNotFoundError):
+        create_comment_in_session(
+            verse_id=uuid4(),
+            user_id=uuid4(),
+            text="Reply",
+            parent_comment_id=uuid4(),
+        )
+
+    db.rollback.assert_called_once()
+
+
+@patch("pecha_api.verse_of_day.comment_repository_sync._create_comment")
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_create_comment_in_session_integrity_error_reraises_without_parent(
+    mock_session_local: MagicMock,
+    mock_create: MagicMock,
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    integrity_error = IntegrityError("stmt", "params", Exception())
+    mock_create.side_effect = integrity_error
+
+    with pytest.raises(IntegrityError):
+        create_comment_in_session(
+            verse_id=uuid4(),
+            user_id=uuid4(),
+            text="Top-level",
+        )
+
+    db.rollback.assert_called_once()
+
+
+@patch(
+    "pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse_with_user"
+)
+@patch("pecha_api.verse_of_day.comment_repository_sync.SessionLocal")
+def test_get_comment_by_id_for_verse_with_user_in_session(
+    mock_session_local: MagicMock,
+    mock_get: MagicMock,
+) -> None:
+    db = MagicMock()
+    mock_session_local.return_value.__enter__.return_value = db
+    comment_id = uuid4()
+    verse_id = uuid4()
+    expected = MagicMock()
+    mock_get.return_value = expected
+
+    assert (
+        get_comment_by_id_for_verse_with_user_in_session(
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
+        is expected
+    )
+    mock_get.assert_called_once_with(
+        db=db,
+        comment_id=comment_id,
+        verse_id=verse_id,
+    )
 
 
 @patch("pecha_api.verse_of_day.comment_repository_sync._get_comment_by_id_for_verse")

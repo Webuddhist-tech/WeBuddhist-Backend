@@ -254,6 +254,92 @@ class TestVerseOfDayCommentViews:
         assert "email" not in response.json()["comments"][0]["user"]
 
     @patch(
+        "pecha_api.verse_of_day.comment_views.list_verse_comments_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_list_comments_valid_token_passes_user_id(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        user_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=user_id)
+        mock_service.return_value = VerseOfDayCommentsResponse(
+            comments=[],
+            skip=0,
+            limit=20,
+            total=0,
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            skip=0,
+            limit=20,
+            user_id=user_id,
+        )
+
+    @patch(
+        "pecha_api.verse_of_day.comment_views.list_verse_comments_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_list_comments_invalid_token_treated_as_anonymous(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        mock_threadpool.side_effect = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+        mock_service.return_value = VerseOfDayCommentsResponse(
+            comments=[],
+            skip=0,
+            limit=20,
+            total=0,
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            skip=0,
+            limit=20,
+            user_id=None,
+        )
+
+    @patch(
+        "pecha_api.verse_of_day.comment_views.list_verse_comments_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_list_comments_non_401_http_exception_propagates(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        mock_threadpool.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        mock_service.assert_not_called()
+
+    @patch(
         "pecha_api.verse_of_day.comment_views.get_verse_comment_service",
         new_callable=AsyncMock,
     )
@@ -272,6 +358,83 @@ class TestVerseOfDayCommentViews:
             comment_id=comment_id,
             user_id=None,
         )
+
+    @patch(
+        "pecha_api.verse_of_day.comment_views.get_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_get_comment_valid_token_passes_user_id(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        comment_id = uuid4()
+        user_id = uuid4()
+        mock_threadpool.return_value = MagicMock(id=user_id)
+        mock_service.return_value = _comment_dto(verse_id=verse_id)
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments/{comment_id}",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            comment_id=comment_id,
+            user_id=user_id,
+        )
+
+    @patch(
+        "pecha_api.verse_of_day.comment_views.get_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_get_comment_invalid_token_treated_as_anonymous(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        comment_id = uuid4()
+        mock_threadpool.side_effect = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+        mock_service.return_value = _comment_dto(verse_id=verse_id)
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments/{comment_id}",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        mock_service.assert_awaited_once_with(
+            verse_id=verse_id,
+            comment_id=comment_id,
+            user_id=None,
+        )
+
+    @patch(
+        "pecha_api.verse_of_day.comment_views.get_verse_comment_service",
+        new_callable=AsyncMock,
+    )
+    @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
+    def test_get_comment_non_401_http_exception_propagates(
+        self, mock_threadpool: AsyncMock, mock_service: AsyncMock
+    ) -> None:
+        verse_id = uuid4()
+        comment_id = uuid4()
+        mock_threadpool.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        )
+
+        response = client.get(
+            f"/verse-of-day/{verse_id}/comments/{comment_id}",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        mock_service.assert_not_called()
 
     @patch("pecha_api.verse_of_day.comment_views.run_in_threadpool", new_callable=AsyncMock)
     @patch(
