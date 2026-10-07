@@ -127,16 +127,14 @@ def _linked_plans_by_language(db: Session, event: Event, author: Author) -> Dict
 
 
 def _add_to_plan_day(
-    db: Session, plan: Plan, day_number: int, links: List[Tuple[EventLink, str]], author_email: str
+    db: Session,
+    plan: Plan,
+    day_number: int,
+    links: List[Tuple[EventLink, str]],
+    author_email: str,
+    *,
+    durations: Dict[str, int],
 ) -> int:
-    # YouTube is called before the row lock so HTTP does not run under with_for_update.
-    # We prefetch every incoming link id because new_links is not known until after the lock.
-    try:
-        durations = durations_for_video_ids(video_id for _, video_id in links)
-    except Exception:
-        logger.warning("YouTube duration lookup failed while syncing event links", exc_info=True)
-        durations = {}
-
     # Locking the day serialises concurrent event saves on it, so the second
     # one sees the first one's videos and display order instead of racing it.
     day = (
@@ -187,13 +185,29 @@ def _sync(db: Session, event: Event, previous_keys: Set[VideoKey], author: Autho
     if not new_links_by_language:
         return []
 
+    video_ids = {
+        video_id
+        for links in new_links_by_language.values()
+        for _, video_id in links
+    }
+    try:
+        durations = durations_for_video_ids(video_ids)
+    except Exception as error:
+        logger.warning(
+            "YouTube duration lookup failed while syncing event links error=%s",
+            type(error).__name__,
+        )
+        durations = {}
+
     plans_by_language = _linked_plans_by_language(db, event, author)
     changed_days: List[ChangedDay] = []
     for language, links in new_links_by_language.items():
         # A video only belongs on a plan in its own language.
         for plan in plans_by_language.get(language, []):
             day_number = _current_plan_day_number(event, plan)
-            if _add_to_plan_day(db, plan, day_number, links, author.email):
+            if _add_to_plan_day(
+                db, plan, day_number, links, author.email, durations=durations
+            ):
                 changed_days.append((plan.id, day_number))
     if changed_days:
         db.commit()

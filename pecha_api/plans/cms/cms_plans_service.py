@@ -585,7 +585,7 @@ async def get_details_plan(token:str,plan_id: UUID) -> PlanWithDays:
     return await run_in_threadpool(_get_details_plan_for_author, current_author, plan_id)
 
 
-def _get_details_plan_for_author(current_author, plan_id: UUID) -> PlanWithDays:
+def _get_details_plan_for_author(current_author: Author, plan_id: UUID) -> PlanWithDays:
     with SessionLocal() as db_session:
         plan = _get_plan_or_404(db=db_session, plan_id=plan_id)
         require_can_read_group_content(db=db_session, group_id=plan.group_id, author=current_author)
@@ -1008,7 +1008,7 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
 
 
 def _get_plan_day_details_for_author(
-    current_author, plan_id: UUID, day_number: int
+    current_author: Author, plan_id: UUID, day_number: int
 ) -> PlanDayDTO:
     with SessionLocal() as db:
         plan = _get_plan_or_404(db=db, plan_id=plan_id)

@@ -1332,6 +1332,7 @@ async def test_get_plan_day_details_uses_cache_when_video_duration_missing():
         id=uuid4(),
         day_number=1,
         tasks=[],
+        series_id=uuid4(),
         videos=[
             DayVideoSummaryDTO(
                 id=video_id,
