@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import String, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
@@ -10,7 +10,12 @@ from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
 from pecha_api.events.event_model import Event
 
-from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatRoomMemberRole
+from pecha_api.chat.enums import (
+    ChatMessageReportSource,
+    ChatMessageType,
+    ChatRoomMemberRole,
+    PrayerSort,
+)
 from pecha_api.chat.models import (
     ChatMessage,
     ChatMessagePrayer,
@@ -20,6 +25,10 @@ from pecha_api.chat.models import (
     ChatRoom,
     ChatRoomMember,
     ChatPrayerNotification,
+)
+from pecha_api.prayer_intentions.intention_slugs import (
+    canonical_prayer_intention_slug,
+    catalog_slug_lookup_candidates,
 )
 from pecha_api.users.users_models import Users
 
@@ -330,23 +339,62 @@ def create_message(db: Session, message: ChatMessage) -> ChatMessage:
     return message
 
 
+def _prayer_sort_order(sort: PrayerSort, seed: Optional[str], prayer_total):
+    """ORDER BY clauses for a prayer sort; `id` breaks ties so pages never
+    overlap. `prayer_total` is the per-message count of people praying."""
+    if sort == PrayerSort.OLDEST:
+        return [ChatMessage.created_at.asc(), ChatMessage.id.asc()]
+    if sort == PrayerSort.MOST_PRAYED:
+        return [prayer_total.desc(), ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+    if sort == PrayerSort.NEEDS_PRAYERS:
+        return [prayer_total.asc(), ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+    if sort == PrayerSort.RANDOM:
+        # Deterministic per seed, so skip/limit pages of one shuffle don't repeat.
+        return [
+            func.md5(func.concat(func.cast(ChatMessage.id, String), seed or "")),
+            ChatMessage.id.asc(),
+        ]
+    return [ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+
+
 def get_room_messages(
     db: Session,
     room_id: UUID,
     skip: int = 0,
     limit: int = 20,
     message_type: Optional[str] = None,
+    sort: PrayerSort = PrayerSort.NEWEST,
+    intention: Optional[str] = None,
+    seed: Optional[str] = None,
 ) -> Tuple[List[ChatMessage], int]:
-    query = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.room_id == room_id)
-        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
-    )
+    query = db.query(ChatMessage).filter(ChatMessage.room_id == room_id)
     if message_type is not None:
         query = query.filter(ChatMessage.message_type == message_type)
+    # Sort and intention only mean something for prayer requests.
+    is_prayer_list = message_type == ChatMessageType.PRAYER.value
+    if is_prayer_list and intention:
+        slug = canonical_prayer_intention_slug(intention)
+        query = query.filter(
+            ChatMessage.intention.in_(catalog_slug_lookup_candidates(slug))
+        )
     total = query.count()
+    if is_prayer_list and sort in (PrayerSort.MOST_PRAYED, PrayerSort.NEEDS_PRAYERS):
+        prayers = (
+            db.query(
+                ChatMessagePrayer.message_id.label("message_id"),
+                func.count(ChatMessagePrayer.id).label("total"),
+            )
+            .group_by(ChatMessagePrayer.message_id)
+            .subquery()
+        )
+        query = query.outerjoin(prayers, prayers.c.message_id == ChatMessage.id)
+        prayer_total = func.coalesce(prayers.c.total, 0)
+    else:
+        prayer_total = None
+    order_by = _prayer_sort_order(sort if is_prayer_list else PrayerSort.NEWEST, seed, prayer_total)
     messages = (
-        query.options(
+        query.order_by(*order_by)
+        .options(
             selectinload(ChatMessage.sender),
             selectinload(ChatMessage.parent).selectinload(ChatMessage.sender),
         )

@@ -34,6 +34,16 @@ class ChatMessageType(enum.Enum):
     PRAYER = "PRAYER"
 
 
+class PrayerSort(str, enum.Enum):
+    """How a room's prayer requests are ordered. NEWEST is the default."""
+
+    NEWEST = "newest"
+    OLDEST = "oldest"
+    MOST_PRAYED = "most_prayed"
+    NEEDS_PRAYERS = "needs_prayers"
+    RANDOM = "random"
+
+
 ChatMessageTypeEnum = Enum(
     ChatMessageType,
     name="chat_message_type",

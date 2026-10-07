@@ -1,3 +1,5 @@
+import pytest
+from pecha_api.chat.enums import PrayerSort
 from datetime import datetime, timezone as tz
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -25,6 +27,7 @@ from pecha_api.chat.repository import (
     get_room_by_id,
     get_room_by_pair,
     get_room_messages,
+    _prayer_sort_order,
     add_prayers,
     claim_prayer_notification_for_dispatch,
     claim_unreported_prayers,
@@ -310,6 +313,43 @@ class TestMessages:
         assert result == messages
         assert total == 1
         query.options.assert_called()
+
+    @pytest.mark.parametrize(
+        "sort, expected",
+        [
+            (PrayerSort.NEWEST, "chat_messages.created_at DESC, chat_messages.id DESC"),
+            (PrayerSort.OLDEST, "chat_messages.created_at ASC, chat_messages.id ASC"),
+            (PrayerSort.MOST_PRAYED, "coalesce(p.total, 0) DESC, chat_messages.created_at DESC"),
+            (PrayerSort.NEEDS_PRAYERS, "coalesce(p.total, 0) ASC, chat_messages.created_at DESC"),
+            (PrayerSort.RANDOM, "md5(concat(CAST(chat_messages.id AS VARCHAR), 'abc')), chat_messages.id ASC"),
+        ],
+    )
+    def test_prayer_sort_order(self, sort, expected):
+        from sqlalchemy import column, func
+        from sqlalchemy.dialects import postgresql
+
+        total = func.coalesce(column("total"), 0)
+        clauses = _prayer_sort_order(sort, "abc", total)
+        sql = ", ".join(
+            str(c.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            for c in clauses
+        ).replace("coalesce(total, 0)", "coalesce(p.total, 0)")
+        assert expected in sql
+
+    def test_get_room_messages_prayer_filters_by_intention(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0, results=[])
+
+        get_room_messages(
+            db=db,
+            room_id=uuid4(),
+            message_type="PRAYER",
+            intention="Compassion",
+            sort=PrayerSort.OLDEST,
+        )
+
+        # room, message_type and intention filters
+        assert query.filter.call_count >= 3
 
     def test_get_message_by_id(self):
         db = MagicMock()
