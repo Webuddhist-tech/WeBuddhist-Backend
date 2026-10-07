@@ -258,6 +258,7 @@ GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
 GROUP_BAN_NOT_FOUND = "Ban not found"
 USER_NOT_JOINED_GROUP = "This user has not joined the group"
 GROUP_MEMBER_DEFAULT_ROLE = "MEMBER"
+INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token"
 USER_BANNED_FROM_GROUP = (
     "This user is banned from the group; lift the ban before admitting them"
 )
@@ -962,6 +963,27 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
         return _group_to_detail(loaded, follower_count=0, db=db)
 
 
+def _assert_slug_available(db: Session, group: AuthorGroup, slug: str) -> None:
+    if slug == group.slug:
+        return
+    existing = get_group_by_slug(db=db, slug=slug)
+    if existing and existing.id != group.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
+
+
+def _metadata_request_to_entries(metadata) -> List[AuthorGroupMetadata]:
+    return [
+        AuthorGroupMetadata(
+            language=item.language.value,
+            title=item.title,
+            sub_title=item.sub_title,
+            description=item.description,
+            description_long=item.description_long,
+        )
+        for item in metadata
+    ]
+
+
 def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRequest) -> AuthorGroupDetailDTO:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
@@ -979,10 +1001,7 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
         )
 
         if "slug" in fields_set:
-            if request.slug != group.slug:
-                existing = get_group_by_slug(db=db, slug=request.slug)
-                if existing and existing.id != group.id:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
+            _assert_slug_available(db=db, group=group, slug=request.slug)
             group.slug = request.slug
         became_public = False
         if "is_public" in fields_set:
@@ -997,17 +1016,11 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
             db.expire(group, ["tradition"])
         if "metadata" in fields_set:
             _assert_metadata_valid(request.metadata)
-            metadata_entries = [
-                AuthorGroupMetadata(
-                    language=item.language.value,
-                    title=item.title,
-                    sub_title=item.sub_title,
-                    description=item.description,
-                    description_long=item.description_long,
-                )
-                for item in request.metadata
-            ]
-            replace_group_metadata(db=db, group_id=group_id, metadata_entries=metadata_entries)
+            replace_group_metadata(
+                db=db,
+                group_id=group_id,
+                metadata_entries=_metadata_request_to_entries(request.metadata),
+            )
             db.expire(group, ["metadata_entries"])
 
         group.updated_by = author.email
@@ -1275,6 +1288,42 @@ def _group_card_title(group: AuthorGroup, language: Optional[str] = None) -> Opt
     return entries[0].title
 
 
+def _recitation_collection_to_dto(collection, item_count: int) -> GroupRecitationCollectionDTO:
+    created_at = collection.created_at
+    return GroupRecitationCollectionDTO(
+        id=collection.id,
+        group_id=collection.group_id,
+        name=collection.name,
+        img_url=_generate_group_asset_url(collection.img_url),
+        item_count=item_count,
+        created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+    )
+
+
+def _series_dto_pairs_by_group(
+    db: Session,
+    series_list: Sequence[Series],
+    language: Optional[str],
+    user_id: Optional[UUID],
+):
+    # Enrollment and partner lookups are scoped to a group, so build per group.
+    series_by_group: Dict[UUID, List[Series]] = {}
+    for series in series_list:
+        series_by_group.setdefault(series.group_id, []).append(series)
+    pairs = []
+    for owning_group_id, group_series in series_by_group.items():
+        dtos = _series_to_dtos(
+            db=db,
+            series_list=group_series,
+            group_id=owning_group_id,
+            language=language,
+            published_only=True,
+            user_id=user_id,
+        )
+        pairs.extend(zip(group_series, dtos))
+    return pairs
+
+
 def get_group_practices_feed(
     token: Optional[str] = None,
     group_id: Optional[UUID] = None,
@@ -1353,35 +1402,18 @@ def get_group_practices_feed(
             db=db, collection_ids=[collection.id for collection in collections]
         )
         collection_dtos = [
-            GroupRecitationCollectionDTO(
-                id=collection.id,
-                group_id=collection.group_id,
-                name=collection.name,
-                img_url=_generate_group_asset_url(collection.img_url),
-                item_count=collection_item_counts.get(collection.id, 0),
-                created_at=collection.created_at.isoformat()
-                if hasattr(collection.created_at, "isoformat")
-                else str(collection.created_at),
-            )
+            _recitation_collection_to_dto(collection, collection_item_counts.get(collection.id, 0))
             for collection in collections
         ]
 
         # Series DTOs are built per owning group because enrollment and partner
         # lookups are scoped to a group.
-        series_by_group: Dict[UUID, List[Series]] = {}
-        for series in series_list:
-            series_by_group.setdefault(series.group_id, []).append(series)
-        series_pairs = []
-        for owning_group_id, group_series in series_by_group.items():
-            dtos = _series_to_dtos(
-                db=db,
-                series_list=group_series,
-                group_id=owning_group_id,
-                language=language,
-                published_only=True,
-                user_id=current_user.id if current_user else None,
-            )
-            series_pairs.extend(zip(group_series, dtos))
+        series_pairs = _series_dto_pairs_by_group(
+            db=db,
+            series_list=series_list,
+            language=language,
+            user_id=current_user.id if current_user else None,
+        )
 
         plan_aggregate_by_id = {
             item.plan.id: item
@@ -1404,12 +1436,12 @@ def get_group_practices_feed(
             db=db, group_accumulator_ids=accumulator_ids
         )
 
-        card_group_ids = list({
+        card_group_ids = [*{
             *[series.group_id for series, _ in series_pairs],
             *[plan.group_id for plan in plans_list],
             *[accumulator.group_id for accumulator in accumulators],
             *[collection.group_id for collection in collections],
-        })
+        }]
         group_by_id = {
             group.id: group
             for group in get_groups_by_ids(db=db, group_ids=card_group_ids)
@@ -3134,14 +3166,14 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=INVALID_OR_EXPIRED_TOKEN,
         )
     if is_refresh_token_payload(payload):
         # Same rule as validate_and_extract_author_details: a refresh token is
         # only good for minting access tokens, never as a bearer credential.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=INVALID_OR_EXPIRED_TOKEN,
         )
 
     with SessionLocal() as db:
@@ -3153,7 +3185,7 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
             # instead of leaking whether group_id exists via 404-vs-401.
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token",
+                detail=INVALID_OR_EXPIRED_TOKEN,
             )
 
         group = get_group_by_id(db=db, group_id=group_id)
