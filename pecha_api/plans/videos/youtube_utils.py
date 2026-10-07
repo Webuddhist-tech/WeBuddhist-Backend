@@ -26,6 +26,7 @@ _YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 _MAX_VIDEO_IDS_PER_REQUEST = 50
 _REQUEST_TIMEOUT_SECONDS = 10.0
 _FAILED_LOOKUP_TTL = timedelta(minutes=15)
+_MAX_FAILED_LOOKUP_ENTRIES = 1024
 _failed_lookup_until: Dict[str, datetime] = {}
 
 
@@ -63,6 +64,15 @@ def parse_iso8601_duration(iso: Optional[str]) -> Optional[int]:
     return total if total > 0 else None
 
 
+def _prune_failed_lookups(*, now: datetime) -> None:
+    expired = [video_id for video_id, until in _failed_lookup_until.items() if until <= now]
+    for video_id in expired:
+        _failed_lookup_until.pop(video_id, None)
+    while len(_failed_lookup_until) > _MAX_FAILED_LOOKUP_ENTRIES:
+        oldest = min(_failed_lookup_until, key=_failed_lookup_until.get)
+        _failed_lookup_until.pop(oldest, None)
+
+
 def _lookup_backoff_active(video_id: str, *, now: datetime) -> bool:
     until = _failed_lookup_until.get(video_id)
     return until is not None and until > now
@@ -73,6 +83,7 @@ def _mark_failed_lookups(video_ids: Sequence[str], *, now: datetime) -> None:
     for video_id in video_ids:
         if video_id:
             _failed_lookup_until[video_id] = retry_after
+    _prune_failed_lookups(now=now)
 
 
 def _clear_failed_lookups(video_ids: Iterable[str]) -> None:
@@ -87,12 +98,12 @@ def fetch_youtube_durations(video_ids: Sequence[str]) -> Dict[str, int]:
     Missing API key, HTTP errors, and empty items are swallowed so callers
     can still save or return the link without a duration.
     """
-    api_key = (config.get("YOUTUBE_API_KEY") or "").strip()
     unique_ids = list(dict.fromkeys(video_id for video_id in video_ids if video_id))
+    now = datetime.now(timezone.utc)
+    _prune_failed_lookups(now=now)
+    api_key = (config.get("YOUTUBE_API_KEY") or "").strip()
     if not api_key or not unique_ids:
         return {}
-
-    now = datetime.now(timezone.utc)
     lookup_ids = [video_id for video_id in unique_ids if not _lookup_backoff_active(video_id, now=now)]
     if not lookup_ids:
         return {}
@@ -112,6 +123,19 @@ def fetch_youtube_durations(video_ids: Sequence[str]) -> Dict[str, int]:
                 )
                 response.raise_for_status()
                 payload = response.json()
+            batch_found: Set[str] = set()
+            for item in payload.get("items") or []:
+                video_id = item.get("id")
+                iso_duration = (item.get("contentDetails") or {}).get("duration")
+                seconds = parse_iso8601_duration(iso_duration)
+                if video_id and seconds is not None:
+                    durations[video_id] = seconds
+                    batch_found.add(video_id)
+            unresolved = [video_id for video_id in batch if video_id not in batch_found]
+            if unresolved:
+                _mark_failed_lookups(unresolved, now=now)
+            if batch_found:
+                _clear_failed_lookups(batch_found)
         except httpx.HTTPStatusError as error:
             logger.warning(
                 "YouTube duration lookup failed for ids %s status=%s",
@@ -119,7 +143,6 @@ def fetch_youtube_durations(video_ids: Sequence[str]) -> Dict[str, int]:
                 error.response.status_code,
             )
             _mark_failed_lookups(batch, now=now)
-            continue
         except httpx.HTTPError as error:
             logger.warning(
                 "YouTube duration lookup failed for ids %s error=%s",
@@ -127,7 +150,6 @@ def fetch_youtube_durations(video_ids: Sequence[str]) -> Dict[str, int]:
                 type(error).__name__,
             )
             _mark_failed_lookups(batch, now=now)
-            continue
         except Exception as error:
             logger.warning(
                 "YouTube duration lookup failed for ids %s error=%s",
@@ -135,28 +157,13 @@ def fetch_youtube_durations(video_ids: Sequence[str]) -> Dict[str, int]:
                 type(error).__name__,
             )
             _mark_failed_lookups(batch, now=now)
-            continue
-
-        batch_found: Set[str] = set()
-        for item in payload.get("items") or []:
-            video_id = item.get("id")
-            iso_duration = (item.get("contentDetails") or {}).get("duration")
-            seconds = parse_iso8601_duration(iso_duration)
-            if video_id and seconds is not None:
-                durations[video_id] = seconds
-                batch_found.add(video_id)
-        unresolved = [video_id for video_id in batch if video_id not in batch_found]
-        if unresolved:
-            _mark_failed_lookups(unresolved, now=now)
-        if batch_found:
-            _clear_failed_lookups(batch_found)
     return durations
 
 
 def lookup_youtube_duration_seconds(video_id: Optional[str]) -> Optional[int]:
     if not video_id:
         return None
-    return fetch_youtube_durations([video_id]).get(video_id)
+    return durations_for_video_ids([video_id]).get(video_id)
 
 
 def durations_for_video_ids(video_ids: Iterable[str]) -> Dict[str, int]:

@@ -40,6 +40,19 @@ from pecha_api.plans.videos.youtube_utils import (
 )
 
 
+def _persist_day_video_duration_updates(updates: Sequence[Tuple[UUID, int]]) -> None:
+    """Persist durations outside the caller session so commit does not expire loaded rows."""
+    if not updates:
+        return
+    with SessionLocal() as db:
+        for video_id, seconds in updates:
+            db.query(DayVideo).filter(DayVideo.id == video_id).update(
+                {DayVideo.duration_seconds: seconds},
+                synchronize_session=False,
+            )
+        db.commit()
+
+
 def _to_dto(video: DayVideo) -> DayVideoDTO:
     return DayVideoDTO(
         id=video.id,
@@ -71,12 +84,7 @@ def ensure_day_video_durations(
             video.duration_seconds = seconds
             updates.append((video.id, seconds))
     if updates and commit:
-        for video_id, seconds in updates:
-            db.query(DayVideo).filter(DayVideo.id == video_id).update(
-                {DayVideo.duration_seconds: seconds},
-                synchronize_session=False,
-            )
-        db.commit()
+        _persist_day_video_duration_updates(updates)
     return list(videos)
 
 
