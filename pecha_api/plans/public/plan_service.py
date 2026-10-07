@@ -564,6 +564,7 @@ async def _build_plan_day_dto(plan_item, language=None, references=None) -> Plan
                 url=video.url,
                 video_id=video.video_id,
                 title=video.title,
+                duration_seconds=video.duration_seconds,
                 display_order=video.display_order,
             )
             for video in sorted(plan_item.videos, key=lambda v: v.display_order)
@@ -580,6 +581,8 @@ async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
 
     cached = await get_plan_day_detail_cache(plan_id=plan_id, day_number=day_number)
     if cached is not None:
+        # Cache hits are not bypassed when video duration_seconds is null; backfill
+        # runs on miss (_load_plan_day) and after invalidation when day videos change.
         # Entries cached before series_id existed (or for non-series plans) carry
         # None; resolve it fresh so stale cache entries stay correct.
         if cached.series_id is None:
@@ -604,10 +607,14 @@ async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
 
 
 def _load_plan_day(plan_id: UUID, day_number: int):
+    from pecha_api.plans.videos.day_video_service import day_videos_with_durations
+
     with SessionLocal() as db:
         plan_item = get_plan_day_with_tasks_and_subtasks(
             db=db, plan_id=plan_id, day_number=day_number
         )
+        if plan_item is not None:
+            day_videos_with_durations(db=db, videos=plan_item.videos)
         plan_language = db.query(Plan.language).filter(Plan.id == plan_id).scalar()
         series_id = db.query(Plan.series_id).filter(Plan.id == plan_id).scalar()
         references = resolve_day_references(

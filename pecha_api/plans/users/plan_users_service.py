@@ -771,6 +771,9 @@ def _load_user_plan_day(token: str, plan_id: UUID, day_number: int) -> _DayReadS
         day_is_completed = is_day_completed(
             db=db, user_id=current_user.id, day_id=plan_item.id
         )
+        from pecha_api.plans.videos.day_video_service import day_videos_with_durations
+
+        day_videos_with_durations(db=db, videos=plan_item.videos)
 
     return _DayReadState(
         plan_item=plan_item,
@@ -838,6 +841,7 @@ def _build_user_plan_day(token: str, plan_id: UUID, day_number: int) -> UserPlan
                 url=video.url,
                 video_id=video.video_id,
                 title=video.title,
+                duration_seconds=video.duration_seconds,
                 display_order=video.display_order,
             )
             for video in sorted(plan_item.videos, key=lambda v: v.display_order)

@@ -16,7 +16,10 @@ from pecha_api.plans.videos.day_video_repository import (
     get_day_videos_by_day_id,
     get_next_display_order,
 )
-from pecha_api.plans.videos.youtube_utils import extract_youtube_video_id
+from pecha_api.plans.videos.youtube_utils import (
+    durations_for_video_ids,
+    extract_youtube_video_id,
+)
 from pecha_api.timezone_utils import get_date_in_timezone
 
 from .event_enums import EventLinkType
@@ -124,7 +127,13 @@ def _linked_plans_by_language(db: Session, event: Event, author: Author) -> Dict
 
 
 def _add_to_plan_day(
-    db: Session, plan: Plan, day_number: int, links: List[Tuple[EventLink, str]], author_email: str
+    db: Session,
+    plan: Plan,
+    day_number: int,
+    links: List[Tuple[EventLink, str]],
+    author_email: str,
+    *,
+    durations: Dict[str, int],
 ) -> int:
     # Locking the day serialises concurrent event saves on it, so the second
     # one sees the first one's videos and display order instead of racing it.
@@ -143,15 +152,17 @@ def _add_to_plan_day(
         for video in get_day_videos_by_day_id(db=db, day_id=day.id)
     }
     display_order = get_next_display_order(db=db, day_id=day.id)
+    new_links = [
+        (link, video_id) for link, video_id in links if video_id not in existing_ids
+    ]
     added = 0
-    for link, video_id in links:
-        if video_id in existing_ids:
-            continue
+    for link, video_id in new_links:
         db.add(
             DayVideo(
                 day_id=day.id,
                 url=link.url,
                 video_id=video_id,
+                duration_seconds=durations.get(video_id),
                 display_order=display_order,
                 created_by=author_email,
             )
@@ -174,13 +185,29 @@ def _sync(db: Session, event: Event, previous_keys: Set[VideoKey], author: Autho
     if not new_links_by_language:
         return []
 
+    video_ids = {
+        video_id
+        for links in new_links_by_language.values()
+        for _, video_id in links
+    }
+    try:
+        durations = durations_for_video_ids(video_ids)
+    except Exception as error:
+        logger.warning(
+            "YouTube duration lookup failed while syncing event links error=%s",
+            type(error).__name__,
+        )
+        durations = {}
+
     plans_by_language = _linked_plans_by_language(db, event, author)
     changed_days: List[ChangedDay] = []
     for language, links in new_links_by_language.items():
         # A video only belongs on a plan in its own language.
         for plan in plans_by_language.get(language, []):
             day_number = _current_plan_day_number(event, plan)
-            if _add_to_plan_day(db, plan, day_number, links, author.email):
+            if _add_to_plan_day(
+                db, plan, day_number, links, author.email, durations=durations
+            ):
                 changed_days.append((plan.id, day_number))
     if changed_days:
         db.commit()

@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 
 from .event_response_models import (
     CreateEventRequest,
@@ -132,7 +133,9 @@ async def create_event_endpoint(
     request: CreateEventRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> EventDTO:
-    return create_event_service(token=credentials.credentials, request=request)
+    return await run_in_threadpool(
+        create_event_service, credentials.credentials, request
+    )
 
 
 @cms_events_router.put("/{event_id}", status_code=status.HTTP_200_OK, response_model=EventDTO, response_model_exclude_none=True)
@@ -141,10 +144,11 @@ async def update_event_endpoint(
     request: UpdateEventRequest,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> EventDTO:
-    return update_event_service(
-        token=credentials.credentials,
-        event_id=event_id,
-        request=request,
+    return await run_in_threadpool(
+        update_event_service,
+        credentials.credentials,
+        event_id,
+        request,
     )
 
 
