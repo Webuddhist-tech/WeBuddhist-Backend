@@ -17,6 +17,10 @@ from pecha_api.plans.groups.groups_response_models import (
     UpdateAuthorGroupRequest,
 )
 from pecha_api.plans.groups.groups_service import (
+    _assert_slug_available,
+    _group_to_followed_summary,
+    _group_to_joined_summary,
+    _metadata_request_to_entries,
     _tradition_to_dto,
     create_author_group,
     list_cms_groups,
@@ -285,3 +289,62 @@ def test_get_groups_paginated_adds_tradition_filter():
 
     clauses = [str(clause) for clause in query.filter.call_args.args]
     assert any("tradition_list.code" in clause for clause in clauses)
+
+
+def test_followed_and_joined_summaries_include_tradition():
+    tradition = _tradition()
+    group = _group(tradition)
+    followed = _group_to_followed_summary(group, follower_count=2, language="zh")
+    joined = _group_to_joined_summary(group, joiner_count=3, language="zh")
+    for dto in (followed, joined):
+        assert dto.tradition.code == "tibetan"
+        assert dto.tradition.name == "梵语与藏语经典"
+
+
+def test_followed_and_joined_summaries_tradition_none_when_unset():
+    group = _group()
+    assert _group_to_followed_summary(group).tradition is None
+    assert _group_to_joined_summary(group).tradition is None
+
+
+def test_assert_slug_available_skips_lookup_for_unchanged_slug():
+    group = _group()
+    with patch(f"{SERVICE}.get_group_by_slug") as lookup:
+        _assert_slug_available(db=MagicMock(), group=group, slug=group.slug)
+    lookup.assert_not_called()
+
+
+def test_assert_slug_available_rejects_slug_owned_by_other_group():
+    group = _group()
+    with patch(f"{SERVICE}.get_group_by_slug", return_value=SimpleNamespace(id=uuid4())):
+        with pytest.raises(HTTPException) as exc:
+            _assert_slug_available(db=MagicMock(), group=group, slug="taken")
+    assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+def test_assert_slug_available_allows_free_slug():
+    group = _group()
+    with patch(f"{SERVICE}.get_group_by_slug", return_value=None):
+        _assert_slug_available(db=MagicMock(), group=group, slug="free")
+
+
+def test_metadata_request_to_entries_maps_fields():
+    entries = _metadata_request_to_entries(
+        [GroupMetadataInput(title="Sangha", sub_title="Sub", description="d", language=LanguageCode.EN)]
+    )
+    assert len(entries) == 1
+    assert (entries[0].language, entries[0].title, entries[0].sub_title, entries[0].description) == (
+        LanguageCode.EN.value, "Sangha", "Sub", "d",
+    )
+
+
+def test_update_author_group_sets_slug_and_replaces_metadata():
+    group = _group()
+    with patch(f"{SERVICE}.get_group_by_slug", return_value=None), patch(
+        f"{SERVICE}.replace_group_metadata"
+    ) as mock_replace:
+        _update(group, UpdateAuthorGroupRequest(slug="new-slug", metadata=_metadata()))
+
+    assert group.slug == "new-slug"
+    entries = mock_replace.call_args.kwargs["metadata_entries"]
+    assert [entry.title for entry in entries] == ["Sangha"]
