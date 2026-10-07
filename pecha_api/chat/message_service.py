@@ -11,6 +11,7 @@ from pecha_api.chat.enums import (
     ChatMessageReportReason,
     ChatMessageReportSource,
     ChatMessageType,
+    PrayerSort,
     ChatRoomKind,
 )
 from pecha_api.chat.models import (
@@ -312,6 +313,9 @@ def list_room_messages_service(
     skip: int = 0,
     limit: int = 20,
     message_type: Optional[str] = None,
+    sort: PrayerSort = PrayerSort.NEWEST,
+    intention: Optional[str] = None,
+    seed: Optional[str] = None,
 ) -> ChatMessagesResponse:
     with SessionLocal() as db:
         _get_room_or_404(db=db, room_id=room_id)
@@ -323,6 +327,9 @@ def list_room_messages_service(
             skip=skip,
             limit=limit,
             message_type=message_type,
+            sort=sort,
+            intention=intention,
+            seed=seed,
         )
         reactions_map = get_reactions_map(
             db=db, message_ids=[message.id for message in messages]

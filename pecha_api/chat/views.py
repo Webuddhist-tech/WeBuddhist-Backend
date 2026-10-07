@@ -62,7 +62,7 @@ from pecha_api.chat.response_models import (
     SendChatMessageRequest,
     UpdateChatRoomRequest,
 )
-from pecha_api.chat.enums import ChatMessageType
+from pecha_api.chat.enums import ChatMessageType, PrayerSort
 from pecha_api.chat.service import (
     _sender_name,
     get_event_room_service,
@@ -171,10 +171,16 @@ def list_room_messages(
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     message_type: Annotated[Optional[ChatMessageType], Query()] = None,
+    sort: Annotated[PrayerSort, Query()] = PrayerSort.NEWEST,
+    intention: Annotated[Optional[str], Query(max_length=32)] = None,
+    seed: Annotated[Optional[str], Query(max_length=64)] = None,
 ):
     """Paginated message history for a room (newest first). Active member only.
 
-    Pass message_type=PRAYER for the room's prayer requests only."""
+    Pass message_type=PRAYER for the room's prayer requests only. For those,
+    `sort` is newest (default) | oldest | most_prayed | needs_prayers (fewest
+    prayers first) | random (pass the same `seed` on every page of one shuffle),
+    and `intention` filters to one intention slug. Both are ignored otherwise."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
     return list_room_messages_service(
         room_id=room_id,
@@ -182,6 +188,9 @@ def list_room_messages(
         skip=skip,
         limit=limit,
         message_type=message_type.value if message_type else None,
+        sort=sort,
+        intention=intention,
+        seed=seed,
     )
 
 
