@@ -23,6 +23,7 @@ from pecha_api.plans.videos.day_video_response_models import (
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from uuid import UUID
 from typing import Annotated, List
 oauth2_scheme = HTTPBearer()
@@ -124,9 +125,10 @@ async def get_day_videos(
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
     day_id: UUID,
 ):
-    return list_day_videos(
-        token=authentication_credential.credentials,
-        day_id=day_id,
+    return await run_in_threadpool(
+        list_day_videos,
+        authentication_credential.credentials,
+        day_id,
     )
 
 
@@ -136,10 +138,11 @@ async def create_day_video(
     day_id: UUID,
     create_video_request: CreateDayVideoRequest,
 ):
-    return add_day_video(
-        token=authentication_credential.credentials,
-        day_id=day_id,
-        request=create_video_request,
+    return await run_in_threadpool(
+        add_day_video,
+        authentication_credential.credentials,
+        day_id,
+        create_video_request,
     )
 
 
@@ -149,10 +152,11 @@ async def reorder_day_videos(
     day_id: UUID,
     reorder_videos_request: ReorderDayVideosRequest,
 ):
-    return reorder_day_videos_entries(
-        token=authentication_credential.credentials,
-        day_id=day_id,
-        request=reorder_videos_request,
+    return await run_in_threadpool(
+        reorder_day_videos_entries,
+        authentication_credential.credentials,
+        day_id,
+        reorder_videos_request,
     )
 
 
@@ -162,8 +166,9 @@ async def delete_day_video(
     day_id: UUID,
     video_id: UUID,
 ):
-    return remove_day_video(
-        token=authentication_credential.credentials,
-        day_id=day_id,
-        video_id=video_id,
+    return await run_in_threadpool(
+        remove_day_video,
+        authentication_credential.credentials,
+        day_id,
+        video_id,
     )

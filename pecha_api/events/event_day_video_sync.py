@@ -129,6 +129,14 @@ def _linked_plans_by_language(db: Session, event: Event, author: Author) -> Dict
 def _add_to_plan_day(
     db: Session, plan: Plan, day_number: int, links: List[Tuple[EventLink, str]], author_email: str
 ) -> int:
+    # YouTube is called before the row lock so HTTP does not run under with_for_update.
+    # We prefetch every incoming link id because new_links is not known until after the lock.
+    try:
+        durations = durations_for_video_ids(video_id for _, video_id in links)
+    except Exception:
+        logger.warning("YouTube duration lookup failed while syncing event links", exc_info=True)
+        durations = {}
+
     # Locking the day serialises concurrent event saves on it, so the second
     # one sees the first one's videos and display order instead of racing it.
     day = (
@@ -149,11 +157,6 @@ def _add_to_plan_day(
     new_links = [
         (link, video_id) for link, video_id in links if video_id not in existing_ids
     ]
-    try:
-        durations = durations_for_video_ids(video_id for _, video_id in new_links)
-    except Exception:
-        logger.warning("YouTube duration lookup failed while syncing event links", exc_info=True)
-        durations = {}
     added = 0
     for link, video_id in new_links:
         db.add(

@@ -576,15 +576,13 @@ def _get_plan_series_id(plan_id: UUID) -> Optional[UUID]:
         return db.query(Plan.series_id).filter(Plan.id == plan_id).scalar()
 
 
-def _cached_videos_need_duration(cached: PlanDayDTO) -> bool:
-    return any(video.duration_seconds is None for video in (cached.videos or []))
-
-
 async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
     """Get specific day's content with tasks"""
 
     cached = await get_plan_day_detail_cache(plan_id=plan_id, day_number=day_number)
-    if cached is not None and not _cached_videos_need_duration(cached):
+    if cached is not None:
+        # Cache hits are not bypassed when video duration_seconds is null; backfill
+        # runs on miss (_load_plan_day) and after invalidation when day videos change.
         # Entries cached before series_id existed (or for non-series plans) carry
         # None; resolve it fresh so stale cache entries stay correct.
         if cached.series_id is None:

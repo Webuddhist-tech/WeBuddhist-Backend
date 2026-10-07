@@ -39,11 +39,15 @@ def test_ensure_fetches_persists_and_returns_missing_duration():
     db = MagicMock()
     video = _video(duration_seconds=None)
 
-    with patch(f"{SERVICE}.durations_for_video_ids", return_value={"AAAAAAAAAAA": 253}):
+    with patch(f"{SERVICE}.durations_for_video_ids", return_value={"AAAAAAAAAAA": 253}), patch(
+        f"{SERVICE}._persist_day_video_duration_updates"
+    ) as persist:
         ensure_day_video_durations(db=db, videos=[video])
 
+    persist.assert_called_once()
+
     assert video.duration_seconds == 253
-    db.commit.assert_called_once()
+    db.commit.assert_not_called()
 
 
 def test_ensure_leaves_null_duration_when_youtube_fails():
@@ -99,8 +103,8 @@ def test_list_day_videos_backfills_missing_duration():
         f"{SERVICE}.get_day_videos_by_day_id", return_value=[video]
     ), patch(
         f"{SERVICE}.durations_for_video_ids", return_value={"AAAAAAAAAAA": 12}
-    ):
+    ), patch(f"{SERVICE}._persist_day_video_duration_updates") as persist:
         result = list_day_videos(token="tok", day_id=day_id)
 
     assert result.videos[0].duration_seconds == 12
-    db.commit.assert_called_once()
+    persist.assert_called_once()

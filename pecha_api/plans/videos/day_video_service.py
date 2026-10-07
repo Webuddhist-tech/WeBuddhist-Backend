@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -33,11 +33,25 @@ from pecha_api.plans.videos.day_video_response_models import (
     DayVideoListResponse,
     ReorderDayVideosRequest,
 )
+from pecha_api.plans.public.plans_cache_service import schedule_invalidate_plan_day_cache_for_day
 from pecha_api.plans.videos.youtube_utils import (
     durations_for_video_ids,
     extract_youtube_video_id,
     lookup_youtube_duration_seconds,
 )
+
+
+def _persist_day_video_duration_updates(updates: Sequence[Tuple[UUID, int]]) -> None:
+    """Write resolved durations in a separate session so caller rows stay attached."""
+    if not updates:
+        return
+    with SessionLocal() as db:
+        for video_id, seconds in updates:
+            db.query(DayVideo).filter(DayVideo.id == video_id).update(
+                {DayVideo.duration_seconds: seconds},
+                synchronize_session=False,
+            )
+        db.commit()
 
 
 def _to_dto(video: DayVideo) -> DayVideoDTO:
@@ -61,16 +75,17 @@ def ensure_day_video_durations(
 ) -> List[DayVideo]:
     """Fill missing YouTube lengths, persist any that resolve, leave the rest."""
     missing = [video for video in videos if video.duration_seconds is None and video.video_id]
-    if missing:
-        durations = durations_for_video_ids(video.video_id for video in missing)
-        updated = False
-        for video in missing:
-            seconds = durations.get(video.video_id)
-            if seconds is not None:
-                video.duration_seconds = seconds
-                updated = True
-        if updated and commit:
-            db.commit()
+    if not missing:
+        return list(videos)
+    durations = durations_for_video_ids(video.video_id for video in missing)
+    updates: List[Tuple[UUID, int]] = []
+    for video in missing:
+        seconds = durations.get(video.video_id)
+        if seconds is not None:
+            video.duration_seconds = seconds
+            updates.append((video.id, seconds))
+    if updates and commit:
+        _persist_day_video_duration_updates(updates)
     return list(videos)
 
 
@@ -142,6 +157,7 @@ def add_day_video(token: str, day_id: UUID, request: CreateDayVideoRequest) -> D
                 created_by=current_author.email,
             ),
         )
+        schedule_invalidate_plan_day_cache_for_day(db=db, day_id=day_id)
         return _to_dto(video)
 
 
@@ -157,6 +173,7 @@ def remove_day_video(token: str, day_id: UUID, video_id: UUID) -> None:
                 detail=ResponseError(error=BAD_REQUEST, message=DAY_VIDEO_NOT_FOUND).model_dump(),
             )
         delete_day_video(db=db, day_id=day_id, video_id=video_id)
+        schedule_invalidate_plan_day_cache_for_day(db=db, day_id=day_id)
 
 
 def reorder_day_videos_entries(
@@ -172,4 +189,5 @@ def reorder_day_videos_entries(
         videos = day_videos_with_durations(
             db=db, videos=get_day_videos_by_day_id(db=db, day_id=day_id)
         )
+        schedule_invalidate_plan_day_cache_for_day(db=db, day_id=day_id)
         return DayVideoListResponse(videos=[_to_dto(video) for video in videos])

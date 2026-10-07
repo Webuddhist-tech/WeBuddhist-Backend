@@ -2,6 +2,7 @@ import struct
 from io import BytesIO
 from typing import Optional, List, Dict
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from pecha_api.plans.audio.plan_item_audio_models import PlanItemAudio
 from pecha_api.plans.audio.plan_item_audio_repository import upsert_plan_item_audio
 from pecha_api.plans.audio.sub_task_timestamps_repository import upsert_sub_task_timestamp
@@ -581,6 +582,10 @@ def create_new_plan(token: str, create_plan_request: CreatePlanRequest) -> PlanD
 
 async def get_details_plan(token:str,plan_id: UUID) -> PlanWithDays:
     current_author = validate_cms_author_details(token=token)
+    return await run_in_threadpool(_get_details_plan_for_author, current_author, plan_id)
+
+
+def _get_details_plan_for_author(current_author, plan_id: UUID) -> PlanWithDays:
     with SessionLocal() as db_session:
         plan = _get_plan_or_404(db=db_session, plan_id=plan_id)
         require_can_read_group_content(db=db_session, group_id=plan.group_id, author=current_author)
@@ -997,6 +1002,14 @@ def _get_task_subtasks_dto(
 
 async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> PlanDayDTO:
     current_author = validate_cms_author_details(token=token)
+    return await run_in_threadpool(
+        _get_plan_day_details_for_author, current_author, plan_id, day_number
+    )
+
+
+def _get_plan_day_details_for_author(
+    current_author, plan_id: UUID, day_number: int
+) -> PlanDayDTO:
     with SessionLocal() as db:
         plan = _get_plan_or_404(db=db, plan_id=plan_id)
         require_can_read_group_content(db=db, group_id=plan.group_id, author=current_author)
