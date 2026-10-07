@@ -62,3 +62,9 @@ class ChatMessageReportReason(enum.Enum):
 class ChatMessageReportSource(enum.Enum):
     MANUAL = "MANUAL"
     AUTOMATIC = "AUTOMATIC"
+
+
+class ChatMessageTranslationStatus(str, enum.Enum):
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"

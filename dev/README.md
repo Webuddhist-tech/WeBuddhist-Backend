@@ -35,3 +35,16 @@ Fixes database directory permissions for file watching.
 
 # Or use a different port
 poetry run uvicorn pecha_api.app:api --reload --port 8001
+
+---
+
+### Prayer translation (local manual test)
+
+See **[PRAYER_TRANSLATION_LOCAL_TEST.md](./PRAYER_TRANSLATION_LOCAL_TEST.md)**.
+
+Quick auth setup:
+
+```bash
+poetry run python dev/set_local_test_password.py
+# POST /auth/login — email lobsangshakya5@gmail.com, password localdev-test
+```

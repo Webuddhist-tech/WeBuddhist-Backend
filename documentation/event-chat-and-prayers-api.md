@@ -121,6 +121,38 @@ endpoint.
 GET /chat/rooms/{room_id}/messages?message_type=PRAYER
 ```
 
+Optional query `translation_language` (`EN`, `BO`, or `ZH`) selects which cached
+translation to attach to each `PRAYER` row. When omitted, the caller's profile
+language from `PUT /users/me/language` is used, defaulting to `EN`.
+
+`body` is always the original text the author submitted. Translation fields are
+omitted on `TEXT` messages and on `PRAYER` messages when the detected source
+language matches `translation_language`:
+
+```json
+{
+  "body": "为我们镇上的流浪狗…",
+  "message_type": "PRAYER",
+  "source_language": "ZH",
+  "can_translate": true,
+  "translation": {
+    "target_language": "EN",
+    "status": "ready",
+    "body": "For the stray dogs in our town…"
+  }
+}
+```
+
+`translation.status` is `pending` while Gemini work is in flight, `ready` when
+`translation.body` is available, or `failed` after a retryable error. The mobile
+client shows `body` by default and toggles to `translation.body` when the user
+chooses “See translation”.
+
+Translations are generated asynchronously when a prayer request is created or
+its body is edited. Configure `GEMINI_API_KEY` and optionally
+`GEMINI_PRAYER_TRANSLATION_MODEL` (default `gemini-2.0-flash`). Set
+`PRAYER_TRANSLATION_ENABLED=false` to disable new translation work.
+
 ---
 
 ## 4. Praying

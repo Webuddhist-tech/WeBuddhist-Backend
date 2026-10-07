@@ -33,6 +33,7 @@ from pecha_api.chat.response_models import (
     ChatMessageParentDTO,
     ChatMessagePrayerUserDTO,
     ChatMessageReactionDTO,
+    ChatMessageTranslationDTO,
     ChatMessageReactionUserDTO,
     ChatPeopleResponse,
     ChatPersonDTO,
@@ -167,6 +168,9 @@ def build_message_dto(
     recent_prayers=None,
     intention: Optional[PrayerIntentionDTO] = None,
     my_prayer_count: int = 0,
+    source_language: Optional[str] = None,
+    translation: Optional[ChatMessageTranslationDTO] = None,
+    can_translate: bool = False,
 ) -> ChatMessageDTO:
     sender_email = (message.sender.email if message.sender else None) or "unknown@example.com"
     is_deleted = message.deleted_at is not None
@@ -189,6 +193,9 @@ def build_message_dto(
         recent_prayers=build_prayer_user_dtos(recent_prayers),
         intention=intention,
         is_edited=getattr(message, "is_edited", None) is True,
+        source_language=source_language,
+        translation=translation,
+        can_translate=can_translate,
     )
 
 

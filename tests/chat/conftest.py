@@ -13,5 +13,12 @@ def published_group_by_default():
         "pecha_api.chat.service.is_group_id_published", return_value=True
     ), patch(
         "pecha_api.chat.message_service.is_group_id_published", return_value=True
+    ), patch(
+        "pecha_api.chat.message_service.prepare_prayer_translations"
+    ), patch(
+        "pecha_api.chat.message_service.get_translations_map", return_value={}
+    ), patch(
+        "pecha_api.chat.prayer_translation_service.get_user_metadata_by_user_id",
+        return_value=None,
     ):
         yield

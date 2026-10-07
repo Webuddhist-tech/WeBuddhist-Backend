@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Dict, Optional, Tuple, Type
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from starlette import status
@@ -63,6 +63,8 @@ from pecha_api.chat.response_models import (
     UpdateChatRoomRequest,
 )
 from pecha_api.chat.enums import ChatMessageType, PrayerSort
+from pecha_api.chat.prayer_translation_service import ensure_translations_for_message
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.chat.service import (
     _sender_name,
     get_event_room_service,
@@ -78,6 +80,13 @@ from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
+
+
+def _schedule_prayer_translation(
+    background_tasks: BackgroundTasks, message: ChatMessageDTO
+) -> None:
+    if message.message_type == ChatMessageType.PRAYER.value:
+        background_tasks.add_task(ensure_translations_for_message, message.id)
 
 oauth2_scheme = HTTPBearer()
 
@@ -174,6 +183,7 @@ def list_room_messages(
     sort: Annotated[PrayerSort, Query()] = PrayerSort.NEWEST,
     intention: Annotated[Optional[str], Query(max_length=32)] = None,
     seed: Annotated[Optional[str], Query(max_length=64)] = None,
+    translation_language: Annotated[Optional[LanguageCode], Query()] = None,
 ):
     """Paginated message history for a room (newest first). Active member only.
 
@@ -191,6 +201,7 @@ def list_room_messages(
         sort=sort,
         intention=intention,
         seed=seed,
+        translation_language=translation_language,
     )
 
 
@@ -258,6 +269,7 @@ async def edit_room_message(
     room_id: UUID,
     message_id: UUID,
     request: EditChatMessageRequest,
+    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> ChatMessageDTO:
     """Edit the body and/or intention of your own message. Fields left out keep
@@ -274,6 +286,8 @@ async def edit_room_message(
         intention=request.intention,
     )
     await _broadcast_message_updated_safe(room_id=room_id, message=message)
+    if request.body is not None:
+        _schedule_prayer_translation(background_tasks, message)
     return message
 
 
@@ -406,13 +420,14 @@ def get_group_chat_room(
 def send_group_chat_message(
     group_id: UUID,
     request: SendChatMessageRequest,
+    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
     """Send a message to a group's chat room. Auto-creates the room (caller
     becomes CREATOR) on the first message from an eligible group joiner/follower.
     Pass parent_message_id in the body to send it as a reply."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return send_group_message_service(
+    message = send_group_message_service(
         group_id=group_id,
         user=user,
         body=request.body,
@@ -420,6 +435,8 @@ def send_group_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
+    _schedule_prayer_translation(background_tasks, message)
+    return message
 
 
 @chat_router.get(
@@ -445,13 +462,14 @@ def get_event_chat_room(
 def send_event_chat_message(
     event_id: UUID,
     request: SendChatMessageRequest,
+    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
     """Send a message to an event's chat room. Auto-creates the room (caller
     becomes CREATOR) on the first message from an eligible joiner/follower of
     the event's group. Pass message_type=PRAYER to post a prayer request."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return send_event_message_service(
+    message = send_event_message_service(
         event_id=event_id,
         user=user,
         body=request.body,
@@ -459,6 +477,8 @@ def send_event_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
+    _schedule_prayer_translation(background_tasks, message)
+    return message
 
 
 @chat_router.post(

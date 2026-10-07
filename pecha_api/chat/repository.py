@@ -12,6 +12,7 @@ from pecha_api.events.event_model import Event
 
 from pecha_api.chat.enums import (
     ChatMessageReportSource,
+    ChatMessageTranslationStatus,
     ChatMessageType,
     ChatRoomMemberRole,
     PrayerSort,
@@ -22,10 +23,12 @@ from pecha_api.chat.models import (
     ChatMessagePrayerCount,
     ChatMessageReaction,
     ChatMessageReport,
+    ChatMessageTranslation,
     ChatRoom,
     ChatRoomMember,
     ChatPrayerNotification,
 )
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.prayer_intentions.intention_slugs import (
     canonical_prayer_intention_slug,
     catalog_slug_lookup_candidates,
@@ -1402,3 +1405,137 @@ def count_unread_messages(
     if last_read_at is not None:
         query = query.filter(ChatMessage.created_at > last_read_at)
     return query.scalar() or 0
+
+
+PRAYER_TRANSLATION_LANGUAGES = (
+    LanguageCode.EN,
+    LanguageCode.BO,
+    LanguageCode.ZH,
+)
+
+
+def _language_value(language: LanguageCode) -> str:
+    return language.value if hasattr(language, "value") else str(language)
+
+
+def delete_translations_for_message(db: Session, message_id: UUID) -> None:
+    db.query(ChatMessageTranslation).filter(
+        ChatMessageTranslation.message_id == message_id
+    ).delete(synchronize_session=False)
+
+
+def reset_prayer_translations(db: Session, message: ChatMessage) -> None:
+    """Clear cached translations after the prayer body changes."""
+    message.source_language = None
+    delete_translations_for_message(db=db, message_id=message.id)
+    now = datetime.now(timezone.utc)
+    for language in PRAYER_TRANSLATION_LANGUAGES:
+        db.add(
+            ChatMessageTranslation(
+                message_id=message.id,
+                target_language=language,
+                body=None,
+                status=ChatMessageTranslationStatus.PENDING.value,
+                updated_at=now,
+            )
+        )
+    db.commit()
+
+
+def get_translations_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    target_language: LanguageCode,
+) -> Dict[UUID, ChatMessageTranslation]:
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessageTranslation)
+        .filter(
+            ChatMessageTranslation.message_id.in_(message_ids),
+            ChatMessageTranslation.target_language == target_language,
+        )
+        .all()
+    )
+    return {row.message_id: row for row in rows}
+
+
+def list_message_ids_needing_translation(db: Session, limit: int) -> List[UUID]:
+    rows = (
+        db.query(ChatMessageTranslation.message_id)
+        .join(ChatMessage, ChatMessage.id == ChatMessageTranslation.message_id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+            ChatMessageTranslation.status.in_(
+                (
+                    ChatMessageTranslationStatus.PENDING.value,
+                    ChatMessageTranslationStatus.FAILED.value,
+                )
+            ),
+        )
+        .distinct()
+        .order_by(ChatMessageTranslation.updated_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
+def apply_prayer_translation_result(
+    db: Session,
+    message: ChatMessage,
+    source_language: LanguageCode,
+    translations: Dict[LanguageCode, str],
+) -> None:
+    """Persist detected source language and ready translation rows."""
+    message.source_language = source_language
+    now = datetime.now(timezone.utc)
+    source_value = _language_value(source_language)
+    for language in PRAYER_TRANSLATION_LANGUAGES:
+        lang_value = _language_value(language)
+        if lang_value == source_value:
+            db.query(ChatMessageTranslation).filter(
+                ChatMessageTranslation.message_id == message.id,
+                ChatMessageTranslation.target_language == language,
+            ).delete(synchronize_session=False)
+            continue
+        text = translations.get(language)
+        row = (
+            db.query(ChatMessageTranslation)
+            .filter(
+                ChatMessageTranslation.message_id == message.id,
+                ChatMessageTranslation.target_language == language,
+            )
+            .first()
+        )
+        if row is None:
+            row = ChatMessageTranslation(
+                message_id=message.id,
+                target_language=language,
+            )
+            db.add(row)
+        if text:
+            row.body = text.strip()
+            row.status = ChatMessageTranslationStatus.READY.value
+        else:
+            row.body = None
+            row.status = ChatMessageTranslationStatus.FAILED.value
+        row.updated_at = now
+    db.commit()
+    db.refresh(message)
+
+
+def mark_prayer_translations_failed(db: Session, message_id: UUID) -> None:
+    now = datetime.now(timezone.utc)
+    db.query(ChatMessageTranslation).filter(
+        ChatMessageTranslation.message_id == message_id,
+        ChatMessageTranslation.status != ChatMessageTranslationStatus.READY.value,
+    ).update(
+        {
+            ChatMessageTranslation.status: ChatMessageTranslationStatus.FAILED.value,
+            ChatMessageTranslation.updated_at: now,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
