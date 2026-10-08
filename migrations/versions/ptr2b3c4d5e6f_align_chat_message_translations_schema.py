@@ -123,4 +123,14 @@ def downgrade() -> None:
             unique=False,
         )
 
+    # Pending/failed rows may have null body; legacy schema required NOT NULL.
+    op.execute(
+        sa.text(
+            f"""
+            DELETE FROM {TABLE}
+            WHERE body IS NULL OR btrim(body) = ''
+            """
+        )
+    )
+
     op.alter_column(TABLE, "body", existing_type=sa.Text(), nullable=False)

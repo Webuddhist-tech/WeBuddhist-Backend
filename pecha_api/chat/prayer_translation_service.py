@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from uuid import UUID
 
@@ -26,6 +27,23 @@ from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.users.user_metadata_repository import get_user_metadata_by_user_id
 
 logger = logging.getLogger(__name__)
+
+_executor_lock = threading.Lock()
+_translation_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _translation_worker_pool() -> ThreadPoolExecutor:
+    global _translation_executor
+    with _executor_lock:
+        if _translation_executor is None:
+            workers = max(
+                config.get_int("PRAYER_TRANSLATION_MAX_CONCURRENT_WORKERS"), 1
+            )
+            _translation_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="prayer-translation",
+            )
+        return _translation_executor
 
 
 def resolve_translation_language_for_user(
@@ -56,12 +74,26 @@ def prepare_prayer_translations(message_id: UUID) -> None:
 
 def schedule_ensure_prayer_translations(message_id: UUID) -> None:
     """Run Gemini translation off the request/WebSocket thread after persist."""
-    threading.Thread(
-        target=ensure_translations_for_message,
-        args=(message_id,),
-        daemon=True,
-        name=f"prayer-translation-{message_id}",
-    ).start()
+    _translation_worker_pool().submit(ensure_translations_for_message, message_id)
+
+
+def _prayer_message_for_translation_apply(
+    db: Session, message_id: UUID, body_at_start: str
+) -> Optional[ChatMessage]:
+    message = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.id == message_id,
+            ChatMessage.deleted_at.is_(None),
+        )
+        .with_for_update()
+        .first()
+    )
+    if not message or _message_type_value(message) != ChatMessageType.PRAYER.value:
+        return None
+    if message.body != body_at_start:
+        return None
+    return message
 
 
 def ensure_translations_for_message(message_id: UUID) -> None:
@@ -77,23 +109,20 @@ def ensure_translations_for_message(message_id: UUID) -> None:
     result = translate_prayer_request(body_at_start)
     if result is None:
         with SessionLocal() as db:
+            message = _prayer_message_for_translation_apply(
+                db=db, message_id=message_id, body_at_start=body_at_start
+            )
+            if message is None:
+                return
             mark_prayer_translations_failed(db=db, message_id=message_id)
         return
 
     source_language, translations = result
     with SessionLocal() as db:
-        message = (
-            db.query(ChatMessage)
-            .filter(
-                ChatMessage.id == message_id,
-                ChatMessage.deleted_at.is_(None),
-            )
-            .with_for_update()
-            .first()
+        message = _prayer_message_for_translation_apply(
+            db=db, message_id=message_id, body_at_start=body_at_start
         )
-        if not message or _message_type_value(message) != ChatMessageType.PRAYER.value:
-            return
-        if message.body != body_at_start:
+        if message is None:
             return
         apply_prayer_translation_result(
             db=db,
@@ -108,9 +137,14 @@ def reconcile_pending_prayer_translations() -> None:
     batch_size = max(config.get_int("PRAYER_TRANSLATION_RECONCILE_BATCH_SIZE"), 1)
     with SessionLocal() as db:
         message_ids = list_message_ids_needing_translation(db=db, limit=batch_size)
-    for message_id in message_ids:
+    pool = _translation_worker_pool()
+    futures = [
+        pool.submit(ensure_translations_for_message, message_id)
+        for message_id in message_ids
+    ]
+    for message_id, future in zip(message_ids, futures):
         try:
-            ensure_translations_for_message(message_id)
+            future.result()
         except Exception:
             logger.exception(
                 "Failed to reconcile prayer translation for message %s", message_id

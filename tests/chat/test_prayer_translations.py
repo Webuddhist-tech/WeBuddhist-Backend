@@ -162,3 +162,27 @@ class TestEnsureTranslationsForMessage:
 
         mock_translate.assert_called_once_with("Original")
         mock_apply.assert_not_called()
+
+    @patch("pecha_api.chat.prayer_translation_service.mark_prayer_translations_failed")
+    @patch("pecha_api.chat.prayer_translation_service.translate_prayer_request")
+    @patch("pecha_api.chat.prayer_translation_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.prayer_translation_service.SessionLocal")
+    def test_skips_stale_gemini_failure_after_body_edit(
+        self, mock_session_local, mock_get_message, mock_translate, mock_mark_failed
+    ):
+        message = MockMessage(body="Original")
+        message.message_type = ChatMessageType.PRAYER.value
+        edited = MockMessage(body="Edited")
+        edited.message_type = ChatMessageType.PRAYER.value
+        mock_db = MagicMock()
+        mock_session_local.return_value.__enter__.return_value = mock_db
+        mock_get_message.return_value = message
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+            edited
+        )
+        mock_translate.return_value = None
+
+        ensure_translations_for_message(message.id)
+
+        mock_translate.assert_called_once_with("Original")
+        mock_mark_failed.assert_not_called()

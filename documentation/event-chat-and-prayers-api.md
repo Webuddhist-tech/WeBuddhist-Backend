@@ -150,7 +150,7 @@ chooses “See translation”.
 
 Translations are generated asynchronously when a prayer request is created or
 its body is edited. Configure `GEMINI_API_KEY` and optionally
-`GEMINI_PRAYER_TRANSLATION_MODEL` (default `gemini-2.0-flash`). Set
+`GEMINI_PRAYER_TRANSLATION_MODEL` (default `gemini-3.8-flash`). Set
 `PRAYER_TRANSLATION_ENABLED=false` to disable new translation work.
 
 ---
