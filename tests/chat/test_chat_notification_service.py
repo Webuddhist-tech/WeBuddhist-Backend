@@ -841,7 +841,7 @@ class TestGetChatNotificationTargets:
     @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Tenzin")
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
     @patch("pecha_api.chat.notification_service.SessionLocal")
-    def test_group_prayer_request_ignores_chat_notification_setting(
+    def test_group_prayer_request_uses_prayer_request_notification_setting(
         self,
         mock_session,
         mock_get_message,
@@ -852,8 +852,7 @@ class TestGetChatNotificationTargets:
         _held,
         _presign,
     ):
-        """Chat pushes are opt-in; a member who never turned them on still
-        hears a prayer request from their group."""
+        """Prayer requests filter on PRAYER_REQUEST, not CHAT_MESSAGE."""
         mock_session.return_value.__enter__.return_value = MagicMock()
         joiner = uuid4()
         room = MockRoom(group_id=uuid4(), name="Sangha")
@@ -864,7 +863,10 @@ class TestGetChatNotificationTargets:
 
         result = get_chat_notification_targets(message_id=message.id)
 
-        assert mock_recipients.call_args.kwargs["notification_type"] is None
+        assert (
+            mock_recipients.call_args.kwargs["notification_type"]
+            == NotificationType.PRAYER_REQUEST
+        )
         assert [recipient.user_id for recipient in result.recipients] == [joiner]
 
     @patch("pecha_api.chat.notification_service.get_event_by_id", return_value=None)
@@ -876,7 +878,7 @@ class TestGetChatNotificationTargets:
     @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Tenzin")
     @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
     @patch("pecha_api.chat.notification_service.SessionLocal")
-    def test_event_prayer_request_ignores_chat_notification_setting(
+    def test_event_prayer_request_uses_prayer_request_notification_setting(
         self,
         mock_session,
         mock_get_message,
@@ -900,8 +902,41 @@ class TestGetChatNotificationTargets:
         result = get_chat_notification_targets(message_id=message.id)
 
         assert result.chat_kind == "EVENT"
-        assert mock_recipients.call_args.kwargs["notification_type"] is None
+        assert (
+            mock_recipients.call_args.kwargs["notification_type"]
+            == NotificationType.PRAYER_REQUEST
+        )
         assert [recipient.user_id for recipient in result.recipients] == [member]
+
+    @patch("pecha_api.chat.notification_service._generate_presigned_url", return_value=None)
+    @patch("pecha_api.chat.notification_service._count_held_prayer_requests", return_value=0)
+    @patch("pecha_api.chat.notification_service.get_int", return_value=120)
+    @patch("pecha_api.chat.notification_service.get_active_push_devices_by_user_ids")
+    @patch("pecha_api.chat.notification_service.list_group_chat_recipient_user_ids")
+    @patch("pecha_api.chat.notification_service.get_sender_display_name", return_value="Tenzin")
+    @patch("pecha_api.chat.notification_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.notification_service.SessionLocal")
+    def test_group_prayer_request_with_no_recipients_after_preference_filter(
+        self,
+        mock_session,
+        mock_get_message,
+        _sender_name,
+        mock_recipients,
+        mock_devices,
+        _get_int,
+        _held,
+        _presign,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        room = MockRoom(group_id=uuid4(), name="Sangha")
+        message = MockMessage(room=room, body="Please pray", message_type="PRAYER")
+        mock_get_message.return_value = message
+        mock_recipients.return_value = ([], 0)
+        mock_devices.return_value = {}
+
+        result = get_chat_notification_targets(message_id=message.id)
+
+        assert result.recipients == []
 
     @patch(
         "pecha_api.chat.notification_service._generate_presigned_url",
