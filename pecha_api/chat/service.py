@@ -193,9 +193,9 @@ def build_message_dto(
         recent_prayers=build_prayer_user_dtos(recent_prayers),
         intention=intention,
         is_edited=getattr(message, "is_edited", None) is True,
-        source_language=source_language,
-        translation=translation,
-        can_translate=can_translate,
+        source_language=None if is_deleted else source_language,
+        translation=None if is_deleted else translation,
+        can_translate=False if is_deleted else can_translate,
     )
 
 

@@ -59,6 +59,7 @@ from pecha_api.chat.prayer_translation_service import (
     build_translation_view,
     prepare_prayer_translations,
     resolve_translation_language_for_user,
+    schedule_ensure_prayer_translations,
 )
 from pecha_api.chat.response_models import (
     ChatMessageDTO,
@@ -304,6 +305,7 @@ def _persist_message(
         intention_dto = intention_map.get(stored_intention)
     if message_type == ChatMessageType.PRAYER.value:
         prepare_prayer_translations(message_id=message.id)
+        schedule_ensure_prayer_translations(message_id=message.id)
     translation_kwargs = _prayer_translation_dto_kwargs(
         db=db, message=message, user_id=user.id, translation_language=None
     )
@@ -538,6 +540,7 @@ def edit_message_service(
             )
             if body_changed and message_type == ChatMessageType.PRAYER.value:
                 prepare_prayer_translations(message_id=message.id)
+                schedule_ensure_prayer_translations(message_id=message.id)
                 db.refresh(message)
 
         reactions = list_message_reactions(db=db, message_id=message.id)

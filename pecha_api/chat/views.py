@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, Dict, Optional, Tuple, Type
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from starlette import status
@@ -62,8 +62,11 @@ from pecha_api.chat.response_models import (
     SendChatMessageRequest,
     UpdateChatRoomRequest,
 )
-from pecha_api.chat.enums import ChatMessageType, PrayerSort
-from pecha_api.chat.prayer_translation_service import ensure_translations_for_message
+from pecha_api.chat.enums import (
+    ChatMessageType,
+    PrayerSort,
+    PrayerTranslationLanguage,
+)
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.chat.service import (
     _sender_name,
@@ -80,13 +83,6 @@ from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
 logger = logging.getLogger(__name__)
-
-
-def _schedule_prayer_translation(
-    background_tasks: BackgroundTasks, message: ChatMessageDTO
-) -> None:
-    if message.message_type == ChatMessageType.PRAYER.value:
-        background_tasks.add_task(ensure_translations_for_message, message.id)
 
 oauth2_scheme = HTTPBearer()
 
@@ -183,7 +179,9 @@ def list_room_messages(
     sort: Annotated[PrayerSort, Query()] = PrayerSort.NEWEST,
     intention: Annotated[Optional[str], Query(max_length=32)] = None,
     seed: Annotated[Optional[str], Query(max_length=64)] = None,
-    translation_language: Annotated[Optional[LanguageCode], Query()] = None,
+    translation_language: Annotated[
+        Optional[PrayerTranslationLanguage], Query()
+    ] = None,
 ):
     """Paginated message history for a room (newest first). Active member only.
 
@@ -192,6 +190,11 @@ def list_room_messages(
     prayers first) | random (pass the same `seed` on every page of one shuffle),
     and `intention` filters to one intention slug. Both are ignored otherwise."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    resolved_translation_language = (
+        LanguageCode[translation_language.value]
+        if translation_language is not None
+        else None
+    )
     return list_room_messages_service(
         room_id=room_id,
         user=user,
@@ -201,7 +204,7 @@ def list_room_messages(
         sort=sort,
         intention=intention,
         seed=seed,
-        translation_language=translation_language,
+        translation_language=resolved_translation_language,
     )
 
 
@@ -269,7 +272,6 @@ async def edit_room_message(
     room_id: UUID,
     message_id: UUID,
     request: EditChatMessageRequest,
-    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ) -> ChatMessageDTO:
     """Edit the body and/or intention of your own message. Fields left out keep
@@ -286,8 +288,6 @@ async def edit_room_message(
         intention=request.intention,
     )
     await _broadcast_message_updated_safe(room_id=room_id, message=message)
-    if request.body is not None:
-        _schedule_prayer_translation(background_tasks, message)
     return message
 
 
@@ -420,7 +420,6 @@ def get_group_chat_room(
 def send_group_chat_message(
     group_id: UUID,
     request: SendChatMessageRequest,
-    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
     """Send a message to a group's chat room. Auto-creates the room (caller
@@ -435,7 +434,6 @@ def send_group_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
-    _schedule_prayer_translation(background_tasks, message)
     return message
 
 
@@ -462,7 +460,6 @@ def get_event_chat_room(
 def send_event_chat_message(
     event_id: UUID,
     request: SendChatMessageRequest,
-    background_tasks: BackgroundTasks,
     authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
 ):
     """Send a message to an event's chat room. Auto-creates the room (caller
@@ -477,7 +474,6 @@ def send_event_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
-    _schedule_prayer_translation(background_tasks, message)
     return message
 
 

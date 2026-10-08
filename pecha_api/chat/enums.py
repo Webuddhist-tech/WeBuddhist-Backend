@@ -34,6 +34,14 @@ class ChatMessageType(enum.Enum):
     PRAYER = "PRAYER"
 
 
+class PrayerTranslationLanguage(str, enum.Enum):
+    """Languages Gemini prayer translation supports (EN/BO/ZH)."""
+
+    EN = "EN"
+    BO = "BO"
+    ZH = "ZH"
+
+
 class PrayerSort(str, enum.Enum):
     """How a room's prayer requests are ordered. NEWEST is the default."""
 

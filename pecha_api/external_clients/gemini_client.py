@@ -44,21 +44,49 @@ Prayer text:
 """
 
 
+def _parse_prayer_translation_payload(
+    payload: object,
+) -> Optional[Tuple[LanguageCode, Dict[LanguageCode, str]]]:
+    if not isinstance(payload, dict):
+        return None
+    source_raw = str(payload.get("source_language", "")).upper()
+    if source_raw not in PRAYER_TRANSLATION_LANGUAGE_CODES:
+        return None
+    source_language = LanguageCode[source_raw]
+
+    translations_raw = payload.get("translations")
+    if not isinstance(translations_raw, dict):
+        return None
+    translations: Dict[LanguageCode, str] = {}
+    for code in PRAYER_TRANSLATION_LANGUAGE_CODES:
+        text = translations_raw.get(code)
+        if text is None:
+            continue
+        cleaned = str(text).strip()
+        if not cleaned:
+            continue
+        if len(cleaned) > PRAYER_REQUEST_BODY_MAX_LENGTH:
+            cleaned = cleaned[:PRAYER_REQUEST_BODY_MAX_LENGTH]
+        translations[LanguageCode[code]] = cleaned
+
+    return source_language, translations
+
+
 def prayer_translation_enabled() -> bool:
-    if config.get("PRAYER_TRANSLATION_ENABLED", "true").lower() in ("0", "false", "no"):
+    if not config.get_bool("PRAYER_TRANSLATION_ENABLED"):
         return False
-    return bool(config.get("GEMINI_API_KEY", "").strip())
+    return bool((config.get("GEMINI_API_KEY") or "").strip())
 
 
 def translate_prayer_request(body: str) -> Optional[Tuple[LanguageCode, Dict[LanguageCode, str]]]:
     """Call Gemini once; return source language and all three language texts."""
     if not prayer_translation_enabled():
         return None
-    api_key = config.get("GEMINI_API_KEY", "").strip()
+    api_key = (config.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
         return None
 
-    model = config.get("GEMINI_PRAYER_TRANSLATION_MODEL", "gemini-2.0-flash")
+    model = config.get("GEMINI_PRAYER_TRANSLATION_MODEL")
     prompt = _PROMPT.format(
         max_len=PRAYER_REQUEST_BODY_MAX_LENGTH,
         text=body.strip(),
@@ -85,26 +113,7 @@ def translate_prayer_request(body: str) -> Optional[Tuple[LanguageCode, Dict[Lan
         if not raw:
             return None
         payload = json.loads(raw)
+        return _parse_prayer_translation_payload(payload)
     except Exception:
         logger.exception("Gemini prayer translation failed")
         return None
-
-    source_raw = str(payload.get("source_language", "")).upper()
-    if source_raw not in PRAYER_TRANSLATION_LANGUAGE_CODES:
-        return None
-    source_language = LanguageCode[source_raw]
-
-    translations_raw = payload.get("translations") or {}
-    translations: Dict[LanguageCode, str] = {}
-    for code in PRAYER_TRANSLATION_LANGUAGE_CODES:
-        text = translations_raw.get(code)
-        if text is None:
-            continue
-        cleaned = str(text).strip()
-        if not cleaned:
-            continue
-        if len(cleaned) > PRAYER_REQUEST_BODY_MAX_LENGTH:
-            cleaned = cleaned[:PRAYER_REQUEST_BODY_MAX_LENGTH]
-        translations[LanguageCode[code]] = cleaned
-
-    return source_language, translations

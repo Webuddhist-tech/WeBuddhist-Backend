@@ -1461,7 +1461,7 @@ def get_translations_map(
 
 
 def list_message_ids_needing_translation(db: Session, limit: int) -> List[UUID]:
-    rows = (
+    pending_or_failed = (
         db.query(ChatMessageTranslation.message_id)
         .join(ChatMessage, ChatMessage.id == ChatMessageTranslation.message_id)
         .filter(
@@ -1479,7 +1479,31 @@ def list_message_ids_needing_translation(db: Session, limit: int) -> List[UUID]:
         .limit(limit)
         .all()
     )
-    return [row[0] for row in rows]
+    has_translation_row = exists().where(
+        ChatMessageTranslation.message_id == ChatMessage.id
+    )
+    missing_rows = (
+        db.query(ChatMessage.id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+            ~has_translation_row,
+        )
+        .order_by(ChatMessage.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    ordered: List[UUID] = []
+    seen: Set[UUID] = set()
+    for row in pending_or_failed + missing_rows:
+        message_id = row[0]
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        ordered.append(message_id)
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 def apply_prayer_translation_result(

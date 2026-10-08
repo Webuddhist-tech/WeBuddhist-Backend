@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Dict, Optional
 from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from pecha_api import config
 from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.models import ChatMessage, ChatMessageTranslation
+from pecha_api.chat.service import _message_type_value
 from pecha_api.chat.repository import (
     apply_prayer_translation_result,
     get_message_by_id_any_room,
@@ -25,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_translation_language_for_user(
-    db, user_id: UUID, requested: Optional[LanguageCode]
+    db: Session, user_id: UUID, requested: Optional[LanguageCode]
 ) -> LanguageCode:
     if requested is not None:
         return requested
@@ -45,9 +49,19 @@ def prepare_prayer_translations(message_id: UUID) -> None:
         message = get_message_by_id_any_room(db=db, message_id=message_id)
         if not message or message.deleted_at is not None:
             return
-        if message.message_type != ChatMessageType.PRAYER.value:
+        if _message_type_value(message) != ChatMessageType.PRAYER.value:
             return
         reset_prayer_translations(db=db, message=message)
+
+
+def schedule_ensure_prayer_translations(message_id: UUID) -> None:
+    """Run Gemini translation off the request/WebSocket thread after persist."""
+    threading.Thread(
+        target=ensure_translations_for_message,
+        args=(message_id,),
+        daemon=True,
+        name=f"prayer-translation-{message_id}",
+    ).start()
 
 
 def ensure_translations_for_message(message_id: UUID) -> None:
@@ -56,11 +70,11 @@ def ensure_translations_for_message(message_id: UUID) -> None:
         message = get_message_by_id_any_room(db=db, message_id=message_id)
         if not message or message.deleted_at is not None:
             return
-        if message.message_type != ChatMessageType.PRAYER.value:
+        if _message_type_value(message) != ChatMessageType.PRAYER.value:
             return
-        body = message.body
+        body_at_start = message.body
 
-    result = translate_prayer_request(body)
+    result = translate_prayer_request(body_at_start)
     if result is None:
         with SessionLocal() as db:
             mark_prayer_translations_failed(db=db, message_id=message_id)
@@ -68,8 +82,18 @@ def ensure_translations_for_message(message_id: UUID) -> None:
 
     source_language, translations = result
     with SessionLocal() as db:
-        message = get_message_by_id_any_room(db=db, message_id=message_id)
-        if not message or message.deleted_at is not None:
+        message = (
+            db.query(ChatMessage)
+            .filter(
+                ChatMessage.id == message_id,
+                ChatMessage.deleted_at.is_(None),
+            )
+            .with_for_update()
+            .first()
+        )
+        if not message or _message_type_value(message) != ChatMessageType.PRAYER.value:
+            return
+        if message.body != body_at_start:
             return
         apply_prayer_translation_result(
             db=db,

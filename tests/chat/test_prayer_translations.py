@@ -92,6 +92,23 @@ class TestChatMessageDtoSerialization:
         assert payload["body"] == message.body
         assert payload["translation"]["body"] == "Translated"
 
+    def test_deleted_prayer_hides_translation_fields(self):
+        message = MockMessage(source_language=LanguageCode.ZH)
+        message.deleted_at = datetime.now(timezone.utc)
+        dto = build_message_dto(
+            message,
+            source_language="ZH",
+            translation=ChatMessageTranslationDTO(
+                target_language="EN", status="ready", body="Secret translation"
+            ),
+            can_translate=True,
+        )
+        payload = dto.model_dump()
+        assert payload["body"] == ""
+        assert payload.get("source_language") is None
+        assert payload.get("translation") is None
+        assert payload.get("can_translate") is False
+
 
 class TestEnsureTranslationsForMessage:
     @patch("pecha_api.chat.prayer_translation_service.apply_prayer_translation_result")
@@ -106,6 +123,9 @@ class TestEnsureTranslationsForMessage:
         mock_db = MagicMock()
         mock_session_local.return_value.__enter__.return_value = mock_db
         mock_get_message.return_value = message
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+            message
+        )
         mock_translate.return_value = (
             LanguageCode.EN,
             {LanguageCode.BO: "བོད", LanguageCode.ZH: "中文"},
@@ -115,3 +135,30 @@ class TestEnsureTranslationsForMessage:
 
         mock_translate.assert_called_once_with("Please pray")
         mock_apply.assert_called_once()
+
+    @patch("pecha_api.chat.prayer_translation_service.apply_prayer_translation_result")
+    @patch("pecha_api.chat.prayer_translation_service.translate_prayer_request")
+    @patch("pecha_api.chat.prayer_translation_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.prayer_translation_service.SessionLocal")
+    def test_skips_stale_gemini_result_after_body_edit(
+        self, mock_session_local, mock_get_message, mock_translate, mock_apply
+    ):
+        message = MockMessage(body="Original")
+        message.message_type = ChatMessageType.PRAYER.value
+        edited = MockMessage(body="Edited")
+        edited.message_type = ChatMessageType.PRAYER.value
+        mock_db = MagicMock()
+        mock_session_local.return_value.__enter__.return_value = mock_db
+        mock_get_message.return_value = message
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+            edited
+        )
+        mock_translate.return_value = (
+            LanguageCode.EN,
+            {LanguageCode.BO: "བོད", LanguageCode.ZH: "中文"},
+        )
+
+        ensure_translations_for_message(message.id)
+
+        mock_translate.assert_called_once_with("Original")
+        mock_apply.assert_not_called()

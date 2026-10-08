@@ -16,6 +16,8 @@ def published_group_by_default():
     ), patch(
         "pecha_api.chat.message_service.prepare_prayer_translations"
     ), patch(
+        "pecha_api.chat.message_service.schedule_ensure_prayer_translations"
+    ), patch(
         "pecha_api.chat.message_service.get_translations_map", return_value={}
     ), patch(
         "pecha_api.chat.prayer_translation_service.get_user_metadata_by_user_id",

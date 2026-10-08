@@ -17,7 +17,6 @@ when the timeout expires.
 
 import asyncio
 import logging
-import threading
 from datetime import datetime
 from functools import partial
 from typing import List, Optional
@@ -59,6 +58,14 @@ EVENT_CACHE_TYPES = (
 )
 
 logger = logging.getLogger(__name__)
+
+_app_event_loop: asyncio.AbstractEventLoop | None = None
+
+
+def bind_app_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Remember the ASGI worker loop for sync callers (e.g. chat threadpool)."""
+    global _app_event_loop
+    _app_event_loop = loop
 
 
 class _FeaturedEvents(BaseModel):
@@ -261,9 +268,21 @@ def schedule_invalidate_event_detail_caches(event_id: UUID) -> None:
 
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_run())
+        if loop.is_running():
+            loop.create_task(_run())
+            return
     except RuntimeError:
-        threading.Thread(target=lambda: asyncio.run(_run()), daemon=True).start()
+        pass
+
+    if _app_event_loop is not None and _app_event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_run(), _app_event_loop)
+        return
+
+    # No loop to hand work to: mark stale and queue a namespace sweep without
+    # touching the process-wide async Redis client on a foreign loop.
+    mark_namespace_superseded(CacheType.EVENT_DETAIL)
+    if cache_type_enabled(CacheType.EVENT_DETAIL):
+        queue_namespace_invalidation(CacheType.EVENT_DETAIL)
 
 
 async def get_events_today_service_cached(

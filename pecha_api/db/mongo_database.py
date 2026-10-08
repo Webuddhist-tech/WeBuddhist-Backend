@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -83,6 +84,10 @@ async def lifespan(api: FastAPI):
             )
             logging.error(error_msg)
             raise RuntimeError(error_msg) from e
+
+        from ..events.events_cache_service import bind_app_event_loop
+
+        bind_app_event_loop(asyncio.get_running_loop())
 
         connection_string = get("MONGO_CONNECTION_STRING")
         if not _is_mongo_connection_string_configured(connection_string):
