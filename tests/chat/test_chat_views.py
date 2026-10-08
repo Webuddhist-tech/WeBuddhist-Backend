@@ -14,6 +14,7 @@ from pecha_api.chat.response_models import (
     ChatRoomMembersResponse,
     ChatRoomsResponse,
 )
+from pecha_api.plans.plans_enums import LanguageCode
 
 
 def get_client():
@@ -251,6 +252,21 @@ class TestRoomMessages:
 
         assert response.status_code == status.HTTP_200_OK
         assert response.json()["total"] == 1
+
+    @patch('pecha_api.chat.views.list_room_messages_service')
+    @patch('pecha_api.chat.views.validate_and_extract_user_details')
+    def test_list_messages_passes_translation_language(self, mock_validate, mock_service):
+        client = get_client()
+        mock_validate.return_value = MagicMock()
+        mock_service.return_value = ChatMessagesResponse(messages=[_message_dto()], skip=0, limit=20, total=1)
+
+        response = client.get(
+            f"/chat/rooms/{uuid4()}/messages?translation_language=EN",
+            headers=AUTH_HEADERS,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert mock_service.call_args.kwargs["translation_language"] is LanguageCode.EN
 
     @patch('pecha_api.chat.views.delete_message_service')
     @patch('pecha_api.chat.views.validate_and_extract_user_details')
