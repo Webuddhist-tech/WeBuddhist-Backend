@@ -15,6 +15,7 @@ class NotificationType(enum.Enum):
     VERSE_OF_DAY = "VERSE_OF_DAY"
     ROUTINE_REMINDER = "ROUTINE_REMINDER"
     PRAYER_RECEIVED = "PRAYER_RECEIVED"
+    PRAYER_REQUEST = "PRAYER_REQUEST"
 
 
 class NotificationChannel(enum.Enum):
@@ -63,6 +64,7 @@ GROUP_SCOPED_TYPES = frozenset(
         NotificationType.EVENT,
         NotificationType.ACCUMULATION,
         NotificationType.PRAYER_RECEIVED,
+        NotificationType.PRAYER_REQUEST,
     }
 )
 
@@ -80,6 +82,7 @@ NON_TOGGLEABLE_TYPES = frozenset(
 DEFAULT_DISABLED_TYPES = frozenset(
     {
         NotificationType.CHAT_MESSAGE,
+        NotificationType.PRAYER_REQUEST,
     }
 )
 
@@ -98,6 +101,7 @@ V1_TOGGLEABLE_TYPES = (
     NotificationType.ACCUMULATION,
     NotificationType.SERIES,
     NotificationType.PRAYER_RECEIVED,
+    NotificationType.PRAYER_REQUEST,
 )
 
 # Event-scoped subset of the above, in render order. Muting one event

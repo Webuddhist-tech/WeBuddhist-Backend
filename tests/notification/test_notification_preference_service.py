@@ -14,6 +14,7 @@ from pecha_api.notification.notification_preference_enums import (
     NotificationType,
     PreferenceSource,
     V1_GROUP_TOGGLEABLE_TYPES,
+    default_enabled,
 )
 from pecha_api.notification.notification_preference_repository import upsert_preference
 from pecha_api.notification.notification_preference_response_models import (
@@ -26,6 +27,7 @@ from pecha_api.notification.notification_preference_service import (
     _resolve,
     delete_group_notification_preferences_service,
     get_group_notification_preferences_service,
+    get_notification_preferences_service,
     update_group_notification_preferences_service,
 )
 
@@ -34,6 +36,14 @@ GROUP_ID = uuid4()
 USER_ID = uuid4()
 
 SERVICE = "pecha_api.notification.notification_preference_service"
+
+
+class TestDefaultEnabled:
+    def test_prayer_request_is_opt_in_by_default(self):
+        assert default_enabled(NotificationType.PRAYER_REQUEST) is False
+
+    def test_prayer_received_is_on_by_default(self):
+        assert default_enabled(NotificationType.PRAYER_RECEIVED) is True
 
 
 def _row(notification_type, *, enabled=True, muted_until=None, scope_id=None):
@@ -344,6 +354,27 @@ class TestSparseUpdates:
                 now=NOW,
             )
         assert exception.value.status_code == 422
+
+
+class TestGlobalEndpoints:
+    @patch(f"{SERVICE}.list_preferences_for_user", return_value=[])
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_get_includes_prayer_request_opt_in_default(
+        self, mock_user, mock_session, _mock_rows
+    ):
+        mock_user.return_value = SimpleNamespace(id=USER_ID)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = get_notification_preferences_service(token="t")
+
+        prayer_request = next(
+            p
+            for p in result.preferences
+            if p.notification_type == NotificationType.PRAYER_REQUEST
+        )
+        assert prayer_request.enabled is False
+        assert prayer_request.source == PreferenceSource.DEFAULT
 
 
 class TestGroupEndpoints:

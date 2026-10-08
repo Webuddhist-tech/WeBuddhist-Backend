@@ -294,10 +294,11 @@ payload, so the tap can deep-link to the request itself.
   `PRAYER_NOTIFICATION_MAX_HOLD_SECONDS` (default 900) caps the wait; `0` for
   the gap sends at once.
 
-Posting a prayer request is the other notification, and a separate rule. It is
-a `CHAT_MESSAGE` event with `message_type: "PRAYER"`, and it goes to every
-member of the room whatever their chat notification setting: turning chat
-pushes off does not silence prayer requests.
+Posting a prayer request is the other notification, and a separate rule. The
+worker still receives a `CHAT_MESSAGE_CREATED` event with `message_type:
+"PRAYER"`, but recipients are filtered with the `PRAYER_REQUEST` notification
+preference (global or per group), not `CHAT_MESSAGE`. With no row stored,
+`PRAYER_REQUEST` defaults to **off** (opt-in).
 
 - **One push per room per interval:**
   `PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS` (default 1140, nineteen
@@ -311,9 +312,9 @@ pushes off does not silence prayer requests.
   buzz, and a member of three sanghas should not have one of them silence the
   other two.
 - Ordinary `TEXT` chat is not gated.
-- The prayer-received push, not the request, is the one users can mute,
-  globally or per group (`PRAYER_RECEIVED` is a group-scoped notification
-  type) — see [notification-preferences-api.md](./notification-preferences-api.md).
+- Users mute **other people's prayer requests** with `PRAYER_REQUEST` (global
+  or per group) and **“someone prayed for you”** with `PRAYER_RECEIVED` — see
+  [notification-preferences-api.md](./notification-preferences-api.md).
 
 ---
 
