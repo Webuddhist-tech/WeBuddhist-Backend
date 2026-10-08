@@ -28,6 +28,12 @@ from pecha_api.users.user_metadata_repository import get_user_metadata_by_user_i
 
 logger = logging.getLogger(__name__)
 
+PRAYER_TRANSLATION_TARGET_LANGUAGES = (
+    LanguageCode.EN,
+    LanguageCode.BO,
+    LanguageCode.ZH,
+)
+
 _executor_lock = threading.Lock()
 _translation_executor: Optional[ThreadPoolExecutor] = None
 
@@ -50,13 +56,11 @@ def resolve_translation_language_for_user(
     db: Session, user_id: UUID, requested: Optional[LanguageCode]
 ) -> LanguageCode:
     if requested is not None:
-        return requested
+        if requested in PRAYER_TRANSLATION_TARGET_LANGUAGES:
+            return requested
+        return LanguageCode.EN
     metadata = get_user_metadata_by_user_id(db=db, user_id=user_id)
-    if metadata and metadata.language in (
-        LanguageCode.EN,
-        LanguageCode.BO,
-        LanguageCode.ZH,
-    ):
+    if metadata and metadata.language in PRAYER_TRANSLATION_TARGET_LANGUAGES:
         return metadata.language
     return LanguageCode.EN
 
@@ -98,16 +102,46 @@ def _prayer_message_for_translation_apply(
 
 def ensure_translations_for_message(message_id: UUID) -> None:
     """Run Gemini and persist translations for one prayer message."""
-    with SessionLocal() as db:
-        message = get_message_by_id_any_room(db=db, message_id=message_id)
-        if not message or message.deleted_at is not None:
-            return
-        if _message_type_value(message) != ChatMessageType.PRAYER.value:
-            return
-        body_at_start = message.body
+    body_at_start: Optional[str] = None
+    try:
+        with SessionLocal() as db:
+            message = get_message_by_id_any_room(db=db, message_id=message_id)
+            if not message or message.deleted_at is not None:
+                return
+            if _message_type_value(message) != ChatMessageType.PRAYER.value:
+                return
+            body_at_start = message.body
 
-    result = translate_prayer_request(body_at_start)
-    if result is None:
+        result = translate_prayer_request(body_at_start)
+        if result is None:
+            with SessionLocal() as db:
+                message = _prayer_message_for_translation_apply(
+                    db=db, message_id=message_id, body_at_start=body_at_start
+                )
+                if message is None:
+                    return
+                mark_prayer_translations_failed(db=db, message_id=message_id)
+            return
+
+        source_language, translations = result
+        with SessionLocal() as db:
+            message = _prayer_message_for_translation_apply(
+                db=db, message_id=message_id, body_at_start=body_at_start
+            )
+            if message is None:
+                return
+            apply_prayer_translation_result(
+                db=db,
+                message=message,
+                source_language=source_language,
+                translations=translations,
+            )
+    except Exception:
+        logger.exception(
+            "Unexpected error translating prayer message %s", message_id
+        )
+        if body_at_start is None:
+            return
         with SessionLocal() as db:
             message = _prayer_message_for_translation_apply(
                 db=db, message_id=message_id, body_at_start=body_at_start
@@ -115,21 +149,6 @@ def ensure_translations_for_message(message_id: UUID) -> None:
             if message is None:
                 return
             mark_prayer_translations_failed(db=db, message_id=message_id)
-        return
-
-    source_language, translations = result
-    with SessionLocal() as db:
-        message = _prayer_message_for_translation_apply(
-            db=db, message_id=message_id, body_at_start=body_at_start
-        )
-        if message is None:
-            return
-        apply_prayer_translation_result(
-            db=db,
-            message=message,
-            source_language=source_language,
-            translations=translations,
-        )
 
 
 def reconcile_pending_prayer_translations() -> None:
@@ -157,10 +176,19 @@ def build_translation_view(
     target_language: LanguageCode,
 ) -> Dict[str, object]:
     """Fields for ChatMessageDTO prayer translation metadata."""
+    if getattr(message, "deleted_at", None) is not None:
+        return {
+            "source_language": None,
+            "translation": None,
+            "can_translate": False,
+        }
     source = getattr(message, "source_language", None)
-    source_value = (
-        source.value if source is not None and hasattr(source, "value") else None
-    )
+    if source is None:
+        source_value = None
+    elif hasattr(source, "value"):
+        source_value = source.value
+    else:
+        source_value = str(source).strip().upper() or None
     target_value = target_language.value
     can_translate = source_value is None or source_value != target_value
 

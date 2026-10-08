@@ -105,14 +105,14 @@ class TestPrayerTranslationRepository:
         apply_prayer_translation_result(
             db=db,
             message=message,
-            source_language=LanguageCode.EN,
+            source_language="EN",
             translations={
                 LanguageCode.BO: " བོད ",
                 LanguageCode.ZH: "",
             },
         )
 
-        assert message.source_language == LanguageCode.EN
+        assert message.source_language == "EN"
         assert bo_row.body == "བོད"
         assert bo_row.status == ChatMessageTranslationStatus.READY.value
         assert db.add.call_count == 1
@@ -121,6 +121,28 @@ class TestPrayerTranslationRepository:
         filter_query.delete.assert_called()
         db.commit.assert_called_once()
         db.refresh.assert_called_once_with(message)
+
+    def test_apply_prayer_translation_persists_iso_source_outside_platform_enum(self):
+        db = MagicMock()
+        message = MagicMock()
+        message.id = uuid4()
+        filter_query = MagicMock()
+        db.query.return_value = filter_query
+        filter_query.filter.return_value = filter_query
+        filter_query.first.return_value = None
+
+        apply_prayer_translation_result(
+            db=db,
+            message=message,
+            source_language="FR",
+            translations={
+                LanguageCode.EN: "Hello",
+                LanguageCode.BO: "བོད",
+                LanguageCode.ZH: "你好",
+            },
+        )
+
+        assert message.source_language == "FR"
 
     def test_mark_prayer_translations_failed(self):
         db = MagicMock()

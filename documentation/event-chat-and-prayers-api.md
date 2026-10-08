@@ -125,9 +125,11 @@ Optional query `translation_language` (`EN`, `BO`, or `ZH`) selects which cached
 translation to attach to each `PRAYER` row. When omitted, the caller's profile
 language from `PUT /users/me/language` is used, defaulting to `EN`.
 
-`body` is always the original text the author submitted. Translation fields are
-omitted on `TEXT` messages and on `PRAYER` messages when the detected source
-language matches `translation_language`:
+`body` is always the original text the author submitted. `source_language` is an
+ISO 639-1 code for the detected language of `body` (any language, e.g. `ZH`,
+`FR`, `HI`). Cached translation rows exist only for `EN`, `BO`, and `ZH`. Translation
+fields are omitted on `TEXT` messages and on `PRAYER` messages when the detected
+source language matches `translation_language`:
 
 ```json
 {

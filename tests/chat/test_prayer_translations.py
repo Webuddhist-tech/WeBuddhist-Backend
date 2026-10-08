@@ -51,8 +51,32 @@ class TestBuildTranslationView:
 
         assert view["can_translate"] is True
         assert view["source_language"] == "BO"
+
+    def test_iso_string_source_language(self):
+        message = MockMessage(source_language="FR")
+        row = MockTranslation(status="ready", body="English text")
+
+        view = build_translation_view(
+            message=message, row=row, target_language=LanguageCode.EN
+        )
+
+        assert view["source_language"] == "FR"
+        assert view["can_translate"] is True
         assert view["translation"]["status"] == "ready"
         assert view["translation"]["body"] == "English text"
+
+    def test_deleted_message_hides_translation_metadata(self):
+        message = MockMessage(source_language=LanguageCode.ZH)
+        message.deleted_at = datetime.now(timezone.utc)
+        row = MockTranslation(status="ready", body="Secret")
+
+        view = build_translation_view(
+            message=message, row=row, target_language=LanguageCode.EN
+        )
+
+        assert view["source_language"] is None
+        assert view["translation"] is None
+        assert view["can_translate"] is False
 
     def test_cannot_translate_when_source_matches_target(self):
         message = MockMessage(source_language=LanguageCode.EN)
@@ -144,6 +168,16 @@ class TestResolveTranslationLanguageForUser:
                 db=db, user_id=uuid4(), requested=LanguageCode.ZH
             )
             is LanguageCode.ZH
+        )
+
+    def test_unsupported_explicit_request_defaults_to_english(self):
+        db = MagicMock()
+
+        assert (
+            resolve_translation_language_for_user(
+                db=db, user_id=uuid4(), requested=LanguageCode.HI
+            )
+            is LanguageCode.EN
         )
 
     @patch("pecha_api.chat.prayer_translation_service.get_user_metadata_by_user_id")
@@ -257,7 +291,7 @@ class TestEnsureTranslationsForMessage:
             message
         )
         mock_translate.return_value = (
-            LanguageCode.EN,
+            "EN",
             {LanguageCode.BO: "བོད", LanguageCode.ZH: "中文"},
         )
 
@@ -284,7 +318,7 @@ class TestEnsureTranslationsForMessage:
             edited
         )
         mock_translate.return_value = (
-            LanguageCode.EN,
+            "EN",
             {LanguageCode.BO: "བོད", LanguageCode.ZH: "中文"},
         )
 
@@ -333,6 +367,27 @@ class TestEnsureTranslationsForMessage:
             message
         )
         mock_translate.return_value = None
+
+        ensure_translations_for_message(message.id)
+
+        mock_mark_failed.assert_called_once()
+
+    @patch("pecha_api.chat.prayer_translation_service.mark_prayer_translations_failed")
+    @patch("pecha_api.chat.prayer_translation_service.translate_prayer_request")
+    @patch("pecha_api.chat.prayer_translation_service.get_message_by_id_any_room")
+    @patch("pecha_api.chat.prayer_translation_service.SessionLocal")
+    def test_marks_failed_when_gemini_raises(
+        self, mock_session_local, mock_get_message, mock_translate, mock_mark_failed
+    ):
+        message = MockMessage(body="Please pray")
+        message.message_type = ChatMessageType.PRAYER.value
+        mock_db = MagicMock()
+        mock_session_local.return_value.__enter__.return_value = mock_db
+        mock_get_message.return_value = message
+        mock_db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+            message
+        )
+        mock_translate.side_effect = RuntimeError("boom")
 
         ensure_translations_for_message(message.id)
 

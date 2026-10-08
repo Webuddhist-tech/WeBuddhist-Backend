@@ -115,6 +115,8 @@ def _prayer_translation_dto_kwargs(
 ) -> Dict[str, Any]:
     if _message_type_value(message) != ChatMessageType.PRAYER.value:
         return {}
+    if getattr(message, "deleted_at", None) is not None:
+        return {}
     target = resolve_translation_language_for_user(
         db=db, user_id=user_id, requested=translation_language
     )

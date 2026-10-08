@@ -152,8 +152,8 @@ class ChatMessage(Base):
     )
     # Prayer-request intention slug (peace, healing, …). Null for TEXT messages.
     intention = Column(String(32), nullable=True)
-    # Detected language of `body` for PRAYER requests; null for TEXT.
-    source_language = Column(LanguageCodeEnum, nullable=True)
+    # Detected ISO 639-1 language of `body` for PRAYER requests; null for TEXT.
+    source_language = Column(String(2), nullable=True)
     # Set once the sender edits the body or intention; never reset.
     is_edited = Column(
         Boolean, nullable=False, default=False, server_default=sql_text("false")

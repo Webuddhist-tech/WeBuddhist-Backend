@@ -1509,13 +1509,19 @@ def list_message_ids_needing_translation(db: Session, limit: int) -> List[UUID]:
 def apply_prayer_translation_result(
     db: Session,
     message: ChatMessage,
-    source_language: LanguageCode,
+    source_language: str,
     translations: Dict[LanguageCode, str],
 ) -> None:
     """Persist detected source language and ready translation rows."""
-    message.source_language = source_language
+    if isinstance(source_language, LanguageCode):
+        source_value = source_language.value
+    else:
+        source_value = str(source_language).strip().upper()
+    if len(source_value) == 2 and source_value.isalpha():
+        message.source_language = source_value
+    else:
+        message.source_language = None
     now = datetime.now(timezone.utc)
-    source_value = _language_value(source_language)
     for language in PRAYER_TRANSLATION_LANGUAGES:
         lang_value = _language_value(language)
         if lang_value == source_value:

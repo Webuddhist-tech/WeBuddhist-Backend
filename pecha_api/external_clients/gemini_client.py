@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Optional, Tuple
 
 from pecha_api import config
+from pecha_api.chat.prayer_translation_payload import parse_prayer_translation_payload
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.prayer_intentions.prayer_intention_service import (
     PRAYER_REQUEST_BODY_MAX_LENGTH,
@@ -14,13 +15,13 @@ from pecha_api.prayer_intentions.prayer_intention_service import (
 
 logger = logging.getLogger(__name__)
 
-PRAYER_TRANSLATION_LANGUAGE_CODES = ("EN", "BO", "ZH")
-
-_PROMPT = """You translate Buddhist prayer requests between English (EN), Tibetan (BO), and Chinese (ZH).
+_PROMPT = """You translate Buddhist prayer requests into English (EN), Tibetan (BO), and Chinese (ZH).
 
 Given the prayer text below:
-1. Detect which language it is written in (EN, BO, or ZH only).
-2. Translate it into each of the other two languages.
+1. Detect which language the prayer is written in (any language).
+2. Set source_language to that language as an ISO 639-1 code (two letters, uppercase).
+   When the prayer is in EN, BO, ZH, HI, NE, MN, or LA, use those exact codes.
+3. Always provide translations for EN, BO, and ZH (all three keys).
 
 Rules:
 - Preserve personal names and place names.
@@ -31,7 +32,7 @@ Rules:
 
 Respond with JSON only, in this exact shape:
 {{
-  "source_language": "EN" | "BO" | "ZH",
+  "source_language": "<ISO 639-1 code>",
   "translations": {{
     "EN": "...",
     "BO": "...",
@@ -44,41 +45,13 @@ Prayer text:
 """
 
 
-def _parse_prayer_translation_payload(
-    payload: object,
-) -> Optional[Tuple[LanguageCode, Dict[LanguageCode, str]]]:
-    if not isinstance(payload, dict):
-        return None
-    source_raw = str(payload.get("source_language", "")).upper()
-    if source_raw not in PRAYER_TRANSLATION_LANGUAGE_CODES:
-        return None
-    source_language = LanguageCode[source_raw]
-
-    translations_raw = payload.get("translations")
-    if not isinstance(translations_raw, dict):
-        return None
-    translations: Dict[LanguageCode, str] = {}
-    for code in PRAYER_TRANSLATION_LANGUAGE_CODES:
-        text = translations_raw.get(code)
-        if text is None:
-            continue
-        cleaned = str(text).strip()
-        if not cleaned:
-            continue
-        if len(cleaned) > PRAYER_REQUEST_BODY_MAX_LENGTH:
-            cleaned = cleaned[:PRAYER_REQUEST_BODY_MAX_LENGTH]
-        translations[LanguageCode[code]] = cleaned
-
-    return source_language, translations
-
-
 def prayer_translation_enabled() -> bool:
     if not config.get_bool("PRAYER_TRANSLATION_ENABLED"):
         return False
     return bool((config.get("GEMINI_API_KEY") or "").strip())
 
 
-def translate_prayer_request(body: str) -> Optional[Tuple[LanguageCode, Dict[LanguageCode, str]]]:
+def translate_prayer_request(body: str) -> Optional[Tuple[str, Dict[LanguageCode, str]]]:
     """Call Gemini once; return source language and all three language texts."""
     if not prayer_translation_enabled():
         return None
@@ -113,7 +86,7 @@ def translate_prayer_request(body: str) -> Optional[Tuple[LanguageCode, Dict[Lan
         if not raw:
             return None
         payload = json.loads(raw)
-        return _parse_prayer_translation_payload(payload)
+        return parse_prayer_translation_payload(payload)
     except Exception:
         logger.exception("Gemini prayer translation failed")
         return None
