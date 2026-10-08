@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from pecha_api.db.database import Base
+from pecha_api.plans.plans_enums import LanguageCodeEnum
 
 from .enums import ChatMessageTypeEnum, ChatRoomMemberRoleEnum
 
@@ -151,6 +152,8 @@ class ChatMessage(Base):
     )
     # Prayer-request intention slug (peace, healing, …). Null for TEXT messages.
     intention = Column(String(32), nullable=True)
+    # Detected ISO 639-1 language of `body` for PRAYER requests; null for TEXT.
+    source_language = Column(String(2), nullable=True)
     # Set once the sender edits the body or intention; never reset.
     is_edited = Column(
         Boolean, nullable=False, default=False, server_default=sql_text("false")
@@ -185,6 +188,11 @@ class ChatMessage(Base):
     )
     prayer_notifications = relationship(
         "ChatPrayerNotification",
+        back_populates="message",
+        cascade=CASCADE_DELETE_ORPHAN,
+    )
+    translations = relationship(
+        "ChatMessageTranslation",
         back_populates="message",
         cascade=CASCADE_DELETE_ORPHAN,
     )
@@ -519,5 +527,43 @@ class ChatMessageReport(Base):
             "idx_chat_message_reports_unresolved",
             "created_at",
             postgresql_where=sql_text("resolved_at IS NULL"),
+        ),
+    )
+
+
+class ChatMessageTranslation(Base):
+    """Cached Gemini translation of a prayer request into one target language."""
+
+    __tablename__ = "chat_message_translations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    message_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_CHAT_MESSAGES_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_language = Column(LanguageCodeEnum, nullable=False)
+    body = Column(Text, nullable=True)
+    status = Column(String(16), nullable=False, server_default="pending")
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(dt.timezone.utc),
+        onupdate=lambda: datetime.now(dt.timezone.utc),
+        nullable=False,
+    )
+
+    message = relationship("ChatMessage", back_populates="translations")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "target_language",
+            name="uq_chat_message_translations_message_language",
+        ),
+        Index("idx_chat_message_translations_message_id", "message_id"),
+        Index(
+            "idx_chat_message_translations_pending",
+            "updated_at",
+            postgresql_where=sql_text("status IN ('pending', 'failed')"),
         ),
     )

@@ -9,6 +9,7 @@ from pecha_api.chat.notification_dispatch_service import (
     reconcile_undispatched_chat_notifications,
     reconcile_undispatched_prayer_notifications,
 )
+from pecha_api.chat.prayer_translation_service import reconcile_pending_prayer_translations
 from pecha_api.plans.groups.join_request_dispatch_service import (
     reconcile_undispatched_join_request_notifications,
 )
@@ -103,6 +104,19 @@ def setup_scheduler() -> None:
         IntervalTrigger(seconds=prayer_dispatch_interval),
         id="dispatch_due_prayer_notifications",
         name="Dispatch held prayer-received notifications",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    prayer_translation_interval = max(
+        get_int("PRAYER_TRANSLATION_RECONCILE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        reconcile_pending_prayer_translations,
+        IntervalTrigger(seconds=prayer_translation_interval),
+        id="reconcile_pending_prayer_translations",
+        name="Retry pending prayer request translations",
         replace_existing=True,
         max_instances=1,
     )

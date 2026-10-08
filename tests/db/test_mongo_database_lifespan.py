@@ -26,15 +26,24 @@ async def test_lifespan_closes_mongo_client_on_shutdown():
         "pecha_api.db.mongo_database.init_broadcaster", new_callable=AsyncMock
     ) as mock_init_broadcaster, patch(
         "pecha_api.db.mongo_database.init_chat_broadcaster", new_callable=AsyncMock
-    ) as mock_init_chat_broadcaster:
+    ) as mock_init_chat_broadcaster, patch(
+        "pecha_api.db.mongo_database.init_recitation_broadcaster", new_callable=AsyncMock
+    ) as mock_init_recitation_broadcaster, patch(
+        "pecha_api.events.recitation_autoplay_service.init_autoplay", new_callable=AsyncMock
+    ) as mock_init_autoplay:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_db = MagicMock()
         mock_client.__getitem__.return_value = mock_db
+        mock_init_recitation_broadcaster.return_value = MagicMock(redis=MagicMock())
 
         async with lifespan(api):
             assert api.mongodb is mock_db
 
+    mock_init_recitation_broadcaster.assert_called_once_with(
+        redis_url="redis://localhost:6379/0"
+    )
+    mock_init_autoplay.assert_awaited_once()
     mock_setup_scheduler.assert_called_once()
     mock_shutdown_scheduler.assert_called_once()
     mock_client.close.assert_called_once()

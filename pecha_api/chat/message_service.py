@@ -44,6 +44,7 @@ from pecha_api.chat.repository import (
     get_report_by_message_and_reporter,
     get_room_by_id,
     get_room_messages,
+    get_translations_map,
     list_message_prayers,
     list_message_reactions,
     remove_prayer_and_count,
@@ -54,15 +55,23 @@ from pecha_api.chat.repository import (
     touch_room,
     update_message,
 )
+from pecha_api.chat.prayer_translation_service import (
+    build_translation_view,
+    prepare_prayer_translations,
+    resolve_translation_language_for_user,
+    schedule_ensure_prayer_translations,
+)
 from pecha_api.chat.response_models import (
     ChatMessageDTO,
     ChatMessagePrayerDTO,
     ChatMessagePrayersResponse,
     ChatMessagePrayerStateDTO,
     ChatMessageReactionDTO,
+    ChatMessageTranslationDTO,
     ChatMessagesResponse,
     PrayerBatchResponse,
 )
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.chat.service import (
     _build_reaction_dtos,
     _generate_presigned_url,
@@ -95,6 +104,39 @@ _NOT_A_PRAYER_REQUEST = "NOT_A_PRAYER_REQUEST"
 _NOT_OWN_MESSAGES = "message_ids include other users' messages"
 _NOTHING_TO_EDIT = "Provide body or intention to edit"
 _RECENT_PRAYERS_LIMIT = 3
+
+
+def _prayer_translation_dto_kwargs(
+    db: Session,
+    message: ChatMessage,
+    user_id: UUID,
+    translation_language: Optional[LanguageCode],
+    translations_map: Optional[dict] = None,
+) -> Dict[str, Any]:
+    if _message_type_value(message) != ChatMessageType.PRAYER.value:
+        return {}
+    if getattr(message, "deleted_at", None) is not None:
+        return {}
+    target = resolve_translation_language_for_user(
+        db=db, user_id=user_id, requested=translation_language
+    )
+    row = None
+    if translations_map is not None:
+        row = translations_map.get(message.id)
+    else:
+        row = get_translations_map(
+            db=db, message_ids=[message.id], target_language=target
+        ).get(message.id)
+    view = build_translation_view(message=message, row=row, target_language=target)
+    translation_payload = view.get("translation")
+    translation_dto = None
+    if translation_payload is not None:
+        translation_dto = ChatMessageTranslationDTO(**translation_payload)
+    return {
+        "source_language": view.get("source_language"),
+        "translation": translation_dto,
+        "can_translate": view.get("can_translate", False),
+    }
 
 
 class PrayerBatchResult(NamedTuple):
@@ -263,8 +305,17 @@ def _persist_message(
     if stored_intention:
         intention_map = resolve_intention_dtos_for_slugs(db=db, slugs=[stored_intention])
         intention_dto = intention_map.get(stored_intention)
+    if message_type == ChatMessageType.PRAYER.value:
+        prepare_prayer_translations(message_id=message.id)
+        schedule_ensure_prayer_translations(message_id=message.id)
+    translation_kwargs = _prayer_translation_dto_kwargs(
+        db=db, message=message, user_id=user.id, translation_language=None
+    )
     dto = build_message_dto(
-        message, viewer_id=user.id, intention=intention_dto
+        message,
+        viewer_id=user.id,
+        intention=intention_dto,
+        **translation_kwargs,
     )
     # The type and room are already in hand, so an ordinary message costs no
     # extra read for the dispatcher to learn it is not a prayer request.
@@ -316,6 +367,7 @@ def list_room_messages_service(
     sort: PrayerSort = PrayerSort.NEWEST,
     intention: Optional[str] = None,
     seed: Optional[str] = None,
+    translation_language: Optional[LanguageCode] = None,
 ) -> ChatMessagesResponse:
     with SessionLocal() as db:
         _get_room_or_404(db=db, room_id=room_id)
@@ -351,6 +403,12 @@ def list_room_messages_service(
             message.intention for message in messages if message.intention
         ]
         intention_dtos = resolve_intention_dtos_for_slugs(db=db, slugs=intention_slugs)
+        target_language = resolve_translation_language_for_user(
+            db=db, user_id=user.id, requested=translation_language
+        )
+        translations_map = get_translations_map(
+            db=db, message_ids=prayer_ids, target_language=target_language
+        )
         return ChatMessagesResponse(
             messages=[
                 build_message_dto(
@@ -364,6 +422,13 @@ def list_room_messages_service(
                     if message.intention
                     else None,
                     my_prayer_count=my_prayer_counts.get(message.id, 0),
+                    **_prayer_translation_dto_kwargs(
+                        db=db,
+                        message=message,
+                        user_id=user.id,
+                        translation_language=target_language,
+                        translations_map=translations_map,
+                    ),
                 )
                 for message in messages
             ],
@@ -467,13 +532,18 @@ def edit_message_service(
                 getattr(room, "event_id", None) if intention is not None else None
             ),
         )
-        if new_body != message.body or stored_intention != message.intention:
+        body_changed = new_body != message.body
+        if body_changed or stored_intention != message.intention:
             validate_message_content(db=db, room=room, user=user, body=new_body)
             # Held until update_message commits, as for a new message.
             _lock_room_publication(db=db, room=room)
             message = update_message(
                 db=db, message=message, body=new_body, intention=stored_intention
             )
+            if body_changed and message_type == ChatMessageType.PRAYER.value:
+                prepare_prayer_translations(message_id=message.id)
+                schedule_ensure_prayer_translations(message_id=message.id)
+                db.refresh(message)
 
         reactions = list_message_reactions(db=db, message_id=message.id)
         prayer_kwargs: Dict[str, Any] = {}
@@ -497,8 +567,15 @@ def edit_message_service(
                 if stored_intention
                 else None,
             }
+        translation_kwargs = _prayer_translation_dto_kwargs(
+            db=db, message=message, user_id=user.id, translation_language=None
+        )
         return build_message_dto(
-            message, reactions=reactions, viewer_id=user.id, **prayer_kwargs
+            message,
+            reactions=reactions,
+            viewer_id=user.id,
+            **prayer_kwargs,
+            **translation_kwargs,
         )
 
 

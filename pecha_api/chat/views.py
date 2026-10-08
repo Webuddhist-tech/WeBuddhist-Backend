@@ -62,7 +62,12 @@ from pecha_api.chat.response_models import (
     SendChatMessageRequest,
     UpdateChatRoomRequest,
 )
-from pecha_api.chat.enums import ChatMessageType, PrayerSort
+from pecha_api.chat.enums import (
+    ChatMessageType,
+    PrayerSort,
+    PrayerTranslationLanguage,
+)
+from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.chat.service import (
     _sender_name,
     get_event_room_service,
@@ -174,6 +179,9 @@ def list_room_messages(
     sort: Annotated[PrayerSort, Query()] = PrayerSort.NEWEST,
     intention: Annotated[Optional[str], Query(max_length=32)] = None,
     seed: Annotated[Optional[str], Query(max_length=64)] = None,
+    translation_language: Annotated[
+        Optional[PrayerTranslationLanguage], Query()
+    ] = None,
 ):
     """Paginated message history for a room (newest first). Active member only.
 
@@ -182,6 +190,11 @@ def list_room_messages(
     prayers first) | random (pass the same `seed` on every page of one shuffle),
     and `intention` filters to one intention slug. Both are ignored otherwise."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
+    resolved_translation_language = (
+        LanguageCode[translation_language.value]
+        if translation_language is not None
+        else None
+    )
     return list_room_messages_service(
         room_id=room_id,
         user=user,
@@ -191,6 +204,7 @@ def list_room_messages(
         sort=sort,
         intention=intention,
         seed=seed,
+        translation_language=resolved_translation_language,
     )
 
 
@@ -412,7 +426,7 @@ def send_group_chat_message(
     becomes CREATOR) on the first message from an eligible group joiner/follower.
     Pass parent_message_id in the body to send it as a reply."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return send_group_message_service(
+    message = send_group_message_service(
         group_id=group_id,
         user=user,
         body=request.body,
@@ -420,6 +434,7 @@ def send_group_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
+    return message
 
 
 @chat_router.get(
@@ -451,7 +466,7 @@ def send_event_chat_message(
     becomes CREATOR) on the first message from an eligible joiner/follower of
     the event's group. Pass message_type=PRAYER to post a prayer request."""
     user = validate_and_extract_user_details(token=authentication_credential.credentials)
-    return send_event_message_service(
+    message = send_event_message_service(
         event_id=event_id,
         user=user,
         body=request.body,
@@ -459,6 +474,7 @@ def send_event_chat_message(
         message_type=request.message_type.value,
         intention=request.intention,
     )
+    return message
 
 
 @chat_router.post(

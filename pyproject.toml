@@ -40,6 +40,7 @@ apscheduler = "^3.11.3"
 better-profanity = "^0.7.0"
 sentry-sdk = "^2.68.1"
 playwright = "^1.55.0"
+google-genai = "^1.29.0"
 [tool.poetry.scripts]
 start = "uvicorn:main"
 
