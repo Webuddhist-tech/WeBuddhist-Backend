@@ -40,6 +40,7 @@ def test_get_cms_admin_authors_delegates_to_service():
         is_active=None,
         platform_role=None,
         search=None,
+        account_status_filter=None,
     )
 
 

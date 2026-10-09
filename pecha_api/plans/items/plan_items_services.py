@@ -274,6 +274,11 @@ def _copy_tasks_and_subtasks_to_days(
                 display_order=source_task.display_order,
                 estimated_time=source_task.estimated_time,
                 is_required=source_task.is_required,
+                # Reader defaults carry over; live does not - it belongs to one day.
+                is_commentary_open=source_task.is_commentary_open,
+                commentary_text_id=source_task.commentary_text_id,
+                is_translation_open=source_task.is_translation_open,
+                translation_text_id=source_task.translation_text_id,
                 created_by=created_by,
             )
             db.add(new_task)

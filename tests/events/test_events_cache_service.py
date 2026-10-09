@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -115,17 +115,21 @@ async def test_schedule_invalidate_event_detail_caches_runs_in_background():
     mock_invalidate.assert_awaited_once_with(event_id)
 
 
-def test_schedule_invalidate_event_detail_caches_falls_back_to_background_thread():
+def test_schedule_invalidate_event_detail_caches_uses_app_loop_from_sync_thread():
     event_id = uuid.uuid4()
+    app_loop = MagicMock()
+    app_loop.is_running.return_value = True
 
     with patch(
         "pecha_api.events.events_cache_service.asyncio.get_running_loop",
         side_effect=RuntimeError,
     ), patch(
-        "pecha_api.events.events_cache_service.threading.Thread",
-    ) as mock_thread:
+        "pecha_api.events.events_cache_service._app_event_loop",
+        app_loop,
+    ), patch(
+        "pecha_api.events.events_cache_service.asyncio.run_coroutine_threadsafe",
+    ) as mock_threadsafe:
         schedule_invalidate_event_detail_caches(event_id)
 
-    mock_thread.assert_called_once()
-    assert mock_thread.call_args.kwargs.get("daemon") is True
-    assert callable(mock_thread.call_args.kwargs["target"])
+    mock_threadsafe.assert_called_once()
+    assert mock_threadsafe.call_args.args[1] is app_loop

@@ -50,6 +50,7 @@ from pecha_api.group_posts.models import GroupPost, GroupPostMedia, GroupPostLin
 from pecha_api.group_assets.models import GroupAsset, GroupRecitationCollectionItemAsset
 from pecha_api.group_posts.comment_models import GroupPostComment
 from pecha_api.group_posts.like_models import GroupPostLike
+from pecha_api.verse_of_day.verse_of_day_model import VerseOfDay  # noqa: F401
 from pecha_api.verse_of_day.like_models import VerseOfDayLike
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
 from pecha_api.verse_of_day.comment_like_models import VerseOfDayCommentLike
@@ -57,6 +58,9 @@ from pecha_api.mantra.mantra_metadata_model import MantraMetadata
 from pecha_api.traditions.tradition_models import Tradition, TraditionMetadata, UserTradition
 from pecha_api.region_restrictions.region_restriction_models import ChinaRestrictedItem
 from pecha_api.notification.notification_preference_models import UserNotificationPreference
+from pecha_api.prayer_pdf.prayer_pdf_model import PrayerPdfSettings
+from pecha_api.feedback.feedback_models import Feedback
+from pecha_api.chat.models import ChatMessageTranslation  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

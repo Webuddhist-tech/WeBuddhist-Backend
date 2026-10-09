@@ -11,6 +11,7 @@ class DayVideoDTO(BaseModel):
     url: str
     video_id: Optional[str] = None
     title: Optional[str] = None
+    duration_seconds: Optional[int] = None
     display_order: int
     created_at: Optional[datetime] = None
 

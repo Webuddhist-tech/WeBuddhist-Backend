@@ -118,6 +118,31 @@ def test_video_is_added_to_todays_day_of_same_language_plan() -> None:
     db.commit.assert_called_once()
 
 
+def test_added_video_stores_youtube_duration() -> None:
+    plan = _plan("EN")
+    day = SimpleNamespace(id=uuid4())
+    db = _db([plan], {plan.id: day})
+
+    with patch(f"{MODULE}.durations_for_video_ids", return_value={"AAAAAAAAAAA": 253}):
+        _run(db, _event([_link(VIDEO_A, "EN")], days_since_start=2))
+
+    assert _added_videos(db)[0].duration_seconds == 253
+
+
+def test_video_is_added_when_youtube_duration_lookup_fails() -> None:
+    plan = _plan("EN")
+    day = SimpleNamespace(id=uuid4())
+    db = _db([plan], {plan.id: day})
+
+    with patch(f"{MODULE}.durations_for_video_ids", side_effect=RuntimeError("youtube down")):
+        _run(db, _event([_link(VIDEO_A, "EN")], days_since_start=2))
+
+    (video,) = _added_videos(db)
+    assert video.video_id == "AAAAAAAAAAA"
+    assert video.duration_seconds is None
+    db.commit.assert_called_once()
+
+
 def test_day_number_falls_back_to_event_start_when_plan_has_none() -> None:
     plan = _plan("EN")
     db = _db([plan], {plan.id: SimpleNamespace(id=uuid4())})

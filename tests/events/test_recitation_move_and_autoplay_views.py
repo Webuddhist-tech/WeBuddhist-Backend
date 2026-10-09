@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from starlette import status
 
 from pecha_api.app import api
-from pecha_api.events.recitation_autoplay_service import _send_permit
+from pecha_api.events.recitation_autoplay_service import AutoplayCommandRefused, _send_permit
 from pecha_api.events.recitation_live_models import AutoplayStateResponse, SetPositionFrame
 from pecha_api.events.recitation_live_views import emit_autoplay_positions
 from pecha_api.events.recitation_websocket import AutoplayGuard, AutoplayRefused
@@ -309,6 +309,9 @@ class TestAutoplayRoutes:
 
 
 def _ws(event_id, token=SECRET):
+    """`token=None` is a signed-out viewer: no query parameter at all."""
+    if token is None:
+        return f"/events/{event_id}/recitation/live"
     return f"/events/{event_id}/recitation/live?token={token}"
 
 
@@ -397,6 +400,31 @@ class TestControllerSocket:
         assert message["code"] == "FORBIDDEN"
         broadcaster.broadcast_position.assert_not_awaited()
 
+    def test_a_signed_out_viewer_cannot_move_the_room(self):
+        """A socket with no token follows along; it is never the controller,
+        however the event's emit secret is configured."""
+        event_id = uuid4()
+        with _env() as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                info = websocket.receive_json()
+                websocket.send_json({"type": "move", "move_id": "m-5", "positions": [_position("bo", "a")]})
+                message = websocket.receive_json()
+
+        assert info["is_operator"] is False
+        assert message["code"] == "FORBIDDEN"
+        broadcaster.allow_set.assert_not_awaited()
+        broadcaster.broadcast_position.assert_not_awaited()
+        broadcaster.caller.assert_not_called()
+
+    def test_a_signed_out_viewer_never_hears_about_autoplay(self):
+        event_id = uuid4()
+        with _env(engine=_engine(event_id)) as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                websocket.receive_json()
+                _sync(websocket)
+
+        broadcaster.subscribe_to_autoplay.assert_not_awaited()
+
     def test_the_operator_is_told_where_autoplay_is_and_every_change(self):
         event_id = uuid4()
         engine = _engine(event_id)
@@ -455,3 +483,237 @@ async def test_an_in_flight_autoplay_step_is_not_published_once_its_plan_is_gone
     assert broadcaster.broadcast_position.await_count == 2
     assert broadcaster.broadcast_position.await_args_list[0].kwargs["guard"].plan_id == "old"
     assert broadcaster.broadcast_position.await_args_list[1].kwargs["guard"].plan_id == "old"
+
+
+def _command_engine(event_id):
+    engine = _engine(event_id)
+    engine.seek = AsyncMock(return_value=_state(event_id, plan_id="p-1", step=4, total_steps=9))
+    engine.hold = AsyncMock(return_value=_state(event_id, plan_id="p-1", held=True))
+    engine.resume = AsyncMock(return_value=_state(event_id, plan_id="p-1"))
+    engine.update_settings = AsyncMock(
+        return_value=_state(event_id, status="stopped", lead_ms=450, tempo=1.1)
+    )
+    return engine
+
+
+def _receive(websocket, frame_type):
+    while True:
+        message = websocket.receive_json()
+        if message.get("type") == frame_type:
+            return message
+
+
+class TestAutoplayCommandRoutes:
+
+    def test_a_seek_is_a_step_of_the_running_plan(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine):
+            response = client.post(
+                f"/events/{event_id}/recitation/autoplay/seek",
+                json={"plan_id": "p-1", "step": 4, "expected_step": 3},
+                headers=AUTH,
+            )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["step"] == 4
+        engine.seek.assert_awaited_once_with(event_id, "p-1", 4, expected_step=3)
+
+    def test_a_seek_with_no_plan_to_act_on_is_a_conflict(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        engine.seek.side_effect = AutoplayCommandRefused("That plan is not running")
+        with _env(engine=engine):
+            response = client.post(
+                f"/events/{event_id}/recitation/autoplay/seek",
+                json={"plan_id": "gone", "step": 1},
+                headers=AUTH,
+            )
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+
+    def test_a_seek_spends_a_throttle_slot(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine, allow_set=False):
+            response = client.post(
+                f"/events/{event_id}/recitation/autoplay/seek",
+                json={"plan_id": "p-1", "step": 1},
+                headers=AUTH,
+            )
+
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        engine.seek.assert_not_awaited()
+
+    def test_hold_and_resume(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine):
+            held = client.post(
+                f"/events/{event_id}/recitation/autoplay/hold",
+                json={"plan_id": "p-1"},
+                headers=AUTH,
+            )
+            resumed = client.post(
+                f"/events/{event_id}/recitation/autoplay/resume", json={}, headers=AUTH
+            )
+
+        assert held.json()["held"] is True
+        assert resumed.json()["held"] is False
+        engine.hold.assert_awaited_once_with(event_id, "p-1")
+        engine.resume.assert_awaited_once_with(event_id, None)
+
+    def test_settings_pass_only_what_was_given(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine, allow_set=False):
+            response = client.post(
+                f"/events/{event_id}/recitation/autoplay/settings",
+                json={"lead_ms": 450},
+                headers=AUTH,
+            )
+
+        # Settings move nobody, so the throttle does not apply to them.
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["lead_ms"] == 450
+        engine.update_settings.assert_awaited_once_with(event_id, lead_ms=450, tempo=None)
+
+    def test_a_lead_past_the_ceiling_is_refused(self):
+        with _env(engine=_command_engine(uuid4())):
+            response = client.post(
+                f"/events/{uuid4()}/recitation/autoplay/settings",
+                json={"lead_ms": 60_000},
+                headers=AUTH,
+            )
+
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    def test_every_command_needs_the_emit_secret(self):
+        event_id = uuid4()
+        with _env(engine=_command_engine(event_id)):
+            for path, body in [
+                ("seek", {"plan_id": "p", "step": 1}),
+                ("hold", {}),
+                ("resume", {}),
+                ("settings", {"lead_ms": 1}),
+            ]:
+                response = client.post(
+                    f"/events/{event_id}/recitation/autoplay/{path}",
+                    json=body,
+                    headers={"X-Recitation-Token": "wrong"},
+                )
+                assert response.status_code in (
+                    status.HTTP_401_UNAUTHORIZED,
+                    status.HTTP_403_FORBIDDEN,
+                ), path
+
+
+class TestAutoplayCommandsOverTheSocket:
+
+    def test_a_seek_is_answered_by_its_ack_with_the_new_state(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine):
+            with client.websocket_connect(_ws(event_id)) as websocket:
+                websocket.send_json({
+                    "type": "autoplay_seek",
+                    "command_id": "c-1",
+                    "plan_id": "p-1",
+                    "step": 4,
+                    "expected_step": 3,
+                })
+                ack = _receive(websocket, "autoplay_ack")
+
+        assert ack["ok"] is True
+        assert ack["command_id"] == "c-1"
+        assert ack["command"] == "seek"
+        assert ack["state"]["step"] == 4
+        engine.seek.assert_awaited_once_with(event_id, "p-1", 4, expected_step=3)
+
+    def test_a_command_with_no_plan_to_act_on_is_refused_by_name(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        engine.hold.side_effect = AutoplayCommandRefused("No plan is running")
+        with _env(engine=engine):
+            with client.websocket_connect(_ws(event_id)) as websocket:
+                websocket.send_json({"type": "autoplay_hold", "command_id": "c-2"})
+                ack = _receive(websocket, "autoplay_ack")
+
+        assert ack["ok"] is False
+        assert ack["code"] == "NOT_RUNNING"
+
+    def test_a_throttled_seek_is_refused_and_moves_nothing(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine, allow_set=False):
+            with client.websocket_connect(_ws(event_id)) as websocket:
+                websocket.send_json({"type": "autoplay_seek", "plan_id": "p-1", "step": 1})
+                ack = _receive(websocket, "autoplay_ack")
+
+        assert ack["code"] == "THROTTLED"
+        engine.seek.assert_not_awaited()
+
+    def test_a_malformed_command_is_refused_by_name(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine):
+            with client.websocket_connect(_ws(event_id)) as websocket:
+                websocket.send_json({"type": "autoplay_seek", "step": -1})
+                ack = _receive(websocket, "autoplay_ack")
+
+        assert ack["code"] == "VALIDATION_ERROR"
+        engine.seek.assert_not_awaited()
+
+    def test_settings_and_resume_go_to_the_engine(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine):
+            with client.websocket_connect(_ws(event_id)) as websocket:
+                websocket.send_json({"type": "autoplay_settings", "tempo": 1.1})
+                settings = _receive(websocket, "autoplay_ack")
+                websocket.send_json({"type": "autoplay_resume", "plan_id": "p-1"})
+                resumed = _receive(websocket, "autoplay_ack")
+
+        assert settings["ok"] is True and resumed["ok"] is True
+        engine.update_settings.assert_awaited_once_with(event_id, lead_ms=None, tempo=1.1)
+        engine.resume.assert_awaited_once_with(event_id, "p-1")
+
+    def test_a_viewer_cannot_command_autoplay(self):
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        with _env(engine=engine) as broadcaster:
+            broadcaster.caller.return_value = MagicMock(presence_id=uuid4(), user_id=uuid4())
+            broadcaster.access.return_value = False
+            with client.websocket_connect(_ws(event_id, token="app-user-token")) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "autoplay_hold"})
+                message = websocket.receive_json()
+
+        assert message["code"] == "FORBIDDEN"
+        engine.hold.assert_not_awaited()
+
+    def test_a_signed_out_viewer_cannot_command_autoplay(self):
+        """Every operator command, not just one: a socket with no token must
+        not be able to touch a running plan."""
+        event_id = uuid4()
+        engine = _command_engine(event_id)
+        frames = [
+            {"type": "autoplay_seek", "plan_id": "p-1", "step": 4},
+            {"type": "autoplay_hold", "plan_id": "p-1"},
+            {"type": "autoplay_resume", "plan_id": "p-1"},
+            {"type": "autoplay_settings", "tempo": 1.1},
+        ]
+        with _env(engine=engine) as broadcaster:
+            with client.websocket_connect(_ws(event_id, token=None)) as websocket:
+                websocket.receive_json()
+                answers = []
+                for frame in frames:
+                    websocket.send_json(frame)
+                    answers.append(websocket.receive_json())
+
+        assert [a["code"] for a in answers] == ["FORBIDDEN"] * len(frames)
+        engine.seek.assert_not_awaited()
+        engine.hold.assert_not_awaited()
+        engine.resume.assert_not_awaited()
+        engine.update_settings.assert_not_awaited()
+        broadcaster.allow_set.assert_not_awaited()

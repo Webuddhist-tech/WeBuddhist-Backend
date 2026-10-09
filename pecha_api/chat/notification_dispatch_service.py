@@ -8,11 +8,15 @@ from pecha_api.chat.enums import ChatMessageType
 from pecha_api.chat.repository import (
     SUPPRESSED_SQS_MESSAGE_ID,
     _as_utc,
+    claim_prayer_notification_for_dispatch,
     claim_unreported_prayers,
     create_prayer_notification,
     get_last_prayer_notification,
     get_message_by_id_any_room,
     last_dispatched_prayer_request,
+    last_prayer_request_push_to_user,
+    list_due_prayer_notifications,
+    list_prayer_requests_with_held_prayers,
     list_undispatched_chat_notification_messages,
     list_undispatched_prayer_notifications,
     lock_prayer_request,
@@ -218,9 +222,19 @@ def _prayer_interval_is_open(last_created_at, interval_seconds: int) -> bool:
     return _as_utc(last_created_at) <= cutoff
 
 
-def _create_prayer_notification_if_due(message_id: UUID, prayer_user_id: UUID) -> UUID | None:
+def _prayer_received_interval_seconds() -> int:
+    return max(get_int("PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS"), 0)
+
+
+def _create_prayer_notification_if_due(
+    message_id: UUID, prayer_user_id: UUID | None = None
+) -> UUID | None:
     """Decide whether this request's requester gets a push now and, if so,
     record it. Returns the new notification id, or None when no push is due.
+
+    `prayer_user_id` is whoever just prayed, so the requester praying for
+    their own request raises nothing. The dispatcher's sweep passes None: no
+    one just prayed, it is collecting prayers the interval held.
 
     The request row is locked for the whole decision, so two pray calls landing
     together cannot both find the interval open. Prayers that arrive while the
@@ -228,10 +242,12 @@ def _create_prayer_notification_if_due(message_id: UUID, prayer_user_id: UUID) -
     and the next push claims them. Claiming the counts and recording the push
     commit together, so a push never reports prayers another push also did.
     """
-    interval_seconds = max(get_int("PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS"), 0)
+    interval_seconds = _prayer_received_interval_seconds()
     with SessionLocal() as db:
         message = lock_prayer_request(db=db, message_id=message_id)
-        if message is None or message.sender_id == prayer_user_id:
+        if message is None:
+            return None
+        if prayer_user_id is not None and message.sender_id == prayer_user_id:
             return None
 
         previous = get_last_prayer_notification(db=db, message_id=message_id)
@@ -292,13 +308,35 @@ def _send_prayer_notification(notification_id: UUID) -> str | None:
     return sqs_message_id
 
 
+def _claim_and_send_prayer_notification(notification_id: UUID) -> str | None:
+    """Claim one recorded prayer push and send it. None when another replica
+    claimed it first, or the claim failed and the row waits for the next poll."""
+    try:
+        with SessionLocal() as db:
+            if not claim_prayer_notification_for_dispatch(
+                db=db, notification_id=notification_id
+            ):
+                return None
+    except Exception:
+        logger.exception("Failed to claim prayer notification %s", notification_id)
+        return None
+    return _send_prayer_notification(notification_id)
+
+
+def _prayer_notification_gap_seconds() -> int:
+    return max(get_int("PRAYER_NOTIFICATION_GAP_SECONDS"), 0)
+
+
 def notify_prayers_for_request(message_id: UUID, prayer_user_id: UUID) -> str | None:
     """Run the prayer-received gate for one request after someone prayed.
     Never raises to callers.
 
     At most one push per request per interval, and none for the requester's
-    own prayers. Returns the SQS MessageId when a push was sent, otherwise
-    None. The prayers themselves are already persisted either way.
+    own prayers. With PRAYER_NOTIFICATION_GAP_SECONDS set the push is only
+    recorded here and dispatch_due_prayer_notifications sends it, so it cannot
+    land on top of a prayer-request push. Returns the SQS MessageId when a push
+    was sent now, otherwise None. The prayers themselves are already persisted
+    either way.
     """
     if not is_prayer_notification_sqs_configured():
         logger.debug(
@@ -316,15 +354,125 @@ def notify_prayers_for_request(message_id: UUID, prayer_user_id: UUID) -> str | 
         return None
     if notification_id is None:
         return None
+    if _prayer_notification_gap_seconds() > 0:
+        return None
 
-    return _send_prayer_notification(notification_id)
+    return _claim_and_send_prayer_notification(notification_id)
+
+
+def _clear_of_prayer_request_pushes(
+    *,
+    requester_id: UUID,
+    created_at: datetime,
+    now: datetime,
+    gap_seconds: int,
+) -> bool:
+    """Whether a prayer-received push to `requester_id` can go out now without
+    landing beside a prayer-request push they were sent in the last gap.
+
+    Never raises: a failed read sends the push rather than holding it."""
+    max_hold_seconds = max(get_int("PRAYER_NOTIFICATION_MAX_HOLD_SECONDS"), gap_seconds)
+    if now - _as_utc(created_at) >= timedelta(seconds=max_hold_seconds):
+        return True
+    try:
+        with SessionLocal() as db:
+            last_request_push = last_prayer_request_push_to_user(
+                db=db,
+                user_id=requester_id,
+                since=now - timedelta(seconds=gap_seconds),
+            )
+    except Exception:
+        logger.exception(
+            "Failed to check recent prayer-request pushes for %s", requester_id
+        )
+        return True
+    return last_request_push is None
+
+
+def _record_held_prayer_notifications() -> int:
+    """Record a push for every request whose held prayers are now due.
+
+    A pray call inside the interval records nothing; its prayers wait for the
+    next push. Without this, that next push only came from another pray call
+    after the interval, so the last prayers in a burst - usually most of them -
+    were never reported. The pushes recorded here go out through the same
+    gap check as any other. Never raises: a failure waits for the next poll.
+    """
+    batch_size = max(get_int("CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE"), 1)
+    last_push_before = datetime.now(timezone.utc) - timedelta(
+        seconds=_prayer_received_interval_seconds()
+    )
+    try:
+        with SessionLocal() as db:
+            message_ids = list_prayer_requests_with_held_prayers(
+                db=db, last_push_before=last_push_before, limit=batch_size
+            )
+    except Exception:
+        logger.exception("Failed to list prayer requests with held prayers")
+        return 0
+
+    recorded = 0
+    for message_id in message_ids:
+        try:
+            if _create_prayer_notification_if_due(message_id=message_id):
+                recorded += 1
+        except Exception:
+            logger.exception("Failed to record held prayers for %s", message_id)
+    return recorded
+
+
+def dispatch_due_prayer_notifications() -> int:
+    """Send the prayer-received pushes that are clear of prayer-request pushes.
+
+    The two prayer pushes must not arrive together. Someone often prays for a
+    request and then posts their own straight after, which would hand the first
+    requester "someone prayed for you" and "X is requesting a prayer" at once.
+    So a prayer-received push waits PRAYER_NOTIFICATION_GAP_SECONDS after it was
+    recorded - long enough for that follow-up request to go out first - and then
+    until the requester has had no prayer-request push for that long either.
+    The prayer-request push goes to a whole room and is never the one delayed.
+    PRAYER_NOTIFICATION_MAX_HOLD_SECONDS caps the wait for someone whose rooms
+    are busy enough to keep it closed.
+
+    Each run first records a push for requests whose held prayers are due, so
+    those go out even when nobody prays for the request again.
+    """
+    if not is_prayer_notification_sqs_configured():
+        return 0
+
+    _record_held_prayer_notifications()
+
+    gap_seconds = _prayer_notification_gap_seconds()
+    batch_size = max(get_int("CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE"), 1)
+    now = datetime.now(timezone.utc)
+
+    with SessionLocal() as db:
+        due = list_due_prayer_notifications(
+            db=db,
+            created_before=now - timedelta(seconds=gap_seconds),
+            limit=batch_size,
+        )
+
+    sent = 0
+    for notification in due:
+        if gap_seconds and not _clear_of_prayer_request_pushes(
+            requester_id=notification.requester_id,
+            created_at=notification.created_at,
+            now=now,
+            gap_seconds=gap_seconds,
+        ):
+            continue
+        if _claim_and_send_prayer_notification(notification.id):
+            sent += 1
+    return sent
 
 
 def reconcile_undispatched_prayer_notifications() -> int:
-    """Re-send prayer pushes that were recorded but never got an SQS MessageId.
+    """Re-send prayer pushes that were claimed but never got an SQS MessageId.
 
-    Covers the same commit-before-send crash window as chat messages. The gate
-    is not re-run: the row is the push that was already decided.
+    Covers the same commit-before-send crash window as chat messages. Neither
+    the gate nor the gap is re-run: the row is the push that was already
+    decided, and it was clear of prayer-request pushes when it was claimed.
     """
     if not is_prayer_notification_sqs_configured():
         return 0

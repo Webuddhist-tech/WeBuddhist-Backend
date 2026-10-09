@@ -23,8 +23,10 @@ from pecha_api.auth.auth_service import (
     validate_username,
     generate_username,
     generate_and_validate_username,
-    retrieve_client_info
+    retrieve_client_info,
+    _get_random_names,
 )
+from pecha_api.users.reserved_usernames import is_reserved_username
 from pecha_api.auth.auth_models import CreateUserRequest
 from pecha_api.auth.auth_enums import RegistrationSource
 from fastapi import HTTPException
@@ -926,6 +928,46 @@ def test_generate_username_falls_back_when_names_are_missing() -> None:
         _assert_random_tail(username.removeprefix("webuddhist_user_"))
 
 
+def _assert_random_name_username(username: str) -> None:
+    name, number = username.rsplit("_", 1)
+    assert name in _get_random_names()
+    assert len(number) == 4
+    assert number.isdigit()
+
+
+def test_generate_username_uses_random_name_when_names_contain_webuddhist() -> None:
+    for first_name, last_name in (
+        ("WeBuddhist", "Doe"),
+        ("John", "webuddhist"),
+        ("The WeBuddhist Team", None),
+        (None, "We-Buddhist"),
+        ("mywebuddhistaccount", ""),
+    ):
+        username = generate_username(first_name=first_name, last_name=last_name)
+        _assert_random_name_username(username)
+
+
+def test_random_names_are_valid_usernames() -> None:
+    names = _get_random_names()
+
+    assert len(names) >= 100
+    assert len(set(names)) == len(names)
+    for name in names:
+        assert name.isalnum()
+        assert name == name.lower()
+        assert not is_reserved_username(name)
+
+
+def test_generate_and_validate_username_retries_random_name_until_unique() -> None:
+    with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
+        mock_validate_username.side_effect = [False, False, True]
+
+        username = generate_and_validate_username(first_name="WeBuddhist", last_name="Admin")
+
+        assert mock_validate_username.call_count == 3
+        _assert_random_name_username(username)
+
+
 def test_generate_and_validate_username_success() -> None:
     with patch('pecha_api.auth.auth_service.validate_username') as mock_validate_username:
         mock_validate_username.return_value = True
@@ -1010,3 +1052,48 @@ def test_create_user_request_keeps_real_identifiers() -> None:
 
     assert request.email is None
     assert request.phone_number == "+15551234567"
+
+
+class TestClaimAuthorForVerifiedLogin:
+    """A trusted social login links the Author an email signup could not."""
+
+    def _run(self, user, author):
+        from pecha_api.auth.auth_service import claim_author_for_verified_login
+        from pecha_api.auth.auth_models import CreateUserRequest
+
+        request = MagicMock(spec=CreateUserRequest)
+        request.email = "owner@example.com"
+        with patch('pecha_api.auth.auth_service.SessionLocal'), \
+             patch('pecha_api.auth.auth_service.get_user_by_email_or_none', return_value=user), \
+             patch('pecha_api.auth.auth_service.find_claimable_author', return_value=author), \
+             patch('pecha_api.auth.auth_service.update_user', side_effect=lambda db, user: user) as mock_update, \
+             patch('pecha_api.auth.auth_service.link_author_to_user') as mock_link:
+            claim_author_for_verified_login(request)
+        return mock_update, mock_link
+
+    def test_links_and_clears_password_of_email_signup_account(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="email", password="hashed")
+        author = MagicMock()
+
+        mock_update, mock_link = self._run(user, author)
+
+        assert user.password is None
+        mock_update.assert_called_once()
+        mock_link.assert_called_once_with(db=ANY, author=author, user_id=user.id)
+
+    def test_keeps_password_of_account_that_did_not_come_from_email_signup(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="google-oauth2", password=None)
+
+        mock_update, mock_link = self._run(user, MagicMock())
+
+        mock_update.assert_not_called()
+        mock_link.assert_called_once()
+
+    def test_does_nothing_without_a_claimable_author(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="email", password="hashed")
+
+        mock_update, mock_link = self._run(user, None)
+
+        assert user.password == "hashed"
+        mock_update.assert_not_called()
+        mock_link.assert_not_called()

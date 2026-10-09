@@ -10,6 +10,7 @@ from pecha_api.db.database import Base
 
 FK_VERSE_OF_DAY_ID = "verse_of_day.id"
 FK_USERS_ID = "users.id"
+FK_VERSE_OF_DAY_COMMENTS_ID = "verse_of_day_comments.id"
 
 
 class VerseOfDayComment(Base):
@@ -26,6 +27,11 @@ class VerseOfDayComment(Base):
         ForeignKey(FK_USERS_ID, ondelete="CASCADE"),
         nullable=False,
     )
+    parent_comment_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_VERSE_OF_DAY_COMMENTS_ID, ondelete="CASCADE"),
+        nullable=True,
+    )
     text = Column(Text, nullable=False)
 
     created_at = Column(
@@ -41,10 +47,24 @@ class VerseOfDayComment(Base):
 
     verse = relationship("VerseOfDay")
     user = relationship("Users")
+    parent_comment = relationship(
+        "VerseOfDayComment",
+        remote_side=[id],
+        foreign_keys=[parent_comment_id],
+        back_populates="replies",
+    )
+    replies = relationship(
+        "VerseOfDayComment",
+        foreign_keys=[parent_comment_id],
+        back_populates="parent_comment",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         Index("idx_verse_of_day_comments_verse_id", "verse_id"),
         Index("idx_verse_of_day_comments_user_id", "user_id"),
+        Index("idx_verse_of_day_comments_parent_comment_id", "parent_comment_id"),
         Index(
             "idx_verse_of_day_comments_feed",
             "verse_id",

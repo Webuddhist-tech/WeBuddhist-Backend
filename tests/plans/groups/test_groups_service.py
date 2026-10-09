@@ -137,6 +137,7 @@ def _make_group(
     group.status = group_status
     group.avatar_key = None
     group.banner_key = None
+    group.tradition = None
     group.metadata_entries = []
     group.members = []
     group.social_links = []
@@ -599,6 +600,41 @@ def test_list_public_groups_with_token_excludes_joined_groups():
         list_public_groups(skip=0, limit=10, token="valid-token")
 
     assert mock_paginated.call_args.kwargs["exclude_group_ids"] == [joined_group_id]
+
+
+def test_list_public_groups_include_joined_lists_joined_groups_and_flags_them():
+    joined_group = _make_group(group_type=AuthorGroupType.COMMUNITY)
+    joined_group.metadata_entries = []
+    other_group = _make_group(group_type=AuthorGroupType.COMMUNITY)
+    other_group.metadata_entries = []
+    user = MagicMock()
+    user.id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joined_group_ids_by_user",
+        return_value=[joined_group.id],
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_groups_paginated",
+        return_value=([joined_group, other_group], 2),
+    ) as mock_paginated, patch(
+        "pecha_api.plans.groups.groups_service.get_followers_count_map",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joiners_count_map",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_join_request_status_map",
+        return_value={},
+    ):
+        _session_local_context(mock_session)
+        response = list_public_groups(
+            skip=0, limit=10, token="valid-token", include_joined=True
+        )
+
+    assert mock_paginated.call_args.kwargs["exclude_group_ids"] is None
+    assert [group.is_joined for group in response.groups] == [True, False]
 
 
 def test_list_public_groups_with_token_and_no_joined_groups_does_not_exclude():

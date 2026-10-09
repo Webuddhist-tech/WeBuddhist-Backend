@@ -1,6 +1,8 @@
+import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import jwt
@@ -26,7 +28,8 @@ from ..users.users_repository import (
     save_user,
     update_user,
 )
-from ..plans.authors.author_user_link_service import link_or_create_author_for_user
+from ..plans.authors.plan_authors_repository import link_author_to_user
+from ..plans.authors.author_user_link_service import find_claimable_author, link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
 from .auth_repository import (
     create_access_token,
@@ -167,6 +170,35 @@ def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
             update_user(db=db_session, user=user)
     except Exception:
         logging.exception("Failed to store social profile image")
+
+
+def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> None:
+    """Link an existing Author to an account that already exists, once a
+    trusted caller has proved ownership of its email.
+
+    Signup could not link it: an email/password registration proves nothing.
+    That same weakness is why the account's password is cleared first when the
+    account came from such a signup - whoever set it may not be the owner, and
+    would otherwise inherit the Author's permissions. The verified owner signs
+    in through their identity provider or resets the password by email.
+    Best-effort and fail-closed: any error leaves the Author unlinked.
+    """
+    if not create_user_request.email:
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None:
+                return
+            author = find_claimable_author(db=db_session, user=user)
+            if author is None:
+                return
+            if user.registration_source == RegistrationSource.EMAIL.value and user.password:
+                user.password = None
+                user = update_user(db=db_session, user=user)
+            link_author_to_user(db=db_session, author=author, user_id=user.id)
+    except Exception:
+        logging.exception("Failed to link Author after verified social login")
 
 
 def _validate_password(password: str):
@@ -418,6 +450,18 @@ _USERNAME_MAX_LENGTH = 255
 _BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _BASE36_WIDTH = 5
 
+# Signups whose first or last name contains this get a random handle instead,
+# so nobody gets a name-based username that reads as the platform.
+_PLATFORM_NAME_MARKER = "webuddhist"
+_RANDOM_NAMES_PATH = Path(__file__).resolve().parent.parent / "assets" / "random_usernames.json"
+_RANDOM_NUMBER_WIDTH = 4
+
+
+@lru_cache(maxsize=1)
+def _get_random_names() -> tuple[str, ...]:
+    with _RANDOM_NAMES_PATH.open(encoding="utf-8") as names_file:
+        return tuple(json.load(names_file))
+
 
 def _name_part(name: str | None) -> str:
     if not name:
@@ -447,24 +491,32 @@ def _random_base36(width: int = _BASE36_WIDTH) -> str:
     return "".join(reversed(chars))
 
 
+def _random_digits(width: int = _RANDOM_NUMBER_WIDTH) -> str:
+    return str(secrets.randbelow(10 ** width)).zfill(width)
+
+
 def _random_marked_suffix() -> str:
-    return "a" + str(secrets.randbelow(10000)).zfill(4)
+    return "a" + _random_digits()
 
 
 def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate a public username.
 
+    Either name contains "webuddhist": {random_name}_{dddd}, name from random_usernames.json
     Both names present: {firstname}_{lastname}_{base36}_a{dddd}
     Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
 
     Names are shortened so the result always fits users.username. The phone
     number is never included. It stays on users.phone_number.
     """
-    token = _random_base36()
-    marked_suffix = _random_marked_suffix()
     first = _name_part(first_name)
     last = _name_part(last_name)
+    if _PLATFORM_NAME_MARKER in first or _PLATFORM_NAME_MARKER in last:
+        return f"{secrets.choice(_get_random_names())}_{_random_digits()}"
+
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
     if not first or not last:
         return f"webuddhist_user_{token}_{marked_suffix}"
 

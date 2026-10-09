@@ -6,7 +6,8 @@ from typing import Annotated
 from uuid import UUID
 from starlette import status
 from pecha_api.plans.tasks.plan_tasks_response_model import CreateTaskRequest, TaskDTO, UpdateTaskDayRequest, UpdatedTaskDayResponse, GetTaskResponse, UpdateTaskOrderRequest, UpdatedTaskOrderResponse, UpdateTaskTitleRequest, UpdateTaskTitleResponse
-from pecha_api.plans.tasks.plan_tasks_services import create_new_task, change_task_day_service, delete_task_by_id, get_task_subtasks_service, change_task_order_service, update_task_title_service
+from pecha_api.plans.tasks.plan_tasks_services import create_new_task, change_task_day_service, delete_task_by_id, get_task_subtasks_service, change_task_order_service, update_task_title_service, update_task_settings_service
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO, UpdateTaskSettingsRequest
 
 oauth2_scheme = HTTPBearer()
 # Create router for plan endpoints
@@ -70,6 +71,18 @@ async def update_task_title(
 ) -> UpdateTaskTitleResponse:
 
     return await update_task_title_service(
+        token=authentication_credential.credentials,
+        task_id=task_id,
+        update_request=update_request,
+    )
+
+@plans_router.put("/{task_id}/settings")
+async def update_task_settings(
+    task_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+    update_request: UpdateTaskSettingsRequest,
+) -> TaskSettingsDTO:
+    return await update_task_settings_service(
         token=authentication_credential.credentials,
         task_id=task_id,
         update_request=update_request,

@@ -14,7 +14,9 @@ from pecha_api.notification.notification_preference_enums import (
     NotificationType,
     PreferenceSource,
     V1_GROUP_TOGGLEABLE_TYPES,
+    default_enabled,
 )
+from pecha_api.notification.notification_preference_repository import upsert_preference
 from pecha_api.notification.notification_preference_response_models import (
     NotificationPreferenceUpdateDTO,
     UpdateNotificationPreferencesRequest,
@@ -25,6 +27,7 @@ from pecha_api.notification.notification_preference_service import (
     _resolve,
     delete_group_notification_preferences_service,
     get_group_notification_preferences_service,
+    get_notification_preferences_service,
     update_group_notification_preferences_service,
 )
 
@@ -33,6 +36,14 @@ GROUP_ID = uuid4()
 USER_ID = uuid4()
 
 SERVICE = "pecha_api.notification.notification_preference_service"
+
+
+class TestDefaultEnabled:
+    def test_prayer_request_is_opt_in_by_default(self):
+        assert default_enabled(NotificationType.PRAYER_REQUEST) is False
+
+    def test_prayer_received_is_on_by_default(self):
+        assert default_enabled(NotificationType.PRAYER_RECEIVED) is True
 
 
 def _row(notification_type, *, enabled=True, muted_until=None, scope_id=None):
@@ -53,6 +64,14 @@ class TestResolve:
             NotificationType.GROUP_POST, group_row=None, global_row=None, now=NOW
         )
         assert resolved.enabled is True
+        assert resolved.source == PreferenceSource.DEFAULT
+
+    def test_absent_rows_leave_chat_off(self):
+        """Chat is opt-in: no row means the user has not turned it on."""
+        resolved = _resolve(
+            NotificationType.CHAT_MESSAGE, group_row=None, global_row=None, now=NOW
+        )
+        assert resolved.enabled is False
         assert resolved.source == PreferenceSource.DEFAULT
 
     def test_global_row_applies_when_no_group_row(self):
@@ -156,6 +175,23 @@ class TestSparseUpdates:
             notification_type="EVENT", muted_until=None
         )
         assert entry.sets_muted_until is True
+
+    def test_snooze_alone_does_not_turn_chat_on(self):
+        """A new row written for a snooze takes the type's default, and chat's is off."""
+        db = MagicMock()
+        db.execute.return_value.scalar_one_or_none.return_value = None
+
+        row = upsert_preference(
+            db=db,
+            user_id=USER_ID,
+            notification_type=NotificationType.CHAT_MESSAGE,
+            channel=NotificationChannel.PUSH,
+            scope_id=GROUP_ID,
+            muted_until=NOW + timedelta(hours=1),
+            set_muted_until=True,
+        )
+
+        assert row.enabled is False
 
     @patch(f"{SERVICE}.upsert_preference")
     def test_only_named_types_are_upserted(self, mock_upsert):
@@ -318,6 +354,27 @@ class TestSparseUpdates:
                 now=NOW,
             )
         assert exception.value.status_code == 422
+
+
+class TestGlobalEndpoints:
+    @patch(f"{SERVICE}.list_preferences_for_user", return_value=[])
+    @patch(f"{SERVICE}.SessionLocal")
+    @patch(f"{SERVICE}.validate_and_extract_user_details")
+    def test_get_includes_prayer_request_opt_in_default(
+        self, mock_user, mock_session, _mock_rows
+    ):
+        mock_user.return_value = SimpleNamespace(id=USER_ID)
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        result = get_notification_preferences_service(token="t")
+
+        prayer_request = next(
+            p
+            for p in result.preferences
+            if p.notification_type == NotificationType.PRAYER_REQUEST
+        )
+        assert prayer_request.enabled is False
+        assert prayer_request.source == PreferenceSource.DEFAULT
 
 
 class TestGroupEndpoints:

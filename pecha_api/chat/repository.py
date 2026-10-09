@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import String, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, selectinload
 
@@ -10,16 +10,28 @@ from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, author_group_followers, author_group_joins
 from pecha_api.events.event_model import Event
 
-from pecha_api.chat.enums import ChatMessageReportSource, ChatMessageType, ChatRoomMemberRole
+from pecha_api.chat.enums import (
+    ChatMessageReportSource,
+    ChatMessageTranslationStatus,
+    ChatMessageType,
+    ChatRoomMemberRole,
+    PrayerSort,
+)
 from pecha_api.chat.models import (
     ChatMessage,
     ChatMessagePrayer,
     ChatMessagePrayerCount,
     ChatMessageReaction,
     ChatMessageReport,
+    ChatMessageTranslation,
     ChatRoom,
     ChatRoomMember,
     ChatPrayerNotification,
+)
+from pecha_api.plans.plans_enums import LanguageCode
+from pecha_api.prayer_intentions.intention_slugs import (
+    canonical_prayer_intention_slug,
+    catalog_slug_lookup_candidates,
 )
 from pecha_api.users.users_models import Users
 
@@ -330,23 +342,62 @@ def create_message(db: Session, message: ChatMessage) -> ChatMessage:
     return message
 
 
+def _prayer_sort_order(sort: PrayerSort, seed: Optional[str], prayer_total):
+    """ORDER BY clauses for a prayer sort; `id` breaks ties so pages never
+    overlap. `prayer_total` is the per-message count of people praying."""
+    if sort == PrayerSort.OLDEST:
+        return [ChatMessage.created_at.asc(), ChatMessage.id.asc()]
+    if sort == PrayerSort.MOST_PRAYED:
+        return [prayer_total.desc(), ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+    if sort == PrayerSort.NEEDS_PRAYERS:
+        return [prayer_total.asc(), ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+    if sort == PrayerSort.RANDOM:
+        # Deterministic per seed, so skip/limit pages of one shuffle don't repeat.
+        return [
+            func.md5(func.concat(func.cast(ChatMessage.id, String), seed or "")),
+            ChatMessage.id.asc(),
+        ]
+    return [ChatMessage.created_at.desc(), ChatMessage.id.desc()]
+
+
 def get_room_messages(
     db: Session,
     room_id: UUID,
     skip: int = 0,
     limit: int = 20,
     message_type: Optional[str] = None,
+    sort: PrayerSort = PrayerSort.NEWEST,
+    intention: Optional[str] = None,
+    seed: Optional[str] = None,
 ) -> Tuple[List[ChatMessage], int]:
-    query = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.room_id == room_id)
-        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
-    )
+    query = db.query(ChatMessage).filter(ChatMessage.room_id == room_id)
     if message_type is not None:
         query = query.filter(ChatMessage.message_type == message_type)
+    # Sort and intention only mean something for prayer requests.
+    is_prayer_list = message_type == ChatMessageType.PRAYER.value
+    if is_prayer_list and intention:
+        slug = canonical_prayer_intention_slug(intention)
+        query = query.filter(
+            ChatMessage.intention.in_(catalog_slug_lookup_candidates(slug))
+        )
     total = query.count()
+    if is_prayer_list and sort in (PrayerSort.MOST_PRAYED, PrayerSort.NEEDS_PRAYERS):
+        prayers = (
+            db.query(
+                ChatMessagePrayer.message_id.label("message_id"),
+                func.count(ChatMessagePrayer.id).label("total"),
+            )
+            .group_by(ChatMessagePrayer.message_id)
+            .subquery()
+        )
+        query = query.outerjoin(prayers, prayers.c.message_id == ChatMessage.id)
+        prayer_total = func.coalesce(prayers.c.total, 0)
+    else:
+        prayer_total = None
+    order_by = _prayer_sort_order(sort if is_prayer_list else PrayerSort.NEWEST, seed, prayer_total)
     messages = (
-        query.options(
+        query.order_by(*order_by)
+        .options(
             selectinload(ChatMessage.sender),
             selectinload(ChatMessage.parent).selectinload(ChatMessage.sender),
         )
@@ -965,6 +1016,43 @@ def get_last_prayer_notification(
     )
 
 
+def list_prayer_requests_with_held_prayers(
+    db: Session,
+    *,
+    last_push_before: datetime,
+    limit: int,
+) -> List[UUID]:
+    """Prayer requests holding prayers no push has reported, whose last
+    prayer-received push was recorded before `last_push_before` (or that never
+    had one), oldest held prayer first.
+
+    These are the requests the interval held and nobody prayed for again
+    afterwards, so no pray call is coming to send their push. The requester's
+    own prayers are never reported, so they alone do not make a request due.
+    """
+    last_push = (
+        select(func.max(ChatPrayerNotification.created_at))
+        .where(ChatPrayerNotification.message_id == ChatMessage.id)
+        .correlate(ChatMessage)
+        .scalar_subquery()
+    )
+    rows = (
+        db.query(ChatMessage.id)
+        .join(ChatMessagePrayerCount, ChatMessagePrayerCount.message_id == ChatMessage.id)
+        .filter(
+            ChatMessagePrayerCount.unreported_count > 0,
+            ChatMessagePrayerCount.user_id != ChatMessage.sender_id,
+            ChatMessage.deleted_at.is_(None),
+            or_(last_push.is_(None), last_push <= last_push_before),
+        )
+        .group_by(ChatMessage.id)
+        .order_by(func.min(ChatMessagePrayerCount.last_prayed_at).asc())
+        .limit(limit)
+        .all()
+    )
+    return [row[0] for row in rows]
+
+
 class UnreportedPrayers(NamedTuple):
     """One person's prayers for a request that no push has reported yet."""
 
@@ -1052,22 +1140,126 @@ def mark_prayer_notification_dispatched(
     return notification
 
 
+class DuePrayerNotification(NamedTuple):
+    """A recorded prayer-received push nobody has started sending yet."""
+
+    id: UUID
+    requester_id: UUID
+    created_at: datetime
+
+
+def list_due_prayer_notifications(
+    db: Session,
+    *,
+    created_before: datetime,
+    limit: int,
+) -> List[DuePrayerNotification]:
+    """Prayer-received pushes recorded before `created_before` and never
+    claimed for sending, oldest first, each with the requester it goes to."""
+    rows = (
+        db.query(
+            ChatPrayerNotification.id,
+            ChatMessage.sender_id,
+            ChatPrayerNotification.created_at,
+        )
+        .join(ChatMessage, ChatMessage.id == ChatPrayerNotification.message_id)
+        .filter(
+            ChatPrayerNotification.notification_sqs_message_id.is_(None),
+            ChatPrayerNotification.notification_dispatched_at.is_(None),
+            ChatPrayerNotification.created_at <= created_before,
+        )
+        .order_by(ChatPrayerNotification.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        DuePrayerNotification(
+            id=row[0], requester_id=row[1], created_at=_as_utc(row[2])
+        )
+        for row in rows
+    ]
+
+
+def claim_prayer_notification_for_dispatch(
+    db: Session, notification_id: UUID
+) -> bool:
+    """Stamp dispatched_at before the SQS send, so two replicas polling at
+    once cannot both send the same push. True if this call won the claim."""
+    result = (
+        db.query(ChatPrayerNotification)
+        .filter(
+            ChatPrayerNotification.id == notification_id,
+            ChatPrayerNotification.notification_dispatched_at.is_(None),
+        )
+        .update(
+            {ChatPrayerNotification.notification_dispatched_at: datetime.now(timezone.utc)},
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    return result == 1
+
+
 def list_undispatched_prayer_notifications(
     db: Session,
     *,
     older_than: datetime,
     limit: int,
 ) -> List[ChatPrayerNotification]:
+    """Pushes claimed for sending before `older_than` that never recorded an
+    SQS MessageId: the crash window between claim and send. Unclaimed rows are
+    not here - they are still waiting their turn, not stuck."""
     return (
         db.query(ChatPrayerNotification)
         .filter(
             ChatPrayerNotification.notification_sqs_message_id.is_(None),
-            ChatPrayerNotification.created_at <= older_than,
+            ChatPrayerNotification.notification_dispatched_at.isnot(None),
+            ChatPrayerNotification.notification_dispatched_at <= older_than,
         )
-        .order_by(ChatPrayerNotification.created_at.asc())
+        .order_by(ChatPrayerNotification.notification_dispatched_at.asc())
         .limit(limit)
         .all()
     )
+
+
+def last_prayer_request_push_to_user(
+    db: Session,
+    *,
+    user_id: UUID,
+    since: datetime,
+) -> Optional[datetime]:
+    """When `user_id` was last sent a prayer-request push, if later than `since`.
+
+    Mirrors who a prayer-request push reaches: every joiner of a group room,
+    every active member of an event room, never the request's own sender.
+    Requests the room's interval held reached nobody and do not count.
+    """
+    joined_group_ids = select(author_group_joins.c.group_id).where(
+        author_group_joins.c.user_id == user_id
+    )
+    member_room_ids = select(ChatRoomMember.room_id).where(
+        ChatRoomMember.user_id == user_id,
+        ChatRoomMember.left_at.is_(None),
+    )
+    value = (
+        db.query(func.max(ChatMessage.notification_dispatched_at))
+        .join(ChatRoom, ChatRoom.id == ChatMessage.room_id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.sender_id != user_id,
+            ChatMessage.notification_sqs_message_id.isnot(None),
+            ChatMessage.notification_sqs_message_id != SUPPRESSED_SQS_MESSAGE_ID,
+            ChatMessage.notification_dispatched_at > since,
+            or_(
+                ChatRoom.group_id.in_(joined_group_ids),
+                (ChatRoom.group_id.is_(None))
+                & ChatRoom.event_id.isnot(None)
+                & ChatRoom.id.in_(member_room_ids),
+            ),
+        )
+        .scalar()
+    )
+    return _as_utc(value)
 
 
 def get_report_by_message_and_reporter(
@@ -1213,3 +1405,167 @@ def count_unread_messages(
     if last_read_at is not None:
         query = query.filter(ChatMessage.created_at > last_read_at)
     return query.scalar() or 0
+
+
+PRAYER_TRANSLATION_LANGUAGES = (
+    LanguageCode.EN,
+    LanguageCode.BO,
+    LanguageCode.ZH,
+)
+
+
+def _language_value(language: LanguageCode) -> str:
+    return language.value if hasattr(language, "value") else str(language)
+
+
+def delete_translations_for_message(db: Session, message_id: UUID) -> None:
+    db.query(ChatMessageTranslation).filter(
+        ChatMessageTranslation.message_id == message_id
+    ).delete(synchronize_session=False)
+
+
+def reset_prayer_translations(db: Session, message: ChatMessage) -> None:
+    """Clear cached translations after the prayer body changes."""
+    message.source_language = None
+    delete_translations_for_message(db=db, message_id=message.id)
+    now = datetime.now(timezone.utc)
+    for language in PRAYER_TRANSLATION_LANGUAGES:
+        db.add(
+            ChatMessageTranslation(
+                message_id=message.id,
+                target_language=language,
+                body=None,
+                status=ChatMessageTranslationStatus.PENDING.value,
+                updated_at=now,
+            )
+        )
+    db.commit()
+
+
+def get_translations_map(
+    db: Session,
+    message_ids: Sequence[UUID],
+    target_language: LanguageCode,
+) -> Dict[UUID, ChatMessageTranslation]:
+    if not message_ids:
+        return {}
+    rows = (
+        db.query(ChatMessageTranslation)
+        .filter(
+            ChatMessageTranslation.message_id.in_(message_ids),
+            ChatMessageTranslation.target_language == target_language,
+        )
+        .all()
+    )
+    return {row.message_id: row for row in rows}
+
+
+def list_message_ids_needing_translation(db: Session, limit: int) -> List[UUID]:
+    pending_or_failed = (
+        db.query(ChatMessageTranslation.message_id)
+        .join(ChatMessage, ChatMessage.id == ChatMessageTranslation.message_id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+            ChatMessageTranslation.status.in_(
+                (
+                    ChatMessageTranslationStatus.PENDING.value,
+                    ChatMessageTranslationStatus.FAILED.value,
+                )
+            ),
+        )
+        .distinct()
+        .order_by(ChatMessageTranslation.updated_at.asc())
+        .limit(limit)
+        .all()
+    )
+    has_translation_row = exists().where(
+        ChatMessageTranslation.message_id == ChatMessage.id
+    )
+    missing_rows = (
+        db.query(ChatMessage.id)
+        .filter(
+            ChatMessage.message_type == ChatMessageType.PRAYER.value,
+            ChatMessage.deleted_at.is_(None),
+            ~has_translation_row,
+        )
+        .order_by(ChatMessage.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+    ordered: List[UUID] = []
+    seen: Set[UUID] = set()
+    for row in pending_or_failed + missing_rows:
+        message_id = row[0]
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        ordered.append(message_id)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def apply_prayer_translation_result(
+    db: Session,
+    message: ChatMessage,
+    source_language: str,
+    translations: Dict[LanguageCode, str],
+) -> None:
+    """Persist detected source language and ready translation rows."""
+    if isinstance(source_language, LanguageCode):
+        source_value = source_language.value
+    else:
+        source_value = str(source_language).strip().upper()
+    if len(source_value) == 2 and source_value.isalpha():
+        message.source_language = source_value
+    else:
+        message.source_language = None
+    now = datetime.now(timezone.utc)
+    for language in PRAYER_TRANSLATION_LANGUAGES:
+        lang_value = _language_value(language)
+        if lang_value == source_value:
+            db.query(ChatMessageTranslation).filter(
+                ChatMessageTranslation.message_id == message.id,
+                ChatMessageTranslation.target_language == language,
+            ).delete(synchronize_session=False)
+            continue
+        text = translations.get(language)
+        row = (
+            db.query(ChatMessageTranslation)
+            .filter(
+                ChatMessageTranslation.message_id == message.id,
+                ChatMessageTranslation.target_language == language,
+            )
+            .first()
+        )
+        if row is None:
+            row = ChatMessageTranslation(
+                message_id=message.id,
+                target_language=language,
+            )
+            db.add(row)
+        if text:
+            row.body = text.strip()
+            row.status = ChatMessageTranslationStatus.READY.value
+        else:
+            row.body = None
+            row.status = ChatMessageTranslationStatus.FAILED.value
+        row.updated_at = now
+    db.commit()
+    db.refresh(message)
+
+
+def mark_prayer_translations_failed(db: Session, message_id: UUID) -> None:
+    now = datetime.now(timezone.utc)
+    db.query(ChatMessageTranslation).filter(
+        ChatMessageTranslation.message_id == message_id,
+        ChatMessageTranslation.status != ChatMessageTranslationStatus.READY.value,
+    ).update(
+        {
+            ChatMessageTranslation.status: ChatMessageTranslationStatus.FAILED.value,
+            ChatMessageTranslation.updated_at: now,
+        },
+        synchronize_session=False,
+    )
+    db.commit()

@@ -30,6 +30,8 @@ async def _record(broadcaster: AsyncMock, **overrides: Any) -> Dict[str, Any]:
         "revision": 9,
         "accepted_at_ms": 10_000,
         "run": "r1",
+        # The controller's own hold: without it nothing is ever stored.
+        "elapsed_ms": 4_000,
         **overrides,
     }
     await record_segment_play_time(broadcaster=broadcaster, **values)
@@ -59,14 +61,16 @@ class TestRecordSegmentPlayTime:
         save.assert_called_once_with("text-7", "seg-a", 3_100)
 
     @pytest.mark.asyncio
-    async def test_without_a_reported_hold_the_marks_are_still_subtracted(self):
-        """A controller that reports nothing - an older one, a script, a pedal -
-        is measured as before rather than not at all."""
+    async def test_without_a_reported_hold_nothing_is_stored(self):
+        """Whether a line's time is stored is the controller's call: a move that
+        reports no hold leaves the stored time alone, the marks are not
+        subtracted in its place - but the move is still marked."""
         broadcaster = _broadcaster(previous="8|6000|0|r1|3|1|seg-a")
         with patch(f"{MODULE}._save_sample") as save:
             await _record(broadcaster, elapsed_ms=None)
 
-        save.assert_called_once_with("text-7", "seg-a", 4_000)
+        save.assert_not_called()
+        broadcaster.swap_segment_mark.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -277,17 +281,6 @@ class TestRecordSegmentPlayTime:
     async def test_no_index_no_measurement(self):
         with patch(f"{MODULE}._save_sample") as save:
             await _record(_broadcaster(previous="8|6000|0|r1||1|seg-a"), index=None)
-
-        save.assert_not_called()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "started_at_ms",
-        [10_000 - MIN_SEGMENT_PLAY_MS + 1, 10_000 - MAX_SEGMENT_PLAY_MS - 1],
-    )
-    async def test_skips_and_pauses_are_not_measurements(self, started_at_ms):
-        with patch(f"{MODULE}._save_sample") as save:
-            await _record(_broadcaster(previous=f"8|{started_at_ms}|0|r1|3|1|seg-a"))
 
         save.assert_not_called()
 

@@ -481,7 +481,8 @@ class TestRecitationPositionSnapshot:
         assert key_count == 4
         assert "INCR" in script and "PUBLISH" in script
         assert args[10:14] == ["A", "plan-1", "0", ""]
-        payload = json.loads(args[-1] + "41}")
+        assert args[-1] == ""
+        payload = json.loads(args[-2] + "41}")
         assert payload["segment_id"] == "bo-0"
         assert payload["revision"] == 41
         broadcaster.redis.publish.assert_not_awaited()

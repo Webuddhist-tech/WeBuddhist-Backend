@@ -62,6 +62,12 @@ def autoplay_plan_key(event_id: UUID) -> str:
     return f"recitation:event:{event_id}:autoplay-plan"
 
 
+def autoplay_settings_key(event_id: UUID) -> str:
+    """The event's autoplay settings - the room's pace and how early steps are
+    sent - which outlive any one plan."""
+    return f"recitation:event:{event_id}:autoplay-settings"
+
+
 def autoplay_lease_key(event_id: UUID) -> str:
     """The instance running this event's autoplay. Exactly one does, and another
     takes over once the lease lapses - a deploy or a crash does not end it."""
@@ -280,6 +286,8 @@ class AutoplayGuard:
     plan_id: str
     step: int
     step_started_ms: str
+    # The next step, sent ahead of its time: never while the plan is held.
+    early: bool = False
 
 
 # An autoplay position is saved and published in the same step as the check
@@ -293,6 +301,7 @@ if redis.call('HGET', KEYS[3], 'plan_id') ~= ARGV[8] then return 0 end
 if redis.call('HGET', KEYS[3], 'status') ~= 'running' then return 0 end
 if redis.call('HGET', KEYS[3], 'step') ~= ARGV[9] then return 0 end
 if redis.call('HGET', KEYS[3], 'step_started_ms') ~= ARGV[10] then return 0 end
+if ARGV[13] == '1' and redis.call('HGET', KEYS[3], 'held') == '1' then return 0 end
 local revision = redis.call('INCR', KEYS[2])
 redis.call('HSET', KEYS[1],
     'text_id', ARGV[1],
@@ -645,6 +654,7 @@ class RecitationBroadcaster:
                 guard.step_started_ms,
                 position_channel(event_id),
                 head[:-1] + ', "revision": ',
+                "1" if guard.early else "",
             )
         except Exception as e:
             logger.exception("Failed to broadcast autoplay position to Redis: %s", e)

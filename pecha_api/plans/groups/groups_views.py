@@ -15,6 +15,13 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_response_models import (
     AuthorGroupDetailDTO,
+    BulkGroupInviteRequest,
+    BulkGroupInviteResponse,
+    CreateGroupJoinLinkRequest,
+    GroupJoinLinkDTO,
+    GroupJoinLinkListResponse,
+    GroupJoinLinkRedeemResponse,
+    RedeemGroupJoinLinkRequest,
     AuthorGroupListResponse,
     CreateAuthorGroupRequest,
     CreateGroupInviteRequest,
@@ -54,6 +61,7 @@ from pecha_api.plans.groups.groups_service import (
     approve_group_join_request,
     create_author_group,
     create_group_member_invite,
+    create_group_member_invites_bulk,
     delete_author_group,
     delete_group_member,
     follow_group,
@@ -93,6 +101,12 @@ from pecha_api.plans.groups.groups_service import (
     transfer_group_ownership,
     update_group_member_role,
 )
+from pecha_api.plans.groups.join_links_service import (
+    create_group_join_link,
+    list_group_join_links,
+    revoke_group_join_link,
+)
+from pecha_api.plans.auth.studio_access_service import redeem_join_link_for_signed_in_author
 
 oauth2_scheme = HTTPBearer()
 optional_oauth2_scheme = HTTPBearer(auto_error=False)
@@ -245,6 +259,10 @@ def get_cms_groups(
             description="Filter by publication status: DRAFT, PUBLISHED or UNPUBLISHED; omit to include all",
         ),
     ] = None,
+    tradition: Annotated[
+        Optional[str],
+        Query(description="Filter by tradition code from GET /traditions (e.g. tibetan)"),
+    ] = None,
     for_transfer: Annotated[bool, Query(description="When true, list all groups for transfer target selection")] = False,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -257,6 +275,7 @@ def get_cms_groups(
         is_public=is_public,
         group_type=group_type,
         group_status=group_status,
+        tradition_code=tradition,
         for_transfer=for_transfer,
         skip=skip,
         limit=limit,
@@ -298,6 +317,87 @@ def post_cms_group_invite(
     return create_group_member_invite(
         token=authentication_credential.credentials,
         group_id=group_id,
+        request=request,
+    )
+
+
+@cms_groups_router.post(
+    "/{group_id}/members/invites/bulk",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BulkGroupInviteResponse,
+)
+def post_cms_group_invites_bulk(
+    group_id: UUID,
+    request: BulkGroupInviteRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    return create_group_member_invites_bulk(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        request=request,
+    )
+
+
+@cms_groups_router.post(
+    "/{group_id}/join-links",
+    status_code=status.HTTP_201_CREATED,
+    response_model=GroupJoinLinkDTO,
+)
+def post_cms_group_join_link(
+    group_id: UUID,
+    request: CreateGroupJoinLinkRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    return create_group_join_link(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        request=request,
+    )
+
+
+@cms_groups_router.get(
+    "/{group_id}/join-links",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupJoinLinkListResponse,
+)
+def get_cms_group_join_links(
+    group_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    return list_group_join_links(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+    )
+
+
+@cms_groups_router.post(
+    "/{group_id}/join-links/{link_id}/revoke",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def post_cms_group_join_link_revoke(
+    group_id: UUID,
+    link_id: UUID,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    revoke_group_join_link(
+        token=authentication_credential.credentials,
+        group_id=group_id,
+        link_id=link_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@cms_groups_router.post(
+    "/join-links/redeem",
+    status_code=status.HTTP_200_OK,
+    response_model=GroupJoinLinkRedeemResponse,
+)
+def post_cms_group_join_link_redeem(
+    request: RedeemGroupJoinLinkRequest,
+    authentication_credential: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
+):
+    return redeem_join_link_for_signed_in_author(
+        token=authentication_credential.credentials,
         request=request,
     )
 
@@ -689,6 +789,14 @@ def get_public_groups(
         AuthorGroupType,
         Query(description="Filter by group type: PAGE or COMMUNITY"),
     ] = AuthorGroupType.COMMUNITY,
+    tradition: Annotated[
+        Optional[str],
+        Query(description="Filter by tradition code from GET /traditions (e.g. tibetan)"),
+    ] = None,
+    include_joined: Annotated[
+        bool,
+        Query(description="Also list the groups the caller has joined. By default a signed-in caller sees only groups they have not joined."),
+    ] = False,
     skip: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     x_timezone: Annotated[
@@ -697,6 +805,7 @@ def get_public_groups(
     ] = None,
 ):
     return list_public_groups(
+        include_joined=include_joined,
         search=search,
         language=language,
         tag_id=tag_id,
@@ -705,6 +814,7 @@ def get_public_groups(
         limit=limit,
         token=authentication_credential.credentials if authentication_credential else None,
         timezone_name=x_timezone,
+        tradition_code=tradition,
     )
 
 

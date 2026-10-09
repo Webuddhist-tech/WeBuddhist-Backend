@@ -2,12 +2,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
-from sqlalchemy import and_, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from pecha_api.plans.groups.groups_enums import (
     AuthorGroupInviteStatus,
     AuthorGroupJoinRequestStatus,
+    AuthorGroupMemberRole,
     AuthorGroupStatus,
     AuthorGroupType,
 )
@@ -23,6 +24,12 @@ from pecha_api.plans.groups.groups_models import (
     author_group_joins,
     author_group_tags,
 )
+from pecha_api.notification.notification_preference_enums import (
+    NotificationChannel,
+    NotificationScope,
+    NotificationType,
+)
+from pecha_api.notification.notification_preference_repository import upsert_preference
 from pecha_api.plans.authors.plan_authors_model import Author
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.plans_models import Plan
@@ -33,7 +40,13 @@ from pecha_api.plans.shared.event_linkage import (
 )
 from pecha_api.plans.tags.tag_model import Tag
 from pecha_api.plans.users.plan_users_models import SeriesPartner, UserSeriesEnrollment
+from pecha_api.traditions.tradition_models import Tradition
 from pecha_api.users.users_models import Users
+
+
+def _group_tradition_load():
+    # Group payloads carry the tradition's localized name, so load its metadata too.
+    return selectinload(AuthorGroup.tradition).selectinload(Tradition.metadata_entries)
 
 
 def get_group_ids_by_plan_ids(db: Session, plan_ids: Sequence[UUID]) -> Dict[UUID, UUID]:
@@ -277,6 +290,7 @@ def get_group_by_id(db: Session, group_id: UUID) -> Optional[AuthorGroup]:
             selectinload(AuthorGroup.members).selectinload(AuthorGroupMember.author),
             selectinload(AuthorGroup.social_links),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
+            _group_tradition_load(),
         )
         .filter(AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None))
         .first()
@@ -375,6 +389,7 @@ def get_groups_by_ids(db: Session, group_ids: Sequence[UUID]) -> List[AuthorGrou
             selectinload(AuthorGroup.metadata_entries),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
             selectinload(AuthorGroup.members),
+            _group_tradition_load(),
         )
         .filter(
             AuthorGroup.id.in_(group_ids),
@@ -502,10 +517,13 @@ def get_groups_paginated(
     is_public: Optional[bool] = None,
     group_type: Optional[AuthorGroupType] = None,
     status: Optional[AuthorGroupStatus] = None,
+    tradition_code: Optional[str] = None,
 ) -> Tuple[List[AuthorGroup], int]:
     filters = [AuthorGroup.deleted_at.is_(None)]
     if is_public is not None:
         filters.append(AuthorGroup.is_public.is_(is_public))
+    if tradition_code:
+        filters.append(AuthorGroup.tradition.has(Tradition.code == tradition_code))
     # Optional, not defaulted to PUBLISHED: CMS listings must still see drafts.
     if status is not None:
         filters.append(AuthorGroup.status == status)
@@ -557,6 +575,7 @@ def get_groups_paginated(
             selectinload(AuthorGroup.metadata_entries),
             selectinload(AuthorGroup.members),
             selectinload(AuthorGroup.tags).selectinload(Tag.metadata_entries),
+            _group_tradition_load(),
         )
         .filter(*filters)
 
@@ -1102,6 +1121,19 @@ def upsert_group_join(
     # leave_group_chat_room recorded, so the group's room comes back to the
     # user's inbox instead of waiting for their next message.
     rejoin_group_room_member(db=db, group_id=group_id, user_id=user_id, commit=False)
+    # Every join starts with the group's chat silenced, even for a user who
+    # turned chat on globally; they turn it on for this group themselves.
+    # Upserted, so a rejoin resets whatever they had chosen before they left.
+    upsert_preference(
+        db=db,
+        user_id=user_id,
+        notification_type=NotificationType.CHAT_MESSAGE,
+        channel=NotificationChannel.PUSH,
+        scope_id=group_id,
+        scope_type=NotificationScope.GROUP,
+        enabled=False,
+        set_enabled=True,
+    )
     if commit:
         db.commit()
 
@@ -1149,6 +1181,7 @@ def list_group_joiners_paginated(
     group_id: UUID,
     skip: int,
     limit: int,
+    order_by_role: bool = False,
 ) -> Tuple[List[Users], int]:
     query = (
         db.query(Users)
@@ -1156,8 +1189,31 @@ def list_group_joiners_paginated(
         .filter(author_group_joins.c.group_id == group_id)
     )
     total = query.count()
+    ordering = [author_group_joins.c.created_at.desc()]
+    if order_by_role:
+        # Owner first, then admins, then everyone else. A scalar subquery (not a
+        # join) so a user linked to several Authors still yields a single row.
+        role_rank = (
+            select(
+                func.min(
+                    case(
+                        (AuthorGroupMember.role == AuthorGroupMemberRole.OWNER, 0),
+                        (AuthorGroupMember.role == AuthorGroupMemberRole.ADMIN, 1),
+                        else_=2,
+                    )
+                )
+            )
+            .join(Author, Author.id == AuthorGroupMember.author_id)
+            .where(
+                AuthorGroupMember.group_id == group_id,
+                Author.user_id == Users.id,
+            )
+            .correlate(Users)
+            .scalar_subquery()
+        )
+        ordering.insert(0, func.coalesce(role_rank, 2))
     users = (
-        query.order_by(author_group_joins.c.created_at.desc())
+        query.order_by(*ordering)
         .offset(skip)
         .limit(limit)
         .all()

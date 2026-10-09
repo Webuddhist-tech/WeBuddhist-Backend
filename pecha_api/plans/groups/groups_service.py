@@ -1,4 +1,7 @@
 import logging
+import re
+import secrets
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional, Sequence
 from uuid import UUID
@@ -8,7 +11,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 
-from pecha_api.config import get, get_int
+from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_repository import find_author_by_email, find_author_by_id, \
@@ -30,6 +33,11 @@ from pecha_api.notification.notification_repository import (
 )
 from pecha_api.notification.notification_service import create_notification_record
 from pecha_api.plans.groups.group_invite_email import send_group_invitation_email
+from pecha_api.plans.groups.group_invite_token import (
+    create_invite_token,
+    decode_invite_token,
+    invite_expiry_minutes,
+)
 from pecha_api.plans.groups.join_request_dispatch_service import (
     enqueue_join_request_created,
     enqueue_join_request_decided,
@@ -61,6 +69,7 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
     get_joined_group_accumulator_ids_by_user,
     remove_group_accumulator_joins_for_group,
 )
+from pecha_api.chat.moderation_service import INAPPROPRIATE_LANGUAGE, contains_inappropriate_language
 from pecha_api.chat.repository import get_room_by_group_id
 from pecha_api.chat.service import leave_group_chat_room
 from pecha_api.plans.groups.follow_scope import resolve_public_group_scope
@@ -160,9 +169,13 @@ from pecha_api.plans.groups.groups_response_models import (
     AuthorGroupMembersListResponse,
     AuthorGroupSummaryDTO,
     CreateAuthorGroupRequest,
+    BulkGroupInviteRequest,
+    BulkGroupInviteResponse,
+    BulkGroupInviteSkippedDTO,
     CreateGroupInviteRequest,
     CreateGroupJoinRequest,
     GroupAccumulationsResponse,
+    GroupInvitePreviewDTO,
     GroupBanDTO,
     GroupBanListResponse,
     GroupInviteCreatedResponse,
@@ -185,6 +198,7 @@ from pecha_api.plans.groups.groups_response_models import (
     GroupPracticesResponse,
     GroupPracticeType,
     GroupSocialLinkDTO,
+    GroupTraditionDTO,
     PublicAuthorGroupDetailDTO,
     PublicAuthorGroupListResponse,
     PublicAuthorGroupSummaryDTO,
@@ -223,8 +237,17 @@ from pecha_api.region_restrictions.region_restriction_service import (
     filter_items_for_timezone,
     get_restricted_item_ids,
 )
+from pecha_api.traditions.tradition_constants import is_managed_tradition_code, normalize_tradition_code
+from pecha_api.traditions.tradition_models import Tradition
+from pecha_api.traditions.tradition_repository import (
+    get_tradition_by_code,
+    resolve_tradition_metadata,
+)
 
 GROUP_NOT_FOUND = "Group not found"
+GROUP_NAME_INAPPROPRIATE_MESSAGE = (
+    "The group name contains inappropriate language. Please change it and try again."
+)
 INVITE_NOT_FOUND = "Invite not found"
 OWNER_ROLE_NOT_ASSIGNABLE = (
     "The OWNER role cannot be assigned via invite or role change; use transfer ownership"
@@ -235,6 +258,7 @@ GROUP_IS_PRIVATE_USE_REQUEST = "This group is private; submit a join request"
 GROUP_BAN_NOT_FOUND = "Ban not found"
 USER_NOT_JOINED_GROUP = "This user has not joined the group"
 GROUP_MEMBER_DEFAULT_ROLE = "MEMBER"
+INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token"
 USER_BANNED_FROM_GROUP = (
     "This user is banned from the group; lift the ban before admitting them"
 )
@@ -374,6 +398,68 @@ def _group_tag_names(tags) -> List[str]:
     active = [tag for tag in tags if tag.deleted_at is None]
     names = (name for name in (_tag_name(tag) for tag in active) if name)
     return sorted(names, key=str.lower)
+
+
+def _assert_group_name_clean(*, slug: Optional[str], metadata: Optional[Sequence]) -> None:
+    """Run what names a group - its title and subtitle in every language, and
+    the slug in its URL - through the same term filter as chat messages.
+    Anyone who signs in to the Studio can create a group, so its name is the
+    first thing an abuser would reach for."""
+    texts = []
+    if slug:
+        texts.append(slug.replace("-", " ").replace("_", " "))
+    for item in metadata or []:
+        texts.extend(text for text in (item.title, item.sub_title) if text)
+    if any(contains_inappropriate_language(text) for text in texts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "code": INAPPROPRIATE_LANGUAGE,
+                "message": GROUP_NAME_INAPPROPRIATE_MESSAGE,
+            },
+        )
+
+
+_SLUG_BASE_MAX_LENGTH = 60
+_SLUG_FALLBACK_BASE = "space"
+_SLUG_SUFFIX_DIGITS = 4
+_SLUG_ATTEMPTS = 20
+
+
+def _slug_base(title: Optional[str]) -> str:
+    """"Dharma Circle (Kathmandu)!" -> "dharma-circle-kathmandu". Accents are
+    folded to ASCII; a title with no Latin letters or digits at all (Tibetan,
+    Chinese...) gives "" and the caller falls back."""
+    ascii_title = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii")
+    base = re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-")
+    return base[:_SLUG_BASE_MAX_LENGTH].rstrip("-")
+
+
+def generate_group_slug(db, metadata) -> str:
+    """A unique slug from the group's name plus a random number after an
+    underscore: "Dharma Circle" -> "dharma-circle_4821". Uses the English
+    title when there is one, otherwise the first title given."""
+    titles = {_metadata_language(item): item.title for item in metadata or []}
+    title = titles.get("EN") or next(iter(titles.values()), None)
+    base = _slug_base(title) or _SLUG_FALLBACK_BASE
+    digits = _SLUG_SUFFIX_DIGITS
+    for attempt in range(_SLUG_ATTEMPTS):
+        if attempt == _SLUG_ATTEMPTS // 2:
+            digits *= 2  # this name is crowded; widen the number
+        number = secrets.randbelow(9 * 10 ** (digits - 1)) + 10 ** (digits - 1)
+        slug = f"{base}_{number}"
+        if get_group_by_slug(db=db, slug=slug) is None:
+            return slug
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Could not generate a unique address for this group. Please try again.",
+    )
+
+
+def _metadata_language(item) -> str:
+    language = item.language.value if hasattr(item.language, "value") else item.language
+    return str(language).upper()
 
 
 def _assert_metadata_valid(metadata_entries: List) -> None:
@@ -635,6 +721,46 @@ def _plans_to_dtos(db: Session, plan_list: List[Plan], group_id: UUID) -> List[P
     ]
 
 
+def _tradition_to_dto(
+    tradition: Optional[Tradition], language: Optional[str] = None
+) -> Optional[GroupTraditionDTO]:
+    if tradition is None:
+        return None
+    metadata = resolve_tradition_metadata(tradition, language)
+    return GroupTraditionDTO(
+        id=tradition.id,
+        code=tradition.code,
+        name=metadata.name if metadata is not None else None,
+    )
+
+
+def _resolve_tradition_id(db: Session, tradition_code: Optional[str]) -> Optional[UUID]:
+    """Map a request's tradition_code to its tradition_list id; None clears it.
+    Legacy rows are not offered by GET /traditions, so they are rejected too."""
+    if tradition_code is None:
+        return None
+    tradition = get_tradition_by_code(db=db, tradition_code=tradition_code)
+    if tradition is None or not is_managed_tradition_code(tradition.code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tradition '{tradition_code}' not found",
+        )
+    return tradition.id
+
+
+def _tradition_filter(tradition_code: Optional[str]) -> Optional[str]:
+    """Normalize a filter code the same way create/update requests do, so
+    "tibetan-buddhism" finds groups saved as "tibetan_buddhism"."""
+    code = (tradition_code or "").strip()
+    if not code:
+        return None
+    try:
+        return normalize_tradition_code(code)
+    except ValueError:
+        # Not a valid managed code; keep the plain form so it simply matches nothing new.
+        return code.lower()
+
+
 def _group_to_summary(
     group: AuthorGroup,
     follower_count: int = 0,
@@ -643,6 +769,7 @@ def _group_to_summary(
     language: Optional[str] = None,
     my_role: Optional[AuthorGroupMemberRole | str] = None,
     my_join_request_status: Optional[str] = None,
+    is_joined: Optional[bool] = None,
 ) -> AuthorGroupSummaryDTO:
     dto_class = PublicAuthorGroupSummaryDTO if public else AuthorGroupSummaryDTO
     tags = _group_tag_names(group.tags) if public else tags_to_summary_dtos(group.tags)
@@ -661,6 +788,7 @@ def _group_to_summary(
         banner_key=group.banner_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
         banner_url=_generate_group_asset_url(group.banner_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         tags=tags,
         follower_count=follower_count,
@@ -672,6 +800,7 @@ def _group_to_summary(
             if public and my_join_request_status
             else {}
         ),
+        **({"is_joined": is_joined} if public and is_joined is not None else {}),
     )
 
 
@@ -684,6 +813,7 @@ def _group_to_followed_summary(
         id=group.id,
         avatar_key=group.avatar_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         follower_count=follower_count,
         tags=_group_tag_names(group.tags),
@@ -699,6 +829,7 @@ def _group_to_joined_summary(
         id=group.id,
         avatar_key=group.avatar_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         joiner_count=joiner_count,
         tags=_group_tag_names(group.tags),
@@ -769,6 +900,7 @@ def _group_to_detail(
         banner_key=group.banner_key,
         avatar_url=_generate_group_asset_url(group.avatar_key),
         banner_url=_generate_group_asset_url(group.banner_key),
+        tradition=_tradition_to_dto(group.tradition, language=language),
         metadata=_metadata_response(group.metadata_entries, language=language),
         members=[] if teaser else _members_to_dtos(group.members),
         tags=tags,
@@ -790,10 +922,14 @@ def _group_to_detail(
 
 def create_author_group(token: str, request: CreateAuthorGroupRequest) -> AuthorGroupDetailDTO:
     _assert_metadata_valid(request.metadata)
+    _assert_group_name_clean(slug=request.slug, metadata=request.metadata)
     author = validate_and_extract_author_details(token=token)
 
     with SessionLocal() as db:
-        if get_group_by_slug(db=db, slug=request.slug):
+        slug = (request.slug or "").strip()
+        if not slug:
+            slug = generate_group_slug(db, request.metadata)
+        elif get_group_by_slug(db=db, slug=slug):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
 
         metadata_entries = [
@@ -807,11 +943,12 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
             for item in request.metadata
         ]
         group = AuthorGroup(
-            slug=request.slug,
+            slug=slug,
             group_type=request.group_type.value,
             is_public=request.is_public,
             avatar_key=request.avatar_key,
             banner_key=request.banner_key,
+            tradition_id=_resolve_tradition_id(db, request.tradition_code),
             created_by=author.email,
             updated_by=author.email,
         )
@@ -826,6 +963,27 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
         return _group_to_detail(loaded, follower_count=0, db=db)
 
 
+def _assert_slug_available(db: Session, group: AuthorGroup, slug: str) -> None:
+    if slug == group.slug:
+        return
+    existing = get_group_by_slug(db=db, slug=slug)
+    if existing and existing.id != group.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
+
+
+def _metadata_request_to_entries(metadata) -> List[AuthorGroupMetadata]:
+    return [
+        AuthorGroupMetadata(
+            language=item.language.value,
+            title=item.title,
+            sub_title=item.sub_title,
+            description=item.description,
+            description_long=item.description_long,
+        )
+        for item in metadata
+    ]
+
+
 def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRequest) -> AuthorGroupDetailDTO:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
@@ -837,12 +995,13 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
             _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
 
         fields_set = request.model_fields_set
+        _assert_group_name_clean(
+            slug=request.slug if "slug" in fields_set else None,
+            metadata=request.metadata if "metadata" in fields_set else None,
+        )
 
         if "slug" in fields_set:
-            if request.slug != group.slug:
-                existing = get_group_by_slug(db=db, slug=request.slug)
-                if existing and existing.id != group.id:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
+            _assert_slug_available(db=db, group=group, slug=request.slug)
             group.slug = request.slug
         became_public = False
         if "is_public" in fields_set:
@@ -852,19 +1011,16 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
             group.avatar_key = request.avatar_key
         if "banner_key" in fields_set:
             group.banner_key = request.banner_key
+        if "tradition_code" in fields_set:
+            group.tradition_id = _resolve_tradition_id(db, request.tradition_code)
+            db.expire(group, ["tradition"])
         if "metadata" in fields_set:
             _assert_metadata_valid(request.metadata)
-            metadata_entries = [
-                AuthorGroupMetadata(
-                    language=item.language.value,
-                    title=item.title,
-                    sub_title=item.sub_title,
-                    description=item.description,
-                    description_long=item.description_long,
-                )
-                for item in request.metadata
-            ]
-            replace_group_metadata(db=db, group_id=group_id, metadata_entries=metadata_entries)
+            replace_group_metadata(
+                db=db,
+                group_id=group_id,
+                metadata_entries=_metadata_request_to_entries(request.metadata),
+            )
             db.expire(group, ["metadata_entries"])
 
         group.updated_by = author.email
@@ -1132,6 +1288,42 @@ def _group_card_title(group: AuthorGroup, language: Optional[str] = None) -> Opt
     return entries[0].title
 
 
+def _recitation_collection_to_dto(collection, item_count: int) -> GroupRecitationCollectionDTO:
+    created_at = collection.created_at
+    return GroupRecitationCollectionDTO(
+        id=collection.id,
+        group_id=collection.group_id,
+        name=collection.name,
+        img_url=_generate_group_asset_url(collection.img_url),
+        item_count=item_count,
+        created_at=created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+    )
+
+
+def _series_dto_pairs_by_group(
+    db: Session,
+    series_list: Sequence[Series],
+    language: Optional[str],
+    user_id: Optional[UUID],
+):
+    # Enrollment and partner lookups are scoped to a group, so build per group.
+    series_by_group: Dict[UUID, List[Series]] = {}
+    for series in series_list:
+        series_by_group.setdefault(series.group_id, []).append(series)
+    pairs = []
+    for owning_group_id, group_series in series_by_group.items():
+        dtos = _series_to_dtos(
+            db=db,
+            series_list=group_series,
+            group_id=owning_group_id,
+            language=language,
+            published_only=True,
+            user_id=user_id,
+        )
+        pairs.extend(zip(group_series, dtos))
+    return pairs
+
+
 def get_group_practices_feed(
     token: Optional[str] = None,
     group_id: Optional[UUID] = None,
@@ -1210,35 +1402,18 @@ def get_group_practices_feed(
             db=db, collection_ids=[collection.id for collection in collections]
         )
         collection_dtos = [
-            GroupRecitationCollectionDTO(
-                id=collection.id,
-                group_id=collection.group_id,
-                name=collection.name,
-                img_url=_generate_group_asset_url(collection.img_url),
-                item_count=collection_item_counts.get(collection.id, 0),
-                created_at=collection.created_at.isoformat()
-                if hasattr(collection.created_at, "isoformat")
-                else str(collection.created_at),
-            )
+            _recitation_collection_to_dto(collection, collection_item_counts.get(collection.id, 0))
             for collection in collections
         ]
 
         # Series DTOs are built per owning group because enrollment and partner
         # lookups are scoped to a group.
-        series_by_group: Dict[UUID, List[Series]] = {}
-        for series in series_list:
-            series_by_group.setdefault(series.group_id, []).append(series)
-        series_pairs = []
-        for owning_group_id, group_series in series_by_group.items():
-            dtos = _series_to_dtos(
-                db=db,
-                series_list=group_series,
-                group_id=owning_group_id,
-                language=language,
-                published_only=True,
-                user_id=current_user.id if current_user else None,
-            )
-            series_pairs.extend(zip(group_series, dtos))
+        series_pairs = _series_dto_pairs_by_group(
+            db=db,
+            series_list=series_list,
+            language=language,
+            user_id=current_user.id if current_user else None,
+        )
 
         plan_aggregate_by_id = {
             item.plan.id: item
@@ -1261,12 +1436,12 @@ def get_group_practices_feed(
             db=db, group_accumulator_ids=accumulator_ids
         )
 
-        card_group_ids = list({
+        card_group_ids = [*{
             *[series.group_id for series, _ in series_pairs],
             *[plan.group_id for plan in plans_list],
             *[accumulator.group_id for accumulator in accumulators],
             *[collection.group_id for collection in collections],
-        })
+        }]
         group_by_id = {
             group.id: group
             for group in get_groups_by_ids(db=db, group_ids=card_group_ids)
@@ -1390,17 +1565,20 @@ def _list_group_members_sync(
         # Status is still enforced: an unpublished group lists no members.
         if not group or not is_group_published(group):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        users, total = list_group_joiners_paginated(
-            db=db,
-            group_id=group_id,
-            skip=skip,
-            limit=limit,
-        )
         # Staff roles follow the same rule as the group detail teaser: a private
         # group's staff are only revealed to callers who have joined it.
         roles_visible = group.is_public or (
             viewer_id is not None
             and is_user_joined_group(db=db, group_id=group_id, user_id=viewer_id)
+        )
+        # Owner, then admins, then everyone else — only when roles are visible,
+        # otherwise the ordering itself would reveal a private group's staff.
+        users, total = list_group_joiners_paginated(
+            db=db,
+            group_id=group_id,
+            skip=skip,
+            limit=limit,
+            order_by_role=roles_visible,
         )
         # Joiners linked to a staff Author (Author.user_id) carry their staff
         # role; everyone else is a plain MEMBER.
@@ -1466,16 +1644,19 @@ def list_public_groups(
     group_type: AuthorGroupType = AuthorGroupType.COMMUNITY,
     token: Optional[str] = None,
     timezone_name: Optional[str] = None,
+    tradition_code: Optional[str] = None,
+    include_joined: bool = False,
 ) -> PublicAuthorGroupListResponse:
     with SessionLocal() as db:
         exclude_group_ids = None
         user_id = None
+        joined_ids = []
         if token:
             try:
                 user = validate_and_extract_user_details(token=token, db=db)
                 user_id = user.id
                 joined_ids = get_joined_group_ids_by_user(db=db, user_id=user.id)
-                if joined_ids:
+                if joined_ids and not include_joined:
                     exclude_group_ids = joined_ids
             except Exception:
                 pass
@@ -1491,6 +1672,7 @@ def list_public_groups(
             exclude_group_ids=exclude_group_ids,
             group_type=group_type,
             status=AuthorGroupStatus.PUBLISHED,
+            tradition_code=_tradition_filter(tradition_code),
         )
         groups = filter_items_for_timezone(
             groups,
@@ -1506,6 +1688,7 @@ def list_public_groups(
             if user_id is not None
             else {}
         )
+        joined_id_set = set(joined_ids)
         return PublicAuthorGroupListResponse(
             groups=[
                 _group_to_summary(
@@ -1515,6 +1698,7 @@ def list_public_groups(
                     public=True,
                     language=language,
                     my_join_request_status=join_request_status_map.get(item.id),
+                    is_joined=item.id in joined_id_set if user_id is not None else None,
                 )
                 for item in groups
             ],
@@ -1535,6 +1719,7 @@ def list_cms_groups(
     for_transfer: bool = False,
     group_type: Optional[AuthorGroupType] = None,
     group_status: Optional[AuthorGroupStatus] = None,
+    tradition_code: Optional[str] = None,
 ) -> AuthorGroupListResponse:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
@@ -1556,6 +1741,7 @@ def list_cms_groups(
             group_type=group_type,
             # Unset means Studio sees every status.
             status=group_status,
+            tradition_code=_tradition_filter(tradition_code),
         )
         ids = [group.id for group in groups]
         follower_count_map = get_followers_count_map(db=db, group_ids=ids)
@@ -2203,10 +2389,8 @@ def _group_title_from_metadata(metadata_entries) -> str:
 
 
 def _invite_expires_at() -> datetime:
-    """Invite TTL is minutes only (default 30), not days — see GROUP_INVITE_EXPIRY_MINUTES."""
-    minutes = get_int("GROUP_INVITE_EXPIRY_MINUTES")
-    minutes = max(1, min(minutes, 24 * 60))
-    return datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    """Invite TTL comes from GROUP_INVITE_EXPIRY_MINUTES (default 7 days)."""
+    return datetime.now(timezone.utc) + timedelta(minutes=invite_expiry_minutes())
 
 
 def _assert_invite_pending_for_recipient(invite: AuthorGroupInvite, author_email: str) -> None:
@@ -2239,6 +2423,9 @@ def notify_pending_group_invites(author) -> None:
     author's email that were sent before they had a Studio account. Called
     once an author becomes verified so the invite is already waiting for them
     the first time they can see the Studio."""
+    if not author.email:
+        # Phone-only authors can't be invited by email; join links reach them.
+        return
     try:
         with SessionLocal() as db:
             pending = list_pending_invites_by_email(db=db, target_email=author.email)
@@ -2264,30 +2451,44 @@ def notify_pending_group_invites(author) -> None:
         logging.exception("Failed to backfill group invite notifications for %s", author.email)
 
 
-def create_group_member_invite(
-    token: str,
-    group_id: UUID,
-    request: CreateGroupInviteRequest,
-) -> GroupInviteCreatedResponse:
-    author = validate_and_extract_author_details(token=token)
-    target_email = request.target_email.strip().lower()
-    if not target_email:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_email is required")
+def _assert_can_manage_group_invites(db, *, group_id: UUID, author) -> str:
+    """404 for an unknown group, 403 unless OWNER/ADMIN (or super admin).
+    Returns the actor's role for the per-role invite rules."""
+    group = get_group_by_id(db=db, group_id=group_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+    actor_role = _resolve_actor_group_role(db, group_id=group_id, author=author)
+    if not is_super_admin(author):
+        member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
+        _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
+    return actor_role
 
-    with SessionLocal() as db:
-        group = get_group_by_id(db=db, group_id=group_id)
-        if not group:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        actor_role = _resolve_actor_group_role(db, group_id=group_id, author=author)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_MEMBER_MANAGEMENT_ROLES)
 
-        _assert_invite_role_allowed(
-            actor_role=actor_role,
-            invite_role=_to_role_value(request.role),
+def _invite_token_or_none(invite: AuthorGroupInvite) -> Optional[str]:
+    try:
+        return create_invite_token(
+            invite_id=invite.id,
+            target_email=invite.target_email,
+            expires_at=invite.expires_at,
         )
+    except Exception:
+        # The email still works without it - its button falls back to the
+        # Studio groups page.
+        logging.exception("Failed to sign invite link for invite %s", invite.id)
+        return None
 
+
+def _send_member_invite(
+    *,
+    author,
+    group_id: UUID,
+    target_email: str,
+    role: AuthorGroupMemberRole,
+) -> GroupInviteCreatedResponse:
+    """Create one invite (the caller has already checked the actor's rights)
+    and send its notification and email. 400 if the address is already a
+    member or already has a pending invite."""
+    with SessionLocal() as db:
         target_author = find_author_by_email(db=db, email=target_email)
         if target_author and get_group_member(db=db, group_id=group_id, author_id=target_author.id):
             raise HTTPException(
@@ -2303,7 +2504,7 @@ def create_group_member_invite(
         invite = AuthorGroupInvite(
             group_id=group_id,
             target_email=target_email,
-            role=request.role,
+            role=role,
             status=AuthorGroupInviteStatus.PENDING.value,
             expires_at=_invite_expires_at(),
             created_by=author.email,
@@ -2315,6 +2516,7 @@ def create_group_member_invite(
         target_author_id = target_author.id if target_author else None
         created_invite_id = created.id
         invite_dto = _invite_to_dto(created, group_name=group_title, db=db)
+        invite_token = _invite_token_or_none(created)
 
     notification = None
     if target_author_id is not None:
@@ -2331,13 +2533,85 @@ def create_group_member_invite(
         inviter_name=inviter_name,
         inviter_email=author.email,
         group_title=group_title,
-        invite_role=_to_role_value(request.role),
+        invite_role=_to_role_value(role),
+        invite_token=invite_token,
     )
 
     return GroupInviteCreatedResponse(
         invite=invite_dto,
         notification_id=notification.id if notification else None,
     )
+
+
+def create_group_member_invite(
+    token: str,
+    group_id: UUID,
+    request: CreateGroupInviteRequest,
+) -> GroupInviteCreatedResponse:
+    author = validate_and_extract_author_details(token=token)
+    target_email = request.target_email.strip().lower()
+    if not target_email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_email is required")
+
+    with SessionLocal() as db:
+        actor_role = _assert_can_manage_group_invites(db, group_id=group_id, author=author)
+    _assert_invite_role_allowed(
+        actor_role=actor_role,
+        invite_role=_to_role_value(request.role),
+    )
+    return _send_member_invite(
+        author=author,
+        group_id=group_id,
+        target_email=target_email,
+        role=request.role,
+    )
+
+
+def _looks_like_email(value: str) -> bool:
+    local, _, domain = value.partition("@")
+    return bool(local) and "." in domain and " " not in value and not domain.startswith(".")
+
+
+def create_group_member_invites_bulk(
+    token: str,
+    group_id: UUID,
+    request: BulkGroupInviteRequest,
+) -> BulkGroupInviteResponse:
+    """Invite a list of addresses with one role. Rights are checked once; each
+    address then either gets an invite or is listed in skipped with the
+    reason, so one bad address never blocks the rest."""
+    author = validate_and_extract_author_details(token=token)
+    with SessionLocal() as db:
+        actor_role = _assert_can_manage_group_invites(db, group_id=group_id, author=author)
+    _assert_invite_role_allowed(
+        actor_role=actor_role,
+        invite_role=_to_role_value(request.role),
+    )
+
+    invites: List[GroupInviteDTO] = []
+    skipped: List[BulkGroupInviteSkippedDTO] = []
+    seen: set = set()
+    for raw_email in request.target_emails:
+        target_email = (raw_email or "").strip().lower()
+        if not _looks_like_email(target_email):
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=raw_email or "", reason="Not a valid email address"))
+            continue
+        if target_email in seen:
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=target_email, reason="Listed more than once"))
+            continue
+        seen.add(target_email)
+        try:
+            created = _send_member_invite(
+                author=author,
+                group_id=group_id,
+                target_email=target_email,
+                role=request.role,
+            )
+        except HTTPException as exc:
+            skipped.append(BulkGroupInviteSkippedDTO(target_email=target_email, reason=str(exc.detail)))
+            continue
+        invites.append(created.invite)
+    return BulkGroupInviteResponse(invites=invites, skipped=skipped)
 
 
 def list_group_invites(
@@ -2373,48 +2647,103 @@ def list_my_pending_group_invites(token: str) -> GroupInviteListResponse:
     )
 
 
+def _accept_invite(db, *, invite: AuthorGroupInvite, author) -> AuthorGroup:
+    """Make the author a member per a pending invite addressed to them and
+    mark it accepted. Raises the same errors the accept endpoint returns."""
+    _assert_invite_pending_for_recipient(invite=invite, author_email=author.email)
+
+    group = get_group_by_id(db=db, group_id=invite.group_id)
+    if not group:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
+
+    invite_role = _to_role_value(invite.role)
+    if invite_role == AuthorGroupMemberRole.OWNER.value and get_owner_count(db=db, group_id=group.id) >= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=GROUP_ALREADY_HAS_OWNER,
+        )
+    _assert_role_not_owner_assignment(invite_role)
+
+    existing_member = get_group_member(db=db, group_id=group.id, author_id=author.id)
+    if existing_member is None:
+        add_group_member(
+            db=db,
+            member=AuthorGroupMember(
+                group_id=group.id,
+                author_id=author.id,
+                role=invite.role,
+                created_by=author.email,
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+    invite.status = AuthorGroupInviteStatus.ACCEPTED.value
+    invite.accepted_at = now
+    save_invite(db=db, invite=invite)
+    _mark_invite_notification_read(db=db, recipient_author_id=author.id, invite_id=invite.id)
+    return group
+
+
+def accept_pending_invites_for_author(db, author) -> List[UUID]:
+    """Accept every pending invite addressed to the author's email.
+
+    Called once, when a new author is first let into the Studio because of
+    those invites, so they land inside their groups instead of in an empty
+    Studio with invites to go and find. An invite that can't be accepted is
+    logged and left pending rather than failing the sign-in. Returns the
+    ids of the groups joined."""
+    if not author.email:
+        return []
+    joined: List[UUID] = []
+    for invite in list_pending_invites_by_email(db=db, target_email=author.email):
+        try:
+            group = _accept_invite(db, invite=invite, author=author)
+        except HTTPException as exc:
+            logging.warning("Skipped auto-accepting invite %s for %s: %s", invite.id, author.email, exc.detail)
+            continue
+        joined.append(group.id)
+    return joined
+
+
 def accept_group_invite_by_id(token: str, invite_id: UUID) -> AuthorGroupDetailDTO:
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
         invite = get_invite_by_id(db=db, invite_id=invite_id, load_group=True)
         if not invite:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVITE_NOT_FOUND)
-        _assert_invite_pending_for_recipient(invite=invite, author_email=author.email)
-
-        group = get_group_by_id(db=db, group_id=invite.group_id)
-        if not group:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-
-        invite_role = _to_role_value(invite.role)
-        if invite_role == AuthorGroupMemberRole.OWNER.value and get_owner_count(db=db, group_id=group.id) >= 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=GROUP_ALREADY_HAS_OWNER,
-            )
-        _assert_role_not_owner_assignment(invite_role)
-
-        existing_member = get_group_member(db=db, group_id=group.id, author_id=author.id)
-        if existing_member is None:
-            add_group_member(
-                db=db,
-                member=AuthorGroupMember(
-                    group_id=group.id,
-                    author_id=author.id,
-                    role=invite.role,
-                    created_by=author.email,
-                ),
-            )
-
-        now = datetime.now(timezone.utc)
-        invite.status = AuthorGroupInviteStatus.ACCEPTED.value
-        invite.accepted_at = now
-        save_invite(db=db, invite=invite)
-        _mark_invite_notification_read(db=db, recipient_author_id=author.id, invite_id=invite.id)
+        group = _accept_invite(db, invite=invite, author=author)
 
         loaded = get_group_by_id(db=db, group_id=group.id)
         follower_count = get_followers_count_map(db=db, group_ids=[group.id]).get(group.id, 0)
         joiner_count = get_joiners_count_map(db=db, group_ids=[group.id]).get(group.id, 0)
         return _group_to_detail(loaded, follower_count=follower_count, joiner_count=joiner_count, db=db)
+
+
+def get_invite_preview(invite_token: str) -> GroupInvitePreviewDTO:
+    """Public: what the Studio /join?invite= page needs before sign-in. The
+    signed token is the credential, so none of this is visible without the
+    email it was sent in."""
+    invite_id, target_email = decode_invite_token(invite_token)
+    with SessionLocal() as db:
+        invite = get_invite_by_id(db=db, invite_id=invite_id, load_group=True)
+        if not invite or invite.target_email.lower() != target_email:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVITE_NOT_FOUND)
+        invite_status = _to_invite_status(invite.status)
+        if invite_status == AuthorGroupInviteStatus.PENDING and invite.expires_at < datetime.now(timezone.utc):
+            invite_status = AuthorGroupInviteStatus.EXPIRED
+        dto = _invite_to_dto(invite, db=db)
+        account_exists = find_author_by_email(db=db, email=target_email) is not None
+    return GroupInvitePreviewDTO(
+        invite_id=dto.id,
+        group_id=dto.group_id,
+        group_name=dto.group_name,
+        role=dto.role,
+        target_email=dto.target_email,
+        inviter_name=dto.inviter_name,
+        status=invite_status,
+        expires_at=dto.expires_at,
+        account_exists=account_exists,
+    )
 
 
 def reject_group_invite_by_id(token: str, invite_id: UUID) -> GroupInviteDTO:
@@ -2837,14 +3166,14 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=INVALID_OR_EXPIRED_TOKEN,
         )
     if is_refresh_token_payload(payload):
         # Same rule as validate_and_extract_author_details: a refresh token is
         # only good for minting access tokens, never as a bearer credential.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=INVALID_OR_EXPIRED_TOKEN,
         )
 
     with SessionLocal() as db:
@@ -2856,7 +3185,7 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
             # instead of leaking whether group_id exists via 404-vs-401.
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token",
+                detail=INVALID_OR_EXPIRED_TOKEN,
             )
 
         group = get_group_by_id(db=db, group_id=group_id)

@@ -68,9 +68,25 @@ Query params: `skip`, `limit` (max 500).
 |-----------|------------|
 | Private | The other participant only |
 | Group | Users in `author_group_joins` for the room's `group_id`, excluding the sender |
+| Event | Event room members; preferences scope to the owning group |
+
+After membership, **PUSH** preferences filter who remains (see
+[notification-preferences-api.md](../notification-preferences-api.md) §7):
+
+| Message | `NotificationType` | Scope |
+|---------|-------------------|--------|
+| `TEXT` (group or event room) | `CHAT_MESSAGE` | Group (+ global) |
+| `PRAYER` | `PRAYER_REQUEST` | Group (+ global); independent of chat |
+| Private `TEXT` | `CHAT_MESSAGE` | Global only |
 
 Users without active push devices are omitted from `recipients`, but still
 counted in `total` for pagination.
+
+### `GET /api/v1/internal/prayer-notification-targets/{prayer_id}`
+
+Targets the **requester** for a `PRAYER_RECEIVED` push. Filtered with
+`PRAYER_RECEIVED` (global or per group). `prayer_id` is a
+`chat_prayer_notifications.id`.
 
 ### `POST /api/v1/internal/push-devices/deactivate`
 

@@ -9,7 +9,7 @@ class GroupPostCommentUserDTO(BaseModel):
     """Public user details included with a comment."""
     first_name: str
     last_name: Optional[str] = None
-    email: str
+    email: Optional[str] = None
     avatar_url: Optional[str] = None
 
 
@@ -18,7 +18,7 @@ class GroupPostCommentDTO(BaseModel):
     id: UUID
     post_id: UUID
     parent_comment_id: Optional[UUID] = None
-    user_email: str
+    user_email: Optional[str] = None
     user: GroupPostCommentUserDTO
     text: str
     created_at: str

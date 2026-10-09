@@ -34,6 +34,24 @@ class ChatMessageType(enum.Enum):
     PRAYER = "PRAYER"
 
 
+class PrayerTranslationLanguage(str, enum.Enum):
+    """Languages Gemini prayer translation supports (EN/BO/ZH)."""
+
+    EN = "EN"
+    BO = "BO"
+    ZH = "ZH"
+
+
+class PrayerSort(str, enum.Enum):
+    """How a room's prayer requests are ordered. NEWEST is the default."""
+
+    NEWEST = "newest"
+    OLDEST = "oldest"
+    MOST_PRAYED = "most_prayed"
+    NEEDS_PRAYERS = "needs_prayers"
+    RANDOM = "random"
+
+
 ChatMessageTypeEnum = Enum(
     ChatMessageType,
     name="chat_message_type",
@@ -52,3 +70,9 @@ class ChatMessageReportReason(enum.Enum):
 class ChatMessageReportSource(enum.Enum):
     MANUAL = "MANUAL"
     AUTOMATIC = "AUTOMATIC"
+
+
+class ChatMessageTranslationStatus(str, enum.Enum):
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"

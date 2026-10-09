@@ -13,6 +13,8 @@ class VerseOfDayCommentUserDTO(BaseModel):
 class VerseOfDayCommentDTO(BaseModel):
     id: UUID
     verse_id: UUID
+    user_id: UUID
+    parent_comment_id: Optional[UUID] = None
     user: VerseOfDayCommentUserDTO
     text: str
     created_at: str
@@ -30,6 +32,7 @@ class VerseOfDayCommentsResponse(BaseModel):
 
 class CreateVerseOfDayCommentRequest(BaseModel):
     text: str
+    parent_comment_id: Optional[UUID] = None
 
     @field_validator("text")
     @classmethod

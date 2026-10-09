@@ -5,9 +5,11 @@ Invoked only from worker threads via ``run_in_threadpool`` in ``comment_reposito
 from typing import List, Optional, Tuple
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from pecha_api.db.database import SessionLocal
+from pecha_api.verse_of_day.comment_errors import ParentCommentNotFoundError
 from pecha_api.verse_of_day.comment_models import VerseOfDayComment
 
 
@@ -53,6 +55,37 @@ def _get_comment_by_id(db: Session, comment_id: UUID) -> Optional[VerseOfDayComm
     )
 
 
+def _get_comment_by_id_for_verse(
+    db: Session,
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    return (
+        db.query(VerseOfDayComment)
+        .filter(
+            VerseOfDayComment.id == comment_id,
+            VerseOfDayComment.verse_id == verse_id,
+        )
+        .first()
+    )
+
+
+def _get_comment_by_id_for_verse_with_user(
+    db: Session,
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    return (
+        db.query(VerseOfDayComment)
+        .options(selectinload(VerseOfDayComment.user))
+        .filter(
+            VerseOfDayComment.id == comment_id,
+            VerseOfDayComment.verse_id == verse_id,
+        )
+        .first()
+    )
+
+
 def _delete_comment(db: Session, comment: VerseOfDayComment) -> None:
     db.delete(comment)
     db.commit()
@@ -71,14 +104,55 @@ def create_comment_in_session(
     verse_id: UUID,
     user_id: UUID,
     text: str,
+    parent_comment_id: Optional[UUID] = None,
 ) -> VerseOfDayComment:
     with SessionLocal() as db:
+        if parent_comment_id is not None:
+            parent = _get_comment_by_id_for_verse(
+                db=db,
+                comment_id=parent_comment_id,
+                verse_id=verse_id,
+            )
+            if parent is None:
+                raise ParentCommentNotFoundError
+
         comment = VerseOfDayComment(
             verse_id=verse_id,
             user_id=user_id,
+            parent_comment_id=parent_comment_id,
             text=text,
         )
-        return _create_comment(db=db, comment=comment)
+        try:
+            return _create_comment(db=db, comment=comment)
+        except IntegrityError as exc:
+            db.rollback()
+            if parent_comment_id is not None:
+                raise ParentCommentNotFoundError from exc
+            raise
+
+
+def get_comment_by_id_for_verse_in_session(
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    with SessionLocal() as db:
+        return _get_comment_by_id_for_verse(
+            db=db,
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
+
+
+def get_comment_by_id_for_verse_with_user_in_session(
+    comment_id: UUID,
+    verse_id: UUID,
+) -> Optional[VerseOfDayComment]:
+    with SessionLocal() as db:
+        return _get_comment_by_id_for_verse_with_user(
+            db=db,
+            comment_id=comment_id,
+            verse_id=verse_id,
+        )
 
 
 def get_comment_by_id_in_session(comment_id: UUID) -> Optional[VerseOfDayComment]:

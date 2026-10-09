@@ -15,6 +15,7 @@ class NotificationType(enum.Enum):
     VERSE_OF_DAY = "VERSE_OF_DAY"
     ROUTINE_REMINDER = "ROUTINE_REMINDER"
     PRAYER_RECEIVED = "PRAYER_RECEIVED"
+    PRAYER_REQUEST = "PRAYER_REQUEST"
 
 
 class NotificationChannel(enum.Enum):
@@ -63,6 +64,7 @@ GROUP_SCOPED_TYPES = frozenset(
         NotificationType.EVENT,
         NotificationType.ACCUMULATION,
         NotificationType.PRAYER_RECEIVED,
+        NotificationType.PRAYER_REQUEST,
     }
 )
 
@@ -75,6 +77,21 @@ NON_TOGGLEABLE_TYPES = frozenset(
     }
 )
 
+# Opt-in types: with no row at all these resolve to disabled, not allowed.
+# A user hears chat only once they turn it on.
+DEFAULT_DISABLED_TYPES = frozenset(
+    {
+        NotificationType.CHAT_MESSAGE,
+        NotificationType.PRAYER_REQUEST,
+    }
+)
+
+
+def default_enabled(notification_type: NotificationType) -> bool:
+    """What a type resolves to when the user has no row for it."""
+    return notification_type not in DEFAULT_DISABLED_TYPES
+
+
 # Types exposed as toggles in v1, in the order clients should render them.
 V1_TOGGLEABLE_TYPES = (
     NotificationType.CHAT_MESSAGE,
@@ -84,6 +101,7 @@ V1_TOGGLEABLE_TYPES = (
     NotificationType.ACCUMULATION,
     NotificationType.SERIES,
     NotificationType.PRAYER_RECEIVED,
+    NotificationType.PRAYER_REQUEST,
 )
 
 # Event-scoped subset of the above, in render order. Muting one event

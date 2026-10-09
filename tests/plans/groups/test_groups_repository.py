@@ -5,6 +5,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy.orm import Session
 
+from pecha_api.notification.notification_preference_enums import (
+    NotificationChannel,
+    NotificationScope,
+    NotificationType,
+)
 from pecha_api.plans.groups.groups_enums import (
     AuthorGroupJoinRequestStatus,
     AuthorGroupStatus,
@@ -649,6 +654,44 @@ def test_upsert_group_join_skips_the_chat_room_for_an_existing_joiner(mock_rejoi
     upsert_group_join(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
 
     mock_rejoin.assert_not_called()
+
+
+_UPSERT_PREFERENCE = "pecha_api.plans.groups.groups_repository.upsert_preference"
+
+
+@patch(_UPSERT_PREFERENCE)
+@patch(_REJOIN)
+def test_upsert_group_join_starts_the_group_chat_off(_mock_rejoin, mock_upsert_preference):
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(db=db, group_id=group_id, user_id=user_id)
+
+    mock_upsert_preference.assert_called_once_with(
+        db=db,
+        user_id=user_id,
+        notification_type=NotificationType.CHAT_MESSAGE,
+        channel=NotificationChannel.PUSH,
+        scope_id=group_id,
+        scope_type=NotificationScope.GROUP,
+        enabled=False,
+        set_enabled=True,
+    )
+
+
+@patch(_UPSERT_PREFERENCE)
+@patch(_REJOIN)
+def test_upsert_group_join_leaves_an_existing_joiners_chat_setting_alone(
+    _mock_rejoin, mock_upsert_preference
+):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_join(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_upsert_preference.assert_not_called()
 
 
 @patch(_REJOIN)

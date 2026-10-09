@@ -13,10 +13,12 @@ user, and take `channel` as a query parameter defaulting to `PUSH`.
 ## 1. The model in one paragraph
 
 A preference is one row per `(user, notification_type, channel, scope)`, where
-scope is either **global** or **one group**. Nothing stored means the
-notification is **on** — no row is ever written just to say "default". Two
-fields resolve differently: `enabled` is **most-specific-wins** (a group row
-beats a global row beats the default), while `muted_until` is
+scope is either **global** or **one group**. Nothing stored means **`enabled`
+comes from the type default** (`source: DEFAULT` on GET) — no row is ever
+written just to say "default". Most types default to **on**; **`CHAT_MESSAGE`**
+and **`PRAYER_REQUEST`** default to **off** (opt-in). Two fields resolve
+differently: `enabled` is **most-specific-wins** (a group row beats a global
+row beats the default), while `muted_until` is
 **any-row-suppresses** (an unexpired snooze on either row silences, and the
 resolved value is the later of the two).
 
@@ -48,11 +50,12 @@ row is saved and returned faithfully and silences nothing yet.
 Global list, in the order clients should render it:
 
 `CHAT_MESSAGE`, `GROUP_POST`, `EVENT`, `EVENT_REMINDER`, `ACCUMULATION`,
-`SERIES`, `PRAYER_RECEIVED`
+`SERIES`, `PRAYER_RECEIVED`, `PRAYER_REQUEST`
 
 Group list (the subset that accepts a per-group override), same order:
 
-`CHAT_MESSAGE`, `GROUP_POST`, `EVENT`, `ACCUMULATION`, `PRAYER_RECEIVED`
+`CHAT_MESSAGE`, `GROUP_POST`, `EVENT`, `ACCUMULATION`, `PRAYER_RECEIVED`,
+`PRAYER_REQUEST`
 
 `GROUP_INVITE` and `GROUP_JOIN_REQUEST` are transactional and rejected on both
 endpoints with `422` — someone who asked to join a group expects to hear the
@@ -87,7 +90,8 @@ GET /users/me/notification-preferences?channel=PUSH
     { "notification_type": "EVENT_REMINDER",  "enabled": true,  "muted_until": null, "source": "DEFAULT" },
     { "notification_type": "ACCUMULATION",    "enabled": true,  "muted_until": null, "source": "DEFAULT" },
     { "notification_type": "SERIES",          "enabled": true,  "muted_until": null, "source": "DEFAULT" },
-    { "notification_type": "PRAYER_RECEIVED", "enabled": true,  "muted_until": null, "source": "DEFAULT" }
+    { "notification_type": "PRAYER_RECEIVED", "enabled": true,  "muted_until": null, "source": "DEFAULT" },
+    { "notification_type": "PRAYER_REQUEST",  "enabled": false, "muted_until": null, "source": "DEFAULT" }
   ],
   "group_overrides": [
     { "group_id": "3f2b…c91a", "group_title": "Morning Practice",
@@ -203,7 +207,7 @@ uses follows from whether it is group-scoped:
 
 | Type | Mechanism |
 |------|-----------|
-| `CHAT_MESSAGE`, `GROUP_POST`, `EVENT` | Group-aware: `_preference_filtered_join` inside the paginated recipient query (a `GROUP` row beats the `GLOBAL` one) |
+| `CHAT_MESSAGE`, `GROUP_POST`, `EVENT`, `PRAYER_REQUEST` | Group-aware: `_preference_filtered_join` inside the paginated recipient query (a `GROUP` row beats the `GLOBAL` one) |
 | `PRAYER_RECEIVED` | Group-aware: `filter_users_by_notification_preference(..., scope_id=group_id)` on the single recipient |
 | `EVENT_REMINDER` | Global rows only, as the `global_preference_blocks` predicate in the event-participant query |
 | `SERIES` | Global rows only, same predicate, in the routine time-block query |

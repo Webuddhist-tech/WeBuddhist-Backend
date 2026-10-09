@@ -65,6 +65,13 @@ class ChatMessagePrayerUserDTO(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class ChatMessageTranslationDTO(BaseModel):
+    """Cached translation of a prayer request for one viewer language."""
+    target_language: str
+    status: str
+    body: Optional[str] = None
+
+
 class ChatMessageDTO(BaseModel):
     """DTO for a single chat message.
 
@@ -88,6 +95,9 @@ class ChatMessageDTO(BaseModel):
     recent_prayers: List[ChatMessagePrayerUserDTO] = []
     intention: Optional[PrayerIntentionDTO] = None
     is_edited: bool = False
+    source_language: Optional[str] = None
+    translation: Optional[ChatMessageTranslationDTO] = None
+    can_translate: bool = False
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -104,10 +114,16 @@ class ChatMessageDTO(BaseModel):
                 "my_prayer_count",
                 "recent_prayers",
                 "intention",
+                "source_language",
+                "translation",
+                "can_translate",
             ):
                 data.pop(field, None)
-        elif data.get("intention") is None:
-            data.pop("intention", None)
+        else:
+            if data.get("intention") is None:
+                data.pop("intention", None)
+            if not data.get("can_translate"):
+                data.pop("translation", None)
         return data
 
 
