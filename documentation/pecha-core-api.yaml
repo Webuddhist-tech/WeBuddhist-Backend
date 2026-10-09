@@ -3462,12 +3462,9 @@ components:
       title: 'UpdateTermRequest'
     UserInfoRequest:
       properties:
-        firstname:
+        display_name:
           type: 'string'
-          title: 'Firstname'
-        lastname:
-          type: 'string'
-          title: 'Lastname'
+          title: 'Display Name'
         title:
           anyOf:
             -
@@ -3515,13 +3512,19 @@ components:
           title: 'Social Profiles'
       type: 'object'
       required:
-        - 'firstname'
-        - 'lastname'
+        - 'display_name'
         - 'educations'
         - 'social_profiles'
       title: 'UserInfoRequest'
     UserInfoResponse:
       properties:
+        display_name:
+          anyOf:
+            -
+              type: 'string'
+            -
+              type: 'null'
+          title: 'Display Name'
         firstname:
           type: 'string'
           title: 'Firstname'

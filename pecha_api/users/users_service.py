@@ -83,6 +83,7 @@ def generate_user_info_response(user: Users) -> Optional[UserInfoResponse]:
 
             user_info_response = UserInfoResponse(
                 id=user.id,
+                display_name=user.firstname,
                 firstname=user.firstname,
                 lastname=user.lastname,
                 username=user.username,
@@ -103,8 +104,7 @@ def generate_user_info_response(user: Users) -> Optional[UserInfoResponse]:
 
 def update_user_info(token: str, user_info_request: UserInfoRequest) -> Users:
     current_user = validate_and_extract_user_details(token=token)
-    current_user.firstname = user_info_request.firstname
-    current_user.lastname = user_info_request.lastname
+    current_user.firstname = user_info_request.display_name
     current_user.title = user_info_request.title
     current_user.organization = user_info_request.organization
     current_user.location = user_info_request.location
