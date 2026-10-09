@@ -85,7 +85,14 @@ def _apply_email_registration(create_user_request: CreateUserRequest, new_user: 
     new_user.password = get_hashed_password(create_user_request.password)
 
 
-def create_user(create_user_request: CreateUserRequest, registration_source: RegistrationSource) -> Users:
+def create_user(
+    create_user_request: CreateUserRequest,
+    registration_source: RegistrationSource,
+    identifier_verified: bool = False,
+) -> Users:
+    """`identifier_verified` says the caller has proved ownership of the email
+    or phone being registered. Only then may the new account take over an
+    existing Author with the same identifier."""
     logging.debug(f"RegistrationSource: {registration_source.value}")
     logging.debug(f"Creating user with first name: {create_user_request.firstname}")
 
@@ -108,7 +115,11 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
 
     with SessionLocal() as db_session:
         saved_user = save_user(db=db_session, user=new_user)
-        link_or_create_author_for_user(db=db_session, user=saved_user)
+        link_or_create_author_for_user(
+            db=db_session,
+            user=saved_user,
+            identifier_verified=identifier_verified,
+        )
         return saved_user
 
 
@@ -285,7 +296,8 @@ def exchange_phone_token(request: PhoneExchangeRequest) -> PhoneExchangeResponse
             is_admin=False,
         )
         user = save_phone_user(db=db, user=user)
-        link_or_create_author_for_user(db=db, user=user)
+        # The phone number comes from a verified Auth0 SMS token.
+        link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
         return _phone_exchange_response(user, sms_identity.phone_number)
 
 

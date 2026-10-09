@@ -47,10 +47,19 @@ def register_user(
     registration_source = RegistrationSource.EMAIL
     if create_social_user_request.platform:
         registration_source =  create_social_user_request.platform
+    # This route is public, so a body claiming "google" proves nothing about
+    # who sent it. Only the Auth0 Post Login Action holds the shared secret and
+    # has actually verified the identity, so only its calls may take over an
+    # existing Author with the same email.
+    identifier_verified = (
+        registration_source != RegistrationSource.EMAIL
+        and is_trusted_social_register_caller(x_social_register_token)
+    )
     try:
         return create_user(
             create_user_request=create_social_user_request.create_user_request,
-            registration_source=registration_source
+            registration_source=registration_source,
+            identifier_verified=identifier_verified,
         )
     except HTTPException as exc:
         # The Auth0 action calls this on every login. After the first one the

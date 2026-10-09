@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from .intention_slugs import LEGACY_PRAYER_INTENTION_SLUG_ALIASES
+
 
 class PrayerIntentionDTO(BaseModel):
     slug: str
@@ -47,7 +49,16 @@ class CreatePrayerIntentionRequest(BaseModel):
     @field_validator("slug")
     @classmethod
     def normalize_slug(cls, value: str) -> str:
-        return value.lower()
+        slug = value.lower()
+        # Posting maps these former names onto the current intentions, so an
+        # intention created under one would be offered to an event but never
+        # matched when a prayer is posted with it.
+        if slug in LEGACY_PRAYER_INTENTION_SLUG_ALIASES:
+            raise ValueError(
+                f"'{slug}' is a former intention name and is reserved; "
+                f"use a different slug"
+            )
+        return slug
 
 
 class PatchPrayerIntentionRequest(BaseModel):

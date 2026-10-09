@@ -422,10 +422,7 @@ async def read_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
     summary="End a recitation session over HTTP",
     dependencies=[Depends(verify_recitation_emit_token)],
 )
-async def end_recitation_session(
-    event_id: UUID,
-    background_tasks: BackgroundTasks,
-) -> Response:
+async def end_recitation_session(event_id: UUID) -> Response:
     """The `end` frame's HTTP twin.
 
     A socket-less controller needs this: without it a session it started would
@@ -453,7 +450,11 @@ async def end_recitation_session(
             detail="Failed to end the recitation session; retry",
         )
 
-    background_tasks.add_task(broadcaster.close_segment_marks, event_id)
+    # Before answering, not after: the boundary is a revision taken when this
+    # runs, so it must land before the operator can start the next session. Run
+    # in the background it could take a revision above that session's first
+    # position, and its first line's mark would be rejected as the old one's.
+    await broadcaster.close_segment_marks(event_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -760,7 +761,8 @@ async def websocket_recitation_live(
                             _error("SERVER_ERROR", "Failed to end the session; try again")
                         )
                     else:
-                        _in_background(broadcaster.close_segment_marks(event_id))
+                        # Awaited, not backgrounded: see end_recitation_session.
+                        await broadcaster.close_segment_marks(event_id)
                     continue
 
                 try:

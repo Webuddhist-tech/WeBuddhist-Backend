@@ -54,7 +54,7 @@ from pecha_api.texts.first_segment_preview_service import (
 from pecha_api.mantra.mantra_repository import get_mantra_by_id
 from pecha_api.plans.groups.groups_repository import (
     get_group_by_id,
-    get_group_member,
+    is_user_joined_group,
     is_group_published,
 )
 from openpecha_api.segments.openpecha_segment_service import (
@@ -658,10 +658,10 @@ def enrich_group_recitation_collection_bookmark(
     group = get_group_by_id(db=db, group_id=collection.group_id)
     if not group or not is_group_published(group):
         return {}
-    if not group.is_public and not get_group_member(
+    if not group.is_public and not is_user_joined_group(
         db=db,
         group_id=collection.group_id,
-        author_id=user_id,
+        user_id=user_id,
     ):
         return {}
 
@@ -702,10 +702,10 @@ def enrich_group_accumulator_bookmark(
     group = get_group_by_id(db=db, group_id=group_accumulator.group_id)
     if not group or not is_group_published(group):
         return {}
-    if not group.is_public and not get_group_member(
+    if not group.is_public and not is_user_joined_group(
         db=db,
         group_id=group_accumulator.group_id,
-        author_id=user_id,
+        user_id=user_id,
     ):
         return {}
 
