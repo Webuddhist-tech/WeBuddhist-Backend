@@ -28,7 +28,8 @@ from ..users.users_repository import (
     save_user,
     update_user,
 )
-from ..plans.authors.author_user_link_service import link_or_create_author_for_user
+from ..plans.authors.plan_authors_repository import link_author_to_user
+from ..plans.authors.author_user_link_service import find_claimable_author, link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
 from .auth_repository import (
     create_access_token,
@@ -169,6 +170,40 @@ def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
             update_user(db=db_session, user=user)
     except Exception:
         logging.exception("Failed to store social profile image")
+
+
+def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> None:
+    """Link an existing Author to an account that already exists, once a
+    trusted caller has proved ownership of its email.
+
+    Signup could not link it: an email/password registration proves nothing.
+    That same weakness is why the account's password and every token already
+    issued are revoked first when the account came from such a signup -
+    whoever set the password may not be the owner, and would otherwise inherit
+    the Author's permissions. The verified owner signs
+    in through their identity provider or resets the password by email.
+    Best-effort and fail-closed: any error leaves the Author unlinked.
+    """
+    if not create_user_request.email:
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None:
+                return
+            author = find_claimable_author(db=db_session, user=user)
+            if author is None:
+                return
+            if user.registration_source == RegistrationSource.EMAIL.value:
+                # Credentials of an unverified signup: the password, and every
+                # token already issued - a refresh token would otherwise keep
+                # minting access tokens that gain the Author's permissions.
+                user.password = None
+                user.tokens_valid_after = datetime.now(timezone.utc)
+                user = update_user(db=db_session, user=user)
+            link_author_to_user(db=db_session, author=author, user_id=user.id)
+    except Exception:
+        logging.exception("Failed to link Author after verified social login")
 
 
 def _validate_password(password: str):

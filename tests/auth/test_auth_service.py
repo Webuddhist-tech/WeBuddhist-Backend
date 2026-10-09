@@ -1052,3 +1052,50 @@ def test_create_user_request_keeps_real_identifiers() -> None:
 
     assert request.email is None
     assert request.phone_number == "+15551234567"
+
+
+class TestClaimAuthorForVerifiedLogin:
+    """A trusted social login links the Author an email signup could not."""
+
+    def _run(self, user, author):
+        from pecha_api.auth.auth_service import claim_author_for_verified_login
+        from pecha_api.auth.auth_models import CreateUserRequest
+
+        request = MagicMock(spec=CreateUserRequest)
+        request.email = "owner@example.com"
+        with patch('pecha_api.auth.auth_service.SessionLocal'), \
+             patch('pecha_api.auth.auth_service.get_user_by_email_or_none', return_value=user), \
+             patch('pecha_api.auth.auth_service.find_claimable_author', return_value=author), \
+             patch('pecha_api.auth.auth_service.update_user', side_effect=lambda db, user: user) as mock_update, \
+             patch('pecha_api.auth.auth_service.link_author_to_user') as mock_link:
+            claim_author_for_verified_login(request)
+        return mock_update, mock_link
+
+    def test_links_and_clears_password_of_email_signup_account(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="email", password="hashed")
+        author = MagicMock()
+
+        mock_update, mock_link = self._run(user, author)
+
+        assert user.password is None
+        assert user.tokens_valid_after is not None
+        mock_update.assert_called_once()
+        mock_link.assert_called_once_with(db=ANY, author=author, user_id=user.id)
+
+    def test_keeps_password_of_account_that_did_not_come_from_email_signup(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="google-oauth2", password=None)
+
+        mock_update, mock_link = self._run(user, MagicMock())
+
+        mock_update.assert_not_called()
+        mock_link.assert_called_once()
+
+    def test_does_nothing_without_a_claimable_author(self):
+        user = MagicMock(id=uuid.uuid4(), registration_source="email", password="hashed")
+
+        mock_update, mock_link = self._run(user, None)
+
+        assert user.password == "hashed"
+        mock_update.assert_not_called()
+        mock_link.assert_not_called()
+
