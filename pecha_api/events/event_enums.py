@@ -23,3 +23,8 @@ class EventLinkType(str, Enum):
 class ParticipationType(str, Enum):
     ONLINE = "online"
     OFFLINE = "offline"
+
+
+class EventAccumulationCountMode(str, Enum):
+    MANUAL_IN_PERSON = "manual_in_person"
+    OFFLINE_PARTICIPANTS = "offline_participants"

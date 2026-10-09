@@ -12,6 +12,7 @@ from starlette import status
 from .event_model import Event
 from .event_metadata_model import EventMetadata
 from .event_link_model import EventLink
+from .group_event_accumulation_model import GroupEventAccumulation
 from .event_enums import EventLinkType
 from .event_filters import EventContentFilter
 from .location_model import Location
@@ -108,6 +109,9 @@ def _linked_resource_options() -> tuple:
         selectinload(Event.group_accumulator).selectinload(
             GroupAccumulator.metadata_entries
         ),
+        selectinload(Event.accumulation_links).selectinload(
+            GroupEventAccumulation.group_accumulator
+        ).selectinload(GroupAccumulator.metadata_entries),
         selectinload(Event.timer),
         selectinload(Event.group_recitation_collection),
     )

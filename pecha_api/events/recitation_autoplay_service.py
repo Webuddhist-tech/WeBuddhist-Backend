@@ -797,6 +797,9 @@ class AutoplayEngine:
             except Exception as e:
                 logger.exception("Could not take back an early line for event %s: %s", event_id, e)
                 raise
+        # The runner this stop is about. A new plan can start while the stop
+        # waits on Redis; its runner is not this stop's to cancel, or the plan
+        # stays marked running with nobody advancing it until its lease lapses.
         # The runner and plan this stop is about, taken after the hold, which
         # may have replaced them. A new plan can start while the stop waits on
         # Redis; neither its runner nor its stored state is this stop's to

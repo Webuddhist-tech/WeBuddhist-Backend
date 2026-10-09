@@ -1098,3 +1098,4 @@ class TestClaimAuthorForVerifiedLogin:
         assert user.password == "hashed"
         mock_update.assert_not_called()
         mock_link.assert_not_called()
+

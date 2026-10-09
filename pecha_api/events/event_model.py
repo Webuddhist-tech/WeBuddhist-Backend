@@ -97,6 +97,14 @@ class Event(Base):
         passive_deletes=True,
     )
 
+    accumulation_links = relationship(
+        "GroupEventAccumulation",
+        back_populates="event",
+        cascade=CASCADE_DELETE_ORPHAN,
+        passive_deletes=True,
+        order_by="GroupEventAccumulation.display_order",
+    )
+
     __table_args__ = (
         Index("idx_events_group_id", "group_id"),
         Index("idx_events_location_id", "location_id"),

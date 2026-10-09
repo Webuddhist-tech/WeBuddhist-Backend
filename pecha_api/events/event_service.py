@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone, date, timedelta
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 from uuid import UUID
@@ -71,7 +72,15 @@ from pecha_api.prayer_intentions.prayer_intention_service import (
 )
 
 from .event_model import Event
-from .event_enums import EventLinkType
+from .event_enums import EventLinkType, EventAccumulationCountMode
+from .group_event_accumulation_model import GroupEventAccumulation
+from .group_event_accumulation_repository import (
+    EventAccumulationSyncInput,
+    list_accumulations_for_event,
+    resolve_primary_group_accumulator_id,
+    sync_event_accumulations,
+    upsert_legacy_single_accumulation,
+)
 from .event_day_video_sync import (
     sync_event_youtube_to_plan_day,
     youtube_video_keys_of_event,
@@ -86,6 +95,8 @@ from .event_response_models import (
     EventLinkDTO,
     EventYoutubeDTO,
     EventsResponse,
+    EventGroupAccumulationDTO,
+    EventGroupAccumulationInput,
     LinkedResourceDTO,
     RecurrenceDTO,
     _validate_date_range,
@@ -116,6 +127,7 @@ from .event_repository import (
 from .event_participant_repository import (
     get_event_participant_count,
     get_event_participant_counts,
+    get_offline_participant_counts,
     get_joined_event_ids_by_user,
     get_participation_types_by_user,
     get_user_participation_type,
@@ -339,17 +351,130 @@ def _group_accumulator_name(
     return group_accumulator.title
 
 
+def _linked_resource_from_group_accumulator(
+    group_accumulator: GroupAccumulator, language: Optional[str] = None
+) -> LinkedResourceDTO:
+    return LinkedResourceDTO(
+        id=group_accumulator.id,
+        name=_group_accumulator_name(group_accumulator, language),
+        image_url=_presign_image_url(group_accumulator.image_key),
+    )
+
+
 def _group_accumulator_to_linked_resource(
     event: Event, language: Optional[str] = None
 ) -> Optional[LinkedResourceDTO]:
     group_accumulator = getattr(event, "group_accumulator", None)
     if group_accumulator is None:
         return None
-    return LinkedResourceDTO(
-        id=group_accumulator.id,
-        name=_group_accumulator_name(group_accumulator, language),
-        image_url=_presign_image_url(group_accumulator.image_key),
-    )
+    return _linked_resource_from_group_accumulator(group_accumulator, language)
+
+
+def _sync_inputs_from_request(
+    items: Sequence[EventGroupAccumulationInput],
+) -> List[EventAccumulationSyncInput]:
+    return [
+        EventAccumulationSyncInput(
+            id=item.id,
+            client_key=item.client_key,
+            parent_id=item.parent_id,
+            parent_client_key=item.parent_client_key,
+            group_accumulator_id=item.group_accumulator_id,
+            event_format=item.event_format,
+            display_order=item.display_order,
+            count_mode=item.count_mode.value,
+        )
+        for item in items
+    ]
+
+
+def _accumulation_links_to_dtos(
+    links: Sequence[GroupEventAccumulation],
+    *,
+    language: Optional[str],
+    offline_participant_count: int = 0,
+) -> List[EventGroupAccumulationDTO]:
+    sorted_links = sorted(links, key=lambda link: (link.display_order, str(link.id)))
+    dtos: List[EventGroupAccumulationDTO] = []
+    for link in sorted_links:
+        ga = getattr(link, "group_accumulator", None)
+        if ga is None:
+            continue
+        count_mode = EventAccumulationCountMode(link.count_mode)
+        dtos.append(
+            EventGroupAccumulationDTO(
+                id=link.id,
+                group_accumulator_id=link.group_accumulator_id,
+                parent_id=link.parent_id,
+                event_format=link.event_format,
+                display_order=link.display_order,
+                count_mode=count_mode,
+                group_accumulator=_linked_resource_from_group_accumulator(ga, language),
+                offline_participant_count=(
+                    offline_participant_count
+                    if count_mode == EventAccumulationCountMode.OFFLINE_PARTICIPANTS
+                    else None
+                ),
+            )
+        )
+    return dtos
+
+
+def _primary_group_accumulator_dto(
+    event: Event, links: Sequence[GroupEventAccumulation], language: Optional[str]
+) -> Tuple[Optional[UUID], Optional[LinkedResourceDTO]]:
+    if links:
+        primary_id = resolve_primary_group_accumulator_id(links)
+        if primary_id is None:
+            return None, None
+        primary_link = next(
+            (link for link in links if link.group_accumulator_id == primary_id),
+            None,
+        )
+        if primary_link is None or getattr(primary_link, "group_accumulator", None) is None:
+            return primary_id, None
+        return primary_id, _linked_resource_from_group_accumulator(
+            primary_link.group_accumulator, language
+        )
+    legacy_id = getattr(event, "group_accumulator_id", None)
+    return legacy_id, _group_accumulator_to_linked_resource(event, language=language)
+
+
+def _apply_event_accumulations(
+    db: Session,
+    event: Event,
+    *,
+    accumulations: Optional[List[EventGroupAccumulationInput]] = None,
+    accumulations_field_set: bool = False,
+    group_accumulator_field_set: bool = False,
+) -> None:
+    if accumulations_field_set:
+        sync_event_accumulations(
+            db,
+            event_id=event.id,
+            group_id=event.group_id,
+            inputs=_sync_inputs_from_request(accumulations or []),
+        )
+        links = list_accumulations_for_event(db, event.id)
+        event.group_accumulator_id = resolve_primary_group_accumulator_id(links)
+        return
+
+    if group_accumulator_field_set:
+        if event.group_accumulator_id is None:
+            sync_event_accumulations(
+                db,
+                event_id=event.id,
+                group_id=event.group_id,
+                inputs=[],
+            )
+            return
+        upsert_legacy_single_accumulation(
+            db,
+            event_id=event.id,
+            group_id=event.group_id,
+            group_accumulator_id=event.group_accumulator_id,
+            event_format=event.event_format or "hybrid",
+        )
 
 
 def _mantra_to_linked_resource(
@@ -526,6 +651,46 @@ def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
     return count_prayer_requests_in_room(db=db, room_id=room.id)
 
 
+@dataclass(frozen=True)
+class _EventDtoDisplay:
+    occurrence_date: Optional[datetime] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+
+
+def _accumulation_links_for_dto(event: Event) -> List[GroupEventAccumulation]:
+    """Return junction rows only for persisted Event ORM instances."""
+    if not isinstance(event, Event):
+        return []
+    links = event.accumulation_links
+    return list(links) if links else []
+
+
+def _cms_saved_event_dto(
+    db: Session,
+    saved: Event,
+    *,
+    intentions: Optional[List[PrayerIntentionDTO]] = None,
+    chat_room_id: Optional[UUID] = None,
+) -> EventDTO:
+    """CMS write response: reload links and attach offline RSVP counts."""
+    if isinstance(saved, Event):
+        event_for_dto = get_event_by_id(db, saved.id) or saved
+        offline_count = get_offline_participant_counts(db=db, event_ids=[saved.id]).get(
+            saved.id, 0
+        )
+    else:
+        event_for_dto = saved
+        offline_count = 0
+    dto_kwargs: dict = {
+        "intentions": intentions,
+        "offline_participant_count": offline_count,
+    }
+    if chat_room_id is not None:
+        dto_kwargs["chat_room_id"] = chat_room_id
+    return _event_to_dto(event_for_dto, **dto_kwargs)
+
+
 def _event_to_dto(
     event: Event,
     language: Optional[str] = None,
@@ -535,15 +700,15 @@ def _event_to_dto(
     my_participation_type: Optional[str] = None,
     group_name: Optional[str] = None,
     group_avatar_url: Optional[str] = None,
-    occurrence_date: Optional[datetime] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
+    display: Optional[_EventDtoDisplay] = None,
     chat_room_id: Optional[UUID] = None,
     prayer_request_count: int = 0,
     intentions: Optional[List[PrayerIntentionDTO]] = None,
+    offline_participant_count: int = 0,
 ) -> EventDTO:
+    display = display or _EventDtoDisplay()
     recurrence_dto = None
-    if event.is_recurring:
+    if isinstance(event, Event) and event.is_recurring:
         recurrence_dto = RecurrenceDTO(
             frequency=event.recurrence_frequency,
             date_system=event.recurrence_date_system,
@@ -554,9 +719,13 @@ def _event_to_dto(
             duration_days=event.duration_days,
         )
 
-    dto_start = start_date if start_date is not None else event.start_date
-    dto_end = end_date if end_date is not None else event.end_date
+    dto_start = display.start_date if display.start_date is not None else event.start_date
+    dto_end = display.end_date if display.end_date is not None else event.end_date
     event_timezone = _effective_event_timezone(getattr(event, "timezone", None))
+    accumulation_links = _accumulation_links_for_dto(event)
+    primary_ga_id, primary_ga_dto = _primary_group_accumulator_dto(
+        event, accumulation_links, language
+    )
 
     return EventDTO(
         id=event.id,
@@ -566,9 +735,12 @@ def _event_to_dto(
         series=_series_to_linked_resource(event, language=language),
         accumulator_id=event.accumulator_id,
         accumulator=_accumulator_to_linked_resource(event, language=language),
-        group_accumulator_id=getattr(event, "group_accumulator_id", None),
-        group_accumulator=_group_accumulator_to_linked_resource(
-            event, language=language
+        group_accumulator_id=primary_ga_id,
+        group_accumulator=primary_ga_dto,
+        accumulations=_accumulation_links_to_dtos(
+            accumulation_links,
+            language=language,
+            offline_participant_count=offline_participant_count,
         ),
         mantra_id=event.mantra_id,
         mantra=_mantra_to_linked_resource(event, language=language),
@@ -588,7 +760,7 @@ def _event_to_dto(
         featured=event.featured,
         is_recurring=event.is_recurring,
         recurrence=recurrence_dto,
-        occurrence_date=occurrence_date,
+        occurrence_date=display.occurrence_date,
         event_format=event.event_format,
         chat_enabled=bool(getattr(event, "chat_enabled", True)),
         notifications_enabled=bool(getattr(event, "notifications_enabled", True)),
@@ -1025,6 +1197,7 @@ def _build_listing_event_dtos(
 ) -> List[EventDTO]:
     event_ids = list({item["event"].id for item in paginated_items})
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+    offline_counts_by_event = get_offline_participant_counts(db=db, event_ids=event_ids)
     chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
     intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
     group_ids = list({item["event"].group_id for item in paginated_items})
@@ -1043,11 +1216,14 @@ def _build_listing_event_dtos(
                 my_participation_type=participation_types.get(event.id),
                 group_name=group_cards.get(event.group_id, (None, None))[0],
                 group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
-                occurrence_date=item["occurrence_date"],
-                start_date=item["start_date"],
-                end_date=item["end_date"],
+                display=_EventDtoDisplay(
+                    occurrence_date=item["occurrence_date"],
+                    start_date=item["start_date"],
+                    end_date=item["end_date"],
+                ),
                 chat_room_id=chat_rooms_by_event.get(event.id),
                 intentions=intentions_by_event.get(event.id, []),
+                offline_participant_count=offline_counts_by_event.get(event.id, 0),
             )
         )
     return event_dtos
@@ -1216,16 +1392,22 @@ def get_cms_event_by_id_service(
             )
         require_can_read_group_content(db=db, group_id=event.group_id, author=current_author)
         participant_count = get_event_participant_count(db=db, event_id=event_id)
+        offline_count = get_offline_participant_counts(db=db, event_ids=[event_id]).get(
+            event_id, 0
+        )
         start_date, end_date, occurrence_date = _display_occurrence_for_event(event)
         return _event_to_dto(
             event,
             language=language,
             participant_count=participant_count,
-            occurrence_date=occurrence_date,
-            start_date=start_date,
-            end_date=end_date,
+            display=_EventDtoDisplay(
+                occurrence_date=occurrence_date,
+                start_date=start_date,
+                end_date=end_date,
+            ),
             chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
             intentions=_intention_dtos_for_event(db=db, event_id=event.id),
+            offline_participant_count=offline_count,
         )
 
 
@@ -1279,6 +1461,9 @@ def get_event_by_id_service(
         group_name, group_avatar_url = _group_card_map(db, [event.group_id]).get(
             event.group_id, (None, None)
         )
+        offline_count = get_offline_participant_counts(db=db, event_ids=[event_id]).get(
+            event_id, 0
+        )
         start_date, end_date, occurrence_date = _display_occurrence_for_event(event)
         return _event_to_dto(
             event,
@@ -1289,51 +1474,86 @@ def get_event_by_id_service(
             my_participation_type=my_participation_type,
             group_name=group_name,
             group_avatar_url=group_avatar_url,
-            occurrence_date=occurrence_date,
-            start_date=start_date,
-            end_date=end_date,
+            display=_EventDtoDisplay(
+                occurrence_date=occurrence_date,
+                start_date=start_date,
+                end_date=end_date,
+            ),
             chat_room_id=_chat_room_id_for_event(db=db, event_id=event.id),
             prayer_request_count=_prayer_request_count_for_event(
                 db=db, event_id=event.id
             ),
             intentions=_intention_dtos_for_event(db=db, event_id=event.id),
+            offline_participant_count=offline_count,
         )
 
 
-def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
-    current_author = validate_cms_author_details(token=token)
+class _CreateEventSchedule(NamedTuple):
+    start_date: datetime
+    end_date: datetime
+    is_recurring: bool
+    recurrence_frequency: Optional[str]
+    recurrence_date_system: Optional[str]
+    recurrence_calendar_type: Optional[str]
+    recurrence_month: Optional[int]
+    recurrence_day: Optional[int]
+    recurrence_day_of_week: Optional[int]
+    duration_days: int
 
+
+def _create_event_schedule(request: CreateEventRequest) -> _CreateEventSchedule:
     if request.recurrence:
         start_date, end_date = compute_initial_dates(request.recurrence)
-        # The recurrence rule only pins a day/month; the time-of-day rides
-        # along on start_date/end_date if the client sent them.
         if request.start_date is not None:
             start_date = combine_date_with_time_of_day(start_date.date(), request.start_date)
         if request.end_date is not None:
             end_date = combine_date_with_time_of_day(end_date.date(), request.end_date)
-        # A single-day occurrence (duration_days == 1) lands both times on the
-        # same calendar day, so an end time earlier than the start time would
-        # otherwise persist as an inverted range once expanded for reads.
         _validate_date_range(start_date, end_date)
-        is_recurring = True
-        recurrence_frequency = request.recurrence.frequency.value
-        recurrence_date_system = request.recurrence.date_system.value
-        recurrence_calendar_type = request.recurrence.calendar_type
-        recurrence_month = request.recurrence.month
-        recurrence_day = request.recurrence.day
-        recurrence_day_of_week = request.recurrence.day_of_week
-        duration_days = request.recurrence.duration_days
-    else:
-        start_date = request.start_date
-        end_date = request.end_date
-        is_recurring = False
-        recurrence_frequency = None
-        recurrence_date_system = None
-        recurrence_calendar_type = None
-        recurrence_month = None
-        recurrence_day = None
-        recurrence_day_of_week = None
-        duration_days = 1
+        return _CreateEventSchedule(
+            start_date=start_date,
+            end_date=end_date,
+            is_recurring=True,
+            recurrence_frequency=request.recurrence.frequency.value,
+            recurrence_date_system=request.recurrence.date_system.value,
+            recurrence_calendar_type=request.recurrence.calendar_type,
+            recurrence_month=request.recurrence.month,
+            recurrence_day=request.recurrence.day,
+            recurrence_day_of_week=request.recurrence.day_of_week,
+            duration_days=request.recurrence.duration_days,
+        )
+    return _CreateEventSchedule(
+        start_date=request.start_date,
+        end_date=request.end_date,
+        is_recurring=False,
+        recurrence_frequency=None,
+        recurrence_date_system=None,
+        recurrence_calendar_type=None,
+        recurrence_month=None,
+        recurrence_day=None,
+        recurrence_day_of_week=None,
+        duration_days=1,
+    )
+
+
+def _validate_create_event_accumulators(db: Session, request: CreateEventRequest) -> None:
+    if request.accumulations:
+        for item in request.accumulations:
+            _validate_group_accumulator(
+                db=db,
+                group_accumulator_id=item.group_accumulator_id,
+                group_id=request.group_id,
+            )
+        return
+    _validate_group_accumulator(
+        db=db,
+        group_accumulator_id=request.group_accumulator_id,
+        group_id=request.group_id,
+    )
+
+
+def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
+    current_author = validate_cms_author_details(token=token)
+    schedule = _create_event_schedule(request)
 
     event = Event(
         plan_id=request.plan_id,
@@ -1345,21 +1565,21 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         group_recitation_collection_id=request.group_recitation_collection_id,
         group_id=request.group_id,
         location_id=request.location_id,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=schedule.start_date,
+        end_date=schedule.end_date,
         timezone=request.timezone,
         image_url=request.image_url,
         event_format=request.event_format,
         chat_enabled=request.chat_enabled,
         notifications_enabled=request.notifications_enabled,
-        is_recurring=is_recurring,
-        recurrence_frequency=recurrence_frequency,
-        recurrence_date_system=recurrence_date_system,
-        recurrence_calendar_type=recurrence_calendar_type,
-        recurrence_month=recurrence_month,
-        recurrence_day=recurrence_day,
-        recurrence_day_of_week=recurrence_day_of_week,
-        duration_days=duration_days,
+        is_recurring=schedule.is_recurring,
+        recurrence_frequency=schedule.recurrence_frequency,
+        recurrence_date_system=schedule.recurrence_date_system,
+        recurrence_calendar_type=schedule.recurrence_calendar_type,
+        recurrence_month=schedule.recurrence_month,
+        recurrence_day=schedule.recurrence_day,
+        recurrence_day_of_week=schedule.recurrence_day_of_week,
+        duration_days=schedule.duration_days,
         created_by=current_author.email,
     )
 
@@ -1377,11 +1597,8 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         _validate_location(
             db=db, location_id=request.location_id, group_id=request.group_id
         )
-        _validate_group_accumulator(
-            db=db,
-            group_accumulator_id=request.group_accumulator_id,
-            group_id=request.group_id,
-        )
+        _validate_create_event_accumulators(db, request)
+
         def _schedule_reminders_after_flush(flushed_event: Event) -> None:
             # Runs after the event is flushed (so its id/FK target exists)
             # but before save_event's commit, so a reminder failure rolls
@@ -1398,6 +1615,19 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
                     event_id=flushed_event.id,
                     intention_ids=request.intention_ids,
                 )
+            if request.accumulations:
+                _apply_event_accumulations(
+                    db,
+                    flushed_event,
+                    accumulations=request.accumulations,
+                    accumulations_field_set=True,
+                )
+            elif request.group_accumulator_id is not None:
+                _apply_event_accumulations(
+                    db,
+                    flushed_event,
+                    group_accumulator_field_set=True,
+                )
 
         saved = save_event(
             db, event, request.metadata, request.links,
@@ -1410,7 +1640,7 @@ def create_event_service(token: str, request: CreateEventRequest) -> EventDTO:
         if bool(getattr(saved, "notifications_enabled", True)):
             enqueue_event_notification(saved.id)
         intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
-        return _event_to_dto(saved, intentions=intentions)
+        return _cms_saved_event_dto(db, saved, intentions=intentions)
 
 
 def _resolve_recurrence_time_window(
@@ -1657,6 +1887,22 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
                 intention_ids=request.intention_ids or [],
             )
 
+        accumulations_field_set = "accumulations" in request.model_fields_set
+        group_accumulator_field_set = "group_accumulator_id" in request.model_fields_set
+        if accumulations_field_set:
+            _apply_event_accumulations(
+                db,
+                event,
+                accumulations=request.accumulations,
+                accumulations_field_set=True,
+            )
+        elif group_accumulator_field_set:
+            _apply_event_accumulations(
+                db,
+                event,
+                group_accumulator_field_set=True,
+            )
+
         saved = update_event(
             db, event,
             metadata_entries=request.metadata,
@@ -1676,7 +1922,8 @@ def update_event_service(token: str, event_id: UUID, request: UpdateEventRequest
             _close_event_chat_sockets_best_effort(event_id=saved.id)
 
         intentions = _intention_dtos_for_event(db=db, event_id=saved.id)
-        return _event_to_dto(
+        return _cms_saved_event_dto(
+            db,
             saved,
             chat_room_id=_chat_room_id_for_event(db=db, event_id=saved.id),
             intentions=intentions,
@@ -1765,6 +2012,7 @@ def get_featured_events_service(
         
         event_ids = list({item['event'].id for item in paginated_items})
         counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+        offline_counts_by_event = get_offline_participant_counts(db=db, event_ids=event_ids)
         chat_rooms_by_event = _chat_room_ids_for_events(db=db, event_ids=event_ids)
         intentions_by_event = _intention_dtos_map_for_events(db=db, event_ids=event_ids)
         group_cards = _group_card_map(db, [item['event'].group_id for item in paginated_items])
@@ -1800,11 +2048,14 @@ def get_featured_events_service(
                     my_participation_type=participation_types.get(event.id),
                     group_name=group_cards.get(event.group_id, (None, None))[0],
                     group_avatar_url=group_cards.get(event.group_id, (None, None))[1],
-                    occurrence_date=item['occurrence_date'],
-                    start_date=item['start_date'],
-                    end_date=item['end_date'],
+                    display=_EventDtoDisplay(
+                        occurrence_date=item['occurrence_date'],
+                        start_date=item['start_date'],
+                        end_date=item['end_date'],
+                    ),
                     chat_room_id=chat_rooms_by_event.get(event.id),
                     intentions=intentions_by_event.get(event.id, []),
+                    offline_participant_count=offline_counts_by_event.get(event.id, 0),
                 )
             )
 
