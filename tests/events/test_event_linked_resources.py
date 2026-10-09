@@ -4,12 +4,14 @@ event's detail response actually carries the linked resource's id/name/image
 instead of just its bare *_id."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from pecha_api.events.event_service import (
     _accumulator_to_linked_resource,
     _event_to_dto,
+    _group_accumulator_to_linked_resource,
     _group_recitation_collection_to_linked_resource,
     _mantra_to_linked_resource,
     _plan_to_linked_resource,
@@ -20,7 +22,7 @@ from pecha_api.events.event_service import (
 MODULE = "pecha_api.events.event_service"
 
 
-def _event(**overrides):
+def _event(**overrides: Any) -> SimpleNamespace:
     now = datetime.now(timezone.utc)
     base = dict(
         id=uuid4(),
@@ -57,20 +59,20 @@ def _event(**overrides):
 # --------------------------- _presign_image_url ---------------------------
 
 
-def test_presign_image_url_returns_none_for_missing_value():
+def test_presign_image_url_returns_none_for_missing_value() -> None:
     assert _presign_image_url(None) is None
     assert _presign_image_url("") is None
 
 
 @patch(f"{MODULE}.generate_presigned_access_url")
-def test_presign_image_url_returns_presigned_url(mock_presign):
+def test_presign_image_url_returns_presigned_url(mock_presign: MagicMock) -> None:
     mock_presign.return_value = "https://cdn.example.com/signed.jpg"
 
     assert _presign_image_url("images/plan.jpg") == "https://cdn.example.com/signed.jpg"
 
 
 @patch(f"{MODULE}.generate_presigned_access_url")
-def test_presign_image_url_swallows_errors(mock_presign):
+def test_presign_image_url_swallows_errors(mock_presign: MagicMock) -> None:
     mock_presign.side_effect = Exception("boom")
 
     assert _presign_image_url("images/plan.jpg") is None
@@ -79,12 +81,12 @@ def test_presign_image_url_swallows_errors(mock_presign):
 # --------------------------- plan ---------------------------
 
 
-def test_plan_to_linked_resource_none_when_not_linked():
+def test_plan_to_linked_resource_none_when_not_linked() -> None:
     assert _plan_to_linked_resource(_event()) is None
 
 
 @patch(f"{MODULE}.generate_presigned_access_url")
-def test_plan_to_linked_resource_populates_fields(mock_presign):
+def test_plan_to_linked_resource_populates_fields(mock_presign: MagicMock) -> None:
     mock_presign.return_value = "https://cdn.example.com/plan.jpg"
     plan = SimpleNamespace(id=uuid4(), title="21 Tara Practice", image_url="images/plan.jpg")
 
@@ -98,11 +100,11 @@ def test_plan_to_linked_resource_populates_fields(mock_presign):
 # --------------------------- accumulator ---------------------------
 
 
-def test_accumulator_to_linked_resource_none_when_not_linked():
+def test_accumulator_to_linked_resource_none_when_not_linked() -> None:
     assert _accumulator_to_linked_resource(_event()) is None
 
 
-def test_accumulator_to_linked_resource_populates_fields():
+def test_accumulator_to_linked_resource_populates_fields() -> None:
     metadata = SimpleNamespace(language="EN", name="Green Tara Mantra")
     accumulator = SimpleNamespace(id=uuid4(), metadata_entries=[metadata], mala=None)
 
@@ -113,7 +115,7 @@ def test_accumulator_to_linked_resource_populates_fields():
     assert resource.image_url is None
 
 
-def test_accumulator_to_linked_resource_name_none_when_no_metadata():
+def test_accumulator_to_linked_resource_name_none_when_no_metadata() -> None:
     accumulator = SimpleNamespace(id=uuid4(), metadata_entries=[], mala=None)
 
     resource = _accumulator_to_linked_resource(_event(accumulator=accumulator))
@@ -124,11 +126,11 @@ def test_accumulator_to_linked_resource_name_none_when_no_metadata():
 # --------------------------- mantra ---------------------------
 
 
-def test_mantra_to_linked_resource_none_when_not_linked():
+def test_mantra_to_linked_resource_none_when_not_linked() -> None:
     assert _mantra_to_linked_resource(_event()) is None
 
 
-def test_mantra_to_linked_resource_populates_fields():
+def test_mantra_to_linked_resource_populates_fields() -> None:
     metadata = SimpleNamespace(language="EN", title="Om Mani Padme Hum")
     mantra = SimpleNamespace(id=uuid4(), metadata_entries=[metadata], mala=None)
 
@@ -139,7 +141,7 @@ def test_mantra_to_linked_resource_populates_fields():
     assert resource.image_url is None
 
 
-def test_mantra_to_linked_resource_name_none_when_no_metadata():
+def test_mantra_to_linked_resource_name_none_when_no_metadata() -> None:
     mantra = SimpleNamespace(id=uuid4(), metadata_entries=[], mala=None)
 
     resource = _mantra_to_linked_resource(_event(mantra=mantra))
@@ -150,11 +152,11 @@ def test_mantra_to_linked_resource_name_none_when_no_metadata():
 # --------------------------- timer ---------------------------
 
 
-def test_timer_to_linked_resource_none_when_not_linked():
+def test_timer_to_linked_resource_none_when_not_linked() -> None:
     assert _timer_to_linked_resource(_event()) is None
 
 
-def test_timer_to_linked_resource_populates_fields():
+def test_timer_to_linked_resource_populates_fields() -> None:
     timer = SimpleNamespace(id=uuid4(), name="Morning Meditation")
 
     resource = _timer_to_linked_resource(_event(timer=timer))
@@ -164,15 +166,95 @@ def test_timer_to_linked_resource_populates_fields():
     assert resource.image_url is None
 
 
+# --------------------------- group accumulator ---------------------------
+
+
+def test_group_accumulator_to_linked_resource_none_when_not_linked() -> None:
+    assert _group_accumulator_to_linked_resource(_event()) is None
+
+
+@patch(f"{MODULE}.generate_presigned_access_url")
+def test_group_accumulator_uses_localized_title(mock_presign: MagicMock) -> None:
+    mock_presign.return_value = "https://cdn.example.com/accumulation.jpg"
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key="images/accumulation.jpg",
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="Green Tara Accumulation"),
+            SimpleNamespace(language="BO", title="སྒྲོལ་མའི་བསགས་པ།"),
+        ],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.id == group_accumulator.id
+    assert resource.name == "སྒྲོལ་མའི་བསགས་པ།"
+    assert resource.image_url == "https://cdn.example.com/accumulation.jpg"
+
+
+def test_group_accumulator_falls_back_to_row_title_when_language_is_missing() -> None:
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key=None,
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="Green Tara Accumulation"),
+        ],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.name == "Green Tara Accumulation"
+
+
+def test_group_accumulator_uses_row_title_when_there_is_no_metadata() -> None:
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="Green Tara Accumulation",
+        image_key=None,
+        metadata_entries=[],
+    )
+
+    resource = _group_accumulator_to_linked_resource(
+        _event(group_accumulator=group_accumulator), language="bo"
+    )
+
+    assert resource.name == "Green Tara Accumulation"
+
+
+def test_event_to_dto_passes_language_to_group_accumulator_name() -> None:
+    group_accumulator = SimpleNamespace(
+        id=uuid4(),
+        title="English title",
+        image_key=None,
+        metadata_entries=[
+            SimpleNamespace(language="EN", title="English title"),
+            SimpleNamespace(language="BO", title="བོད་ཡིག"),
+        ],
+    )
+
+    dto = _event_to_dto(
+        _event(group_accumulator=group_accumulator, group_accumulator_id=group_accumulator.id),
+        language="bo",
+    )
+
+    assert dto.group_accumulator.name == "བོད་ཡིག"
+
+
 # --------------------------- group recitation collection ---------------------------
 
 
-def test_group_recitation_collection_to_linked_resource_none_when_not_linked():
+def test_group_recitation_collection_to_linked_resource_none_when_not_linked() -> None:
     assert _group_recitation_collection_to_linked_resource(_event()) is None
 
 
 @patch(f"{MODULE}.generate_presigned_access_url")
-def test_group_recitation_collection_to_linked_resource_populates_fields(mock_presign):
+def test_group_recitation_collection_to_linked_resource_populates_fields(mock_presign: MagicMock) -> None:
     mock_presign.return_value = "https://cdn.example.com/collection.jpg"
     collection = SimpleNamespace(id=uuid4(), name="Daily Chants", img_url="images/collection.jpg")
 
@@ -189,7 +271,7 @@ def test_group_recitation_collection_to_linked_resource_populates_fields(mock_pr
 
 
 @patch(f"{MODULE}.generate_presigned_access_url")
-def test_event_to_dto_includes_every_linked_resource(mock_presign):
+def test_event_to_dto_includes_every_linked_resource(mock_presign: MagicMock) -> None:
     mock_presign.return_value = "https://cdn.example.com/img.jpg"
     plan = SimpleNamespace(id=uuid4(), title="Plan", image_url="images/plan.jpg")
     accumulator = SimpleNamespace(
@@ -223,7 +305,7 @@ def test_event_to_dto_includes_every_linked_resource(mock_presign):
     assert dto.group_recitation_collection.name == "Collection"
 
 
-def test_event_to_dto_all_linked_resources_none_when_event_has_no_links():
+def test_event_to_dto_all_linked_resources_none_when_event_has_no_links() -> None:
     dto = _event_to_dto(_event())
 
     assert dto.plan is None

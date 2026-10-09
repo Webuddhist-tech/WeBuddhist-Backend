@@ -3,16 +3,28 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from starlette import status
 
 from pecha_api.config import get
 from pecha_api.db.database import SessionLocal
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
+from pecha_api.plans.groups.group_ban_guard import get_group_ban_expiry
+from pecha_api.plans.groups.groups_enums import AuthorGroupType
+from pecha_api.plans.groups.groups_repository import (
+    get_group_by_id,
+    is_group_published,
+    is_user_joined_group,
+    lock_group_membership_changes,
+    upsert_group_join,
+)
 from pecha_api.plans.shared.permissions import require_can_read_group_content
 from pecha_api.users.users_models import Users
 from pecha_api.users.users_service import validate_and_extract_user_details
 
+from .event_enums import ParticipationType
+from .event_model import Event
 from .event_repository import get_event_by_id
 from .event_response_models import EventParticipantDTO, EventParticipantsResponse
 from .event_participant_repository import (
@@ -40,17 +52,20 @@ def _fullname(user: Users) -> Optional[str]:
     return " ".join(parts) or None
 
 
-def _participant_to_dto(user: Users, created_at) -> EventParticipantDTO:
+def _participant_to_dto(
+    user: Users, created_at, participation_type: Optional[str] = None
+) -> EventParticipantDTO:
     return EventParticipantDTO(
         user_id=user.id,
         username=user.username,
         fullname=_fullname(user),
         avatar_url=_safe_avatar_url(user),
+        participation_type=participation_type,
         created_at=created_at,
     )
 
 
-def _get_event_or_404(db, event_id: UUID):
+def _get_event_or_404(db: Session, event_id: UUID) -> Event:
     event = get_event_by_id(db, event_id)
     if not event:
         raise HTTPException(
@@ -68,7 +83,8 @@ def _participants_response(
     )
     return EventParticipantsResponse(
         participants=[
-            _participant_to_dto(user, created_at) for user, created_at in rows
+            _participant_to_dto(user, created_at, participation_type)
+            for user, created_at, participation_type in rows
         ],
         skip=skip,
         limit=limit,
@@ -76,17 +92,136 @@ def _participants_response(
     )
 
 
-def join_event_service(token: str, event_id: UUID) -> None:
-    """Join an event. Idempotent: joining again is a no-op."""
+def _resolve_participation_type(
+    event,
+    requested: Optional[ParticipationType],
+) -> Optional[str]:
+    """Reconcile what the user asked for with what the event actually offers.
+
+    An online-only or offline-only event leaves no choice, so a missing value
+    is filled in from the event and a contradicting one is rejected rather
+    than silently corrected. A hybrid event accepts either, and stays unset
+    when the user does not pick."""
+    event_format = getattr(event, "event_format", None) or "hybrid"
+
+    if event_format == "hybrid":
+        return requested.value if requested is not None else None
+
+    if requested is not None and requested.value != event_format:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Event '{event.id}' is {event_format}-only; "
+                f"participation_type '{requested.value}' is not available"
+            ),
+        )
+    return event_format
+
+
+def _to_group_type(value: AuthorGroupType | str) -> AuthorGroupType:
+    if hasattr(value, "value"):
+        return AuthorGroupType(value.value)
+    return AuthorGroupType(value)
+
+
+def _join_parent_group(db: Session, event: Event, user_id: UUID) -> None:
+    """Attending an event also makes the user a joiner of the event's group,
+    the way joining one of its accumulators does.
+
+    Best effort on purpose. The RSVP is the user's actual intent, and the
+    cases where the membership is not ours to grant - a PAGE group, which is
+    followed rather than joined; a private group, which goes through the
+    join-request flow; a user serving a ban from the group - are skipped
+    rather than turned into an error that would also stop them saying how
+    they attend. A lookup, lock or write that fails is the same: the RSVP is
+    already stored, and the failure must not turn the request into an error
+    or skip the chat-room join that follows."""
+    try:
+        group = get_group_by_id(db=db, group_id=event.group_id)
+        if not group or not is_group_published(group):
+            return
+        if _to_group_type(group.group_type) != AuthorGroupType.COMMUNITY:
+            return
+        # Locked before the ban is read, for the reason lock_group_membership_changes
+        # documents: a removal that is mid-flight holds this lock until its ban has
+        # committed, so the check below cannot miss it.
+        lock_group_membership_changes(db=db, group_id=event.group_id)
+        if is_user_joined_group(db=db, group_id=event.group_id, user_id=user_id):
+            return
+        if not group.is_public:
+            return
+        if get_group_ban_expiry(db=db, group_id=event.group_id, user_id=user_id) is not None:
+            return
+        upsert_group_join(db=db, group_id=event.group_id, user_id=user_id)
+    except Exception:
+        logging.exception(
+            "Failed to add user %s to group %s for event %s",
+            user_id,
+            event.group_id,
+            event.id,
+        )
+        # The session is shared with the chat-room join that follows, and a
+        # failed database call leaves the transaction unusable: without this,
+        # swallowing the error here would make that join raise
+        # PendingRollbackError and silently drop the user's chat room while the
+        # endpoint still reported success. The RSVP is already committed, so
+        # there is nothing of the user's intent left to lose here.
+        try:
+            db.rollback()
+        except Exception:
+            logging.exception("Failed to roll back after group join error")
+
+
+def _join_event_chat_room(db, event_id: UUID, user: Users) -> None:
+    """Put the user into the event's chat room, so it shows up in their inbox
+    before they ever type in it. Best effort: the RSVP is the user's actual
+    intent, and a chat-room hiccup must not undo it. The room is joined again
+    on their first message anyway."""
+    try:
+        # Deferred: chat imports events at module level, so events cannot
+        # import chat back at module level.
+        from pecha_api.chat.service import join_event_chat_room
+
+        join_event_chat_room(db=db, event_id=event_id, user=user)
+    except Exception:
+        logging.exception(
+            f"Failed to add user {user.id} to chat room for event {event_id}"
+        )
+
+
+def join_event_service(
+    token: str,
+    event_id: UUID,
+    participation_type: Optional[ParticipationType] = None,
+) -> None:
+    """Join an event. Idempotent: joining again is a no-op.
+
+    Passing `participation_type` on a re-join switches how the user attends,
+    so the client can treat join as an upsert instead of joining twice.
+
+    Also joins the event's group, when that membership is ours to grant, and
+    puts the user into the event's chat room when one exists, so the room
+    shows up in their inbox before they ever type in it. Same side effects as
+    `update_participation_type_service`."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
-        _get_event_or_404(db, event_id)
-        upsert_event_participant(db=db, event_id=event_id, user_id=current_user.id)
+        event = _get_event_or_404(db, event_id)
+        resolved = _resolve_participation_type(event, participation_type)
+        upsert_event_participant(
+            db=db,
+            event_id=event_id,
+            user_id=current_user.id,
+            participation_type=resolved,
+        )
+        _join_parent_group(db=db, event=event, user_id=current_user.id)
+        _join_event_chat_room(db=db, event_id=event_id, user=current_user)
 
 
 def leave_event_service(token: str, event_id: UUID) -> None:
-    """Leave an event. 404 when the caller had not joined."""
+    """Leave an event. 404 when the caller had not joined.
+
+    Also drops the event's chat room from their inbox."""
     current_user = validate_and_extract_user_details(token=token)
 
     with SessionLocal() as db:
@@ -99,6 +234,41 @@ def leave_event_service(token: str, event_id: UUID) -> None:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"You have not joined event '{event_id}'",
             )
+        try:
+            from pecha_api.chat.service import leave_event_chat_room
+
+            leave_event_chat_room(db=db, event_id=event_id, user_id=current_user.id)
+        except Exception:
+            logging.exception(
+                f"Failed to remove user {current_user.id} from chat room for event {event_id}"
+            )
+
+
+def update_participation_type_service(
+    token: str,
+    event_id: UUID,
+    participation_type: ParticipationType,
+) -> None:
+    """Switch how the caller attends an event.
+
+    An upsert, not an edit: a caller who has not joined yet is joined by the
+    same call, so the client can drive the online/offline control without
+    first working out whether an RSVP already exists. Attending also joins
+    the event's group and its chat room, exactly as `join_event_service`
+    does, so the two entry points cannot leave a user in different states."""
+    current_user = validate_and_extract_user_details(token=token)
+
+    with SessionLocal() as db:
+        event = _get_event_or_404(db, event_id)
+        resolved = _resolve_participation_type(event, participation_type)
+        upsert_event_participant(
+            db=db,
+            event_id=event_id,
+            user_id=current_user.id,
+            participation_type=resolved,
+        )
+        _join_parent_group(db=db, event=event, user_id=current_user.id)
+        _join_event_chat_room(db=db, event_id=event_id, user=current_user)
 
 
 def get_event_participants_service(

@@ -155,6 +155,34 @@ Accumulators support **multi-language metadata** with `name` and `description` f
 | `updated_at` | datetime | Last update timestamp |
 | `deleted_at` | datetime? | Soft delete timestamp |
 
+### GroupAccumulatorMetadata
+
+Per-language About text for a group accumulator. Unlike [AccumulatorMetadata](#metadata) there is no `name` — the group accumulator carries its own `title`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Primary key |
+| `group_accumulator_id` | UUID | Owning group accumulator (cascade delete) |
+| `description` | string? | About text for this language |
+| `language` | enum | `EN`/`BO`/`ZH`/`HI`/`NE`/`MN`/`LA`, unique per accumulator |
+
+### GroupAccumulatorLink
+
+Links a group shares on its accumulator page. `link_type` and `video_id` are derived server-side from the URL and are never sent by the client.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Primary key |
+| `group_accumulator_id` | UUID | Owning group accumulator (cascade delete) |
+| `url` | string | Any valid http/https URL |
+| `link_type` | enum | `YOUTUBE` when a YouTube video id can be extracted, else `LINK` |
+| `video_id` | string? | YouTube video id; null when `link_type` is `LINK` |
+| `title` | string? | Display title |
+| `display_order` | int | Ordering, assigned from the request array index |
+| `created_at` / `created_by` / `updated_at` / `updated_by` | | Audit fields |
+
+> **Rendering note**: only `YOUTUBE` links play inline (the app already ships `youtube_player_flutter`). `LINK` entries — Vimeo, Instagram Reels, Facebook video, articles — have no mobile-embeddable player and are rendered as cards that open externally.
+
 > **`text_id` note**: `GroupAccumulator` does not store `text_id` directly. When `accumulator_id` is set, it points at a preset `Accumulator` row, and presets now carry their own `text_id` (UUID, added alongside `mantra_id` — see [Accumulator](#accumulator) below) linking the practice to a recitation text. To resolve which text a group accumulator practices, read `accumulator_id` off the group accumulator response, then fetch `GET /accumulators/{accumulator_id}` (or `GET /accumulators/presets`) and read `text_id` off that preset. See [Resolving `text_id` for a group accumulator](#resolving-text_id-for-a-group-accumulator) for the full flow.
 
 ### GroupAccumulatorJoin
@@ -631,6 +659,11 @@ Get details of a specific group accumulator, including lifetime and today totals
 |-----------|------|-------------|
 | `group_accumulator_id` | UUID | Group accumulator ID |
 
+**Query Parameters**:
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `language` | string? | Language code for the About `description`. Falls back to `EN`, then `null`. |
+
 **Response**: `GroupAccumulatorDetailDTO`
 
 ```json
@@ -648,6 +681,17 @@ Get details of a specific group accumulator, including lifetime and today totals
   "target_count": 100000000,
   "start_date": "2024-01-01T00:00:00Z",
   "end_date": "2024-12-31T23:59:59Z",
+  "description": "We are holding this accumulation for the benefit of all beings...",
+  "links": [
+    {
+      "id": "uuid",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "link_type": "YOUTUBE",
+      "video_id": "dQw4w9WgXcQ",
+      "title": "Beyond the verse of today's practice",
+      "display_order": 0
+    }
+  ],
   "total_count": 45678900,
   "total_today_count": 5400,
   "user_total_count": 1080,
@@ -666,6 +710,8 @@ Get details of a specific group accumulator, including lifetime and today totals
 | `user_today_count` | Authenticated user's today count (`null` when unauthenticated) |
 | `member_count` | Number of users who joined this group accumulator |
 | `image` | Presigned URLs for thumbnail, medium, and original sizes (`null` when no image) |
+| `description` | About text resolved for the requested `language`, falling back to `EN` then `null` |
+| `links` | Ordered links for the About tab, sorted by `display_order`; `[]` when none |
 
 ---
 
@@ -1180,7 +1226,14 @@ Create a new group accumulator.
   "image_key": "groups/abc123/cover.jpg",
   "target_count": 100000000,
   "start_date": "2024-01-01T00:00:00Z",
-  "end_date": "2024-12-31T23:59:59Z"
+  "end_date": "2024-12-31T23:59:59Z",
+  "metadata": [
+    { "language": "EN", "description": "We are holding this accumulation..." },
+    { "language": "BO", "description": "..." }
+  ],
+  "links": [
+    { "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "title": "Beyond the verse of today's practice" }
+  ]
 }
 ```
 
@@ -1192,12 +1245,18 @@ Create a new group accumulator.
 | `target_count` | int | No | Group goal (>= 1) |
 | `start_date` | datetime | No | Practice period start |
 | `end_date` | datetime | No | Practice period end |
+| `metadata` | array | No | Per-language About text. Languages must be unique. |
+| `links` | array | No | Ordered links; each entry takes `url` and optional `title`. Array index becomes `display_order`. |
 
-**Response**: `201 Created` - `GroupAccumulatorDTO`
+> **Replace semantics**: `metadata` and `links` each replace the full set. Omitting a field (or sending `null`) leaves existing rows untouched; sending `[]` clears them. Row ids are regenerated on every save, so nothing should reference a metadata or link row by id.
+
+**Response**: `201 Created` - `GroupAccumulatorDTO` (includes `metadata` and `links`)
 
 **Errors**:
 - `404 NOT_FOUND` - Group not found
 - `403 FORBIDDEN` - Insufficient permissions
+- `400 BAD_REQUEST` - A link URL is not a valid http/https URL
+- `422 UNPROCESSABLE_ENTITY` - Duplicate `metadata` languages
 
 ---
 
@@ -1261,15 +1320,26 @@ Update a group accumulator.
   "title": "Updated Title",
   "image_key": "groups/abc123/new-cover.jpg",
   "target_count": 200000000,
-  "end_date": "2025-12-31T23:59:59Z"
+  "end_date": "2025-12-31T23:59:59Z",
+  "metadata": [
+    { "language": "EN", "description": "Updated about text..." }
+  ],
+  "links": [
+    { "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "title": "Beyond the verse" },
+    { "url": "https://vimeo.com/12345678", "title": "Teaching from the retreat" }
+  ]
 }
 ```
 
-**Response**: `GroupAccumulatorDTO`
+Same `metadata` / `links` replace semantics as the create endpoint above: omit to leave unchanged, `[]` to clear, otherwise the full set is replaced.
+
+**Response**: `GroupAccumulatorDTO` (includes `metadata` and `links`)
 
 **Errors**:
 - `404 NOT_FOUND` - Group accumulator not found
 - `403 FORBIDDEN` - Accumulator doesn't belong to this group or insufficient permissions
+- `400 BAD_REQUEST` - A link URL is not a valid http/https URL
+- `422 UNPROCESSABLE_ENTITY` - Duplicate `metadata` languages
 
 ---
 

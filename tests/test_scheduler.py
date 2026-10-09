@@ -8,15 +8,21 @@ from pecha_api.scheduler import setup_scheduler, shutdown_scheduler
 def _get_int_side_effect(key: str) -> int:
     defaults = {
         "VERSE_OF_DAY_EXPIRY_DAYS": 7,
+        "TIMER_DELETED_RETENTION_DAYS": 30,
         "AUDIO_JOB_DISPATCH_RECONCILE_INTERVAL_SECONDS": 60,
         "AUDIO_JOB_DISPATCH_RECONCILE_GRACE_SECONDS": 120,
         "AUDIO_JOB_DISPATCH_RECONCILE_BATCH_SIZE": 50,
         "CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS": 30,
+        "PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS": 15,
+        "PRAYER_TRANSLATION_RECONCILE_INTERVAL_SECONDS": 120,
         "JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS": 60,
         "GROUP_POST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS": 45,
         "EVENT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS": 90,
         "EVENT_REMINDER_DISPATCH_INTERVAL_SECONDS": 60,
         "EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS": 60,
+        "EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS": 3600,
+        "EVENT_REMINDER_PURGE_INTERVAL_SECONDS": 86400,
+        "YOUTUBE_LIVE_SYNC_TICK_SECONDS": 60,
     }
     return defaults[key]
 
@@ -46,6 +52,21 @@ def test_setup_scheduler_rejects_negative_retention():
         mock_scheduler.add_job.assert_not_called()
 
 
+def test_setup_scheduler_rejects_non_positive_timer_retention():
+    def _side_effect(key: str) -> int:
+        return 7 if key == "VERSE_OF_DAY_EXPIRY_DAYS" else 0
+
+    with patch("pecha_api.scheduler.get_int", side_effect=_side_effect), patch(
+        "pecha_api.scheduler.scheduler"
+    ) as mock_scheduler:
+        mock_scheduler.running = False
+
+        with pytest.raises(ValueError, match="positive integer"):
+            setup_scheduler()
+
+        mock_scheduler.start.assert_not_called()
+
+
 def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
     with patch("pecha_api.scheduler.get_int", side_effect=_get_int_side_effect), patch(
         "pecha_api.scheduler.scheduler"
@@ -60,26 +81,44 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
 
         setup_scheduler()
 
-        assert mock_scheduler.add_job.call_count == 8
+        assert mock_scheduler.add_job.call_count == 15
         job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
         assert job_ids == [
             "cleanup_expired_verses_of_day",
+            "purge_deleted_timers",
             "reconcile_undispatched_audio_jobs",
             "reconcile_undispatched_chat_notifications",
+            "reconcile_undispatched_prayer_notifications",
+            "dispatch_due_prayer_notifications",
+            "reconcile_pending_prayer_translations",
             "reconcile_undispatched_join_request_notifications",
             "reconcile_undispatched_group_post_notifications",
             "reconcile_undispatched_event_notifications",
             "dispatch_due_event_reminders",
             "reconcile_undispatched_event_reminders",
+            "materialize_recurring_event_reminders",
+            "purge_expired_event_reminders",
+            "run_due_youtube_live_syncs",
         ]
         assert mock_scheduler.add_job.call_args_list[0].kwargs["args"] == [7]
+        assert mock_scheduler.add_job.call_args_list[1].kwargs["args"] == [30]
         assert [call.kwargs for call in mock_interval_trigger.call_args_list] == [
             {"seconds": 60},
             {"seconds": 30},
+            # Prayer notifications reconcile on the chat interval.
+            {"seconds": 30},
+            # Held prayer-received pushes are checked on their own, tighter one.
+            {"seconds": 15},
+            {"seconds": 120},
             {"seconds": 60},
             {"seconds": 45},
             {"seconds": 90},
             {"seconds": 60},
+            {"seconds": 60},
+            # Recurring series are topped up hourly and swept daily.
+            {"seconds": 3600},
+            {"seconds": 86400},
+            # Each group's own YouTube live sync times are checked every minute.
             {"seconds": 60},
         ]
         mock_scheduler.start.assert_called_once()

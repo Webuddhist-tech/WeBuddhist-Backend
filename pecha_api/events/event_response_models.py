@@ -4,12 +4,21 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from uuid import UUID
 
-from pecha_api.config import get
+from pecha_api.config import get, get_int
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from pecha_api.timezone_utils import normalize_timezone_name
+from pecha_api.prayer_intentions.prayer_intention_response_models import (
+    PrayerIntentionDTO,
+)
 from .location_response_models import LocationDTO
-from .event_enums import RecurrenceFrequency, RecurrenceDateSystem
+from .event_enums import (
+    RecurrenceFrequency,
+    RecurrenceDateSystem,
+    EventLinkType,
+    ParticipationType,
+    EventAccumulationCountMode,
+)
 
 
 EventFormat = Literal["online", "offline", "hybrid"]
@@ -34,6 +43,17 @@ class EventLinkDTO(BaseModel):
     type: str
     url: str
     label: Optional[str] = None
+    language: str
+    display_order: int
+
+
+class EventYoutubeDTO(BaseModel):
+    model_config = ConfigDict(ser_json_exclude_none=True)
+
+    id: UUID
+    url: str
+    label: Optional[str] = None
+    language: str
     display_order: int
 
 
@@ -44,23 +64,46 @@ def _validate_link_url(url: str) -> str:
     return url.strip()
 
 
+def _validate_youtube_url(url: str) -> str:
+    normalized = _validate_link_url(url)
+    host = urlparse(normalized).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not (host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"):
+        raise ValueError("url must be a youtube.com or youtu.be URL")
+    return normalized
+
+
 class EventLinkInput(BaseModel):
-    type: str = Field(max_length=50)
+    type: EventLinkType
     url: str = Field(max_length=2000)
     label: Optional[str] = Field(default=None, max_length=255)
+    language: LanguageCode
     display_order: int = 1
 
     @field_validator("type")
     @classmethod
-    def validate_type_not_empty(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("type must be a non-empty string")
-        return value.strip()
+    def validate_type_not_youtube(cls, value: EventLinkType) -> EventLinkType:
+        if value == EventLinkType.YOUTUBE:
+            raise ValueError("type 'youtube' is not allowed in links[]; use the youtube[] array instead")
+        return value
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
         return _validate_link_url(value)
+
+
+class EventYoutubeInput(BaseModel):
+    url: str = Field(max_length=2000)
+    label: Optional[str] = Field(default=None, max_length=255)
+    language: LanguageCode
+    display_order: int = 1
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return _validate_youtube_url(value)
 
 
 class EventMetadataInput(BaseModel):
@@ -79,6 +122,15 @@ def _validate_unique_languages(metadata: List[EventMetadataInput]) -> List[Event
 def _validate_date_range(start_date: datetime, end_date: datetime) -> None:
     if end_date < start_date:
         raise ValueError("end_date must be greater than or equal to start_date")
+    # An event is owed reminders for every day it runs, so a mistyped year in
+    # end_date would quietly schedule thousands of them. The bound is
+    # deliberately generous - a genuinely long retreat still saves, and only
+    # a span no real event has trips it.
+    max_span_days = max(get_int("EVENT_MAX_SPAN_DAYS"), 1)
+    if (end_date - start_date).days > max_span_days:
+        raise ValueError(
+            f"Event cannot span more than {max_span_days} days"
+        )
 
 
 class RecurrenceInput(BaseModel):
@@ -86,11 +138,27 @@ class RecurrenceInput(BaseModel):
     date_system: RecurrenceDateSystem
     calendar_type: Optional[str] = Field(None, max_length=10)
     month: Optional[int] = Field(None, ge=1, le=12)
-    day: int = Field(ge=1, le=31)
+    day: Optional[int] = Field(None, ge=1, le=31)
+    day_of_week: Optional[int] = Field(
+        None,
+        ge=0,
+        le=6,
+        description="0=Monday .. 6=Sunday, required for WEEKLY frequency",
+    )
     duration_days: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def validate_recurrence_rules(self) -> "RecurrenceInput":
+        if self.frequency == RecurrenceFrequency.WEEKLY:
+            if self.day_of_week is None:
+                raise ValueError("day_of_week is required for WEEKLY frequency")
+            if self.date_system != RecurrenceDateSystem.GREGORIAN:
+                raise ValueError("WEEKLY frequency only supports the GREGORIAN date system")
+            return self
+
+        if self.day is None:
+            raise ValueError("day is required for MONTHLY and YEARLY frequency")
+
         if self.date_system == RecurrenceDateSystem.TIBETAN_LUNAR:
             if not self.calendar_type:
                 raise ValueError("calendar_type is required for TIBETAN_LUNAR date system")
@@ -98,7 +166,7 @@ class RecurrenceInput(BaseModel):
                 raise ValueError("calendar_type must be 'phugpa' or 'tsurphu'")
             if self.day > 30:
                 raise ValueError("Lunar day must be between 1 and 30")
-        
+
         if self.frequency == RecurrenceFrequency.YEARLY and self.month is None:
             raise ValueError("month is required for YEARLY frequency")
 
@@ -115,6 +183,33 @@ class LinkedResourceDTO(BaseModel):
     image_url: Optional[str] = None
 
 
+class EventGroupAccumulationDTO(BaseModel):
+    model_config = ConfigDict(ser_json_exclude_none=True)
+
+    id: UUID
+    group_accumulator_id: UUID
+    parent_id: Optional[UUID] = None
+    event_format: EventFormat = "hybrid"
+    display_order: int
+    count_mode: EventAccumulationCountMode
+    group_accumulator: LinkedResourceDTO
+    offline_participant_count: Optional[int] = Field(
+        None,
+        description="Present when count_mode is offline_participants",
+    )
+
+
+class EventGroupAccumulationInput(BaseModel):
+    group_accumulator_id: UUID
+    event_format: EventFormat = "hybrid"
+    display_order: int = 1
+    count_mode: EventAccumulationCountMode = EventAccumulationCountMode.MANUAL_IN_PERSON
+    id: Optional[UUID] = None
+    client_key: Optional[str] = Field(default=None, max_length=64)
+    parent_id: Optional[UUID] = None
+    parent_client_key: Optional[str] = Field(default=None, max_length=64)
+
+
 class RecurrenceDTO(BaseModel):
     model_config = ConfigDict(ser_json_exclude_none=True)
 
@@ -122,7 +217,8 @@ class RecurrenceDTO(BaseModel):
     date_system: str
     calendar_type: Optional[str] = None
     month: Optional[int] = None
-    day: int
+    day: Optional[int] = None
+    day_of_week: Optional[int] = None
     duration_days: int
 
 
@@ -132,8 +228,13 @@ class EventDTO(BaseModel):
     id: UUID
     plan_id: Optional[UUID] = None
     plan: Optional[LinkedResourceDTO] = None
+    series_id: Optional[UUID] = None
+    series: Optional[LinkedResourceDTO] = None
     accumulator_id: Optional[UUID] = None
     accumulator: Optional[LinkedResourceDTO] = None
+    group_accumulator_id: Optional[UUID] = None
+    group_accumulator: Optional[LinkedResourceDTO] = None
+    accumulations: List[EventGroupAccumulationDTO] = []
     mantra_id: Optional[UUID] = None
     mantra: Optional[LinkedResourceDTO] = None
     timer_id: Optional[UUID] = None
@@ -146,6 +247,14 @@ class EventDTO(BaseModel):
     start_date: datetime
     end_date: datetime
     timezone: Optional[str] = None
+    start_time: Optional[str] = Field(
+        None,
+        description="Start as local HH:MM in the event's timezone",
+    )
+    end_time: Optional[str] = Field(
+        None,
+        description="End as local HH:MM in the event's timezone",
+    )
     is_one_day: bool
     featured: bool
     is_recurring: bool = False
@@ -155,16 +264,43 @@ class EventDTO(BaseModel):
         description="For expanded occurrences, the specific occurrence date"
     )
     event_format: EventFormat = "hybrid"
+    chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
+    chat_room_id: Optional[UUID] = Field(
+        None,
+        description="The event's chat room, when one has been created (null until first use)",
+    )
     metadata: EventMetadataResponse
+    youtube: List[EventYoutubeDTO] = []
     links: List[EventLinkDTO] = []
     image: Optional[ImageUrlModel] = None
     image_url: Optional[str] = None
     group_name: Optional[str] = None
     group_avatar_url: Optional[str] = None
     participant_count: int = 0
+    prayer_request_count: int = Field(
+        0,
+        description="Non-deleted prayer requests in the event chat room (0 if no room yet)",
+    )
+    intentions: List[PrayerIntentionDTO] = Field(
+        default_factory=list,
+        description=(
+            "Prayer intentions allowed for this event when restricted; "
+            "empty when any catalog intention is allowed"
+        ),
+    )
     is_joined: Optional[bool] = Field(
         None,
         description="Whether the authenticated user has joined (null when unauthenticated)",
+    )
+    my_participation_type: Optional[ParticipationType] = Field(
+        None,
+        description=(
+            "How the authenticated user attends this event: 'online' or "
+            "'offline' (null when unauthenticated, not joined, or joined "
+            "without picking)"
+        ),
     )
     created_at: datetime
     created_by: str
@@ -185,6 +321,7 @@ class EventParticipantDTO(BaseModel):
     username: Optional[str] = None
     fullname: Optional[str] = None
     avatar_url: Optional[str] = None
+    participation_type: Optional[ParticipationType] = None
     created_at: datetime
 
 
@@ -195,6 +332,18 @@ class EventParticipantsResponse(BaseModel):
     total: int
 
 
+class JoinEventRequest(BaseModel):
+    """Optional body on join. Omitting participation_type keeps the old
+    bodyless behaviour: the type is inferred for online-only and offline-only
+    events and left unset on hybrid ones."""
+
+    participation_type: Optional[ParticipationType] = None
+
+
+class UpdateParticipationTypeRequest(BaseModel):
+    participation_type: ParticipationType
+
+
 class CreateEventRequest(BaseModel):
     group_id: UUID
     start_date: Optional[datetime] = None
@@ -202,15 +351,29 @@ class CreateEventRequest(BaseModel):
     timezone: Optional[str] = None
     metadata: List[EventMetadataInput]
     links: List[EventLinkInput] = []
+    youtube: List[EventYoutubeInput] = []
     image_url: Optional[str] = None
     plan_id: Optional[UUID] = None
+    series_id: Optional[UUID] = None
     accumulator_id: Optional[UUID] = None
+    group_accumulator_id: Optional[UUID] = None
+    accumulations: List[EventGroupAccumulationInput] = []
     mantra_id: Optional[UUID] = None
     timer_id: Optional[UUID] = None
     group_recitation_collection_id: Optional[UUID] = None
     location_id: Optional[UUID] = None
     recurrence: Optional[RecurrenceInput] = None
     event_format: EventFormat = "hybrid"
+    chat_enabled: bool = True
+    # The organizer's switch for every push this event can send.
+    notifications_enabled: bool = True
+    intention_ids: List[UUID] = Field(
+        default_factory=list,
+        description=(
+            "When non-empty, prayer requests in this event's chat may only "
+            "use these catalog intentions"
+        ),
+    )
 
     @field_validator("metadata")
     @classmethod
@@ -245,15 +408,28 @@ class UpdateEventRequest(BaseModel):
     timezone: Optional[str] = None
     metadata: Optional[List[EventMetadataInput]] = None
     links: Optional[List[EventLinkInput]] = None
+    youtube: Optional[List[EventYoutubeInput]] = None
     image_url: Optional[str] = None
     plan_id: Optional[UUID] = None
+    series_id: Optional[UUID] = None
     accumulator_id: Optional[UUID] = None
+    group_accumulator_id: Optional[UUID] = None
+    accumulations: Optional[List[EventGroupAccumulationInput]] = None
     mantra_id: Optional[UUID] = None
     timer_id: Optional[UUID] = None
     group_recitation_collection_id: Optional[UUID] = None
     location_id: Optional[UUID] = None
     recurrence: Optional[RecurrenceInput] = None
     event_format: Optional[EventFormat] = None
+    chat_enabled: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
+    intention_ids: Optional[List[UUID]] = Field(
+        None,
+        description=(
+            "Replace the event's allowed prayer intentions; send an empty list "
+            "to allow any catalog intention"
+        ),
+    )
 
     @field_validator("event_format")
     @classmethod

@@ -14,6 +14,50 @@ ChatRoomMemberRoleEnum = Enum(
 )
 
 
+class ChatRoomKind(str, enum.Enum):
+    """Which of the three `ck_chat_rooms_kind_shape` arms a room satisfies.
+
+    Derived from the room's columns rather than stored: `group_id` for a
+    group's room, `event_id` for an event's room, the sender/receiver pair
+    for a DM."""
+
+    GROUP = "GROUP"
+    EVENT = "EVENT"
+    PRIVATE = "PRIVATE"
+
+
+class ChatMessageType(enum.Enum):
+    """What a message is. TEXT is ordinary chat; PRAYER marks the message as a
+    prayer request other members can pray for."""
+
+    TEXT = "TEXT"
+    PRAYER = "PRAYER"
+
+
+class PrayerTranslationLanguage(str, enum.Enum):
+    """Languages Gemini prayer translation supports (EN/BO/ZH)."""
+
+    EN = "EN"
+    BO = "BO"
+    ZH = "ZH"
+
+
+class PrayerSort(str, enum.Enum):
+    """How a room's prayer requests are ordered. NEWEST is the default."""
+
+    NEWEST = "newest"
+    OLDEST = "oldest"
+    MOST_PRAYED = "most_prayed"
+    NEEDS_PRAYERS = "needs_prayers"
+    RANDOM = "random"
+
+
+ChatMessageTypeEnum = Enum(
+    ChatMessageType,
+    name="chat_message_type",
+)
+
+
 class ChatMessageReportReason(enum.Enum):
     SPAM = "SPAM"
     HARASSMENT = "HARASSMENT"
@@ -26,3 +70,9 @@ class ChatMessageReportReason(enum.Enum):
 class ChatMessageReportSource(enum.Enum):
     MANUAL = "MANUAL"
     AUTOMATIC = "AUTOMATIC"
+
+
+class ChatMessageTranslationStatus(str, enum.Enum):
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"

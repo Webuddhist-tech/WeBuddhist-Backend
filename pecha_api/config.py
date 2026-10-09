@@ -1,10 +1,20 @@
 import os
 import re
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 DEFAULTS = dict(
     SITE_LANGUAGE="en",
     SITE_NAME="Pecha",
     ACCESS_TOKEN_EXPIRE_MINUTES=3000000,
+    # Studio (CMS) sessions only - the app keeps ACCESS_TOKEN_EXPIRE_MINUTES /
+    # REFRESH_TOKEN_EXPIRE_DAYS above. Studio runs in a browser the author
+    # keeps open across days, so the access token is scoped to two days and
+    # the refresh token to a month rather than inheriting the app's values.
+    CMS_ACCESS_TOKEN_EXPIRE_DAYS=2,
+    CMS_REFRESH_TOKEN_EXPIRE_DAYS=30,
     APP_NAME="Pecha Backend",
     AWS_ACCESS_KEY="",
     AWS_SECRET_KEY="",
@@ -24,6 +34,17 @@ DEFAULTS = dict(
     AUTH0_GOOGLE_EMAIL_VERIFIED_CLAIM="https://webuddhist.com/email_verified",
     COMPRESSED_QUALITY=80,
     DATABASE_URL="postgresql://admin:pechaAdmin@localhost:5434/pecha",
+    # Connection pool. The ceiling is DB_POOL_SIZE + DB_MAX_OVERFLOW per
+    # instance, so replica count has to be multiplied in before comparing
+    # against the server's max_connections.
+    DB_POOL_SIZE=10,
+    DB_MAX_OVERFLOW=20,
+    # Seconds a request waits for a connection before giving up. Short on
+    # purpose: waiting 30s does not make a connection appear, it just holds a
+    # worker thread while the queue behind it grows. Exhaustion is returned as
+    # a 503 with Retry-After (see db/overload_handler.py), not a 500.
+    DB_POOL_TIMEOUT=5,
+    DB_POOL_RECYCLE=1800,
     DEFAULT_LANGUAGE="en",
     DEFAULT_PAGE_SIZE=10,
     DEPLOYMENT_MODE="DEBUG",
@@ -36,13 +57,8 @@ DEFAULTS = dict(
     MAX_FILE_SIZE_MB=1,
     MAX_FILE_SIZE = 5 * 1024 * 1024,
     MAX_AUDIO_FILE_SIZE = 50 * 1024 * 1024,
-    MAX_OTR_FILE_SIZE = 5 * 1024 * 1024,
     ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'},
     ALLOWED_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'},
-    AUDIO_MP3_BITRATE="128k",
-    FFMPEG_BINARY="ffmpeg",
-    FFPROBE_BINARY="ffprobe",
-    ALLOWED_OTR_EXTENSIONS = {'.otr', '.json'},
     MONGO_CONNECTION_STRING="",
 
     WEBUDDHIST_STUDIO_BASE_URL="https://studio.webuddhist.com",
@@ -56,6 +72,22 @@ DEFAULTS = dict(
     CACHE_PREFIX="pecha:",
     CACHE_DEFAULT_TIMEOUT=3000000, # 30 seconds in seconds
     CACHE_CONNECTION_STRING="redis://localhost:6379",
+    # Master switch for the response cache. False means every read goes to
+    # the database and nothing is written to, read from, or swept out of
+    # Redis - the app runs as though Redis were not configured at all.
+    # Turning it back on can serve entries written before it went off, so
+    # pair a re-enable with a flush via /cms/admin/cache.
+    CACHE_ENABLED="true",
+    # Comma-separated CacheType values to bypass while the cache is on, for
+    # taking one namespace out of service without losing the rest:
+    # CACHE_DISABLED_TYPES="plan_detail,plan_list". Unknown names are ignored.
+    CACHE_DISABLED_TYPES="",
+    # Bounds on every cache call. A cache that stops answering must fail
+    # fast and let the request fall through to the database.
+    CACHE_CONNECT_TIMEOUT=1.0,
+    CACHE_SOCKET_TIMEOUT=2.0,
+    # How long the cache is treated as absent after a failure.
+    CACHE_CIRCUIT_BREAK_SECONDS=10.0,
     REDIS_URL="redis://localhost:6379/0",
 
     # Cache timeout configurations for different types (in seconds)
@@ -64,7 +96,55 @@ DEFAULTS = dict(
     CACHE_USER_TIMEOUT=900,         # 15 minutes for users (not frequently changed)
     CACHE_SHEET_TIMEOUT=60,         # 1 minute for sheets (frequently edited by users)
     CACHE_USER_STATS_TIMEOUT=300,   # 5 minutes for user stats
+    # Plan day content. Read by everyone on a plan, written only by an author
+    # through the CMS - and every write already invalidates the day it touched,
+    # so the timeout is just a backstop.
+    CACHE_PLAN_TIMEOUT=900,         # 15 minutes for plan day content
+    # Author-published content: series, plans, plan days, tags, presets. Only
+    # a CMS write changes any of it, and every one of those writes invalidates
+    # the namespaces it touches, so the timeout is a backstop for an
+    # invalidation that was missed rather than the thing keeping it correct.
+    CACHE_CONTENT_TIMEOUT=12600,    # 3.5 hours
+    # Anything carrying live or per-user state: event joins, user progress,
+    # posts, likes, accumulator totals. These have many write paths, several
+    # outside the CMS, so they lean on a short timeout instead of on having
+    # caught every one. At a busy moment a 60s entry is still read hundreds of
+    # times before it expires, which is where the load relief comes from.
+    CACHE_SOCIAL_TIMEOUT=60,        # 1 minute
     CACHE_CALENDAR_TIMEOUT=2592000, # 30 days; source calendar files are immutable
+    # openpecha segment bodies and references. Resolved one HTTP round trip at
+    # a time, by every endpoint that renders a plan day, and the same segments
+    # come back for every reader - so this is the timeout that decides how much
+    # of that traffic is made at all. Long because the content behind it only
+    # changes when an editor changes it upstream, which nothing here is told
+    # about; shorten it if openpecha edits need to surface faster.
+    CACHE_SEGMENT_TIMEOUT=12600,    # 3.5 hours
+
+    # openpecha has no bulk segment endpoint, so a plan day costs one round
+    # trip per segment and the only lever on a cold day is how many of them
+    # run at once. The gate is process-wide and shared by every openpecha
+    # caller, so it is held below OPENPECHA_MAX_CONNECTIONS - otherwise the
+    # httpx pool becomes the real limit and waits show up as PoolTimeout
+    # instead of as a queue. Raise these together, and only as far as
+    # openpecha itself can take.
+    OPENPECHA_MAX_CONCURRENCY=32,
+    OPENPECHA_MAX_CONNECTIONS=40,
+    # How long a request waits for a slot before giving up. A segment that
+    # gives up resolves to None, which the day falls back to stored content
+    # for - a degraded day now beats a request that hangs for minutes.
+    OPENPECHA_QUEUE_TIMEOUT=20.0,
+
+    # How long a presigned S3 URL stays valid. Responses carrying these URLs
+    # are cached with the URL already inside them, so the signature has to
+    # outlive the cache entry that holds it - at one hour it did not, and
+    # every image served from a warm cache entry older than that was dead on
+    # arrival. AWS SigV4 allows at most 7 days.
+    PRESIGNED_URL_EXPIRY_SECONDS=86400,   # 24 hours
+    # Usable life a response must still have left when it is served. A cache
+    # entry is kept only while its shortest-lived signature has at least this
+    # long to run, so nobody is handed a URL that dies while the page using
+    # it is still open.
+    PRESIGNED_URL_SAFETY_MARGIN=1800,     # 30 minutes
 
     SHORT_URL_GENERATION_ENDPOINT="https://pech.as/api/v1",
 
@@ -100,7 +180,20 @@ DEFAULTS = dict(
 
     SQS_TIMEOUT=1800,
 
-    GROUP_INVITE_EXPIRY_MINUTES=30,
+    # 7 days. Someone new has to sign up before they can accept, so a short
+    # window just means the owner re-sends. Clamped to 1 minute..30 days.
+    GROUP_INVITE_EXPIRY_MINUTES=10080,
+    # Invite emails link to the Studio's /join?invite= page (one-step sign-up
+    # and accept). Turn on once that page is deployed; until then the email
+    # keeps pointing at /groups.
+    STUDIO_JOIN_PAGE_ENABLED="false",
+    # Shareable group join links (author_group_join_links): default and
+    # maximum lifetime a group manager can give one.
+    GROUP_JOIN_LINK_DEFAULT_EXPIRY_DAYS=14,
+    GROUP_JOIN_LINK_MAX_EXPIRY_DAYS=90,
+    # The account that holds counts made at an event in person (by people not
+    # using the app). Group managers record them per day in the Studio.
+    IN_PERSON_USER_ID="7cafd4eb-d996-437f-83f7-d9359c7ef40f",
     WEBUDDHIST_EMAIL_LOGO_URL="https://studio.webuddhist.com/assets/pecha_icon-DkKJLXuA.png",
 
     # When true, sync_alembic_stamp.py may advance alembic_version to match detected
@@ -128,6 +221,52 @@ DEFAULTS = dict(
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     CHAT_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
     CHAT_NOTIFICATION_PREVIEW_MAX_LENGTH=120,
+    # Prayer requests and "someone prayed" pushes. Empty = use the chat queue.
+    PRAYER_NOTIFICATION_SQS_QUEUE_URL="",
+    # In-app feedback (POST /feedback). Feedback is always stored; it is also
+    # posted to this Discord webhook when set, and left there when not.
+    DISCORD_FEEDBACK_WEBHOOK_URL="",
+    FEEDBACK_MAX_CONTENT_LENGTH=4000,
+    FEEDBACK_MAX_IMAGES=3,
+    # Discord's per-message upload cap; above it the webhook rejects the post.
+    FEEDBACK_MAX_TOTAL_IMAGE_MB=10,
+    # /share/image serves an event's own photo, re-encoded as JPEG because the
+    # stored WebP is not a format link-preview crawlers render. The endpoint is
+    # public, so the fetch is bounded and the bytes are held per process.
+    SHARE_EVENT_PHOTO_MAX_BYTES=10485760,  # 10 MB
+    SHARE_EVENT_PHOTO_CACHE_SIZE=32,
+    # How long a crawler may reuse a rendered share image.
+    SHARE_IMAGE_CACHE_SECONDS=86400,
+    # At most one prayer-request push per room per this many seconds. Prayer
+    # requests posted inside it are held: the room shows them at once, and the
+    # next push that goes out carries them as "+N other prayer requests".
+    # 0 sends a push for every prayer request. TEXT messages are unaffected.
+    PRAYER_REQUEST_NOTIFICATION_INTERVAL_SECONDS=1140,
+    # At most one "X prayed for you" push per request per this many seconds,
+    # summarising every prayer since the previous one. Prayers inside it are
+    # held, and the next push goes out once it has passed - on the next pray,
+    # or from the dispatcher if nobody prays again. 0 pushes on every pray.
+    PRAYER_RECEIVED_NOTIFICATION_INTERVAL_SECONDS=900,
+    # A "someone prayed for you" push never lands beside a prayer-request push
+    # to the same person. It waits this long after the prayer, so a request
+    # posted straight after praying goes out first, and then until that person
+    # has had no prayer-request push for this long. 0 sends it at once.
+    PRAYER_NOTIFICATION_GAP_SECONDS=120,
+    # Longest a prayer-received push is held, for someone whose rooms are busy
+    # enough to keep that gap from ever opening.
+    PRAYER_NOTIFICATION_MAX_HOLD_SECONDS=900,
+    # How often held prayer-received pushes are checked and sent.
+    PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS=15,
+    # Percent of prayer-received pushes that read "Someone prayed for you"
+    # instead of naming who prayed. 0 always names them; 100 never does.
+    PRAYER_NOTIFICATION_ANONYMOUS_PERCENT=10,
+
+    GEMINI_API_KEY="",
+    GEMINI_PRAYER_TRANSLATION_MODEL="gemini-3.8-flash",
+    PRAYER_TRANSLATION_ENABLED="true",
+    PRAYER_TRANSLATION_RECONCILE_INTERVAL_SECONDS=120,
+    PRAYER_TRANSLATION_RECONCILE_BATCH_SIZE=20,
+    PRAYER_TRANSLATION_MAX_CONCURRENT_WORKERS=4,
 
     # Group join request notification SQS queue (backend producer → worker consumer)
     JOIN_REQUEST_NOTIFICATION_SQS_QUEUE_URL="",
@@ -135,7 +274,22 @@ DEFAULTS = dict(
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     JOIN_REQUEST_NOTIFICATION_DISPATCH_RECONCILE_BATCH_SIZE=50,
 
-    # Internal routine notification dispatch (worker -> backend)
+    # Shared secret proving a /auth/social_register call is the Auth0 Post
+    # Login Action. The route itself stays open so social signup works, but
+    # the header is what lets a call touch an account that already exists.
+    # Empty on purpose: without it that backfill is skipped, because a default
+    # here would be a published password for any deployment that never set it.
+    SOCIAL_REGISTER_SECRET_TOKEN="",
+
+    # Shared secret for machines emitting live recitation positions over HTTP
+    # (controller/pedal/OBS -> backend). Empty disables those endpoints.
+    RECITATION_EMIT_SECRET_TOKEN="",
+
+    # Internal routine notification dispatch (worker -> backend). Empty on
+    # purpose: this is the whole credential for the /internal/* routes, which
+    # are mounted on the public API and both expose recipient data and mutate
+    # dispatch state. A value here would be a published password for any
+    # deployment that forgot to set the env var, so it fails closed instead.
     NOTIFICATION_DISPATCH_SECRET_TOKEN="",
     NOTIFICATION_DEFAULT_TITLE="WebBuddhist",
     NOTIFICATION_DEFAULT_BODY="Time for your daily practice.",
@@ -143,6 +297,9 @@ DEFAULTS = dict(
     # Verse of the day retention (days); scheduler deletes older rows daily
     VERSE_OF_DAY_EXPIRY_DAYS=7,
     VERSE_OF_DAY_NOTIFICATION_TITLE="Verse of the Day",
+
+    # Soft-deleted timer retention (days) before the purge job hard-deletes them
+    TIMER_DELETED_RETENTION_DAYS=30,
 
     # Group post notification SQS queue (backend producer -> worker consumer)
     GROUP_POST_NOTIFICATION_SQS_QUEUE_URL="",
@@ -163,7 +320,39 @@ DEFAULTS = dict(
     EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE=50,
+    # Per-day reminders for multi-day events, and reminders for recurring
+    # events at all. Separate flags so the recurring blast radius - an
+    # indefinite series, with no per-occurrence way to decline - can be
+    # turned on well after the one-time case has settled.
+    EVENT_REMINDER_DAILY_ENABLED="false",
+    EVENT_REMINDER_RECURRING_ENABLED="false",
+    # How far ahead a recurring series' reminders are materialized. Rows are
+    # topped up on this schedule, so losing more than HORIZON_DAYS of
+    # materializer runs is what starts dropping reminders.
+    EVENT_REMINDER_HORIZON_DAYS=14,
+    EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS=3600,
+    EVENT_REMINDER_MATERIALIZE_BATCH_SIZE=200,
+    # A recurring series never ends, so its rows need sweeping.
+    EVENT_REMINDER_RETENTION_DAYS=30,
+    EVENT_REMINDER_PURGE_INTERVAL_SECONDS=86400,
+    # Sanity bound on how long one event may run. Set high enough that a
+    # real retreat never hits it, so what it actually catches is a
+    # mistyped end_date - which would otherwise materialize reminders for
+    # every day between here and the typo.
+    EVENT_MAX_SPAN_DAYS=366,
     DEFAULT_EVENT_TIMEZONE="Asia/Kolkata",
+
+    # YouTube Data API v3. Used to resolve plan-day video length. Empty
+    # means lookups are skipped; GET paths still return the link.
+    YOUTUBE_API_KEY="",
+
+    # Adding a group channel's live stream to the group's running events.
+    # Run times are per group (the youtube-live-sync CMS endpoints); the job
+    # only wakes every TICK seconds to see whether any group's time has come,
+    # and still runs a time it woke up to within GRACE seconds of it.
+    GEMINI_YOUTUBE_LIVE_LANGUAGE_MODEL="gemini-3.8-flash",
+    YOUTUBE_LIVE_SYNC_TICK_SECONDS=60,
+    YOUTUBE_LIVE_SYNC_GRACE_SECONDS=600,
 
     # Sentry error tracking (disabled unless SENTRY_DSN is set)
     SENTRY_DSN="",
@@ -181,6 +370,21 @@ def get(key: str) -> str:
         return os.environ[key]
     else:
         return str(DEFAULTS[key])
+
+
+TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+FALSY_VALUES = frozenset({"0", "false", "no", "off", ""})
+
+
+def get_bool(key: str) -> bool:
+    value = get(key).strip().lower()
+    if value in TRUTHY_VALUES:
+        return True
+    if value in FALSY_VALUES:
+        return False
+    raise ValueError(
+        f"Could not convert the value for key '{key}' to bool: {get(key)!r}"
+    )
 
 
 def get_float(key: str) -> float:

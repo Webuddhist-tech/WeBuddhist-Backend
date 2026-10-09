@@ -17,6 +17,7 @@ from pecha_api.plans.groups.groups_repository import get_author_group_ids
 from pecha_api.plans.series.series_repository import (
     get_series_by_id,
     get_series_paginated,
+    SeriesListFilter,
     get_enrolled_count_map_by_series_ids,
     get_plans_by_ids,
     save_series_with_plans,
@@ -619,17 +620,21 @@ def get_filtered_series(
     with SessionLocal() as db_session:
         rows, total = get_series_paginated(
             db=db_session,
-            search=search,
             skip=skip,
             limit=limit,
-            include_deleted=False,
+            series_filter=SeriesListFilter(
+                search=search,
+                include_deleted=False,
+                language=language,
+                status=PlanStatus.PUBLISHED,
+                group_ids=[group_id] if group_id is not None else None,
+                language_fallback=True,
+                # Series merged into an event (directly or via one of its plans) are reached through the event.
+                exclude_event_linked=True,
+            ),
             order_by_field=Series.created_at,
             order_desc=True,
-            language=language,
-            status=PlanStatus.PUBLISHED,
             published_only=True,
-            group_ids=[group_id] if group_id is not None else None,
-            language_fallback=True,
         )
         rows = filter_items_for_timezone(
             rows,
@@ -815,17 +820,19 @@ def get_cms_filtered_series(
     with SessionLocal() as db_session:
         rows, total = get_series_paginated(
             db=db_session,
-            search=search,
             skip=skip,
             limit=limit,
-            include_deleted=False,
+            series_filter=SeriesListFilter(
+                search=search,
+                include_deleted=False,
+                author_id=author_id,
+                language=language,
+                status=plan_status,
+                featured=featured,
+                group_ids=group_ids,
+            ),
             order_by_field=Series.created_at,
             order_desc=True,
-            author_id=author_id,
-            language=language,
-            status=plan_status,
-            featured=featured,
-            group_ids=group_ids,
         )
         group_summaries = _group_summaries_for_series_rows(
             db=db_session,

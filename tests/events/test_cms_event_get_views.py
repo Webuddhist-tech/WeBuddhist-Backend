@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette import status
 
@@ -90,3 +91,60 @@ def test_cms_detail_success_passes_token():
 def test_cms_detail_invalid_uuid_returns_422():
     response = client.get("/cms/events/not-a-uuid", headers=AUTH)
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_deleting_an_event_stops_its_autoplay_once_deleted():
+    event_id = uuid4()
+    order = []
+    engine = AsyncMock()
+
+    async def stop(stopped_event_id, reason="stopped"):
+        order.append(("stop", stopped_event_id, reason))
+
+    def delete(token, event_id):
+        order.append(("delete", event_id))
+
+    engine.stop.side_effect = stop
+    with patch(
+        "pecha_api.events.recitation_autoplay_service.get_autoplay_engine",
+        return_value=engine,
+    ), patch(
+        "pecha_api.events.cms_event_views.delete_event_service",
+        side_effect=delete,
+    ):
+        response = client.delete(f"/cms/events/{event_id}", headers=AUTH)
+
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    assert order == [("delete", event_id), ("stop", event_id, "ended")]
+
+
+def test_a_delete_that_is_refused_does_not_stop_autoplay():
+    event_id = uuid4()
+    engine = AsyncMock()
+    with patch(
+        "pecha_api.events.recitation_autoplay_service.get_autoplay_engine",
+        return_value=engine,
+    ), patch(
+        "pecha_api.events.cms_event_views.delete_event_service",
+        side_effect=HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="no"),
+    ):
+        response = client.delete(f"/cms/events/{event_id}", headers=AUTH)
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    engine.stop.assert_not_awaited()
+
+
+def test_deleting_an_event_still_deletes_when_autoplay_cannot_be_stopped():
+    event_id = uuid4()
+    engine = AsyncMock()
+    engine.stop.side_effect = RuntimeError("redis down")
+    with patch(
+        "pecha_api.events.recitation_autoplay_service.get_autoplay_engine",
+        return_value=engine,
+    ), patch(
+        "pecha_api.events.cms_event_views.delete_event_service",
+    ) as delete:
+        response = client.delete(f"/cms/events/{event_id}", headers=AUTH)
+
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    delete.assert_called_once()

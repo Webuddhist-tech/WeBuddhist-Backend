@@ -18,6 +18,7 @@ from pecha_api.plans.admin.admin_service import (
     update_author_platform_role,
 )
 from pecha_api.plans.auth.cms_auth_deps import get_cms_author_token
+from pecha_api.plans.auth.plan_auth_enums import AuthorStatus
 from pecha_api.plans.platform_enums import PlatformRole
 
 cms_admin_router = APIRouter(prefix="/cms/admin/authors", tags=["CMS Admin Authors"])
@@ -31,6 +32,10 @@ def get_cms_admin_authors(
     is_active: Annotated[Optional[bool], Query()] = None,
     platform_role: Annotated[Optional[PlatformRole], Query()] = None,
     search: Annotated[Optional[str], Query()] = None,
+    account_status: Annotated[
+        Optional[AuthorStatus],
+        Query(description="ACTIVE, SUSPENDED, or INACTIVE (never signed in to the Studio)"),
+    ] = None,
     token: Annotated[str, Depends(get_cms_author_token)] = "",
 ):
     return list_admin_authors(
@@ -41,6 +46,7 @@ def get_cms_admin_authors(
         is_active=is_active,
         platform_role=platform_role,
         search=search,
+        account_status_filter=account_status,
     )
 
 

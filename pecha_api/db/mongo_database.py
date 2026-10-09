@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -10,12 +11,12 @@ from ..collections.collections_models import Collection
 from ..texts.texts_models import Text
 from ..texts.segments.segments_models import Segment
 from ..texts.texts_models import TableOfContent
-from ..texts.text_audio_models import TextAudio, TextAudioOtr
 from ..texts.groups.groups_models import Group
 from ..config import get
 from ..scheduler import setup_scheduler, shutdown_scheduler
 from ..group_posts.comment_websocket import init_broadcaster
 from ..chat.chat_websocket import init_broadcaster as init_chat_broadcaster
+from ..events.recitation_websocket import init_broadcaster as init_recitation_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ async def lifespan(api: FastAPI):
             logging.info("✅ Comment broadcaster initialized with Redis")
             await init_chat_broadcaster(redis_url=redis_url)
             logging.info("✅ Chat broadcaster initialized with Redis")
+            recitation_broadcaster = await init_recitation_broadcaster(redis_url=redis_url)
+            logging.info("✅ Recitation broadcaster initialized with Redis")
+            from ..events.recitation_autoplay_service import init_autoplay
+            from ..events.recitation_live_views import emit_autoplay_positions
+            await init_autoplay(recitation_broadcaster.redis, emit_autoplay_positions)
+            logging.info("✅ Recitation autoplay initialized")
         except ConnectionRefusedError as e:
             error_msg = (
                 f"❌ REDIS CONNECTION FAILED: Cannot connect to Redis at {get('REDIS_URL')}\n"
@@ -77,6 +84,10 @@ async def lifespan(api: FastAPI):
             )
             logging.error(error_msg)
             raise RuntimeError(error_msg) from e
+
+        from ..events.events_cache_service import bind_app_event_loop
+
+        bind_app_event_loop(asyncio.get_running_loop())
 
         connection_string = get("MONGO_CONNECTION_STRING")
         if not _is_mongo_connection_string_configured(connection_string):
@@ -110,8 +121,6 @@ async def lifespan(api: FastAPI):
                 Text,
                 Segment,
                 TableOfContent,
-                TextAudio,
-                TextAudioOtr,
                 Group,
             ],
             allow_index_dropping=True,
@@ -132,5 +141,13 @@ async def lifespan(api: FastAPI):
         if chat_broadcaster:
             await chat_broadcaster.disconnect()
             logging.info("Chat broadcaster disconnected")
+        # Before the broadcaster: autoplay hands its leases back through it, so
+        # another instance carries the room on at once.
+        from ..events.recitation_autoplay_service import shutdown_autoplay
+        await shutdown_autoplay()
+        from ..events.recitation_websocket import broadcaster as recitation_broadcaster
+        if recitation_broadcaster:
+            await recitation_broadcaster.disconnect()
+            logging.info("Recitation broadcaster disconnected")
         if mongodb_client:
             mongodb_client.close()

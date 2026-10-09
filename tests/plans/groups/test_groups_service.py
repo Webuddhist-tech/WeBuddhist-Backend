@@ -75,6 +75,7 @@ from pecha_api.plans.groups.groups_service import (
     get_cms_group_detail,
     list_cms_groups,
     list_group_members,
+    _list_group_members_sync,
     list_followed_groups,
     list_joined_groups,
     update_group_status,
@@ -136,6 +137,7 @@ def _make_group(
     group.status = group_status
     group.avatar_key = None
     group.banner_key = None
+    group.tradition = None
     group.metadata_entries = []
     group.members = []
     group.social_links = []
@@ -367,17 +369,24 @@ def test_list_group_members_not_found():
     ):
         _session_local_context(mock_session)
         with pytest.raises(HTTPException) as exc:
-            list_group_members(group_id=uuid4(), skip=0, limit=20)
+            _list_group_members_sync(group_id=uuid4(), skip=0, limit=20)
     assert exc.value.detail == GROUP_NOT_FOUND
+
+
+def _make_joiner(username, email, firstname="Alice", lastname="Smith"):
+    user = MagicMock()
+    user.id = uuid4()
+    user.email = email
+    user.username = username
+    user.firstname = firstname
+    user.lastname = lastname
+    user.avatar_url = f"images/profile_images/{username}.webp"
+    return user
 
 
 def test_list_group_members_returns_paginated_profiles():
     group = _make_group()
-    user = MagicMock()
-    user.username = "alice"
-    user.firstname = "Alice"
-    user.lastname = "Smith"
-    user.avatar_url = "images/profile_images/alice.webp"
+    user = _make_joiner("alice", "alice@example.org")
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
@@ -385,19 +394,117 @@ def test_list_group_members_returns_paginated_profiles():
         "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
         return_value=([user], 1),
     ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_user_ids",
+        return_value={},
+    ), patch(
         "pecha_api.plans.groups.groups_service._user_avatar_url",
         return_value="https://example.com/avatar.webp",
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
 
     assert result.total_members == 1
     assert result.skip == 0
     assert result.limit == 20
     assert len(result.list) == 1
+    assert result.list[0].user_id == user.id
+    assert result.list[0].role == "MEMBER"
     assert result.list[0].username == "alice"
     assert result.list[0].fullname == "Alice Smith"
     assert result.list[0].avatar_url == "https://example.com/avatar.webp"
+
+
+def test_list_group_members_returns_staff_role_for_linked_author():
+    group = _make_group()
+    admin_user = _make_joiner("alice", "alice@example.org")
+    plain_user = _make_joiner("bob", "bob@example.org", firstname="Bob")
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
+        return_value=([admin_user, plain_user], 2),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_user_ids",
+        return_value={admin_user.id: "ADMIN"},
+    ) as mock_roles, patch(
+        "pecha_api.plans.groups.groups_service._user_avatar_url",
+        return_value=None,
+    ):
+        _session_local_context(mock_session)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
+
+    assert mock_roles.call_args.kwargs["user_ids"] == [admin_user.id, plain_user.id]
+    assert [(m.user_id, m.role) for m in result.list] == [
+        (admin_user.id, "ADMIN"),
+        (plain_user.id, "MEMBER"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_group_members_runs_sync_body_in_threadpool():
+    expected = MagicMock()
+    group_id = uuid4()
+    with patch(
+        "pecha_api.plans.groups.groups_service.run_in_threadpool",
+        new=AsyncMock(return_value=expected),
+    ) as mock_threadpool:
+        result = await list_group_members(group_id=group_id, skip=0, limit=20, token="token")
+
+    assert result is expected
+    mock_threadpool.assert_awaited_once_with(
+        _list_group_members_sync,
+        group_id=group_id,
+        skip=0,
+        limit=20,
+        token="token",
+    )
+
+
+def _list_private_group_members(viewer_joined, token):
+    group = _make_group(is_public=False)
+    admin_user = _make_joiner("alice", "alice@example.org")
+    viewer = MagicMock()
+    viewer.id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
+        return_value=([admin_user], 1),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=viewer,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group",
+        return_value=viewer_joined,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_user_ids",
+        return_value={admin_user.id: "ADMIN"},
+    ) as mock_roles, patch(
+        "pecha_api.plans.groups.groups_service._user_avatar_url",
+        return_value=None,
+    ):
+        _session_local_context(mock_session)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20, token=token)
+    return result, mock_roles
+
+
+def test_list_group_members_private_group_hides_roles_without_token():
+    result, mock_roles = _list_private_group_members(viewer_joined=False, token=None)
+    mock_roles.assert_not_called()
+    assert result.list[0].role is None
+
+
+def test_list_group_members_private_group_hides_roles_from_non_joiner():
+    result, mock_roles = _list_private_group_members(viewer_joined=False, token="token")
+    mock_roles.assert_not_called()
+    assert result.list[0].role is None
+
+
+def test_list_group_members_private_group_shows_roles_to_joiner():
+    result, _ = _list_private_group_members(viewer_joined=True, token="token")
+    assert result.list[0].role == "ADMIN"
 
 
 def test_list_public_groups_defaults_to_community_type():
@@ -493,6 +600,41 @@ def test_list_public_groups_with_token_excludes_joined_groups():
         list_public_groups(skip=0, limit=10, token="valid-token")
 
     assert mock_paginated.call_args.kwargs["exclude_group_ids"] == [joined_group_id]
+
+
+def test_list_public_groups_include_joined_lists_joined_groups_and_flags_them():
+    joined_group = _make_group(group_type=AuthorGroupType.COMMUNITY)
+    joined_group.metadata_entries = []
+    other_group = _make_group(group_type=AuthorGroupType.COMMUNITY)
+    other_group.metadata_entries = []
+    user = MagicMock()
+    user.id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joined_group_ids_by_user",
+        return_value=[joined_group.id],
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_groups_paginated",
+        return_value=([joined_group, other_group], 2),
+    ) as mock_paginated, patch(
+        "pecha_api.plans.groups.groups_service.get_followers_count_map",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joiners_count_map",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_join_request_status_map",
+        return_value={},
+    ):
+        _session_local_context(mock_session)
+        response = list_public_groups(
+            skip=0, limit=10, token="valid-token", include_joined=True
+        )
+
+    assert mock_paginated.call_args.kwargs["exclude_group_ids"] is None
+    assert [group.is_joined for group in response.groups] == [True, False]
 
 
 def test_list_public_groups_with_token_and_no_joined_groups_does_not_exclude():
@@ -1190,10 +1332,55 @@ def test_unfollow_group_calls_repository():
         return_value=user,
     ), patch(
         "pecha_api.plans.groups.groups_service.remove_group_follow",
-    ) as mock_unfollow:
+    ) as mock_unfollow, patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group",
+        return_value=False,
+    ):
         _session_local_context(mock_session)
         unfollow_group(token="t", group_id=uuid4())
     mock_unfollow.assert_called_once()
+
+
+def test_unfollow_group_drops_chat_room_membership_when_not_joined():
+    user = MagicMock()
+    user.id = uuid4()
+    group_id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.remove_group_follow",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group",
+        return_value=False,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_chat_room",
+    ) as mock_leave_chat_room:
+        mock_db = _session_local_context(mock_session)
+        unfollow_group(token="t", group_id=group_id)
+    mock_leave_chat_room.assert_called_once_with(db=mock_db, group_id=group_id, user_id=user.id)
+
+
+def test_unfollow_group_keeps_chat_room_membership_when_still_joined():
+    """Chat access is granted to joiners OR followers, so unfollowing a group
+    the user is still a joiner of must not kick them out of its chat room."""
+    user = MagicMock()
+    user.id = uuid4()
+    group_id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.remove_group_follow",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group",
+        return_value=True,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_chat_room",
+    ) as mock_leave_chat_room:
+        mock_db = _session_local_context(mock_session)
+        unfollow_group(token="t", group_id=group_id)
+    mock_leave_chat_room.assert_not_called()
 
 
 def test_list_followed_groups():
@@ -1345,6 +1532,8 @@ def test_join_group_success():
     group = _make_group(is_public=True, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -1369,7 +1558,10 @@ def test_leave_group_calls_repository():
         "pecha_api.plans.groups.groups_service.remove_group_accumulator_joins_for_group",
     ) as mock_remove_accumulator_joins, patch(
         "pecha_api.plans.groups.groups_service.leave_group_membership",
-    ) as mock_leave_membership:
+    ) as mock_leave_membership, patch(
+        "pecha_api.plans.groups.groups_service.is_user_following_group",
+        return_value=False,
+    ):
         mock_db = _session_local_context(mock_session)
         leave_group(token="t", group_id=group_id)
     mock_remove_accumulator_joins.assert_called_once_with(
@@ -1382,6 +1574,52 @@ def test_leave_group_calls_repository():
         user_id=user.id,
         group_id=group_id,
     )
+
+
+def test_leave_group_drops_chat_room_membership_when_not_following():
+    user = MagicMock()
+    user.id = uuid4()
+    group_id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.remove_group_accumulator_joins_for_group",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_membership",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_following_group",
+        return_value=False,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_chat_room",
+    ) as mock_leave_chat_room:
+        mock_db = _session_local_context(mock_session)
+        leave_group(token="t", group_id=group_id)
+    mock_leave_chat_room.assert_called_once_with(db=mock_db, group_id=group_id, user_id=user.id)
+
+
+def test_leave_group_keeps_chat_room_membership_when_still_following():
+    """Chat access is granted to joiners OR followers, so leaving a group the
+    user still follows must not kick them out of its chat room."""
+    user = MagicMock()
+    user.id = uuid4()
+    group_id = uuid4()
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.remove_group_accumulator_joins_for_group",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_membership",
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_following_group",
+        return_value=True,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.leave_group_chat_room",
+    ) as mock_leave_chat_room:
+        mock_db = _session_local_context(mock_session)
+        leave_group(token="t", group_id=group_id)
+    mock_leave_chat_room.assert_not_called()
 
 
 def test_list_joined_groups():
@@ -3564,6 +3802,54 @@ def test_get_group_practices_feed_merges_and_sorts_by_created_at():
     assert mock_series_to_dtos.call_args.kwargs["published_only"] is True
 
 
+def test_get_group_practices_feed_guest_uses_public_scope_without_user_lookups():
+    group = _make_group()
+    accumulator = _make_feed_accumulator(group.id, datetime(2026, 1, 2, tzinfo=timezone.utc))
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+    ) as mock_validate, patch(
+        "pecha_api.plans.groups.groups_service.resolve_public_group_scope",
+        return_value=([group.id], set()),
+    ) as mock_scope, patch(
+        "pecha_api.plans.groups.groups_service.get_series_for_group_ids",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_standalone_plans_for_group_ids",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_accumulators_for_group_ids",
+        return_value=([accumulator], 1),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joined_group_accumulator_ids_by_user",
+    ) as mock_joined_acc, patch(
+        "pecha_api.plans.groups.groups_service.get_group_accumulator_joiners_counts",
+        return_value={accumulator.id: 5},
+    ), patch(
+        "pecha_api.plans.groups.groups_service._group_accumulator_to_dto",
+        side_effect=_feed_accumulator_dto,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_collections_for_group_ids_with_total",
+        return_value=([], 0),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_collection_item_counts",
+        return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_groups_by_ids",
+        return_value=[group],
+    ):
+        _session_local_context(mock_session)
+        result = get_group_practices_feed(token=None, skip=0, limit=20)
+
+    mock_validate.assert_not_called()
+    mock_joined_acc.assert_not_called()
+    mock_scope.assert_called_once()
+    assert mock_scope.call_args.kwargs["user_id"] is None
+    assert result.total == 1
+    assert result.practices[0].is_joined is False
+    assert result.practices[0].accumulator.is_joined is False
+
+
 def test_get_group_practices_feed_marks_unfollowed_groups():
     joined_group = _make_group(slug="joined-group")
     other_group = _make_group(slug="other-group")
@@ -3962,6 +4248,9 @@ def test_get_group_permission_app_user_no_author():
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
     ):
@@ -4105,6 +4394,7 @@ def test_get_group_permission_group_member():
 
     assert result.group_id == group.id
     assert result.has_permission is True
+    assert result.can_create_content is True
     assert result.role == AuthorGroupMemberRole.ADMIN
     assert result.is_super_admin is False
     assert result.author_id == author.id
@@ -4161,13 +4451,14 @@ def test_get_group_permission_author_role_no_management():
 
     assert result.group_id == group.id
     assert result.has_permission is False
+    assert result.can_create_content is True
     assert result.role == AuthorGroupMemberRole.AUTHOR
     assert result.is_super_admin is False
     assert result.author_id == author.id
 
 
 def test_get_group_permission_viewer_role_no_management():
-    """VIEWER role can only read → has_permission: false"""
+    """VIEWER role can only read → has_permission: false, can_create_content: false"""
     author = _make_author(email="viewer@example.org")
     group = _make_group()
 
@@ -4189,6 +4480,7 @@ def test_get_group_permission_viewer_role_no_management():
 
     assert result.group_id == group.id
     assert result.has_permission is False
+    assert result.can_create_content is False
     assert result.role == AuthorGroupMemberRole.VIEWER
     assert result.is_super_admin is False
     assert result.author_id == author.id
@@ -4337,11 +4629,17 @@ def test_get_group_permission_user_uuid_matches_unrelated_author():
         "pecha_api.plans.groups.groups_service.find_author_by_id",
         return_value=colliding_author,  # same id, unrelated Author record
     ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_email",
+        return_value=None,  # this user's own email has no Author account
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_user_by_id",
         return_value=user,  # live Users row exists at this exact id
     ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,  # this user has no persisted Author link
     ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
@@ -4421,12 +4719,9 @@ def test_get_group_permission_phone_only_author_no_collision():
     assert result.author_id == author.id
 
 
-def test_get_group_permission_author_uuid_collides_with_user_resolves_as_author():
-    """A genuine CMS Author whose id also happens to match a Users row must
-    keep their Author role and permission - the token's own email claim
-    (the Author's real email, set at mint time) positively identifies this
-    as an Author token, not a User token, even though the User lookup also
-    succeeds for the same id.
+def test_get_group_permission_author_uuid_collides_with_user_is_not_author():
+    """A live User at the same id as an Author is a website login, not a
+    CMS identity. Contact claims must not disambiguate the collision.
     """
     colliding_user = _make_user(email="unrelated-user@example.org")
     author = _make_author(
@@ -4442,22 +4737,22 @@ def test_get_group_permission_author_uuid_collides_with_user_resolves_as_author(
         return_value=author,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_user_by_id",
-        return_value=colliding_user,  # same id also resolves as a User
+        return_value=colliding_user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
-    ), patch(
-        "pecha_api.plans.groups.groups_service.get_member_role",
-        return_value=AuthorGroupMemberRole.OWNER,
     ):
         _session_local_context(mock_session)
         result = get_group_permission(token="t", group_id=group.id)
 
     assert result.group_id == group.id
-    assert result.has_permission is True
-    assert result.role == AuthorGroupMemberRole.OWNER
+    assert result.has_permission is False
+    assert result.role is None
     assert result.is_super_admin is False
-    assert result.author_id == author.id
+    assert result.author_id is None
 
 
 def test_get_group_permission_phone_only_user_uuid_collides_with_author():
@@ -4483,6 +4778,9 @@ def test_get_group_permission_phone_only_user_uuid_collides_with_author():
         "pecha_api.plans.groups.groups_service.get_user_by_id",
         return_value=phone_user,  # live Users row exists at this exact id
     ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
     ):
@@ -4496,13 +4794,8 @@ def test_get_group_permission_phone_only_user_uuid_collides_with_author():
     assert result.author_id is None
 
 
-def test_get_group_permission_phone_only_author_uuid_collides_with_user_resolves_as_author():
-    """A genuine phone-only CMS Author (no email) whose id also happens to
-    match a Users row must keep their Author role and permission - the
-    token's own phone_number claim (the Author's real phone, set at mint
-    time) positively identifies this as an Author token, exactly like the
-    email channel does for Authors who have an email.
-    """
+def test_get_group_permission_phone_only_author_uuid_collides_with_user_is_not_author():
+    """A phone match does not bind a colliding User token to that Author."""
     colliding_user = _make_user(email="unrelated-user@example.org", phone_number="+15559998888")
     author = _make_author(author_id=colliding_user.id, email=None, is_admin=False)
     author.phone_number = "+15551234567"
@@ -4516,22 +4809,22 @@ def test_get_group_permission_phone_only_author_uuid_collides_with_user_resolves
         return_value=author,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_user_by_id",
-        return_value=colliding_user,  # same id also resolves as a User
+        return_value=colliding_user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
-    ), patch(
-        "pecha_api.plans.groups.groups_service.get_member_role",
-        return_value=AuthorGroupMemberRole.ADMIN,
     ):
         _session_local_context(mock_session)
         result = get_group_permission(token="t", group_id=group.id)
 
     assert result.group_id == group.id
-    assert result.has_permission is True
-    assert result.role == AuthorGroupMemberRole.ADMIN
+    assert result.has_permission is False
+    assert result.role is None
     assert result.is_super_admin is False
-    assert result.author_id == author.id
+    assert result.author_id is None
 
 
 def test_get_group_permission_stale_phone_claim_does_not_deny_rightful_author():
@@ -4569,12 +4862,8 @@ def test_get_group_permission_stale_phone_claim_does_not_deny_rightful_author():
     assert result.author_id == author.id
 
 
-def test_get_group_permission_no_email_fallback():
-    """Token with email but no matching Author UUID → has_permission: false
-    
-    This tests Issue 2 & 5: Contact field mismatch prevention.
-    Email-based fallback should not be used for permission checks.
-    """
+def test_get_group_permission_website_user_does_not_resolve_author_by_email():
+    """A website User token must not inherit CMS access from a shared email."""
     user = _make_user(email="shared@example.org")
     group = _make_group()
 
@@ -4583,10 +4872,16 @@ def test_get_group_permission_no_email_fallback():
         return_value={"sub": str(user.id), "email": "shared@example.org"},
     ), patch(
         "pecha_api.plans.groups.groups_service.find_author_by_id",
-        return_value=None,  # UUID doesn't match any Author (email fallback not used)
+        return_value=None,
     ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_email",
+        return_value=_make_author(email="shared@example.org", is_admin=False),
+    ) as by_email, patch(
         "pecha_api.plans.groups.groups_service.get_user_by_id",
         return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
@@ -4594,7 +4889,70 @@ def test_get_group_permission_no_email_fallback():
         _session_local_context(mock_session)
         result = get_group_permission(token="t", group_id=group.id)
 
-    # Should NOT resolve to an Author via email fallback
+    by_email.assert_not_called()
+    assert result.group_id == group.id
+    assert result.has_permission is False
+    assert result.role is None
+    assert result.author_id is None
+
+
+def test_get_group_permission_website_user_does_not_resolve_author_by_phone():
+    """A website User token must not inherit CMS access from a shared phone."""
+    user = _make_user(email=None, phone_number="+15551234567")
+    group = _make_group()
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_token",
+        return_value={"sub": str(user.id), "phone_number": "+15551234567"},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_id",
+        return_value=None,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_user_by_id",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ):
+        _session_local_context(mock_session)
+        result = get_group_permission(token="t", group_id=group.id)
+    assert result.group_id == group.id
+    assert result.has_permission is False
+    assert result.role is None
+    assert result.author_id is None
+
+
+def test_get_group_permission_no_contact_match_no_author():
+    """A website User with no Author at their subject id has no CMS access.
+    """
+    user = _make_user(email="nobody-links-to-me@example.org")
+    group = _make_group()
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_token",
+        return_value={"sub": str(user.id), "email": "nobody-links-to-me@example.org"},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_id",
+        return_value=None,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_email",
+        return_value=None,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_user_by_id",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.find_author_by_user_id",
+        return_value=None,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ):
+        _session_local_context(mock_session)
+        result = get_group_permission(token="t", group_id=group.id)
+
     assert result.group_id == group.id
     assert result.has_permission is False
     assert result.role is None
@@ -4651,6 +5009,8 @@ def test_get_author_group_detail_private_group_full_for_joiner():
     ), patch(
         "pecha_api.plans.groups.groups_service.is_user_joined_group", return_value=True,
     ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
@@ -4664,6 +5024,91 @@ def test_get_author_group_detail_private_group_full_for_joiner():
 
     assert result.id == private_group.id
     mock_series.assert_called_once()
+
+
+def _detail_with_chat_room(
+    *,
+    joined=False,
+    following=False,
+    room=None,
+    token=None,
+):
+    """Run the public group detail with the chat lookups pinned, so a case only
+    has to say who the caller is and whether the room exists."""
+    group = _make_group(is_public=True)
+    user = MagicMock()
+    user.id = uuid4()
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id", return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_joined_group", return_value=joined,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.is_user_following_group", return_value=following,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=room,
+    ) as mock_get_room, patch(
+        "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_join_request_status_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_series_by_group_id", return_value=[],
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_plans_by_group_id", return_value=[],
+    ):
+        _session_local_context(mock_session)
+        return get_author_group_detail(group_id=group.id, token=token), mock_get_room
+
+
+def test_group_detail_carries_the_chat_room_id_for_a_joiner():
+    """The group page can open the chat without a second round trip."""
+    room = MagicMock(id=uuid4())
+
+    result, _ = _detail_with_chat_room(joined=True, room=room, token="t")
+
+    assert result.chat_room_id == room.id
+
+
+def test_group_detail_carries_the_chat_room_id_for_a_follower():
+    """Followers may chat too, so withholding the id would hide a room they
+    can actually open."""
+    room = MagicMock(id=uuid4())
+
+    result, _ = _detail_with_chat_room(following=True, room=room, token="t")
+
+    assert result.chat_room_id == room.id
+
+
+def test_group_detail_has_no_chat_room_id_before_the_room_exists():
+    """A room is created by the chat routes on first use - reading a group
+    page must not create one, nor make the viewer its creator."""
+    result, _ = _detail_with_chat_room(joined=True, room=None, token="t")
+
+    assert result.chat_room_id is None
+
+
+def test_group_detail_has_no_chat_room_id_for_an_outsider():
+    result, mock_get_room = _detail_with_chat_room(
+        joined=False, following=False, room=MagicMock(id=uuid4()), token="t"
+    )
+
+    assert result.chat_room_id is None
+    # Not eligible, so the room is never even looked up.
+    mock_get_room.assert_not_called()
+
+
+def test_group_detail_has_no_chat_room_id_for_an_anonymous_caller():
+    result, mock_get_room = _detail_with_chat_room(
+        joined=True, room=MagicMock(id=uuid4()), token=None
+    )
+
+    assert result.chat_room_id is None
+    mock_get_room.assert_not_called()
 
 
 def test_get_author_group_detail_public_group_unaffected():
@@ -4689,10 +5134,7 @@ def test_get_author_group_detail_public_group_unaffected():
 
 def test_list_group_members_private_group_returns_members_without_token():
     group = _make_group(is_public=False)
-    user = MagicMock()
-    user.username = "bob"
-    user.firstname = "Bob"
-    user.lastname = "Jones"
+    user = _make_joiner("bob", "bob@example.org", firstname="Bob", lastname="Jones")
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
         "pecha_api.plans.groups.groups_service.get_group_by_id",
         return_value=group,
@@ -4700,11 +5142,14 @@ def test_list_group_members_private_group_returns_members_without_token():
         "pecha_api.plans.groups.groups_service.list_group_joiners_paginated",
         return_value=([user], 1),
     ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_member_roles_by_user_ids",
+        return_value={},
+    ), patch(
         "pecha_api.plans.groups.groups_service._user_avatar_url",
         return_value=None,
     ):
         _session_local_context(mock_session)
-        result = list_group_members(group_id=group.id, skip=0, limit=20)
+        result = _list_group_members_sync(group_id=group.id, skip=0, limit=20)
 
     assert result.total_members == 1
     assert result.list[0].username == "bob"
@@ -4735,6 +5180,8 @@ def test_join_group_private_group_directs_to_request_flow():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4761,6 +5208,8 @@ def test_submit_group_join_request_creates_pending_request():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4801,6 +5250,8 @@ def test_submit_group_join_request_rejects_public_group():
     group = _make_group(is_public=True, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4822,6 +5273,8 @@ def test_submit_group_join_request_rejects_existing_member():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4850,6 +5303,8 @@ def test_submit_group_join_request_rejects_duplicate_pending():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -4910,6 +5365,11 @@ def test_approve_group_join_request_adds_joiner():
     ), patch(
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
+    ), patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
@@ -5038,6 +5498,7 @@ def test_list_group_join_requests_returns_requester_profile():
     requester = MagicMock()
     requester.firstname = "Tenzin"
     requester.lastname = "Tib"
+    requester.email = "tenzin@example.com"
     requester.avatar_url = None
     join_request.user = requester
 
@@ -5056,7 +5517,35 @@ def test_list_group_join_requests_returns_requester_profile():
 
     assert result.total == 1
     assert result.requests[0].user_name == "Tenzin Tib"
+    assert result.requests[0].email == "tenzin@example.com"
     assert result.requests[0].status == AuthorGroupJoinRequestStatus.PENDING
+
+
+def test_list_group_join_requests_omits_email_when_user_has_none():
+    author = _make_author(is_admin=True)
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    join_request = _make_join_request(group_id=group.id)
+    requester = MagicMock()
+    requester.firstname = "Dawa"
+    requester.lastname = ""
+    requester.email = None
+    requester.avatar_url = None
+    join_request.user = requester
+
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_author_details",
+        return_value=author,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_group_by_id",
+        return_value=group,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_join_requests_by_group",
+        return_value=([join_request], 1),
+    ):
+        _session_local_context(mock_session)
+        result = list_group_join_requests(token="t", group_id=group.id, skip=0, limit=20)
+
+    assert result.requests[0].email is None
 
 
 def test_flipping_group_public_approves_pending_join_requests():
@@ -5068,6 +5557,11 @@ def test_flipping_group_public_approves_pending_join_requests():
         "pecha_api.plans.groups.groups_service.list_pending_join_requests_by_group",
         return_value=pending,
     ) as mock_list, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join:
         _approve_pending_join_requests_on_publish(mock_db, group_id=group_id)
@@ -5097,6 +5591,8 @@ def test_submit_group_join_request_notifies_moderators():
     owner_id, admin_id = uuid4(), uuid4()
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5142,6 +5638,8 @@ def test_submit_group_join_request_survives_notification_failure():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5178,6 +5676,8 @@ def test_submit_group_join_request_without_moderators_sends_nothing():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5219,6 +5719,11 @@ def test_approve_join_request_keeps_row_lock_until_commit():
         "pecha_api.plans.groups.groups_service.get_join_request_by_id",
         return_value=join_request,
     ) as mock_get, patch(
+        # A MagicMock session makes every ban lookup return a row; the ban
+        # cases have their own tests in test_group_bans.py.
+        "pecha_api.plans.groups.groups_service.get_group_ban_expiry",
+        return_value=None,
+    ), patch(
         "pecha_api.plans.groups.groups_service.upsert_group_join",
     ) as mock_join, patch(
         "pecha_api.plans.groups.groups_service.save_join_request",
@@ -5242,6 +5747,8 @@ def test_submit_join_request_locks_group_against_concurrent_publish():
     created = _make_join_request(group_id=group.id, user_id=user.id)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5272,6 +5779,8 @@ def test_submit_join_request_rejects_group_published_under_us():
     group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
 
     with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.assert_user_not_banned_from_group",
+    ), patch(
         "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
         return_value=user,
     ), patch(
@@ -5308,6 +5817,8 @@ def test_group_detail_exposes_my_pending_join_request():
     ), patch(
         "pecha_api.plans.groups.groups_service.get_join_request_status_map",
         return_value={group.id: "PENDING"},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
     ), patch(
         "pecha_api.plans.groups.groups_service.get_followers_count_map", return_value={},
     ), patch(
@@ -5632,7 +6143,7 @@ def test_list_group_members_hides_unpublished_group():
     ):
         _session_local_context(mock_session)
         with pytest.raises(HTTPException) as exc:
-            list_group_members(group_id=group.id, skip=0, limit=10)
+            _list_group_members_sync(group_id=group.id, skip=0, limit=10)
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
 
@@ -5810,6 +6321,8 @@ def test_published_private_group_still_uses_teaser_flow():
         "pecha_api.plans.groups.groups_service.get_joiners_count_map", return_value={},
     ), patch(
         "pecha_api.plans.groups.groups_service.get_join_request_status_map", return_value={},
+    ), patch(
+        "pecha_api.plans.groups.groups_service.get_room_by_group_id", return_value=None,
     ):
         _session_local_context(mock_session)
         result = get_author_group_detail(group_id=group.id, token="t")
@@ -5841,3 +6354,113 @@ def test_get_group_member_accumulations_hides_unpublished_group():
             get_group_member_accumulations(group_id=group.id, accumulation_id=uuid4())
 
     assert exc.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+from pecha_api.plans.groups.groups_service import list_my_join_request_notifications
+
+
+def _make_decided_join_request(group, request_status, reviewed_at=None):
+    join_request = _make_join_request(group_id=group.id, request_status=request_status)
+    join_request.group = group
+    join_request.reviewed_by = uuid4()
+    join_request.reviewed_at = reviewed_at or datetime.now(timezone.utc)
+    return join_request
+
+
+def _metadata_entry(title, language):
+    entry = MagicMock()
+    entry.title = title
+    entry.language = language
+    return entry
+
+
+def _list_notifications(rows, total=None, language=None, user=None):
+    user = user or MagicMock(id=uuid4())
+    with patch("pecha_api.plans.groups.groups_service.SessionLocal") as mock_session, patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        return_value=user,
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_decided_join_requests_by_user",
+        return_value=(rows, len(rows) if total is None else total),
+    ) as mock_repo, patch(
+        "pecha_api.plans.groups.groups_service.generate_presigned_access_url",
+        return_value="https://signed/avatar.jpg",
+    ):
+        mock_db = _session_local_context(mock_session)
+        result = list_my_join_request_notifications(
+            token="t", skip=0, limit=20, language=language
+        )
+    mock_repo.assert_called_once_with(db=mock_db, user_id=user.id, skip=0, limit=20)
+    return result
+
+
+def test_list_my_join_request_notifications_approved_message():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [_metadata_entry("Vajra foundation", LanguageCode.EN)]
+    group.avatar_key = "images/avatar.jpg"
+    reviewed_at = datetime(2026, 9, 28, 9, 36, tzinfo=timezone.utc)
+    join_request = _make_decided_join_request(
+        group, AuthorGroupJoinRequestStatus.APPROVED, reviewed_at=reviewed_at
+    )
+
+    result = _list_notifications([join_request])
+
+    assert result.total == 1
+    item = result.notifications[0]
+    assert item.id == join_request.id
+    assert item.group_id == group.id
+    assert item.group_name == "Vajra foundation"
+    assert item.group_avatar_url == "https://signed/avatar.jpg"
+    assert item.status == AuthorGroupJoinRequestStatus.APPROVED
+    assert item.title == "WeBuddhist"
+    assert item.message == "Vajra foundation accepted your request. Tap to open the group."
+    assert item.created_at == reviewed_at
+
+
+def test_list_my_join_request_notifications_rejected_message():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [_metadata_entry("Vajra foundation", LanguageCode.EN)]
+    join_request = _make_decided_join_request(group, AuthorGroupJoinRequestStatus.REJECTED)
+
+    result = _list_notifications([join_request])
+
+    item = result.notifications[0]
+    assert item.status == AuthorGroupJoinRequestStatus.REJECTED
+    assert item.message == "Your request to join Vajra foundation was not approved."
+    assert item.group_avatar_url is None
+
+
+def test_list_my_join_request_notifications_uses_requested_language():
+    group = _make_group(is_public=False, group_type=AuthorGroupType.COMMUNITY)
+    group.metadata_entries = [
+        _metadata_entry("Vajra foundation", LanguageCode.EN),
+        _metadata_entry("རྡོ་རྗེ།", LanguageCode.BO),
+    ]
+    join_request = _make_decided_join_request(group, AuthorGroupJoinRequestStatus.APPROVED)
+
+    result = _list_notifications([join_request], language="bo")
+
+    assert result.notifications[0].group_name == "རྡོ་རྗེ།"
+
+
+def test_list_my_join_request_notifications_empty():
+    result = _list_notifications([], total=0)
+
+    assert result.notifications == []
+    assert result.total == 0
+    assert result.skip == 0
+    assert result.limit == 20
+
+
+def test_list_my_join_request_notifications_rejects_invalid_token():
+    with patch(
+        "pecha_api.plans.groups.groups_service.validate_and_extract_user_details",
+        side_effect=HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid"),
+    ), patch(
+        "pecha_api.plans.groups.groups_service.list_decided_join_requests_by_user",
+    ) as mock_repo:
+        with pytest.raises(HTTPException) as exc:
+            list_my_join_request_notifications(token="bad", skip=0, limit=20)
+
+    assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+    mock_repo.assert_not_called()

@@ -1,13 +1,17 @@
+import json
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from functools import lru_cache
+from typing import Any, Dict, Optional
 
 import jwt
 from jose import JWTError
 from jose.exceptions import ExpiredSignatureError as JoseExpiredSignatureError
 
 from pecha_api.auth.auth0_sms import verify_auth0_sms_token
+from pecha_api.uploads.S3_utils import generate_presigned_access_url
+from pecha_api.utils import Utils
 from ..config import get
 from ..notification.email_provider import send_email
 from .auth_models import CreateUserRequest, UserLoginResponse, RefreshTokenResponse, TokenResponse, UserInfo, \
@@ -22,7 +26,10 @@ from ..users.users_repository import (
     link_user_phone,
     save_phone_user,
     save_user,
+    update_user,
 )
+from ..plans.authors.plan_authors_repository import link_author_to_user
+from ..plans.authors.author_user_link_service import find_claimable_author, link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
 from .auth_repository import (
     create_access_token,
@@ -35,7 +42,6 @@ from .auth_repository import (
 )
 from .password_reset_repository import save_password_reset, get_password_reset_by_token
 from .auth_enums import RegistrationSource
-from ..error_contants import ErrorConstants
 from fastapi import HTTPException
 from starlette import status
 from jinja2 import Template
@@ -50,60 +56,154 @@ def register_user_with_source(create_user_request: CreateUserRequest, registrati
     return generate_token_user(registered_user)
 
 
-def create_user(create_user_request: CreateUserRequest, registration_source: RegistrationSource) -> Users:
-    logging.debug(f"RegistrationSource: {registration_source.value}")
-    logging.debug(f"Creating user with first name: {create_user_request.firstname}")
-
-    # Validate that either email or phone is provided
+def _require_email_or_phone(create_user_request: CreateUserRequest) -> None:
     if not create_user_request.email and not create_user_request.phone_number:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either email or phone number is required"
         )
 
+
+def _apply_phone_registration(create_user_request: CreateUserRequest) -> None:
+    if not create_user_request.phone_number:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Phone number is required for phone registration"
+        )
+    with SessionLocal() as db_session:
+        if get_user_by_phone(db_session, create_user_request.phone_number):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Phone number already registered"
+            )
+
+
+def _apply_email_registration(create_user_request: CreateUserRequest, new_user: Users) -> None:
+    if not create_user_request.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is required for email registration"
+        )
+    _validate_password(create_user_request.password)
+    new_user.password = get_hashed_password(create_user_request.password)
+
+
+def create_user(
+    create_user_request: CreateUserRequest,
+    registration_source: RegistrationSource,
+    identifier_verified: bool = False,
+) -> Users:
+    """`identifier_verified` says the caller has proved ownership of the email
+    or phone being registered. Only then may the new account take over an
+    existing Author with the same identifier."""
+    logging.debug(f"RegistrationSource: {registration_source.value}")
+    logging.debug(f"Creating user with first name: {create_user_request.firstname}")
+
+    _require_email_or_phone(create_user_request)
+
     new_user = Users(**create_user_request.model_dump(exclude_unset=True))
     new_user.is_admin = False
+    new_user.username = generate_and_validate_username(
+        first_name=create_user_request.firstname,
+        last_name=create_user_request.lastname,
+    )
 
-    username = generate_and_validate_username(first_name=create_user_request.firstname,
-                                              last_name=create_user_request.lastname,
-                                              phone_number=create_user_request.phone_number)
-    new_user.username = username
-
-    # Handle phone registration
     if registration_source == RegistrationSource.PHONE:
-        if not create_user_request.phone_number:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Phone number is required for phone registration"
-            )
-        # Check if phone already exists
-        with SessionLocal() as db_session:
-            existing_phone_user = get_user_by_phone(db_session, create_user_request.phone_number)
-            if existing_phone_user:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="Phone number already registered"
-                )
-
-    # Handle email registration (traditional)
+        _apply_phone_registration(create_user_request)
     if registration_source == RegistrationSource.EMAIL:
-        if not create_user_request.email:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email is required for email registration"
-            )
-        _validate_password(create_user_request.password)
-        hashed_password = get_hashed_password(create_user_request.password)
-        new_user.password = hashed_password
+        _apply_email_registration(create_user_request, new_user)
 
     # For social logins (Google, Facebook, Apple, etc.), password is not required
     new_user.registration_source = registration_source.value
 
     with SessionLocal() as db_session:
-        if create_user_request.email and get_user_by_email_or_none(db=db_session, email=create_user_request.email):
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ErrorConstants.USER_ALREADY_EXISTS)
         saved_user = save_user(db=db_session, user=new_user)
+        link_or_create_author_for_user(
+            db=db_session,
+            user=saved_user,
+            identifier_verified=identifier_verified,
+        )
         return saved_user
+
+
+def is_trusted_social_register_caller(token: Optional[str]) -> bool:
+    """Whether a /auth/social_register call may write to an existing account.
+
+    Attempting to create an account is safe for anyone: an identifier that is
+    already taken is rejected. Writing to the account that did the rejecting
+    is not, so that part is reserved for the Auth0 Post Login Action, which is
+    the only caller holding this shared secret. An unset secret fails closed -
+    the backfill is skipped - rather than leaving the write open to everyone.
+    """
+    expected = get("SOCIAL_REGISTER_SECRET_TOKEN")
+    if not expected or not token:
+        return False
+    return secrets.compare_digest(token, expected)
+
+
+def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
+    """Store Auth0's picture on an account that already exists.
+
+    A picture the user uploaded themselves is an S3 key and is left alone.
+    An empty avatar, or one that is already an Auth0 https URL, takes the
+    picture from this login. Only the identity providers' own image hosts are
+    accepted, so a caller holding the shared secret still cannot point an
+    account's avatar at an arbitrary server.
+    """
+    picture = create_user_request.avatar_url
+    if not picture or not Utils.is_social_picture_url(picture):
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = None
+            if create_user_request.email:
+                user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None and create_user_request.phone_number:
+                user = get_user_by_phone(db=db_session, phone_number=create_user_request.phone_number)
+            if user is None:
+                return
+            if user.avatar_url and not str(user.avatar_url).startswith("https://"):
+                return
+            if user.avatar_url == picture:
+                return
+            user.avatar_url = picture
+            update_user(db=db_session, user=user)
+    except Exception:
+        logging.exception("Failed to store social profile image")
+
+
+def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> None:
+    """Link an existing Author to an account that already exists, once a
+    trusted caller has proved ownership of its email.
+
+    Signup could not link it: an email/password registration proves nothing.
+    That same weakness is why the account's password and every token already
+    issued are revoked first when the account came from such a signup -
+    whoever set the password may not be the owner, and would otherwise inherit
+    the Author's permissions. The verified owner signs
+    in through their identity provider or resets the password by email.
+    Best-effort and fail-closed: any error leaves the Author unlinked.
+    """
+    if not create_user_request.email:
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None:
+                return
+            author = find_claimable_author(db=db_session, user=user)
+            if author is None:
+                return
+            if user.registration_source == RegistrationSource.EMAIL.value:
+                # Credentials of an unverified signup: the password, and every
+                # token already issued - a refresh token would otherwise keep
+                # minting access tokens that gain the Author's permissions.
+                user.password = None
+                user.tokens_valid_after = datetime.now(timezone.utc)
+                user = update_user(db=db_session, user=user)
+            link_author_to_user(db=db_session, author=author, user_id=user.id)
+    except Exception:
+        logging.exception("Failed to link Author after verified social login")
 
 
 def _validate_password(password: str):
@@ -139,7 +239,10 @@ def generate_token_user(user: Users):
     return UserLoginResponse(
         user=UserInfo(
             name=user.firstname + " " + user.lastname,
-            avatar_url=user.avatar_url
+            avatar_url=generate_presigned_access_url(
+                bucket_name=get("AWS_BUCKET_NAME"),
+                s3_key=user.avatar_url,
+            ) or None
         ),
         auth=token_response
     )
@@ -230,6 +333,8 @@ def exchange_phone_token(request: PhoneExchangeRequest) -> PhoneExchangeResponse
             is_admin=False,
         )
         user = save_phone_user(db=db, user=user)
+        # The phone number comes from a verified Auth0 SMS token.
+        link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
         return _phone_exchange_response(user, sms_identity.phone_number)
 
 
@@ -343,33 +448,96 @@ def validate_username(username: str) -> bool:
         return user is None
 
 
-def generate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+# users.username is VARCHAR(255). A name-based handle is
+# first + "_" + last + "_" + 5 base36 + "_a" + 4 digits.
+# The fixed wrapper is 13 characters, leaving 242 for the two names.
+_USERNAME_MAX_LENGTH = 255
+_BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 5
+
+# Signups whose first or last name contains this get a random handle instead,
+# so nobody gets a name-based username that reads as the platform.
+_PLATFORM_NAME_MARKER = "webuddhist"
+_RANDOM_NAMES_PATH = Path(__file__).resolve().parent.parent / "assets" / "random_usernames.json"
+_RANDOM_NUMBER_WIDTH = 4
+
+
+@lru_cache(maxsize=1)
+def _get_random_names() -> tuple[str, ...]:
+    with _RANDOM_NAMES_PATH.open(encoding="utf-8") as names_file:
+        return tuple(json.load(names_file))
+
+
+def _name_part(name: str | None) -> str:
+    if not name:
+        return ""
+    return "".join(char for char in name.strip().lower() if char.isalnum())
+
+
+def _fit_name_parts(first: str, last: str, max_combined: int) -> tuple[str, str]:
+    """Shorten names so both still appear and their combined length fits."""
+    if len(first) + len(last) <= max_combined:
+        return first, last
+
+    first_budget = min(len(first), max(1, max_combined // 2))
+    last_budget = max_combined - first_budget
+    if len(last) < last_budget:
+        last_budget = len(last)
+        first_budget = max_combined - last_budget
+    return first[:first_budget], last[:last_budget]
+
+
+def _random_base36(width: int = _BASE36_WIDTH) -> str:
+    value = secrets.randbelow(36 ** width)
+    chars = []
+    for _ in range(width):
+        value, remainder = divmod(value, 36)
+        chars.append(_BASE36_ALPHABET[remainder])
+    return "".join(reversed(chars))
+
+
+def _random_digits(width: int = _RANDOM_NUMBER_WIDTH) -> str:
+    return str(secrets.randbelow(10 ** width)).zfill(width)
+
+
+def _random_marked_suffix() -> str:
+    return "a" + _random_digits()
+
+
+def generate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
-    Generate a username based on the following logic:
-    - If phone_number is present: webuddhist_{firstname}_{lastname}_{phonenumber}
-    - If phone_number is NOT present: webuddhist_user_{random_6_digit}
+    Generate a public username.
 
-    Uses cryptographically secure random number generation for username uniqueness.
+    Either name contains "webuddhist": {random_name}_{dddd}, name from random_usernames.json
+    Both names present: {firstname}_{lastname}_{base36}_a{dddd}
+    Either name missing, including phone-only signup: webuddhist_user_{base36}_a{dddd}
+
+    Names are shortened so the result always fits users.username. The phone
+    number is never included. It stays on users.phone_number.
     """
-    random_suffix = str(secrets.randbelow(9999) + 1).zfill(4)
+    first = _name_part(first_name)
+    last = _name_part(last_name)
+    if _PLATFORM_NAME_MARKER in first or _PLATFORM_NAME_MARKER in last:
+        return f"{secrets.choice(_get_random_names())}_{_random_digits()}"
 
-    if phone_number:
-        # Sanitize phone number - remove all non-digit characters
-        sanitized_phone = ''.join(filter(str.isdigit, phone_number))
-        return f"webuddhist_{first_name.lower()}_{last_name.lower()}_{sanitized_phone}.{random_suffix}"
-    else:
-        # Use random fallback if no phone number
-        random_num = str(secrets.randbelow(900000) + 100000)
-        return f"webuddhist_user_{random_num}.{random_suffix}"
+    token = _random_base36()
+    marked_suffix = _random_marked_suffix()
+    if not first or not last:
+        return f"webuddhist_user_{token}_{marked_suffix}"
+
+    tail = f"_{token}_{marked_suffix}"
+    name_budget = _USERNAME_MAX_LENGTH - len("_") - len(tail)
+    first, last = _fit_name_parts(first, last, name_budget)
+    return f"{first}_{last}{tail}"
 
 
-def generate_and_validate_username(first_name: str, last_name: str, phone_number: str = None) -> str:
+def generate_and_validate_username(first_name: str | None = None, last_name: str | None = None) -> str:
     """
     Generate and validate a unique username.
     Keeps generating new usernames until a unique one is found.
     """
-    while True:  # Loop until a valid username is generated
-        username = generate_username(first_name=first_name, last_name=last_name, phone_number=phone_number)
+    while True:
+        username = generate_username(first_name=first_name, last_name=last_name)
         if validate_username(username=username):
             return username
 

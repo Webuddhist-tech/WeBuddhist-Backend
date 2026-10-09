@@ -1,4 +1,5 @@
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator, Field
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO
 from typing import Optional, List
 from datetime import datetime
 from pecha_api.plans.plans_enums import (
@@ -10,6 +11,7 @@ from pecha_api.plans.plans_enums import (
 )
 from uuid import UUID
 from pecha_api.plans.plans_models import Plan
+from pecha_api.plans.shared.subtask_reference_resolver import SubTaskReferenceDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 
 
@@ -90,6 +92,8 @@ class SubTaskDTO(BaseModel):
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
     audio_url: Optional[str] = None
+    reference_id: Optional[UUID] = None
+    reference: Optional[SubTaskReferenceDTO] = None
 
 class TaskDTO(BaseModel):
     id: UUID
@@ -97,12 +101,14 @@ class TaskDTO(BaseModel):
     estimated_time: Optional[int] = None
     display_order: Optional[int] = None
     subtasks: List[SubTaskDTO] = []
+    settings: TaskSettingsDTO = Field(default_factory=TaskSettingsDTO)
 
 class DayVideoSummaryDTO(BaseModel):
     id: UUID
     url: str
     video_id: Optional[str] = None
     title: Optional[str] = None
+    duration_seconds: Optional[int] = None
     display_order: int
 
 class PlanDayDTO(BaseModel):

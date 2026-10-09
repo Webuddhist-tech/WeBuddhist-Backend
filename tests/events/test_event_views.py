@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -30,7 +30,8 @@ def test_get_events_forwards_include_unfollowed():
     response_payload = EventsResponse(events=[], total=0, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_service",
+        "pecha_api.events.event_views.get_events_service_cached",
+        new_callable=AsyncMock,
         return_value=response_payload,
     ) as mock_service:
         response = client.get("/events?include_unfollowed=true")
@@ -44,7 +45,8 @@ def test_get_events_today_success():
     response_payload = EventsResponse(events=[event], total=1, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=response_payload,
     ) as mock_service:
         response = client.get("/events/today")
@@ -68,7 +70,8 @@ def test_get_events_today_with_timezone_header():
     response_payload = EventsResponse(events=[], total=0, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=response_payload,
     ) as mock_service:
         response = client.get(
@@ -92,7 +95,8 @@ def test_get_events_today_forwards_optional_token():
     response_payload = EventsResponse(events=[], total=0, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=response_payload,
     ) as mock_service:
         response = client.get(
@@ -116,7 +120,8 @@ def test_get_events_today_forwards_include_unfollowed():
     response_payload = EventsResponse(events=[], total=0, skip=0, limit=20)
 
     with patch(
-        "pecha_api.events.event_views.get_events_today_service",
+        "pecha_api.events.event_views.get_events_today_service_cached",
+        new_callable=AsyncMock,
         return_value=response_payload,
     ) as mock_service:
         response = client.get("/events/today?include_unfollowed=true")
@@ -130,7 +135,8 @@ def test_get_event_by_id_forwards_optional_token():
     event_id = event.id
 
     with patch(
-        "pecha_api.events.event_views.get_event_by_id_service",
+        "pecha_api.events.event_views.get_event_by_id_service_cached",
+        new_callable=AsyncMock,
         return_value=event,
     ) as mock_service:
         response = client.get(

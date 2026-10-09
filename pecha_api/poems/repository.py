@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from uuid import UUID
 
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from pecha_api.plans.plans_enums import LanguageCode
@@ -17,8 +18,14 @@ def get_poems_list(
     chapter_name: Optional[str] = None,
     author_name: Optional[str] = None,
     language: Optional[LanguageCode] = None,
+    shuffle_seed: Optional[str] = None,
 ) -> Tuple[List[Poem], int]:
-    """Get paginated poems, newest first, excluding soft-deleted."""
+    """Get paginated poems, excluding soft-deleted.
+
+    Newest first by default. With shuffle_seed, poems are ordered by a hash of
+    id + seed: shuffled, but stable for the same seed so pagination does not
+    repeat or skip poems.
+    """
     query = db.query(Poem).filter(Poem.deleted_at.is_(None))
 
     if status is not None:
@@ -33,7 +40,13 @@ def get_poems_list(
     if language is not None:
         query = query.filter(Poem.language == language)
 
-    query = query.order_by(Poem.published_at.desc(), Poem.id.desc())
+    if shuffle_seed is not None:
+        query = query.order_by(
+            func.md5(func.concat(cast(Poem.id, String), shuffle_seed)),
+            Poem.id,
+        )
+    else:
+        query = query.order_by(Poem.published_at.desc(), Poem.id.desc())
 
     total = query.count()
     poems = query.offset(skip).limit(limit).all()

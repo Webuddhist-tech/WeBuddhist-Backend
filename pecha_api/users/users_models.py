@@ -22,12 +22,14 @@ class Users(Base):
     location = Column(String(255),nullable=True)
     education = Column(String(255),nullable=True)
     about_me = Column(String,nullable=True)
-    avatar_url = Column(String(255),nullable=True)
+    avatar_url = Column(String(2048),nullable=True)
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, server_default="FALSE", default=False,nullable=False)
     has_seen_onboarding = Column(Boolean, server_default="FALSE", default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.now(_datetime.timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(_datetime.timezone.utc))
+    # Backend tokens issued at or before this are rejected (see user_resolution).
+    tokens_valid_after = Column(DateTime(timezone=True), nullable=True)
 
     # Define the relationship between users and social media accounts
     social_media_accounts = relationship("SocialMediaAccount", back_populates="user", cascade="all, delete-orphan")

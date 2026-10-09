@@ -1,7 +1,7 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import func
-from typing import List, Tuple, Optional, Dict
+from sqlalchemy import case, func
+from typing import TYPE_CHECKING, List, Tuple, Optional, Dict
 from uuid import UUID
 import _datetime
 from _datetime import datetime
@@ -17,6 +17,10 @@ from .group_accumulator_history_model import GroupAccumulatorHistory
 from .group_accumulator_join_model import group_accumulator_joins
 from ..mantra.mantra_model import Mantra
 from ..mantra.mantra_metadata_model import MantraMetadata
+
+if TYPE_CHECKING:
+    from pecha_api.events.event_model import Event
+    from pecha_api.plans.groups.groups_models import AuthorGroup
 
 
 def mantra_exists(db: Session, mantra_id: UUID) -> bool:
@@ -345,16 +349,113 @@ def get_user_accumulator_history(
 
 
 class GroupAccumulatorWithUserCount:
-    """Data class for group accumulator with user's total count."""
+    """Data class for group accumulator with user's and group's total count."""
     def __init__(
         self,
         group_accumulator: GroupAccumulator,
         user_total_count: int,
         is_joined: bool = False,
-    ):
+        group_total_count: int = 0,
+        group: Optional["AuthorGroup"] = None,
+        event: Optional["Event"] = None,
+    ) -> None:
         self.group_accumulator = group_accumulator
         self.user_total_count = user_total_count
         self.is_joined = is_joined
+        self.group_total_count = group_total_count
+        self.group = group
+        self.event = event
+
+
+def _get_visible_groups_by_id(
+    db: Session, group_ids: List[UUID], user_id: UUID
+) -> Dict[UUID, "AuthorGroup"]:
+    """Published, non-deleted groups with their metadata that this user may see:
+    public groups, and private ones the user has joined. A private group's name
+    must not reach someone who has not joined it."""
+    from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
+    from pecha_api.plans.groups.groups_models import AuthorGroup
+    from pecha_api.plans.groups.groups_repository import get_joined_group_ids_by_user
+
+    groups = (
+        db.query(AuthorGroup)
+        .options(selectinload(AuthorGroup.metadata_entries))
+        .filter(
+            AuthorGroup.id.in_(set(group_ids)),
+            AuthorGroup.status == AuthorGroupStatus.PUBLISHED,
+            AuthorGroup.deleted_at.is_(None),
+        )
+        .all()
+    )
+    joined_group_ids = set(get_joined_group_ids_by_user(db=db, user_id=user_id))
+    return {
+        group.id: group
+        for group in groups
+        if group.is_public or group.id in joined_group_ids
+    }
+
+
+def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) -> Dict[UUID, "Event"]:
+    """The most recently created event linking each group accumulator, with its metadata.
+
+    An event links a group accumulator only within the same group (see
+    group_accumulator_not_linked_to_event). Events pointing at a draft or
+    missing plan/series are skipped, as in normal event reads, so their title
+    is never shown.
+    """
+    if not group_accumulator_ids:
+        return {}
+
+    from pecha_api.events.event_model import Event
+    from pecha_api.events.event_repository import _publishable_linked_content_filter
+
+    latest = (
+        db.query(
+            Event.id.label("event_id"),
+            func.row_number()
+            .over(partition_by=Event.group_accumulator_id, order_by=Event.created_at.desc())
+            .label("rank"),
+        )
+        .join(GroupAccumulator, GroupAccumulator.id == Event.group_accumulator_id)
+        .filter(
+            Event.group_accumulator_id.in_(group_accumulator_ids),
+            Event.group_id == GroupAccumulator.group_id,
+            _publishable_linked_content_filter(),
+        )
+        .subquery()
+    )
+    events = (
+        db.query(Event)
+        .join(latest, latest.c.event_id == Event.id)
+        .filter(latest.c.rank == 1)
+        .options(selectinload(Event.metadata_entries))
+        .all()
+    )
+    linked: Dict[UUID, "Event"] = {event.group_accumulator_id: event for event in events}
+
+    from pecha_api.events.group_event_accumulation_model import GroupEventAccumulation
+
+    junction_rows = (
+        db.query(Event, GroupEventAccumulation.group_accumulator_id)
+        .join(
+            GroupEventAccumulation,
+            GroupEventAccumulation.event_id == Event.id,
+        )
+        .join(GroupAccumulator, GroupAccumulator.id == GroupEventAccumulation.group_accumulator_id)
+        .filter(
+            GroupEventAccumulation.group_accumulator_id.in_(group_accumulator_ids),
+            Event.group_id == GroupAccumulator.group_id,
+            _publishable_linked_content_filter(),
+        )
+        .options(selectinload(Event.metadata_entries))
+        .order_by(Event.created_at.desc())
+        .all()
+    )
+    for event, group_accumulator_id in junction_rows:
+        existing = linked.get(group_accumulator_id)
+        if existing is None or event.created_at > existing.created_at:
+            linked[group_accumulator_id] = event
+    return linked
 
 
 def get_groups_by_accumulator_id(
@@ -371,8 +472,14 @@ def get_groups_by_accumulator_id(
     """
     query = db.query(GroupAccumulator).filter(
         GroupAccumulator.accumulator_id == accumulator_id,
-        GroupAccumulator.deleted_at.is_(None)
+        GroupAccumulator.deleted_at.is_(None),
     )
+    if not joined_only:
+        from pecha_api.plans.shared.event_linkage import (
+            group_accumulator_not_linked_to_event,
+        )
+
+        query = query.filter(group_accumulator_not_linked_to_event())
 
     if joined_only:
         query = query.join(
@@ -389,21 +496,22 @@ def get_groups_by_accumulator_id(
     
     group_accumulator_ids = [ga.id for ga in group_accumulators]
     
-    # Get user's total count for each group accumulator
-    user_counts_query = (
+    # Get the user's total and the group's total (all members) for each group accumulator in one query
+    counts_query = (
         db.query(
             GroupAccumulatorHistory.group_accumulator_id,
-            func.sum(GroupAccumulatorHistory.count).label('total_count')
+            func.sum(
+                case((GroupAccumulatorHistory.user_id == user_id, GroupAccumulatorHistory.count), else_=0)
+            ).label('user_total_count'),
+            func.sum(GroupAccumulatorHistory.count).label('group_total_count'),
         )
-        .filter(
-            GroupAccumulatorHistory.group_accumulator_id.in_(group_accumulator_ids),
-            GroupAccumulatorHistory.user_id == user_id
-        )
+        .filter(GroupAccumulatorHistory.group_accumulator_id.in_(group_accumulator_ids))
         .group_by(GroupAccumulatorHistory.group_accumulator_id)
         .all()
     )
-    
-    user_counts_map = {row.group_accumulator_id: int(row.total_count or 0) for row in user_counts_query}
+
+    user_counts_map = {row.group_accumulator_id: int(row.user_total_count or 0) for row in counts_query}
+    group_counts_map = {row.group_accumulator_id: int(row.group_total_count or 0) for row in counts_query}
 
     from pecha_api.group_accumulator.group_accumulator_repository import (
         get_joined_group_accumulator_ids_by_user,
@@ -417,11 +525,20 @@ def get_groups_by_accumulator_id(
         )
     )
 
+    groups_by_id = _get_visible_groups_by_id(db, [ga.group_id for ga in group_accumulators], user_id)
+    events_by_group_accumulator_id = _get_latest_linked_events(
+        db,
+        [ga.id for ga in group_accumulators if ga.group_id in groups_by_id],
+    )
+
     result = [
         GroupAccumulatorWithUserCount(
             group_accumulator=ga,
             user_total_count=user_counts_map.get(ga.id, 0),
             is_joined=ga.id in joined_ids,
+            group_total_count=group_counts_map.get(ga.id, 0),
+            group=groups_by_id.get(ga.group_id),
+            event=events_by_group_accumulator_id.get(ga.id),
         )
         for ga in group_accumulators
     ]

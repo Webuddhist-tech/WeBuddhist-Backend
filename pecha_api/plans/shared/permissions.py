@@ -58,6 +58,10 @@ def is_reviewer(author: Author) -> bool:
     return get_platform_role(author) == PlatformRole.REVIEWER
 
 
+def is_content_admin(author: Author) -> bool:
+    return get_platform_role(author) == PlatformRole.CONTENT_ADMIN
+
+
 def is_platform_read_only(author: Author) -> bool:
     return is_reviewer(author)
 
@@ -72,6 +76,13 @@ def require_active_author(author: Author) -> None:
 
 def require_super_admin(author: Author) -> None:
     if not is_super_admin(author):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
+
+
+def require_content_manager(author: Author) -> None:
+    """The app-wide content catalogues (not tied to any space): super admins
+    and content admins may change them."""
+    if not (is_super_admin(author) or is_content_admin(author)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
 
 
@@ -143,6 +154,13 @@ def _normalize_plan_status(status_value) -> PlanStatus:
     if hasattr(status_value, "value"):
         return PlanStatus(status_value.value)
     return PlanStatus(status_value)
+
+
+def can_create_group_content(member_role: Optional[AuthorGroupMemberRole]) -> bool:
+    """Same role set require_can_create_content enforces (OWNER/ADMIN/AUTHOR)
+    - exposed as a plain predicate for callers that report permissions
+    rather than gate an action (e.g. GET /users/me/permission/{group_id})."""
+    return member_role in _CONTENT_CREATE_ROLES
 
 
 def can_edit_content(member_role: AuthorGroupMemberRole, content_status) -> bool:
@@ -240,7 +258,7 @@ def build_author_access_context(db: Session, author: Author) -> dict:
     can_create_content = (
         bool(author.is_active)
         and has_group
-        and role in {PlatformRole.CREATOR, PlatformRole.SUPER_ADMIN}
+        and role in {PlatformRole.CREATOR, PlatformRole.CONTENT_ADMIN, PlatformRole.SUPER_ADMIN}
     )
     return {
         "platform_role": role,

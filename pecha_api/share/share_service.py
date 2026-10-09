@@ -1,12 +1,36 @@
 from fastapi import HTTPException
 import io
+import logging
+from collections import OrderedDict
+import re
+from threading import Lock
+from functools import partial
+from typing import Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
+from uuid import UUID
+
+from sqlalchemy.orm import Session
+
 from pecha_api.error_contants import ErrorConstants
 from starlette.responses import StreamingResponse
-from .pecha_text_image_generator import generate_segment_image
+from .pecha_text_image_generator import (
+    ImageDestination,
+    generate_event_share_image,
+    generate_segment_image,
+)
 from pecha_api.texts.segments.segments_openpecha_service import get_openpecha_segment_details_by_id
 from pecha_api.texts.texts_openpecha_service import get_text_by_id_from_openpecha
-from pecha_api.config import get
+from pecha_api.config import get, get_int
+from pecha_api.db.database import SessionLocal
+from pecha_api.poems.enums import PoemStatus
+from pecha_api.poems.repository import get_poem_by_id
+from pecha_api.events.event_repository import get_event_by_id
+from pecha_api.group_posts.enums import GroupPostStatus
+from pecha_api.group_posts.repository import get_post_by_id_only
+from pecha_api.plans.groups.groups_models import AuthorGroup
+from pecha_api.plans.groups.groups_repository import is_group_published
 import anyio
+from anyio import to_thread
 
 from pecha_api.share.share_response_models import (
     ShareRequest,
@@ -14,17 +38,84 @@ from pecha_api.share.share_response_models import (
 )
 
 from pecha_api.short_url.short_url_service import get_short_url
-
-from pecha_api.error_contants import ErrorConstants
+from pecha_api.uploads.S3_utils import download_bytes
 
 LOGO_PATH = "pecha_api/share/static/img/pecha-logo.png"
 IMAGE_PATH = "pecha_api/share/static/img/output.png"
 MEDIA_TYPE = "image/png"
+JPEG_MEDIA_TYPE = "image/jpeg"
+# Event photos, keyed by S3 key, most-recently-used last. A share card is
+# the same for every viewer, so this holds nothing per-user.
+_event_photo_cache: "OrderedDict[str, bytes]" = OrderedDict()
+# `_load_event_photo_bytes` runs in a worker thread, so two concurrent
+# /share/image requests reach the cache at once. The individual OrderedDict
+# operations are atomic but the sequences below are not: a reader that has just
+# found a key can have it evicted by another thread before it calls
+# move_to_end, which then raises KeyError and turns an image into a 500.
+_event_photo_cache_lock = Lock()
+# (title, description, language, image_key) as the share card needs it. The
+# image key is the event photo's S3 key, or None when the event has no photo.
+EventShareMetadata = tuple[str, Optional[str], Optional[str], Optional[str]]
 DEFAULT_OG_TITLE = get("SITE_NAME")
 DEFAULT_OG_DESCRIPTION = get("SITE_NAME")
 PECHA_FRONTEND_ENDPOINT = "https://webuddhist.com/chapter"
+_EMPTY_IDS = {"", "none", "null"}
+_UUID_PATTERN = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_PATH_ID_PATTERNS = {
+    "poem_id": re.compile(rf"/poems?/({_UUID_PATTERN})", re.IGNORECASE),
+    "event_id": re.compile(rf"/events?/({_UUID_PATTERN})", re.IGNORECASE),
+    "post_id": re.compile(rf"/posts?/({_UUID_PATTERN})", re.IGNORECASE),
+}
+_TYPE_TO_ID_FIELD = {
+    "poem": "poem_id",
+    "event": "event_id",
+    "post": "post_id",
+}
+# Order matters: _primary_content_id resolves ties with this precedence.
+_CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
 
-async def get_generated_image():
+
+def _is_group_publicly_visible(db: Session, group_id: Optional[UUID]) -> bool:
+    """Whether anyone, signed in or not, may see this group's content.
+
+    The share endpoints are unauthenticated, so a card is only rendered for a
+    published public group - the same gate the app applies to a viewer who has
+    not joined. A private or unpublished group's events and posts must not leak
+    through a guessed id.
+    """
+    if group_id is None:
+        return False
+    group = (
+        db.query(AuthorGroup)
+        .filter(AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None))
+        .first()
+    )
+    return group is not None and bool(group.is_public) and is_group_published(group)
+
+
+def _share_image_headers() -> dict:
+    """Let crawlers and any CDN in front of us reuse a rendered card.
+
+    The card only changes when the event does, and this endpoint is public and
+    re-renders per hit, so the cheapest request is the one that never arrives.
+    """
+    return {"Cache-Control": f"public, max-age={max(get_int('SHARE_IMAGE_CACHE_SECONDS'), 0)}"}
+
+
+async def get_generated_image(share_request: Optional[ShareRequest] = None):
+    if share_request is not None:
+        _apply_inferred_ids(share_request)
+        if _has_resolvable_content(share_request):
+            image_bytes, media_type = await _render_share_image_bytes(share_request)
+            return StreamingResponse(
+                io.BytesIO(image_bytes),
+                media_type=media_type,
+                headers=_share_image_headers(),
+            )
+
     try:
         image_path = IMAGE_PATH
         async with await anyio.open_file(image_path, "rb") as file:
@@ -38,19 +129,54 @@ async def get_generated_image():
             detail=ErrorConstants.IMAGE_NOT_FOUND_MESSAGE
         )
 
+
 async def generate_short_url(share_request: ShareRequest) -> ShortUrlResponse:
+    _apply_inferred_ids(share_request)
+    og_title = DEFAULT_OG_TITLE
     og_description = DEFAULT_OG_DESCRIPTION
+    og_image: Optional[str] = None
+    event_metadata: Optional[EventShareMetadata] = None
+    if _normalized_id(share_request.event_id) is not None:
+        event_metadata = await to_thread.run_sync(
+            partial(
+                _load_event_share_metadata,
+                _normalized_id(share_request.event_id),
+                share_request.language,
+                get("SITE_NAME"),
+            )
+        )
+        title, _description, _language, image_key = event_metadata
+        # The site name is the title and the event's name is the description:
+        # a preview then reads "WeBuddhist" over the name of the event, rather
+        # than repeating the name in both slots.
+        og_title = get("SITE_NAME")
+        og_description = title
+        # og_image stays the /share/image endpoint rather than the row's S3
+        # URL. Two reasons, either of which is enough: the stored file is WebP,
+        # which link-preview crawlers do not render, and a signed S3 URL
+        # expires while the short link does not. The endpoint serves the same
+        # photo as JPEG from a URL with no deadline on it.
+        _ = image_key
     if share_request.logo:
-        _generate_logo_image_(share_request=share_request)
+        await to_thread.run_sync(partial(_generate_logo_image_, share_request=share_request))
 
+    # The card image needs the same event this just loaded. Handing it over
+    # saves a second session and a second eager-loaded event query on a path
+    # that runs for every share.
+    await _generate_segment_content_image_(
+        share_request=share_request,
+        event_metadata=event_metadata,
+    )
 
-    await _generate_segment_content_image_(share_request=share_request)
-
-    payload = _generate_short_url_payload_(share_request=share_request, og_description=og_description)
+    payload = _generate_short_url_payload_(
+        share_request=share_request,
+        og_title=og_title,
+        og_description=og_description,
+        og_image=og_image,
+    )
     short_url: ShortUrlResponse = await get_short_url(payload=payload)
 
     return short_url
-
 
 
 def _generate_logo_image_(share_request: ShareRequest):
@@ -60,34 +186,246 @@ def _generate_logo_image_(share_request: ShareRequest):
         logo_path=LOGO_PATH
     )
 
-async def _generate_segment_content_image_(share_request: ShareRequest):
-    main_content_text = get("SITE_NAME")
-    reference_text = get("SITE_NAME")
-    language = share_request.language
-    if share_request.segment_id is not None:
-        segment_details = await get_openpecha_segment_details_by_id(
-            segment_id=share_request.segment_id,
-        )
-        main_content_text = segment_details.content
-        reference_text = segment_details.text.title
-        language = segment_details.text.language
-    elif share_request.text_id is not None:
-        text_detail = await get_text_by_id_from_openpecha(text_id=share_request.text_id)
-        main_content_text = text_detail.title
-        language = text_detail.language
 
-    generate_segment_image(
-        text=main_content_text,
-        ref_str=reference_text,
-        lang=language,
-        text_color=share_request.text_color,
-        bg_color=share_request.bg_color,
-        logo_path=LOGO_PATH
+async def _generate_segment_content_image_(
+    share_request: ShareRequest,
+    output_path: Optional[ImageDestination] = None,
+    event_metadata: Optional["EventShareMetadata"] = None,
+):
+    _, content_key = _primary_content_id(share_request)
+    if content_key == "event_id":
+        await _generate_event_content_image_(share_request, output_path, event_metadata)
+        return
+
+    main_content_text, reference_text, language = await _resolve_share_image_text(
+        share_request
     )
 
+    image_kwargs = {
+        "text": main_content_text,
+        "ref_str": reference_text,
+        "lang": language,
+        "text_color": share_request.text_color,
+        "bg_color": share_request.bg_color,
+        "logo_path": LOGO_PATH if share_request.logo else None,
+    }
+    if output_path is not None:
+        image_kwargs["output_path"] = output_path
+    # Pillow rendering is CPU-bound and blocks the event loop otherwise.
+    await to_thread.run_sync(partial(generate_segment_image, **image_kwargs))
 
 
-def _generate_short_url_payload_(share_request: ShareRequest, og_description: str) -> dict:
+async def _resolve_share_image_text(
+    share_request: ShareRequest,
+) -> tuple[str, str, Optional[str]]:
+    site_name = get("SITE_NAME")
+    main_content_text = site_name
+    reference_text = site_name
+    language = share_request.language
+
+    poem_id = _normalized_id(share_request.poem_id)
+    post_id = _normalized_id(share_request.post_id)
+    segment_id = _normalized_id(share_request.segment_id)
+    text_id = _normalized_id(share_request.text_id)
+
+    # The poem/post lookups use a synchronous session, so they run in a
+    # worker thread rather than blocking the event loop for every OG request.
+    if poem_id is not None:
+        return await to_thread.run_sync(
+            partial(_resolve_poem_share_text, poem_id, site_name)
+        )
+    if post_id is not None:
+        return await to_thread.run_sync(
+            partial(_resolve_post_share_text, post_id, site_name)
+        )
+    if segment_id is not None:
+        segment_details = await get_openpecha_segment_details_by_id(
+            segment_id=segment_id,
+        )
+        return (
+            segment_details.content,
+            segment_details.text.title,
+            segment_details.text.language,
+        )
+    if text_id is not None:
+        text_detail = await get_text_by_id_from_openpecha(text_id=text_id)
+        return text_detail.title, site_name, text_detail.language
+
+    return main_content_text, reference_text, language
+
+
+def _resolve_poem_share_text(poem_id: str, site_name: str) -> tuple[str, str, Optional[str]]:
+    poem_uuid = _parse_uuid(poem_id)
+    if poem_uuid is None:
+        return site_name, site_name, None
+
+    with SessionLocal() as db:
+        poem = get_poem_by_id(db=db, poem_id=poem_uuid, status=PoemStatus.PUBLISHED)
+    if poem is None:
+        return site_name, site_name, None
+
+    main_text = poem.content or poem.title or site_name
+    reference_text = poem.author_name or poem.title or site_name
+    return main_text, reference_text, _language_code(poem.language)
+
+
+async def _generate_event_content_image_(
+    share_request: ShareRequest,
+    output_path: Optional[ImageDestination] = None,
+    event_metadata: Optional["EventShareMetadata"] = None,
+) -> None:
+    site_name = get("SITE_NAME")
+    event_id = _normalized_id(share_request.event_id)
+    # Already loaded when this render is part of building a short URL; loaded
+    # here when the image endpoint is called on its own.
+    if event_metadata is None:
+        event_metadata = await to_thread.run_sync(
+            partial(_load_event_share_metadata, event_id, share_request.language, site_name)
+        )
+    title, _description, language, image_key = event_metadata
+    photo_bytes = await to_thread.run_sync(partial(_load_event_photo_bytes, image_key))
+    image_kwargs = {
+        "title": title,
+        "lang": language,
+        "logo_path": LOGO_PATH,
+        "photo_bytes": photo_bytes,
+    }
+    if output_path is not None:
+        image_kwargs["output_path"] = output_path
+    await to_thread.run_sync(partial(generate_event_share_image, **image_kwargs))
+
+
+def _event_photo_cache_limit() -> int:
+    return max(get_int("SHARE_EVENT_PHOTO_CACHE_SIZE"), 0)
+
+
+def _event_photo_s3_key(image_key: str) -> Optional[str]:
+    """The S3 key behind an event's stored photo reference.
+
+    The column normally holds a bare key, but a full URL is accepted elsewhere
+    (it is returned as-is when signing). A URL into our own bucket is reduced to
+    its key; any other URL is not fetched - this endpoint is public, and
+    downloading an arbitrary address on its behalf would be an SSRF vector - so
+    the card falls back to the title render.
+    """
+    image_key = image_key.strip()
+    if not image_key.lower().startswith(("http://", "https://")):
+        return image_key or None
+    bucket = get("AWS_BUCKET_NAME")
+    host = (urlparse(image_key).hostname or "").lower()
+    if not bucket or not host.startswith(f"{bucket.lower()}."):
+        return None
+    return unquote(urlparse(image_key).path.lstrip("/")) or None
+
+
+def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
+    """The event photo from S3, as bytes, memoised per key.
+
+    This endpoint is public and every crawler hit re-renders, so an unbounded
+    fetch of a full-size original would be a free way to make the API do real
+    work. Two bounds keep that in proportion: the download refuses anything
+    over SHARE_EVENT_PHOTO_MAX_BYTES, and the bytes are held in a small
+    per-process cache so repeated previews of the same event do not repeat the
+    S3 round trip. A share card is the same for everyone, so nothing here is
+    per-viewer.
+
+    Returns None for an event with no photo, or when S3 will not give it up -
+    the card falls back to the title render rather than the share failing.
+    """
+    if not image_key:
+        return None
+    image_key = _event_photo_s3_key(image_key)
+    if not image_key:
+        return None
+
+    with _event_photo_cache_lock:
+        cached = _event_photo_cache.get(image_key)
+        if cached is not None:
+            # Refreshed to most-recently-used, under the lock so the key cannot
+            # be evicted between finding it and moving it.
+            _event_photo_cache.move_to_end(image_key)
+            return cached
+
+    # Downloaded outside the lock: it is a network round trip, and holding the
+    # lock across it would serialise every share render behind one S3 fetch.
+    # Two threads missing on the same key both download, which costs one extra
+    # fetch and stores the same bytes twice.
+    try:
+        photo_bytes = download_bytes(
+            bucket_name=get("AWS_BUCKET_NAME"),
+            s3_key=image_key,
+            max_bytes=max(get_int("SHARE_EVENT_PHOTO_MAX_BYTES"), 1),
+        )
+    except Exception:
+        logging.exception("Could not download event share photo for key %s", image_key)
+        return None
+
+    limit = _event_photo_cache_limit()
+    if limit:
+        with _event_photo_cache_lock:
+            _event_photo_cache[image_key] = photo_bytes
+            while len(_event_photo_cache) > limit:
+                _event_photo_cache.popitem(last=False)
+    return photo_bytes
+
+
+def _load_event_share_metadata(
+    event_id: Optional[str],
+    language: Optional[str],
+    site_name: str,
+) -> EventShareMetadata:
+    """The event name, description and photo key used on the short URL card.
+
+    The photo is the card when the event has one; the name and description go
+    on the OG tags either way, where a preview renders them as text.
+    """
+    event_uuid = _parse_uuid(event_id) if event_id else None
+    if event_uuid is None:
+        return site_name, None, language, None
+
+    with SessionLocal() as db:
+        event = get_event_by_id(db=db, event_id=event_uuid)
+        if event is None or not _is_group_publicly_visible(db, event.group_id):
+            return site_name, None, language, None
+        image_key = getattr(event, "image_url", None) or None
+        metadata = _first_metadata(event.metadata_entries, language)
+        title = (metadata.name if metadata is not None and metadata.name else None) or site_name
+        description = (
+            metadata.description.strip()
+            if metadata is not None and metadata.description
+            else None
+        ) or None
+        resolved_language = (
+            _language_code(metadata.language) if metadata is not None else None
+        ) or language
+    return title, description, resolved_language, image_key
+
+
+def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Optional[str]]:
+    post_uuid = _parse_uuid(post_id)
+    if post_uuid is None:
+        return site_name, site_name, None
+
+    with SessionLocal() as db:
+        post = get_post_by_id_only(
+            db=db,
+            post_id=post_uuid,
+            status=GroupPostStatus.PUBLISHED,
+        )
+        if post is None or not _is_group_publicly_visible(db, post.group_id):
+            return site_name, site_name, None
+
+    main_text = (post.caption or "").strip() or site_name
+    return main_text, site_name, None
+
+
+def _generate_short_url_payload_(
+    share_request: ShareRequest,
+    og_description: str,
+    og_title: Optional[str] = None,
+    og_image: Optional[str] = None,
+) -> dict:
+    _apply_inferred_ids(share_request)
 
     if share_request.url is None:
         share_request.url = _generate_url_(
@@ -97,19 +435,30 @@ def _generate_short_url_payload_(share_request: ShareRequest, og_description: st
             content_index=share_request.content_index,
         )
 
-    pecha_backend_endpoint = get("PECHA_BACKEND_ENDPOINT")
-    if share_request.segment_id is not None:
-        image_url = f"{pecha_backend_endpoint}/share/image?segment_id={share_request.segment_id}&language={share_request.language}&logo={share_request.logo}"
-    else:
-        image_url = f"{pecha_backend_endpoint}/share/image?text_id={share_request.text_id}&language={share_request.language}&logo={share_request.logo}"
     payload = {
         "url": share_request.url,
-        "og_title": DEFAULT_OG_DESCRIPTION,
+        "og_title": og_title or DEFAULT_OG_TITLE,
         "og_description": og_description,
-        "og_image": image_url,
+        # A caller that already has a real image URL - an event's own photo -
+        # passes it. Everything else points at the rendered card.
+        "og_image": og_image or _share_image_url(share_request),
         "tags": share_request.tags
     }
     return payload
+
+
+def _share_image_url(share_request: ShareRequest) -> str:
+    pecha_backend_endpoint = get("PECHA_BACKEND_ENDPOINT")
+    content_id, content_key = _primary_content_id(share_request)
+    language = share_request.language
+    logo = share_request.logo
+    if content_id is not None:
+        return (
+            f"{pecha_backend_endpoint}/share/image?"
+            f"{content_key}={content_id}&language={language}&logo={logo}"
+        )
+    return f"{pecha_backend_endpoint}/share/image?language={language}&logo={logo}"
+
 
 def _generate_url_(
         content_id: str,
@@ -120,3 +469,124 @@ def _generate_url_(
     if segment_id is None:
         return f"{PECHA_FRONTEND_ENDPOINT}?contentId={content_id}&text_id={text_id}&contentIndex={content_index}"
     return f"{PECHA_FRONTEND_ENDPOINT}?segment_id={segment_id}&contentId={content_id}&text_id={text_id}&contentIndex={content_index}"
+
+
+async def _render_share_image_bytes(share_request: ShareRequest) -> Tuple[bytes, str]:
+    """The rendered image and the media type it actually came out as.
+
+    An event photo is written as JPEG and every card as PNG, so the type is
+    read off the bytes rather than assumed - serving a JPEG labelled image/png
+    is exactly the kind of thing a strict crawler rejects.
+    """
+    # Rendered straight into memory: a temp file would put open/read/unlink
+    # syscalls on the async request path and leak the file if the render
+    # failed. The buffer is filled inside the render worker thread.
+    buffer = io.BytesIO()
+    await _generate_segment_content_image_(
+        share_request=share_request,
+        output_path=buffer,
+    )
+    image_bytes = buffer.getvalue()
+    return image_bytes, _media_type_for(image_bytes)
+
+
+def _media_type_for(image_bytes: bytes) -> str:
+    """JPEG starts with FF D8 FF; everything else here is the PNG the cards use."""
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return JPEG_MEDIA_TYPE
+    return MEDIA_TYPE
+
+
+def _apply_inferred_ids(share_request: ShareRequest) -> None:
+    """Fill the poem/event/post ids from the target URL, but only when the
+    caller supplied no content identifier at all.
+
+    Inferring alongside an explicit identifier mixes two sources of truth: a
+    request carrying segment_id plus an event URL would gain an event_id, and
+    the fixed precedence in _primary_content_id would then silently share the
+    event instead of the requested segment. The caller's own identifier wins,
+    and the URL is consulted only when there is nothing to conflict with.
+    """
+    if _primary_content_id(share_request)[0] is not None:
+        return
+
+    inferred = _ids_from_url(share_request.url)
+    share_request.poem_id = inferred.get("poem_id")
+    share_request.event_id = inferred.get("event_id")
+    share_request.post_id = inferred.get("post_id")
+
+
+def _ids_from_url(url: Optional[str]) -> dict[str, str]:
+    if not url:
+        return {}
+
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    inferred: dict[str, str] = {}
+
+    for key in ("poem_id", "event_id", "post_id"):
+        values = params.get(key) or params.get(key.removesuffix("_id"))
+        value = _normalized_id(values[0] if values else None)
+        if value:
+            inferred[key] = value
+
+    type_values = params.get("type")
+    id_values = params.get("id")
+    if type_values and id_values:
+        field = _TYPE_TO_ID_FIELD.get(type_values[0].strip().lower())
+        value = _normalized_id(id_values[0])
+        if field and value:
+            inferred.setdefault(field, value)
+
+    for field, pattern in _PATH_ID_PATTERNS.items():
+        match = pattern.search(parsed.path)
+        if match:
+            inferred.setdefault(field, match.group(1))
+
+    return inferred
+
+
+def _has_resolvable_content(share_request: ShareRequest) -> bool:
+    return _primary_content_id(share_request)[0] is not None
+
+
+def _primary_content_id(share_request: ShareRequest) -> tuple[Optional[str], Optional[str]]:
+    for key in _CONTENT_ID_FIELDS:
+        value = _normalized_id(getattr(share_request, key, None))
+        if value is not None:
+            return value, key
+    return None, None
+
+
+def _normalized_id(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if cleaned.lower() in _EMPTY_IDS:
+        return None
+    return cleaned
+
+
+def _parse_uuid(value: str) -> Optional[UUID]:
+    try:
+        return UUID(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _language_code(language) -> Optional[str]:
+    if language is None:
+        return None
+    code = language.value if hasattr(language, "value") else str(language)
+    return code.lower()
+
+
+def _first_metadata(entries, language: Optional[str]):
+    entries = list(entries or [])
+    wanted = (language or "").upper()
+    if wanted:
+        for entry in entries:
+            entry_lang = _language_code(entry.language) or ""
+            if entry_lang.upper() == wanted:
+                return entry
+    return next(iter(entries), None)

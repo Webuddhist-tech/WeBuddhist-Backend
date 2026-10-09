@@ -2,6 +2,7 @@ import struct
 from io import BytesIO
 from typing import Optional, List, Dict
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from pecha_api.plans.audio.plan_item_audio_models import PlanItemAudio
 from pecha_api.plans.audio.plan_item_audio_repository import upsert_plan_item_audio
 from pecha_api.plans.audio.sub_task_timestamps_repository import upsert_sub_task_timestamp
@@ -44,6 +45,7 @@ from pecha_api.plans.plans_enums import (
     PlanAudioType,
     MonlamVoiceName,
 )
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.plans_response_models import PlansResponse, PlanDTO, CreatePlanRequest, TaskDTO, PlanDayDTO, \
     PlanWithDays, UpdatePlanRequest, PlanStatusUpdate, PlansRepositoryResponse, PlanWithAggregates, AuthorDTO, SubTaskDTO, \
     DayVideoSummaryDTO, PlanVideoSummaryDTO
@@ -580,6 +582,10 @@ def create_new_plan(token: str, create_plan_request: CreatePlanRequest) -> PlanD
 
 async def get_details_plan(token:str,plan_id: UUID) -> PlanWithDays:
     current_author = validate_cms_author_details(token=token)
+    return await run_in_threadpool(_get_details_plan_for_author, current_author, plan_id)
+
+
+def _get_details_plan_for_author(current_author: Author, plan_id: UUID) -> PlanWithDays:
     with SessionLocal() as db_session:
         plan = _get_plan_or_404(db=db_session, plan_id=plan_id)
         require_can_read_group_content(db=db_session, group_id=plan.group_id, author=current_author)
@@ -607,9 +613,13 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
     }
 
     from pecha_api.plans.videos.day_video_repository import get_day_videos_by_day_ids
+    from pecha_api.plans.videos.day_video_service import day_videos_with_durations
 
     videos_by_item: Dict[UUID, List] = {}
-    for video in get_day_videos_by_day_ids(db=db, day_ids=plan_item_ids):
+    day_videos = day_videos_with_durations(
+        db=db, videos=get_day_videos_by_day_ids(db=db, day_ids=plan_item_ids)
+    )
+    for video in day_videos:
         videos_by_item.setdefault(video.day_id, []).append(video)
 
     from pecha_api.plans.shareable_images.day_shareable_image_repository import (
@@ -659,6 +669,7 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
                         url=video.url,
                         video_id=video.video_id,
                         title=video.title,
+                        duration_seconds=video.duration_seconds,
                         display_order=video.display_order,
                     )
                     for video in videos_by_item.get(item.id, [])
@@ -669,6 +680,7 @@ def _get_plan_details(db: Session, plan_id: UUID) -> PlanWithDays:
                         title=task.title,
                         estimated_time=task.estimated_time,
                         display_order=task.display_order,
+                        settings=build_task_settings(task),
                     )
                     for task in tasks_by_item.get(item.id, [])
                 ],
@@ -955,11 +967,19 @@ async def delete_selected_plan(token:str,plan_id: UUID):
         _soft_delete_plan_by_id(db=db, plan_id=plan.id, author=current_author)
         return
 
-def _get_task_subtasks_dto(subtasks: List[PlanSubTask]) -> List[SubTaskDTO]:
+def _get_task_subtasks_dto(
+    subtasks: List[PlanSubTask], db: Session, language: Optional[str] = None
+) -> List[SubTaskDTO]:
     from pecha_api.plans.audio.dto_helpers import build_subtask_timestamp_fields
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
+    # On the caller's session: called once per task, so leaving `db` off meant
+    # a day's worth of extra connections opened inside a block already holding
+    # one of its own.
+    references = resolve_subtask_references(subtasks=subtasks, db=db, language=language)
 
     subtasks_dto = []
-    for subtask in subtasks:
+    for subtask, reference in zip(subtasks, references):
         start_ms, end_ms = build_subtask_timestamp_fields(subtask)
         audio_url = (
             generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=subtask.audio_url)
@@ -974,12 +994,22 @@ def _get_task_subtasks_dto(subtasks: List[PlanSubTask]) -> List[SubTaskDTO]:
                 start_ms=start_ms,
                 end_ms=end_ms,
                 audio_url=audio_url,
+                reference_id=subtask.reference_id,
+                reference=reference,
             )
         )
     return subtasks_dto
 
 async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> PlanDayDTO:
     current_author = validate_cms_author_details(token=token)
+    return await run_in_threadpool(
+        _get_plan_day_details_for_author, current_author, plan_id, day_number
+    )
+
+
+def _get_plan_day_details_for_author(
+    current_author: Author, plan_id: UUID, day_number: int
+) -> PlanDayDTO:
     with SessionLocal() as db:
         plan = _get_plan_or_404(db=db, plan_id=plan_id)
         require_can_read_group_content(db=db, group_id=plan.group_id, author=current_author)
@@ -993,6 +1023,9 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
         thumbnail_url, thumbnail_key, shareable_image_url, shareable_image_key = (
             build_plan_day_shareable_image_fields(plan_item.shareable_images)
         )
+        from pecha_api.plans.videos.day_video_service import day_videos_with_durations
+
+        videos = day_videos_with_durations(db=db, videos=plan_item.videos)
         plan_day_dto: PlanDayDTO = PlanDayDTO(
             id=plan_item.id,
             day_number=plan_item.day_number,
@@ -1010,9 +1043,10 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
                     url=video.url,
                     video_id=video.video_id,
                     title=video.title,
+                    duration_seconds=video.duration_seconds,
                     display_order=video.display_order,
                 )
-                for video in plan_item.videos
+                for video in videos
             ],
             tasks=[
                 TaskDTO(
@@ -1020,7 +1054,8 @@ async def get_plan_day_details(token:str,plan_id: UUID, day_number: int) -> Plan
                     title=task.title,
                     estimated_time=task.estimated_time,
                     display_order=task.display_order,
-                    subtasks=_get_task_subtasks_dto(task.sub_tasks)
+                    subtasks=_get_task_subtasks_dto(task.sub_tasks, db=db, language=plan.language),
+                    settings=build_task_settings(task),
                 )
                 for task in plan_item.tasks
             ]

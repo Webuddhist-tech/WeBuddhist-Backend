@@ -6,6 +6,7 @@ from sqlalchemy import Column, String, Integer, DateTime, UUID, ForeignKey, Inde
 from sqlalchemy.orm import relationship
 
 from ..db.database import Base
+from pecha_api.plans.plans_enums import LanguageCodeEnum
 
 
 class EventLink(Base):
@@ -20,6 +21,7 @@ class EventLink(Base):
     type = Column(String(50), nullable=False)
     url = Column(String(2000), nullable=False)
     label = Column(String(255), nullable=True)
+    language = Column(LanguageCodeEnum, nullable=False)
     display_order = Column(Integer, nullable=False, default=1)
 
     created_at = Column(
@@ -36,4 +38,5 @@ class EventLink(Base):
 
     __table_args__ = (
         Index("idx_event_links_event_id", "event_id"),
+        Index("idx_event_links_event_language", "event_id", "language"),
     )

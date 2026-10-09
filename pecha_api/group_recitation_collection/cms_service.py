@@ -16,6 +16,12 @@ from pecha_api.plans.shared.permissions import require_can_create_content, requi
 from pecha_api.texts.texts_openpecha_service import get_texts_by_edition_or_text_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
+from pecha_api.group_assets.repository import (
+    delete_links_for_collection,
+    delete_links_for_item,
+    get_assets_for_items,
+)
+from pecha_api.group_assets.service import build_asset_dto
 from pecha_api.group_recitation_collection.models import (
     GroupRecitationCollection,
     GroupRecitationCollectionItem,
@@ -74,6 +80,7 @@ def _validate_group_exists(db: Session, group_id: UUID) -> None:
 
 async def _build_items_dto(
     items: List[GroupRecitationCollectionItem],
+    db: Optional[Session] = None,
 ) -> List[GroupRecitationCollectionItemDTO]:
     """Build item DTOs with text metadata fetched from OpenPecha."""
     if not items:
@@ -81,6 +88,13 @@ async def _build_items_dto(
 
     text_ids_str = [str(item.text_id) for item in items]
     texts_dict = await get_texts_by_edition_or_text_ids(text_ids_str)
+
+    # One batched fetch for every item on the page, never a query per item.
+    assets_by_item = (
+        get_assets_for_items(db=db, item_ids=[item.id for item in items])
+        if db is not None
+        else {}
+    )
 
     items_dto = []
     for item in items:
@@ -95,6 +109,10 @@ async def _build_items_dto(
                     language=text.language,
                     type=None,
                     display_order=item.display_order,
+                    audio=[
+                        build_asset_dto(asset)
+                        for asset in assets_by_item.get(item.id, [])
+                    ],
                 )
             )
     return items_dto
@@ -176,7 +194,7 @@ async def cms_get_group_collection_detail_service(
             )
 
         items = get_collection_items(db=db, collection_id=collection_id)
-        items_dto = await _build_items_dto(items)
+        items_dto = await _build_items_dto(items, db=db)
 
         return GroupRecitationCollectionDetailDTO(
             id=collection.id,
@@ -294,6 +312,10 @@ def cms_delete_collection_service(
                 detail=NOT_FOUND,
             )
 
+        # Collections are soft-deleted, so the link FK's CASCADE never fires.
+        # Drop the links explicitly or they outlive the collection and keep
+        # their assets looking in use.
+        delete_links_for_collection(db=db, collection_id=collection_id)
         soft_delete_collection(db=db, collection=collection)
 
 
@@ -334,7 +356,7 @@ async def cms_add_items_service(
         ]
 
         saved_items = create_collection_items(db=db, items=new_items)
-        items_dto = await _build_items_dto(saved_items)
+        items_dto = await _build_items_dto(saved_items, db=db)
 
         return AddGroupRecitationCollectionItemsResponse(
             collection_id=collection_id,
@@ -380,6 +402,10 @@ def cms_delete_item_service(
                 detail=NOT_FOUND,
             )
 
+        # Same as collection delete: soft delete means no CASCADE, so the
+        # item's audio links have to go explicitly. The assets stay in the
+        # library, which is the point of having one.
+        delete_links_for_item(db=db, item_id=item_id)
         soft_delete_collection_item(db=db, item=item)
 
 
@@ -418,7 +444,7 @@ async def cms_reorder_items_service(
         update_item_display_orders(db=db, items=list(item_map.values()))
 
         updated_items = get_collection_items(db=db, collection_id=collection_id)
-        items_dto = await _build_items_dto(updated_items)
+        items_dto = await _build_items_dto(updated_items, db=db)
 
         return GroupRecitationCollectionDetailDTO(
             id=collection.id,

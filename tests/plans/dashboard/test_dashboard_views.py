@@ -87,6 +87,7 @@ async def test_list_dashboard_items_success():
             language="en",
             featured=True,
             group_id=None,
+            include_partner_groups=False,
         )
         assert response == expected
         assert response.items[0].type == "series"

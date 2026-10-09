@@ -30,6 +30,7 @@ from pecha_api.accumulator.accumulator_response_models import (
     AccumulatorDTO,
     PublicAccumulatorDTO,
     PresetMantraDTO,
+    CMSPresetMantraDTO,
     CreateAccumulatorRequest,
     UpdateAccumulatorRequest,
     UpdateMalaImageRequest,
@@ -41,8 +42,9 @@ from pecha_api.accumulator.accumulator_response_models import (
 from pecha_api.accumulator.accumulator_models import Accumulator
 from pecha_api.accumulator.accumulator_history_model import AccumulatorHistory
 from pecha_api.accumulator.accumulator_enums import AccumulatorType
-from pecha_api.mantra.mantra_model import Mantra  
-from pecha_api.mantra.mantra_metadata_model import MantraMetadata  
+from pecha_api.mantra.mantra_model import Mantra
+from pecha_api.mantra.mantra_metadata_model import MantraMetadata
+from pecha_api.plans.media.media_response_models import ImageUrlModel
 
 
 from pecha_api.plans.plans_enums import LanguageCode
@@ -71,6 +73,7 @@ class TestDataFactory:
         audio_url="audio/mantra.mp3",
         metadata_entries=None,
         mala=None,
+        deity_image=None,
     ):
         mantra = MagicMock(spec=Mantra)
         mantra.id = mantra_id or uuid4()
@@ -79,6 +82,7 @@ class TestDataFactory:
             metadata_entries = [TestDataFactory.create_mock_mantra_metadata()]
         mantra.metadata_entries = metadata_entries
         mantra.mala = mala
+        mantra.deity_image = deity_image
         return mantra
 
     @staticmethod
@@ -331,6 +335,30 @@ class TestGetUserAccumulatorsService:
 
         assert len(result.accumulators) == 0
         assert result.total == 0
+
+    @patch('pecha_api.accumulator.accumulator_service.get_mantras_by_ids')
+    @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
+    @patch('pecha_api.accumulator.accumulator_service.get_user_accumulators')
+    def test_get_user_accumulators_service_batches_mantras_once(
+        self, mock_get_user, mock_session, mock_get_mantras
+    ):
+        """Mantras for the whole page are fetched in a single batched call,
+        not once per accumulator, and deity_image flows through to each DTO."""
+        user_id = uuid4()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        mantra_id = uuid4()
+        mantra = TestDataFactory.create_mock_mantra(mantra_id=mantra_id)
+        acc1 = TestDataFactory.create_mock_accumulator(user_id=user_id, mantra_id=mantra_id)
+        acc2 = TestDataFactory.create_mock_accumulator(user_id=user_id, mantra_id=mantra_id)
+        mock_get_user.return_value = ([acc1, acc2], 2)
+        mock_get_mantras.return_value = {mantra_id: mantra}
+
+        result = get_user_accumulators_service(user_id=user_id, skip=0, limit=20)
+
+        mock_get_mantras.assert_called_once_with(mock_db, [mantra_id, mantra_id])
+        assert len(result.accumulators) == 2
 
 
 class TestCreateAccumulatorService:
@@ -741,25 +769,23 @@ class TestUpdateAccumulatorService:
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
-    @patch('pecha_api.accumulator.accumulator_service.TextUtils.validate_text_exists', new_callable=AsyncMock)
     @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
     @patch('pecha_api.accumulator.accumulator_service.update_accumulator')
     @patch('pecha_api.accumulator.accumulator_service.get_accumulator_by_id')
     @patch('pecha_api.accumulator.accumulator_service.validate_and_extract_user_details')
     @pytest.mark.asyncio
     async def test_update_accumulator_service_updates_text_id(
-        self, mock_validate, mock_get, mock_update, mock_session, mock_validate_text
+        self, mock_validate, mock_get, mock_update, mock_session
     ):
-        """Test update_accumulator_service updates text_id after validation."""
+        """Test update_accumulator_service stores a non-UUID text id as given."""
         user_id = uuid4()
         accumulator_id = uuid4()
-        text_id = uuid4()
+        text_id = "OPE1A2B3C4"
         token = "valid_token"
 
         mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
-        mock_validate_text.return_value = None
 
         existing = TestDataFactory.create_mock_accumulator(
             accumulator_id=accumulator_id, user_id=user_id
@@ -770,8 +796,7 @@ class TestUpdateAccumulatorService:
         request = TestDataFactory.create_update_request(text_id=text_id)
         await update_accumulator_service(token=token, accumulator_id=accumulator_id, request=request)
 
-        assert existing.text_id == str(text_id)
-        mock_validate_text.assert_awaited_once_with(text_id=str(text_id))
+        assert existing.text_id == text_id
 
     @patch('pecha_api.accumulator.accumulator_service.validate_mantra_exists')
     @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
@@ -1094,6 +1119,34 @@ class TestGetAccumulatorHistoryService:
 
         assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
 
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    @patch('pecha_api.accumulator.accumulator_service.get_mantras_by_ids')
+    @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
+    @patch('pecha_api.accumulator.accumulator_service.get_user_accumulator_history')
+    @patch('pecha_api.accumulator.accumulator_service.validate_and_extract_user_details')
+    def test_get_accumulator_history_service_batches_mantras_and_includes_deity_image(
+        self, mock_validate, mock_get_history, mock_session, mock_get_mantras, mock_resolve
+    ):
+        """History rows batch their mantra lookup once (mirroring the preset-side
+        pattern) instead of querying per row, and deity_image is populated."""
+        mock_validate.return_value = TestDataFactory.create_mock_user()
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        mantra_id = uuid4()
+        mantra = TestDataFactory.create_mock_mantra(mantra_id=mantra_id)
+        accumulator = TestDataFactory.create_mock_accumulator(mantra_id=mantra_id)
+        session = TestDataFactory.create_mock_history(accumulator_id=accumulator.id)
+        mock_get_history.return_value = ([(accumulator, 10, [session])], 1)
+        mock_get_mantras.return_value = {mantra_id: mantra}
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_resolve.return_value = expected_image
+
+        result = get_accumulator_history_service(token="token", skip=0, limit=20)
+
+        mock_get_mantras.assert_called_once_with(mock_db, [mantra_id])
+        assert result.accumulators[0].deity_image is expected_image
+
 
 class TestGetAccumulatorDetailService:
     """Test cases for get_accumulator_detail_service."""
@@ -1183,6 +1236,36 @@ class TestGetAccumulatorDetailService:
             get_accumulator_detail_service(token=token, parent_id=uuid4())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    @patch('pecha_api.accumulator.accumulator_service.get_mantras_by_ids')
+    @patch('pecha_api.accumulator.accumulator_service.SessionLocal')
+    @patch('pecha_api.accumulator.accumulator_service.get_accumulator_with_history')
+    @patch('pecha_api.accumulator.accumulator_service.validate_and_extract_user_details')
+    def test_get_accumulator_detail_service_includes_deity_image(
+        self, mock_validate, mock_get_history, mock_session, mock_get_mantras, mock_resolve
+    ):
+        """The linked mantra's deity image is resolved for the single-row detail response."""
+        user_id = uuid4()
+        parent_id = uuid4()
+        mantra_id = uuid4()
+        mock_validate.return_value = TestDataFactory.create_mock_user(user_id=user_id)
+        mock_db = MagicMock()
+        mock_session.return_value.__enter__.return_value = mock_db
+
+        mantra = TestDataFactory.create_mock_mantra(mantra_id=mantra_id)
+        accumulator = TestDataFactory.create_mock_accumulator(
+            user_id=user_id, parent_id=parent_id, mantra_id=mantra_id
+        )
+        mock_get_history.return_value = (accumulator, 50, [])
+        mock_get_mantras.return_value = {mantra_id: mantra}
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_resolve.return_value = expected_image
+
+        result = get_accumulator_detail_service(token="token", parent_id=parent_id)
+
+        mock_get_mantras.assert_called_once_with(mock_db, [mantra_id])
+        assert result.deity_image is expected_image
 
 
 class TestHelperFunctions:
@@ -1357,6 +1440,72 @@ class TestHelperFunctions:
         """Empty mala image url returns None without calling S3."""
         assert generate_mala_image_presigned_url(None) is None
 
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    def test_build_preset_mantra_dto_includes_deity_image(self, mock_resolve):
+        """The resolved deity image (from the mantra, not the accumulator) is included."""
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_resolve.return_value = expected_image
+        mantra = TestDataFactory.create_mock_mantra(deity_image="images/mantra_images/x/original/y.webp")
+
+        result = build_preset_mantra_dto(mantra, language=None)
+
+        assert result.deity_image is expected_image
+        assert not hasattr(result, "deity_image_key")
+        mock_resolve.assert_called_once_with(mantra)
+
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    def test_build_preset_mantra_dto_include_key_true_returns_cms_variant(self, mock_resolve):
+        """CMS callers (include_key=True) get the raw key alongside the resolved image."""
+        mock_resolve.return_value = None
+        mantra = TestDataFactory.create_mock_mantra(deity_image="images/mantra_images/x/original/y.webp")
+
+        result = build_preset_mantra_dto(mantra, language=None, include_key=True)
+
+        assert isinstance(result, CMSPresetMantraDTO)
+        assert result.deity_image_key == "images/mantra_images/x/original/y.webp"
+
+    def test_build_preset_mantra_dto_include_key_false_is_plain_dto(self):
+        """Public callers (default) never get the raw key attribute."""
+        mantra = TestDataFactory.create_mock_mantra()
+
+        result = build_preset_mantra_dto(mantra, language=None)
+
+        assert type(result) is PresetMantraDTO
+
+
+class TestConvertAccumulatorToDtoDeityImage:
+    """convert_accumulator_to_dto/convert_accumulators_to_dtos resolve deity_image
+    from a pre-batched mantras_by_id map, matching the preset-side pattern."""
+
+    @patch('pecha_api.mantra.mantra_service.resolve_deity_image')
+    def test_convert_accumulator_to_dto_resolves_deity_image_from_map(self, mock_resolve):
+        expected_image = ImageUrlModel(thumbnail="t", medium="m", original="o")
+        mock_resolve.return_value = expected_image
+        mantra_id = uuid4()
+        mantra = TestDataFactory.create_mock_mantra(mantra_id=mantra_id)
+        accumulator = TestDataFactory.create_mock_accumulator(mantra_id=mantra_id)
+
+        result = convert_accumulator_to_dto(accumulator, mantras_by_id={mantra_id: mantra})
+
+        assert result.deity_image is expected_image
+        mock_resolve.assert_called_once_with(mantra)
+
+    def test_convert_accumulator_to_dto_no_mantras_by_id_is_none(self):
+        """Without a mantras_by_id map (e.g. delete/list paths that don't need it),
+        deity_image degrades to None instead of raising."""
+        accumulator = TestDataFactory.create_mock_accumulator(mantra_id=uuid4())
+
+        result = convert_accumulator_to_dto(accumulator)
+
+        assert result.deity_image is None
+
+    def test_convert_accumulator_to_dto_mantra_not_in_map_is_none(self):
+        accumulator = TestDataFactory.create_mock_accumulator(mantra_id=uuid4())
+
+        result = convert_accumulator_to_dto(accumulator, mantras_by_id={})
+
+        assert result.deity_image is None
+
     @patch('pecha_api.accumulator.accumulator_service.generate_presigned_access_url', side_effect=Exception("s3 down"))
     @patch('pecha_api.accumulator.accumulator_service.get', return_value="test-bucket")
     def test_generate_mala_image_presigned_url_handles_errors(self, _mock_get, _mock_presign):
@@ -1512,8 +1661,8 @@ class TestGetAccumulatorGroupsService:
         group_acc_2.created_at = datetime.utcnow()
         group_acc_2.image_key = None
 
-        item_1 = GroupAccumulatorWithUserCount(group_acc_1, 1234, is_joined=True)
-        item_2 = GroupAccumulatorWithUserCount(group_acc_2, 567, is_joined=False)
+        item_1 = GroupAccumulatorWithUserCount(group_acc_1, 1234, is_joined=True, group_total_count=54321)
+        item_2 = GroupAccumulatorWithUserCount(group_acc_2, 567, is_joined=False, group_total_count=567)
 
         mock_get_groups.return_value = ([item_1, item_2], 2)
 
@@ -1535,6 +1684,7 @@ class TestGetAccumulatorGroupsService:
         assert result.groups[0].title == "Group Practice 1"
         assert result.groups[0].target_count == 100000
         assert result.groups[0].user_total_count == 1234
+        assert result.groups[0].group_total_count == 54321
         assert result.groups[0].is_joined is True
         assert result.groups[0].image is None
 
@@ -1543,6 +1693,7 @@ class TestGetAccumulatorGroupsService:
         assert result.groups[1].title == "Group Practice 2"
         assert result.groups[1].target_count == 50000
         assert result.groups[1].user_total_count == 567
+        assert result.groups[1].group_total_count == 567
         assert result.groups[1].is_joined is False
         assert result.groups[1].image is None
 

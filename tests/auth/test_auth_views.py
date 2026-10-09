@@ -1,3 +1,4 @@
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
@@ -41,6 +42,108 @@ def test_register_user_social():
         assert response.json()["auth"]["access_token"] == "test_token"
         assert response.json()["auth"]["refresh_token"] == "test_refresh_token"
         assert response.json()["auth"]["token_type"] == "Bearer"
+
+
+def test_register_user_social_keeps_auth0_picture():
+    with patch("pecha_api.auth.auth_views.create_user") as mock_create_user:
+        mock_create_user.return_value = {
+            "user": {"name": "tenzin samten", "avatar_url": ""},
+            "auth": {
+                "access_token": "test_token",
+                "refresh_token": "test_refresh_token",
+                "token_type": "Bearer",
+            },
+        }
+        response = client.post(
+            "/auth/social_register",
+            json={
+                "create_user_request": {
+                    "email": "testuser@example.com",
+                    "firstname": "testfirstname",
+                    "lastname": "testlastname",
+                    "avatar_url": "https://lh3.googleusercontent.com/a/photo",
+                },
+                "platform": "google-oauth2",
+            },
+        )
+
+    assert response.status_code == 201
+    request = mock_create_user.call_args.kwargs["create_user_request"]
+    assert request.avatar_url == "https://lh3.googleusercontent.com/a/photo"
+
+
+def test_register_user_social_stores_picture_when_account_exists():
+    with patch("pecha_api.auth.auth_views.create_user") as mock_create_user, patch(
+        "pecha_api.auth.auth_views.remember_social_avatar"
+    ) as mock_remember, patch(
+        "pecha_api.auth.auth_service.get", return_value="action-secret"
+    ):
+        mock_create_user.side_effect = HTTPException(status_code=409, detail="exists")
+        response = client.post(
+            "/auth/social_register",
+            json={
+                "create_user_request": {
+                    "email": "testuser@example.com",
+                    "firstname": "testfirstname",
+                    "lastname": "testlastname",
+                    "avatar_url": "https://lh3.googleusercontent.com/a/photo",
+                },
+                "platform": "google-oauth2",
+            },
+            headers={"X-Social-Register-Token": "action-secret"},
+        )
+
+    assert response.status_code == 409
+    mock_remember.assert_called_once()
+
+
+def test_register_user_social_ignores_picture_without_the_shared_secret():
+    """A public caller cannot repaint an existing account's avatar."""
+    with patch("pecha_api.auth.auth_views.create_user") as mock_create_user, patch(
+        "pecha_api.auth.auth_views.remember_social_avatar"
+    ) as mock_remember, patch(
+        "pecha_api.auth.auth_service.get", return_value="action-secret"
+    ):
+        mock_create_user.side_effect = HTTPException(status_code=409, detail="exists")
+        response = client.post(
+            "/auth/social_register",
+            json={
+                "create_user_request": {
+                    "email": "victim@example.com",
+                    "firstname": "testfirstname",
+                    "lastname": "testlastname",
+                    "avatar_url": "https://lh3.googleusercontent.com/a/attacker",
+                },
+                "platform": "google-oauth2",
+            },
+        )
+
+    assert response.status_code == 409
+    mock_remember.assert_not_called()
+
+
+def test_register_user_social_ignores_picture_when_the_secret_is_unset():
+    """No configured secret means no caller can be trusted with the write."""
+    with patch("pecha_api.auth.auth_views.create_user") as mock_create_user, patch(
+        "pecha_api.auth.auth_views.remember_social_avatar"
+    ) as mock_remember, patch("pecha_api.auth.auth_service.get", return_value=""):
+        mock_create_user.side_effect = HTTPException(status_code=409, detail="exists")
+        response = client.post(
+            "/auth/social_register",
+            json={
+                "create_user_request": {
+                    "email": "victim@example.com",
+                    "firstname": "testfirstname",
+                    "lastname": "testlastname",
+                    "avatar_url": "https://lh3.googleusercontent.com/a/attacker",
+                },
+                "platform": "google-oauth2",
+            },
+            headers={"X-Social-Register-Token": "anything"},
+        )
+
+    assert response.status_code == 409
+    mock_remember.assert_not_called()
 
 
 def test_login_user():

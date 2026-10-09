@@ -16,9 +16,14 @@ from pecha_api.plans.shared.permissions import (
     require_can_read_group_content,
 )
 
+from pecha_api.group_posts.comment_repository import (
+    get_comment_by_id_only,
+    soft_delete_comment,
+)
 from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.models import GroupPost, GroupPostLink, GroupPostMedia
 from pecha_api.group_posts.notification_dispatch_service import enqueue_group_post_notification
+from pecha_api.group_posts.report_repository import resolve_open_reports_for_comment
 from pecha_api.group_posts.repository import (
     create_post,
     get_group_posts,
@@ -314,3 +319,34 @@ def cms_delete_group_post_service(
 
         post = _get_post_or_404(db, post_id, group_id)
         soft_delete_post(db=db, post=post, deleted_by=author.email)
+
+
+def cms_delete_group_post_comment_service(
+    token: str,
+    group_id: UUID,
+    post_id: UUID,
+    comment_id: UUID,
+) -> None:
+    """Soft-delete any member's comment on one of the group's posts
+    (moderation), and resolve the open reports against it in the same commit.
+
+    Same role gate as the CMS chat-message delete: an author who can update
+    the group's content."""
+    author = validate_and_extract_author_details(token=token)
+
+    with SessionLocal() as db:
+        _validate_group_exists(db, group_id)
+        require_can_create_content(db=db, group_id=group_id, author=author)
+        _get_post_or_404(db, post_id, group_id)
+
+        comment = get_comment_by_id_only(db=db, comment_id=comment_id)
+        if not comment or comment.post_id != post_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=NOT_FOUND,
+            )
+
+        resolve_open_reports_for_comment(
+            db=db, comment_id=comment.id, resolved_at=datetime.now(tz.utc)
+        )
+        soft_delete_comment(db=db, comment=comment)

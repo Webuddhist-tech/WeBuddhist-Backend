@@ -59,6 +59,7 @@ class RoutineTimeBlock(Base):
         nullable=False,
     )
     time = Column(String(5), nullable=False)
+    title = Column(String(255), nullable=True)
     time_utc = Column(Time(timezone=True), nullable=False)
     time_int = Column(Integer, nullable=False)
     notification_enabled = Column(Boolean, default=True)

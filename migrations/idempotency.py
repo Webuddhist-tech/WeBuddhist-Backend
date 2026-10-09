@@ -23,6 +23,17 @@ def index_exists(table: str, index_name: str) -> bool:
     return index_name in indexes
 
 
+def unique_constraint_exists(table: str, constraint_name: str) -> bool:
+    if not table_exists(table):
+        return False
+    constraints = {
+        uq["name"]
+        for uq in inspect(op.get_bind()).get_unique_constraints(table)
+        if uq.get("name")
+    }
+    return constraint_name in constraints
+
+
 def fk_exists(table: str, fk_name: str) -> bool:
     if not table_exists(table):
         return False

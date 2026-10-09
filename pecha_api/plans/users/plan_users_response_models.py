@@ -1,9 +1,11 @@
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO
 from pecha_api.plans.media.media_response_models import ImageUrlModel
 from uuid import UUID
 from datetime import datetime
 from pecha_api.plans.plans_enums import ContentType, SeriesStatus
+from pecha_api.plans.shared.subtask_reference_resolver import SubTaskReferenceDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 from pecha_api.plans.groups.group_summary_models import AuthorGroupSummaryDTO
 from pecha_api.plans.public.plan_response_models import DayVideoSummaryDTO
@@ -80,12 +82,14 @@ class UserSubTaskDTO(BaseModel):
     is_completed: bool
     duration: Optional[str] = None
     content_type: ContentType
-    content: str
+    content: Optional[str] = None
     audio_url: Optional[str] = None
     source_text_id: Optional[str] = None
     pecha_segment_id: Optional[str] = None
     segment_ids: Optional[List[str]] = None
     segment_numbers: Optional[List[int]] = None
+    reference_id: Optional[UUID] = None
+    reference: Optional[SubTaskReferenceDTO] = None
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
 
@@ -96,6 +100,7 @@ class UserTaskDTO(BaseModel):
     display_order: int
     is_completed: bool
     sub_tasks: List[UserSubTaskDTO] = []
+    settings: TaskSettingsDTO = Field(default_factory=TaskSettingsDTO)
 
 class UserPlanDayDetailsResponse(BaseModel):
     id: UUID

@@ -1,16 +1,22 @@
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.orm import Session
 
+from pecha_api.notification.notification_preference_enums import (
+    NotificationChannel,
+    NotificationScope,
+    NotificationType,
+)
 from pecha_api.plans.groups.groups_enums import (
     AuthorGroupJoinRequestStatus,
     AuthorGroupStatus,
 )
 from pecha_api.plans.groups.groups_repository import (
     clear_user_series_partner_ids_for_group,
+    create_group,
     create_group_join_request,
     has_pending_join_request,
     list_join_requests_by_group,
@@ -32,6 +38,8 @@ from pecha_api.plans.groups.groups_repository import (
     get_user_series_enrollment_partner_map,
     leave_group_membership,
     update_group,
+    upsert_group_follow,
+    upsert_group_join,
 )
 from pecha_api.plans.users.plan_users_models import UserSeriesEnrollment
 
@@ -450,6 +458,30 @@ def test_list_join_requests_by_group_filters_by_status():
     base.filter.assert_called_once()
 
 
+def test_create_group_joins_the_creator_before_committing():
+    db = _make_session_mock()
+    group = MagicMock(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+
+    with patch("pecha_api.plans.groups.groups_repository.upsert_group_join") as join:
+        create_group(
+            db=db, group=group, metadata_entries=[], owner_member=MagicMock(),
+            creator_user_id=user_id,
+        )
+
+    join.assert_called_once_with(db=db, group_id=group.id, user_id=user_id, commit=False)
+    db.commit.assert_called_once()
+
+
+def test_create_group_without_a_creator_user_joins_no_one():
+    db = _make_session_mock()
+
+    with patch("pecha_api.plans.groups.groups_repository.upsert_group_join") as join:
+        create_group(db=db, group=MagicMock(), metadata_entries=[], owner_member=MagicMock())
+
+    join.assert_not_called()
+
+
 def test_create_group_join_request_commits_and_refreshes():
     db = _make_session_mock()
     join_request = MagicMock()
@@ -599,3 +631,156 @@ def test_is_group_id_published_does_not_lock_by_default():
     is_group_id_published(db=db, group_id=uuid.uuid4())
 
     query.with_for_update.assert_not_called()
+
+
+# The chat helper is imported inside the upsert functions (see the comment
+# there), so it is patched where it lives rather than in this module.
+_REJOIN = "pecha_api.chat.repository.rejoin_group_room_member"
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_puts_a_returning_member_back_in_the_chat_room(mock_rejoin):
+    """Leaving a group marks the chat membership as left; nothing used to clear
+    it, so the room stayed out of the rejoiner's inbox until they posted."""
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(db=db, group_id=group_id, user_id=user_id)
+
+    mock_rejoin.assert_called_once_with(
+        db=db, group_id=group_id, user_id=user_id, commit=False
+    )
+    # One commit for the join row and the chat membership together.
+    db.commit.assert_called_once()
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_defers_the_commit_with_its_caller(mock_rejoin):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(
+        db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4(), commit=False
+    )
+
+    mock_rejoin.assert_called_once()
+    db.commit.assert_not_called()
+
+
+@patch(_REJOIN)
+def test_upsert_group_join_skips_the_chat_room_for_an_existing_joiner(mock_rejoin):
+    """Already a joiner, so nothing about their group membership changed: a
+    chat membership that is closed was closed by the room, not by a leave."""
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_join(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_rejoin.assert_not_called()
+
+
+_UPSERT_PREFERENCE = "pecha_api.plans.groups.groups_repository.upsert_preference"
+
+
+@patch(_UPSERT_PREFERENCE)
+@patch(_REJOIN)
+def test_upsert_group_join_starts_the_group_chat_off(_mock_rejoin, mock_upsert_preference):
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_join(db=db, group_id=group_id, user_id=user_id)
+
+    mock_upsert_preference.assert_called_once_with(
+        db=db,
+        user_id=user_id,
+        notification_type=NotificationType.CHAT_MESSAGE,
+        channel=NotificationChannel.PUSH,
+        scope_id=group_id,
+        scope_type=NotificationScope.GROUP,
+        enabled=False,
+        set_enabled=True,
+    )
+
+
+@patch(_UPSERT_PREFERENCE)
+@patch(_REJOIN)
+def test_upsert_group_join_leaves_an_existing_joiners_chat_setting_alone(
+    _mock_rejoin, mock_upsert_preference
+):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_join(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_upsert_preference.assert_not_called()
+
+
+@patch(_REJOIN)
+def test_upsert_group_follow_puts_a_returning_follower_back_in_the_chat_room(mock_rejoin):
+    db = _make_session_mock()
+    user_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    db.execute.return_value.first.return_value = None
+
+    upsert_group_follow(db=db, group_id=group_id, user_id=user_id)
+
+    mock_rejoin.assert_called_once_with(
+        db=db, group_id=group_id, user_id=user_id, commit=False
+    )
+    db.commit.assert_called_once()
+
+
+@patch(_REJOIN)
+def test_upsert_group_follow_skips_the_chat_room_for_an_existing_follower(mock_rejoin):
+    db = _make_session_mock()
+    db.execute.return_value.first.return_value = (uuid.uuid4(),)
+
+    upsert_group_follow(db=db, group_id=uuid.uuid4(), user_id=uuid.uuid4())
+
+    mock_rejoin.assert_not_called()
+
+
+def test_list_decided_join_requests_by_user_returns_rows_and_total():
+    from pecha_api.plans.groups.groups_repository import list_decided_join_requests_by_user
+
+    db = _make_session_mock()
+    row = MagicMock()
+    query = db.query.return_value.join.return_value.options.return_value.filter.return_value
+    query.count.return_value = 1
+    query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = [row]
+
+    rows, total = list_decided_join_requests_by_user(
+        db=db, user_id=uuid.uuid4(), skip=5, limit=10
+    )
+
+    assert rows == [row]
+    assert total == 1
+    query.order_by.return_value.offset.assert_called_once_with(5)
+    query.order_by.return_value.offset.return_value.limit.assert_called_once_with(10)
+
+
+def test_list_decided_join_requests_by_user_filters_decided_reviewed_live_groups():
+    from pecha_api.plans.groups.groups_repository import list_decided_join_requests_by_user
+
+    db = _make_session_mock()
+    query = db.query.return_value.join.return_value.options.return_value.filter.return_value
+    query.count.return_value = 0
+    query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = []
+
+    list_decided_join_requests_by_user(db=db, user_id=uuid.uuid4(), skip=0, limit=20)
+
+    filter_sql = " ".join(
+        str(clause)
+        for clause in db.query.return_value.join.return_value.options.return_value.filter.call_args.args
+    )
+    assert "author_group_join_requests.user_id" in filter_sql
+    assert "author_group_join_requests.status IN" in filter_sql
+    assert "author_group_join_requests.reviewed_by IS NOT NULL" in filter_sql
+    assert "author_groups.deleted_at IS NULL" in filter_sql
+    assert "author_groups.status =" in filter_sql
+    order_sql = str(query.order_by.call_args.args[0])
+    assert order_sql == "author_group_join_requests.reviewed_at DESC"

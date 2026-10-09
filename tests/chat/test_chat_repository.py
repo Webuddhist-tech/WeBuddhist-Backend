@@ -1,12 +1,18 @@
+import pytest
+from pecha_api.chat.enums import PrayerSort
 from datetime import datetime, timezone as tz
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pecha_api.app  # noqa: F401
 
 from pecha_api.chat.repository import (
+    SUPPRESSED_SQS_MESSAGE_ID,
     add_member,
+    count_suppressed_prayer_requests,
+    last_dispatched_prayer_request,
     count_active_members,
+    count_prayer_requests_in_room,
     count_unread_messages,
     create_message,
     create_room,
@@ -16,15 +22,29 @@ from pecha_api.chat.repository import (
     get_last_messages_map,
     get_member,
     get_message_by_id,
+    get_messages_by_ids,
     get_room_by_group_id,
     get_room_by_id,
     get_room_by_pair,
     get_room_messages,
+    _prayer_sort_order,
+    add_prayers,
+    claim_prayer_notification_for_dispatch,
+    claim_unreported_prayers,
+    last_prayer_request_push_to_user,
+    list_due_prayer_notifications,
+    list_prayer_requests_with_held_prayers,
+    list_undispatched_prayer_notifications,
+    get_my_prayer_counts_map,
     leave_member,
+    lock_prayer_request,
+    remove_prayer_and_count,
     list_active_members,
     list_my_active_rooms,
     mark_read,
+    rejoin_group_room_member,
     soft_delete_message,
+    soft_delete_messages,
     touch_room,
     update_room,
 )
@@ -155,6 +175,69 @@ class TestMemberQueries:
         assert member.left_at is not None
         db.commit.assert_called_once()
 
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_clears_left_at_for_a_returning_member(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        member = MagicMock(left_at=datetime.now(tz.utc))
+        mock_get_member.return_value = member
+
+        changed = rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4())
+
+        assert changed is True
+        assert member.left_at is None
+        db.commit.assert_called_once()
+
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_leaves_an_enclosing_transaction_open(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        mock_get_member.return_value = MagicMock(left_at=datetime.now(tz.utc))
+
+        rejoin_group_room_member(
+            db=db, group_id=uuid4(), user_id=uuid4(), commit=False
+        )
+
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_member')
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_is_a_noop_for_an_already_active_member(
+        self, mock_get_room, mock_get_member
+    ):
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+        mock_get_member.return_value = MagicMock(left_at=None)
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_member', return_value=None)
+    @patch('pecha_api.chat.repository.get_room_by_group_id')
+    def test_rejoin_does_not_add_someone_who_was_never_in_the_room(
+        self, mock_get_room, _mock_get_member
+    ):
+        """Joining the group does not put a newcomer in the room - that is
+        resolve_or_create_group_room's call, and it decides the role."""
+        db = MagicMock()
+        mock_get_room.return_value = MagicMock(id=uuid4())
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
+
+    @patch('pecha_api.chat.repository.get_room_by_group_id', return_value=None)
+    def test_rejoin_is_a_noop_when_the_group_has_no_room(self, _mock_get_room):
+        db = MagicMock()
+
+        assert rejoin_group_room_member(db=db, group_id=uuid4(), user_id=uuid4()) is False
+        db.commit.assert_not_called()
+
     def test_mark_read_sets_last_read_at(self):
         db = MagicMock()
         member = MagicMock(last_read_at=None)
@@ -194,6 +277,22 @@ class TestRoomLists:
         assert "author_groups" in rendered
         assert "group_id IS NULL" in rendered
 
+    def test_list_my_active_rooms_excludes_rooms_for_groups_no_longer_joined_or_followed(self):
+        """Chat access tracks live join/follow status, not just the
+        ChatRoomMember row - this covers ChatRoomMember rows left over from
+        before a leave/unfollow started closing them out too."""
+        db = MagicMock()
+        query = _query_chain(db, total=0, results=[])
+
+        list_my_active_rooms(db=db, user_id=uuid4(), skip=0, limit=20)
+
+        rendered = " ".join(
+            str(clause.compile(compile_kwargs={"literal_binds": True}))
+            for clause in query.filter.call_args.args
+        )
+        assert "author_group_joins" in rendered
+        assert "author_group_followers" in rendered
+
 
 class TestMessages:
 
@@ -214,6 +313,43 @@ class TestMessages:
         assert result == messages
         assert total == 1
         query.options.assert_called()
+
+    @pytest.mark.parametrize(
+        "sort, expected",
+        [
+            (PrayerSort.NEWEST, "chat_messages.created_at DESC, chat_messages.id DESC"),
+            (PrayerSort.OLDEST, "chat_messages.created_at ASC, chat_messages.id ASC"),
+            (PrayerSort.MOST_PRAYED, "coalesce(p.total, 0) DESC, chat_messages.created_at DESC"),
+            (PrayerSort.NEEDS_PRAYERS, "coalesce(p.total, 0) ASC, chat_messages.created_at DESC"),
+            (PrayerSort.RANDOM, "md5(concat(CAST(chat_messages.id AS VARCHAR), 'abc')), chat_messages.id ASC"),
+        ],
+    )
+    def test_prayer_sort_order(self, sort, expected):
+        from sqlalchemy import column, func
+        from sqlalchemy.dialects import postgresql
+
+        total = func.coalesce(column("total"), 0)
+        clauses = _prayer_sort_order(sort, "abc", total)
+        sql = ", ".join(
+            str(c.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            for c in clauses
+        ).replace("coalesce(total, 0)", "coalesce(p.total, 0)")
+        assert expected in sql
+
+    def test_get_room_messages_prayer_filters_by_intention(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0, results=[])
+
+        get_room_messages(
+            db=db,
+            room_id=uuid4(),
+            message_type="PRAYER",
+            intention="Compassion",
+            sort=PrayerSort.OLDEST,
+        )
+
+        # room, message_type and intention filters
+        assert query.filter.call_count >= 3
 
     def test_get_message_by_id(self):
         db = MagicMock()
@@ -278,3 +414,533 @@ class TestMessages:
         query.scalar.return_value = None
 
         assert count_unread_messages(db=db, room_id=uuid4(), last_read_at=None) == 0
+
+    def test_count_prayer_requests_in_room(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = 5
+
+        assert count_prayer_requests_in_room(db=db, room_id=uuid4()) == 5
+        assert query.filter.call_count == 1
+
+    def test_count_prayer_requests_returns_zero_when_scalar_none(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = None
+
+        assert count_prayer_requests_in_room(db=db, room_id=uuid4()) == 0
+
+
+class TestBulkMessageDeletion:
+    """The bulk delete's guarantees live in these two functions, so they are
+    checked here directly rather than through the service, which mocks them."""
+
+    def test_get_messages_by_ids_skips_query_when_no_ids(self):
+        db = MagicMock()
+
+        assert get_messages_by_ids(db=db, message_ids=[], room_id=uuid4()) == []
+        db.query.assert_not_called()
+
+    def test_get_messages_by_ids_restricts_to_live_messages_of_the_room(self):
+        db = MagicMock()
+        messages = [MagicMock(), MagicMock()]
+        query = _query_chain(db, results=messages)
+
+        result = get_messages_by_ids(
+            db=db, message_ids=[uuid4(), uuid4()], room_id=uuid4()
+        )
+
+        assert result == messages
+        clauses = [str(clause) for clause in query.filter.call_args.args]
+        # A caller must not reach another room's messages, nor delete one twice.
+        assert any("chat_messages.id IN" in clause for clause in clauses)
+        assert any("chat_messages.room_id =" in clause for clause in clauses)
+        assert any("chat_messages.deleted_at IS NULL" in clause for clause in clauses)
+
+    def test_soft_delete_messages_shares_one_timestamp_and_commits_once(self):
+        db = MagicMock()
+        messages = [MagicMock(deleted_at=None) for _ in range(3)]
+
+        result = soft_delete_messages(db=db, messages=messages)
+
+        assert all(message.deleted_at == result for message in messages)
+        assert result.tzinfo is not None
+        # One commit, so a bulk delete lands all or nothing.
+        db.commit.assert_called_once()
+
+    def test_soft_delete_messages_with_no_messages_still_returns_timestamp(self):
+        db = MagicMock()
+
+        assert soft_delete_messages(db=db, messages=[]) is not None
+        db.commit.assert_called_once()
+
+
+class TestAddPrayers:
+    """The "is praying" row and the running total are written together."""
+
+    def test_inserts_both_rows_and_commits_once(self):
+        db = MagicMock()
+        first, second = uuid4(), uuid4()
+        prayers_result = MagicMock()
+        prayers_result.all.return_value = [(first,)]
+        counts_result = MagicMock()
+        counts_result.all.return_value = [(first, 10), (second, 25)]
+        db.execute.side_effect = [prayers_result, counts_result]
+
+        result = add_prayers(
+            db=db, message_ids=[first, second], user_id=uuid4(), count=10
+        )
+
+        assert db.execute.call_count == 2
+        db.commit.assert_called_once()
+        assert result.created_message_ids == {first}
+        assert result.my_prayer_counts == {first: 10, second: 25}
+
+    def test_counter_upsert_adds_to_the_existing_total(self):
+        db = MagicMock()
+        db.execute.return_value.all.return_value = []
+
+        add_prayers(db=db, message_ids=[uuid4()], user_id=uuid4(), count=3)
+
+        counts_sql = str(db.execute.call_args_list[1].args[0])
+        assert "ON CONFLICT ON CONSTRAINT uq_chat_message_prayer_counts_message_user" in counts_sql
+        assert "prayer_count = (chat_message_prayer_counts.prayer_count + excluded.prayer_count)" in counts_sql
+        assert "unreported_count = (chat_message_prayer_counts.unreported_count + excluded.unreported_count)" in counts_sql
+        prayers_sql = str(db.execute.call_args_list[0].args[0])
+        assert "DO NOTHING" in prayers_sql
+
+    def test_no_ids_writes_nothing(self):
+        db = MagicMock()
+
+        result = add_prayers(db=db, message_ids=[], user_id=uuid4())
+
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()
+        assert result.created_message_ids == set()
+        assert result.my_prayer_counts == {}
+
+
+class TestRemovePrayerAndCount:
+
+    def test_deletes_both_rows_in_one_commit(self):
+        db = MagicMock()
+        query = _query_chain(db)
+
+        remove_prayer_and_count(db=db, message_id=uuid4(), user_id=uuid4())
+
+        assert query.delete.call_count == 2
+        db.commit.assert_called_once()
+
+
+class TestMyPrayerCountsMap:
+
+    def test_keys_counts_by_message(self):
+        db = MagicMock()
+        message_id = uuid4()
+        _query_chain(db, results=[(message_id, 30)])
+
+        assert get_my_prayer_counts_map(
+            db=db, message_ids=[message_id], user_id=uuid4()
+        ) == {message_id: 30}
+
+    def test_no_ids_skips_the_query(self):
+        db = MagicMock()
+
+        assert get_my_prayer_counts_map(db=db, message_ids=[], user_id=uuid4()) == {}
+        db.query.assert_not_called()
+
+
+class TestPrayerNotificationGateQueries:
+
+    def test_lock_prayer_request_locks_the_row(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.with_for_update.return_value = query
+        message = MagicMock()
+        query.first.return_value = message
+
+        assert lock_prayer_request(db=db, message_id=uuid4()) is message
+        query.with_for_update.assert_called_once()
+
+    def test_claim_locks_reads_and_zeroes_unreported_counts(self):
+        db = MagicMock()
+        tenzin, dolma = uuid4(), uuid4()
+        earlier = datetime(2026, 9, 30, 10, 0, tzinfo=tz.utc)
+        later = datetime(2026, 9, 30, 10, 5)  # naive, as SQLite hands it back
+        db.execute.return_value.all.return_value = [(tenzin, 3, earlier), (dolma, 10, later)]
+
+        claimed = claim_unreported_prayers(db=db, message_id=uuid4())
+
+        assert [(row.user_id, row.count) for row in claimed] == [(tenzin, 3), (dolma, 10)]
+        assert claimed[1].last_prayed_at.tzinfo is not None
+        sql = str(db.execute.call_args.args[0])
+        assert "FOR UPDATE" in sql
+        assert "unreported_count > " in sql
+        assert "SET unreported_count=" in sql
+        # The caller commits together with the push row.
+        db.commit.assert_not_called()
+
+
+class TestSuppressedSentinel:
+
+    def test_suppressed_sentinel_matches_what_the_dispatch_service_writes(self):
+        # Guards against the sentinel drifting out of sync between the two
+        # modules now that it is defined once here and re-exported there.
+        from pecha_api.chat.notification_dispatch_service import (
+            SUPPRESSED_SQS_MESSAGE_ID as reexported,
+        )
+
+        assert reexported == SUPPRESSED_SQS_MESSAGE_ID == "SUPPRESSED"
+
+
+class TestLastDispatchedPrayerRequest:
+    """The room's last prayer-request push that actually went out. A request the
+    interval held must not extend the interval, or one busy minute would
+    silence the room indefinitely."""
+
+    def test_returns_both_clocks(self):
+        db = MagicMock()
+        sent_at = datetime(2026, 9, 25, 10, 0, 2, tzinfo=tz.utc)
+        created_at = datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc)
+        _query_chain(db, first=(sent_at, created_at))
+
+        result = last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        assert result.dispatched_at == sent_at
+        assert result.created_at == created_at
+
+    def test_returns_none_when_the_room_never_raised_one(self):
+        db = MagicMock()
+        _query_chain(db, first=None)
+
+        assert last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        ) is None
+
+    def test_naive_timestamps_come_back_utc_aware(self):
+        # Postgres hands back an aware value; SQLite, which these tests run on,
+        # does not. The gate compares against an aware now().
+        db = MagicMock()
+        _query_chain(
+            db,
+            first=(datetime(2026, 9, 25, 10, 0, 2), datetime(2026, 9, 25, 10, 0)),
+        )
+
+        result = last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        assert result.dispatched_at.tzinfo is not None
+        assert result.created_at.tzinfo is not None
+        assert result.dispatched_at == datetime(2026, 9, 25, 10, 0, 2, tzinfo=tz.utc)
+
+    def test_filters_out_suppressed_and_non_prayer_rows(self):
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any("message_type =" in condition for condition in conditions)
+        assert any(
+            "notification_sqs_message_id !=" in condition for condition in conditions
+        )
+
+    def test_a_deleted_request_still_counts_as_dispatched(self):
+        """Deleting a request does not un-send the push its members already
+        received. Filtering deleted rows out here would let a sender clear the
+        interval by deleting their own request and post again immediately."""
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert not any("deleted_at IS NULL" in condition for condition in conditions)
+
+    def test_excludes_the_message_being_dispatched(self):
+        # Without this the copy would resolve "last sent push" to the message
+        # being sent, and the held count would always come out zero.
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any("chat_messages.id !=" in condition for condition in conditions)
+
+    def test_before_bounds_the_search_to_earlier_pushes(self):
+        """The worker can reach a message after a later request has pushed. The
+        copy asks about this message's own moment, not about the room's latest
+        push, which by then can be one that went out afterwards."""
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db,
+            room_id=uuid4(),
+            exclude_message_id=uuid4(),
+            before=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+        )
+
+        conditions = [
+            str(arg) for call in query.filter.call_args_list for arg in call.args
+        ]
+        assert any(
+            "notification_dispatched_at <" in condition for condition in conditions
+        )
+
+    def test_without_before_the_latest_push_is_the_answer(self):
+        """The gate asks about now, so nothing is out of bounds for it."""
+        db = MagicMock()
+        query = _query_chain(db, first=None)
+
+        last_dispatched_prayer_request(
+            db=db, room_id=uuid4(), exclude_message_id=uuid4()
+        )
+
+        conditions = [
+            str(arg) for call in query.filter.call_args_list for arg in call.args
+        ]
+        assert not any(
+            "notification_dispatched_at <" in condition for condition in conditions
+        )
+
+
+class TestCountSuppressedPrayerRequests:
+    """How many prayer requests the interval held, for the "+N other prayer
+    requests" the next push carries."""
+
+    def test_counts_suppressed_rows(self):
+        db = MagicMock()
+        _query_chain(db, total=3)
+
+        assert count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc),
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        ) == 3
+
+    def test_returns_zero_when_nothing_was_held(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.scalar.return_value = None
+
+        assert count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        ) == 0
+
+    def test_windows_on_the_suppression_clock_at_both_ends(self):
+        """Bounding on created_at instead would lose a request held out of
+        order - one whose first enqueue failed and which reconcile suppresses
+        after a newer request has already pushed. No push would count it, and
+        its SUPPRESSED marker stops it ever being delivered."""
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any(
+            "notification_dispatched_at <=" in condition for condition in conditions
+        )
+        assert not any(
+            "chat_messages.created_at" in condition for condition in conditions
+        )
+
+    def test_excludes_deleted_rows_and_the_one_being_sent(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        )
+
+        conditions = [str(arg) for arg in query.filter.call_args.args]
+        assert any(
+            "notification_sqs_message_id =" in condition for condition in conditions
+        )
+        assert any("chat_messages.id !=" in condition for condition in conditions)
+        assert any("deleted_at IS NULL" in condition for condition in conditions)
+
+    def test_since_adds_the_lower_bound(self):
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=datetime(2026, 9, 25, 10, 0, tzinfo=tz.utc),
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        )
+
+        assert query.filter.call_count == 2
+
+    def test_no_since_counts_every_suppressed_row_up_to_this_push(self):
+        # A room that has never raised a push has nothing to measure from, so
+        # every request it held still belongs in the count.
+        db = MagicMock()
+        query = _query_chain(db, total=0)
+
+        count_suppressed_prayer_requests(
+            db=db,
+            room_id=uuid4(),
+            since=None,
+            until=datetime(2026, 9, 25, 10, 20, tzinfo=tz.utc),
+            exclude_message_id=uuid4(),
+        )
+
+        assert query.filter.call_count == 1
+
+
+def _compiled_conditions(query):
+    from sqlalchemy.dialects import postgresql
+
+    return [
+        str(arg.compile(dialect=postgresql.dialect()))
+        for arg in query.filter.call_args.args
+    ]
+
+
+class TestHeldPrayerNotificationQueries:
+    """A prayer-received push is recorded first and sent once it is clear of
+    the requester's prayer-request pushes."""
+
+    def test_due_rows_are_unclaimed_and_carry_the_requester(self):
+        db = MagicMock()
+        requester = uuid4()
+        notification_id = uuid4()
+        query = _query_chain(
+            db, results=[(notification_id, requester, datetime(2026, 10, 2, 10, 0))]
+        )
+
+        due = list_due_prayer_notifications(
+            db=db, created_before=datetime(2026, 10, 2, 10, 2, tzinfo=tz.utc), limit=50
+        )
+
+        assert due[0].id == notification_id
+        assert due[0].requester_id == requester
+        assert due[0].created_at.tzinfo is not None
+        conditions = _compiled_conditions(query)
+        assert any("notification_dispatched_at IS NULL" in c for c in conditions)
+        assert any("notification_sqs_message_id IS NULL" in c for c in conditions)
+
+    def test_held_prayers_from_others_on_live_requests_past_the_interval(self):
+        """A request is due when someone other than the requester has prayers
+        waiting and its last push is older than the interval, or it never had
+        one. Deleted requests are left alone."""
+        db = MagicMock()
+        message_id = uuid4()
+        query = _query_chain(db, results=[(message_id,)])
+        query.group_by.return_value = query
+
+        due = list_prayer_requests_with_held_prayers(
+            db=db, last_push_before=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc), limit=50
+        )
+
+        assert due == [message_id]
+        conditions = _compiled_conditions(query)
+        assert any("unreported_count >" in c for c in conditions)
+        assert any(
+            "chat_message_prayer_counts.user_id != chat_messages.sender_id" in c
+            for c in conditions
+        )
+        assert any("chat_messages.deleted_at IS NULL" in c for c in conditions)
+        last_push = next(c for c in conditions if "chat_prayer_notifications" in c)
+        assert "IS NULL" in last_push
+        assert "<=" in last_push
+        query.limit.assert_called_once_with(50)
+
+    def test_claim_wins_only_an_unclaimed_row(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.update.return_value = 1
+
+        assert claim_prayer_notification_for_dispatch(db=db, notification_id=uuid4())
+        assert any(
+            "notification_dispatched_at IS NULL" in c for c in _compiled_conditions(query)
+        )
+        db.commit.assert_called_once()
+
+    def test_claim_lost_to_another_replica(self):
+        db = MagicMock()
+        query = _query_chain(db)
+        query.update.return_value = 0
+
+        assert not claim_prayer_notification_for_dispatch(db=db, notification_id=uuid4())
+
+    def test_reconcile_only_retries_claimed_rows(self):
+        """A row still waiting out the gap is not stuck; resending it from
+        reconcile would skip the gap entirely."""
+        db = MagicMock()
+        query = _query_chain(db)
+
+        list_undispatched_prayer_notifications(
+            db=db, older_than=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc), limit=50
+        )
+
+        conditions = _compiled_conditions(query)
+        assert any("notification_dispatched_at IS NOT NULL" in c for c in conditions)
+        assert any("notification_sqs_message_id IS NULL" in c for c in conditions)
+
+
+class TestLastPrayerRequestPushToUser:
+
+    def test_reaches_group_joiners_and_event_members_but_not_the_sender(self):
+        db = MagicMock()
+        query = _query_chain(db, total=None)
+
+        last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        )
+
+        conditions = _compiled_conditions(query)
+        assert any("chat_messages.sender_id !=" in c for c in conditions)
+        assert any("notification_sqs_message_id !=" in c for c in conditions)
+        assert any("notification_dispatched_at >" in c for c in conditions)
+        audience = next(c for c in conditions if "author_group_joins" in c)
+        assert "chat_room_members" in audience
+        assert "left_at IS NULL" in audience
+
+    def test_none_when_no_push_reached_them(self):
+        db = MagicMock()
+        _query_chain(db, total=None)
+
+        assert last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        ) is None
+
+    def test_naive_timestamp_comes_back_utc_aware(self):
+        db = MagicMock()
+        _query_chain(db, total=datetime(2026, 10, 2, 10, 1))
+
+        result = last_prayer_request_push_to_user(
+            db=db, user_id=uuid4(), since=datetime(2026, 10, 2, 10, 0, tzinfo=tz.utc)
+        )
+
+        assert result == datetime(2026, 10, 2, 10, 1, tzinfo=tz.utc)

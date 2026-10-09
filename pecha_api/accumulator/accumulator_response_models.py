@@ -1,10 +1,22 @@
-from pydantic import BaseModel, Field, model_validator
-from typing import Optional, List
+from pydantic import BaseModel, Field, StringConstraints, model_validator
+from typing import Annotated, Optional, List
 from datetime import datetime
 from uuid import UUID
 from .accumulator_enums import AccumulatorType
 from ..plans.plans_enums import LanguageCode
 from ..plans.media.media_response_models import ImageUrlModel
+
+# An external (OpenPecha edition) text id as a request may supply it.
+#
+# Bounded rather than free-form for two reasons. It lands in a String(255)
+# column, so an overlong value has to be a 422 rather than a database error on
+# save. And a non-null `text_id` is what marks a preset a recitation - it is
+# excluded from the default public catalogue - so a blank string would hide a
+# preset behind a text id nothing can resolve. Whitespace is stripped before
+# the length check, the way metadata names are treated below.
+TextId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+]
 
 
 class AccumulatorMetadataDTO(BaseModel):
@@ -17,7 +29,10 @@ class AccumulatorMetadataDTO(BaseModel):
 class CreatePresetAccumulatorRequest(BaseModel):
     """CMS request to create a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[UUID] = None
+    text_id: Optional[TextId] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     metadata: List[AccumulatorMetadataDTO] = Field(..., min_length=1)
@@ -35,7 +50,10 @@ class CreatePresetAccumulatorRequest(BaseModel):
 class UpdatePresetAccumulatorRequest(BaseModel):
     """CMS request to update a public preset accumulator."""
     target_count: Optional[int] = Field(None, ge=1)
-    text_id: Optional[UUID] = None
+    text_id: Optional[TextId] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     metadata: Optional[List[AccumulatorMetadataDTO]] = Field(None, min_length=1)
@@ -64,6 +82,13 @@ class PresetMantraDTO(BaseModel):
         None,
         description="Presigned S3 URL for the mantra's default mala image",
     )
+    deity_image: Optional[ImageUrlModel] = None
+
+
+class CMSPresetMantraDTO(PresetMantraDTO):
+    """CMS-facing variant of PresetMantraDTO that also round-trips the raw
+    deity image S3 key, so a CMS edit form can display/re-submit it."""
+    deity_image_key: Optional[str] = None
 
 
 class AccumulatorDTO(BaseModel):
@@ -78,6 +103,7 @@ class AccumulatorDTO(BaseModel):
     mantra_id: Optional[UUID] = None
     mala_image_id: Optional[UUID] = None
     mala_image_url: Optional[str] = Field(None, description="Presigned S3 URL for the chosen mala image (None when no image is set)")
+    deity_image: Optional[ImageUrlModel] = Field(None, description="The linked mantra's deity image, if any")
     metadata: List[AccumulatorMetadataDTO] = []
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -116,6 +142,25 @@ class PublicAccumulatorsResponse(BaseModel):
     limit: int
 
 
+class CMSPublicAccumulatorDTO(PublicAccumulatorDTO):
+    """CMS-facing variant of PublicAccumulatorDTO whose nested mantra also
+    carries the raw deity image key, and whose linked text title is resolved
+    with the list so each row does not look the title up on its own."""
+    mantra: Optional[CMSPresetMantraDTO] = None
+    text_title: Optional[str] = Field(
+        None,
+        description="Title of the linked OpenPecha text when text_id is set. "
+        "Null when the preset has no text or the title could not be resolved.",
+    )
+
+
+class CMSPublicAccumulatorsResponse(BaseModel):
+    accumulators: List[CMSPublicAccumulatorDTO]
+    total: int
+    skip: int
+    limit: int
+
+
 class CreateAccumulatorRequest(BaseModel):
     parent_id: UUID = Field(..., description="Id of the public preset the user tapped (the `id` from GET /accumulators/presets); its fields are copied into the new user accumulator and stored as the new row's parent_id")
 
@@ -123,7 +168,10 @@ class CreateAccumulatorRequest(BaseModel):
 class UpdateAccumulatorRequest(BaseModel):
     target_count: Optional[int] = None
     current_count: Optional[int] = Field(None, ge=0, description="New absolute current count")
-    text_id: Optional[UUID] = None
+    text_id: Optional[TextId] = Field(
+        None,
+        description="External (OpenPecha edition) text id. Free-form string, not a UUID.",
+    )
     mantra_id: Optional[UUID] = None
 
 
@@ -144,6 +192,7 @@ class AccumulatorHistoryDTO(BaseModel):
     total_counted: int
     mala_image_id: Optional[UUID] = None
     mala_image_url: Optional[str] = Field(None, description="Presigned S3 URL for the chosen mala image (None when no image is set)")
+    deity_image: Optional[ImageUrlModel] = Field(None, description="The linked mantra's deity image, if any")
     metadata: List[AccumulatorMetadataDTO] = []
     sessions: List[AccumulatorSessionDTO]
 
@@ -160,9 +209,12 @@ class AccumulatorGroupDTO(BaseModel):
     group_accumulator_id: UUID
     group_id: UUID
     title: Optional[str] = None
+    group_name: Optional[str] = Field(None, description="Name of the group that owns this group accumulator")
+    event_title: Optional[str] = Field(None, description="Title of the event this group accumulator is linked to, if any")
     image: Optional[ImageUrlModel] = None
     target_count: Optional[int] = None
     user_total_count: int = Field(..., description="Authenticated user's total count for this group accumulator")
+    group_total_count: int = Field(0, description="Total count from all users for this group accumulator")
     is_joined: bool = Field(
         ...,
         description="Whether the authenticated user has joined this group accumulator",

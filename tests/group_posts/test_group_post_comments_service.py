@@ -192,6 +192,14 @@ class TestBuildCommentDTO:
         assert dto.user.avatar_url == "https://example.com/avatar.jpg"
         mock_generate_url.assert_called_once()
 
+    def test_a_commenter_without_an_email_is_still_listed(self):
+        """Accounts signed up without an email have users.email NULL."""
+        dto = build_comment_dto(MockComment(user=MockUser(email=None)))
+
+        assert dto.user.email is None
+        assert dto.user_email is None
+        assert dto.user.first_name == "First"
+
     def test_leaves_updated_at_null_when_never_edited(self):
         comment = MockComment()
         comment.updated_at = None

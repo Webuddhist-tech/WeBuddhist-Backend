@@ -149,6 +149,13 @@ class AuthorGroup(Base):
     status = Column(AuthorGroupStatusEnum, nullable=False, default="DRAFT")
     avatar_key = Column(String(1000), nullable=True)
     banner_key = Column(String(1000), nullable=True)
+    # The Buddhist tradition the group practises in. Nullable because groups
+    # created before traditions were tracked have none until set in Studio.
+    tradition_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("tradition_list.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     created_at = Column(
         DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False
@@ -159,6 +166,7 @@ class AuthorGroup(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     deleted_by = Column(String(255), nullable=True)
 
+    tradition = relationship("Tradition", lazy="select")
     metadata_entries = relationship(
         "AuthorGroupMetadata",
         back_populates="group",
@@ -185,6 +193,7 @@ class AuthorGroup(Base):
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        Index("idx_author_groups_tradition_id", "tradition_id"),
     )
 
 
@@ -298,6 +307,43 @@ class AuthorGroupInvite(Base):
     )
 
 
+class AuthorGroupJoinLink(Base):
+    """A shareable Studio link that adds whoever opens it to a group.
+
+    Unlike AuthorGroupInvite it is not tied to one email, so it also reaches
+    phone-only authors. Usable while not revoked, not expired and under
+    max_uses (null = unlimited). Redeeming it also activates a pending
+    author: the group manager who shared it is vouching for them.
+    """
+
+    __tablename__ = "author_group_join_links"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    group_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_AUTHOR_GROUPS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    token = Column(String(64), nullable=False)
+    role = Column(AuthorGroupMemberRoleEnum, nullable=False, default="AUTHOR")
+    max_uses = Column(Integer, nullable=True)
+    use_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(String(255), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(_datetime.timezone.utc), nullable=False
+    )
+    created_by = Column(String(255), nullable=False)
+
+    group = relationship("AuthorGroup")
+
+    __table_args__ = (
+        Index("uq_author_group_join_links_token", "token", unique=True),
+        Index("idx_author_group_join_links_group_id", "group_id"),
+    )
+
+
 class AuthorGroupJoinRequest(Base):
     """An app user's request to join a private COMMUNITY group, reviewed in Studio."""
 
@@ -344,4 +390,53 @@ class AuthorGroupJoinRequest(Base):
             unique=True,
             postgresql_where=text("status = 'PENDING'"),
         ),
+    )
+
+
+class AuthorGroupBan(Base):
+    """A time-boxed block on an app user rejoining a COMMUNITY group.
+
+    Written by a group OWNER/ADMIN from Studio when they remove a joined user.
+    A ban is active while `lifted_at` is null and `expires_at` is in the future;
+    expired rows are left in place as an audit trail rather than being deleted,
+    so the active-ban lookup always filters on both columns.
+    """
+
+    __tablename__ = "author_group_bans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    group_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(FK_AUTHOR_GROUPS_ID, ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    lifted_at = Column(DateTime(timezone=True), nullable=True)
+    lifted_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("authors.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=datetime.now(_datetime.timezone.utc), nullable=False
+    )
+    created_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("authors.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    group = relationship("AuthorGroup")
+    user = relationship("Users", foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index("idx_author_group_bans_group_user", "group_id", "user_id"),
+        Index("idx_author_group_bans_group_expires", "group_id", "expires_at"),
+        Index("idx_author_group_bans_user_expires", "user_id", "expires_at"),
     )

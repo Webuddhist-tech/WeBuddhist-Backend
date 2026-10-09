@@ -248,8 +248,7 @@ pytest tests/calendar/test_calendar_parser.py::TestFindGregorianDatesForLunar -v
 
 ## Next Steps (Future Enhancements)
 
-Per RFC, these are **out of scope** for v1:
-- Weekly schedules
+Per RFC, these are **out of scope** for v1 (weekly schedules were added post-v1 — see `RecurrenceFrequency.WEEKLY`):
 - Chinese lunar calendar
 - Per-occurrence edits/exceptions
 - Pre-materialized occurrence rows
@@ -307,3 +306,19 @@ This ensures recurring events are only processed through the expansion logic, no
 **Fix:** `get_events_service()` (`pecha_api/events/event_service.py`) now takes only `occurrences[0]` — the earliest occurrence within `[from_date, to_date]` — from `expand_occurrences()` per template, instead of iterating over the full list. This applies to both `GET /events` (public) and `GET /cms/events` (CMS), since both route through the same function.
 
 **Behavior change:** Callers that relied on the list endpoints to enumerate *every* date a recurring event falls on within a range (e.g. rendering all occurrences of a weekly/monthly event on a calendar) will now only see the next/earliest one per request. There is currently no endpoint that returns the full set of occurrences for a template within a range — a dedicated expansion/preview endpoint would be needed if that becomes a requirement (see "Next Steps").
+
+## Weekly Recurrence (Added: September 8, 2026)
+
+Added `RecurrenceFrequency.WEEKLY` alongside the existing `MONTHLY`/`YEARLY` options — an event that repeats every week on a specific day (e.g. "every Wednesday").
+
+**Files Modified:**
+- `pecha_api/events/event_enums.py` - added `WEEKLY` to `RecurrenceFrequency`
+- `pecha_api/events/event_model.py` - added `recurrence_day_of_week` column (Integer, nullable)
+- `migrations/versions/wk1a2b3c4d5e_add_event_recurrence_weekly.py` - adds the column; splits `ck_events_recurrence_required` into per-frequency day requirements (`ck_events_monthly_yearly_day`, `ck_events_weekly_day_of_week`); adds `ck_events_weekly_gregorian_only` since weekly has no lunar equivalent
+- `pecha_api/events/event_response_models.py` - `RecurrenceInput`/`RecurrenceDTO` gained `day_of_week` (0=Monday..6=Sunday); `day` is now optional (required only for MONTHLY/YEARLY, validated in `validate_recurrence_rules`)
+- `pecha_api/events/recurrence_service.py` - added `_resolve_gregorian_weekly()`; wired a `WEEKLY` branch into the frequency dispatch in both `expand_occurrences()` and `compute_initial_dates()`
+- `pecha_api/events/event_service.py` - threads `recurrence_day_of_week` through `create_event_service()`, `_apply_recurrence_update()`, and `_event_to_dto()`
+
+**Convention:** `day_of_week` uses Python's `date.weekday()` convention: `0=Monday .. 6=Sunday`. Weekly recurrence only supports `RecurrenceDateSystem.GREGORIAN` — there's no lunar "day of week" concept.
+
+**Studio (CMS) changes:** `EventSchema.ts` (added `WEEKLY` + `day_of_week` field + `DAYS_OF_WEEK` constant), `EventRecurrenceSection.tsx` (Weekly option in the frequency dropdown, a Day-of-week select shown in place of the day-of-month input, Tibetan Lunar disabled while Weekly is selected), and `eventsApi.ts` (`day_of_week` threaded through `RecurrenceDTO`/`RecurrenceInput`, `buildRecurrenceInput()`, the DTO→form mapping, and the update-diff check).

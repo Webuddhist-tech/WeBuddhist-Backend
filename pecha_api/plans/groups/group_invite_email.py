@@ -1,7 +1,10 @@
 import logging
+from typing import Optional
+from urllib.parse import quote
 
-from pecha_api.config import get, get_int
+from pecha_api.config import get, get_bool
 from pecha_api.notification.email_provider import send_email
+from pecha_api.plans.groups.group_invite_token import invite_expiry_label
 
 BRAND_PRIMARY = "#A51C21"
 BRAND_PRIMARY_HOVER = "#8a171c"
@@ -10,11 +13,7 @@ TEXT_MUTED = "#666666"
 
 
 def _invite_expiry_label() -> str:
-    minutes = get_int("GROUP_INVITE_EXPIRY_MINUTES")
-    minutes = max(1, min(minutes, 24 * 60))
-    if minutes == 1:
-        return "1 minute"
-    return f"{minutes} minutes"
+    return invite_expiry_label()
 
 
 def _build_invitation_html(
@@ -26,8 +25,24 @@ def _build_invitation_html(
     invitations_url: str,
     login_url: str,
     logo_url: str,
+    one_step_join: bool = False,
 ) -> str:
     expiry_label = _invite_expiry_label()
+    if one_step_join:
+        button_label = "Accept invitation"
+        account_help = (
+            "New to WeBuddhist? The button lets you create your account and join in one step &mdash; "
+            "no separate email confirmation needed. Already have an account? "
+            f'<a href="{login_url}" style="color:{BRAND_PRIMARY};font-weight:600;text-decoration:none;">Log in to WeBuddhist Studio</a> '
+            "with this email address to accept."
+        )
+    else:
+        button_label = "View invitation"
+        account_help = (
+            "Already have a WeBuddhist account? "
+            f'<a href="{login_url}" style="color:{BRAND_PRIMARY};font-weight:600;text-decoration:none;">Log in to WeBuddhist Studio</a> '
+            "to view and respond to this invitation. New to WeBuddhist? The login page has a link to sign up."
+        )
     role_label = invite_role.replace("_", " ").title()
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -70,7 +85,7 @@ def _build_invitation_html(
                   <td style="border-radius:8px;background-color:{BRAND_PRIMARY};">
                     <a href="{invitations_url}" target="_blank" rel="noopener noreferrer"
                        style="display:inline-block;padding:14px 32px;font-size:16px;font-weight:600;color:#ffffff;text-decoration:none;">
-                      View invitation
+                      {button_label}
                     </a>
                   </td>
                 </tr>
@@ -82,9 +97,7 @@ def _build_invitation_html(
                 <a href="{invitations_url}" style="color:{BRAND_PRIMARY};">{invitations_url}</a>
               </p>
               <p style="margin:0;font-size:14px;line-height:1.5;color:#333333;">
-                Already have a WeBuddhist account?
-                <a href="{login_url}" style="color:{BRAND_PRIMARY};font-weight:600;text-decoration:none;">Log in to WeBuddhist Studio</a>
-                to view and respond to this invitation. New to WeBuddhist? The login page has a link to sign up.
+                {account_help}
               </p>
             </td>
           </tr>
@@ -113,9 +126,14 @@ def send_group_invitation_email(
     inviter_email: str,
     group_title: str,
     invite_role: str,
+    invite_token: Optional[str] = None,
 ) -> None:
     base_url = get("WEBUDDHIST_STUDIO_BASE_URL").rstrip("/")
-    invitations_url = f"{base_url}/groups"
+    one_step_join = bool(invite_token) and get_bool("STUDIO_JOIN_PAGE_ENABLED")
+    if one_step_join:
+        invitations_url = f"{base_url}/join?invite={quote(invite_token, safe='')}"
+    else:
+        invitations_url = f"{base_url}/groups"
     login_url = f"{base_url}/login"
     logo_url = get("WEBUDDHIST_EMAIL_LOGO_URL")
     subject = f"You have been invited to join {group_title}"
@@ -127,6 +145,7 @@ def send_group_invitation_email(
         invitations_url=invitations_url,
         login_url=login_url,
         logo_url=logo_url,
+        one_step_join=one_step_join,
     )
     try:
         send_email(to_email=target_email, subject=subject, message=html)

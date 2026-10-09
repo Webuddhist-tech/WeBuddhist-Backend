@@ -1,3 +1,6 @@
+from pecha_api.plans.response_message import EMAIL_VERIFIED_ACTIVE
+from uuid import uuid4
+from pecha_api.plans.auth.studio_access_service import StudioAdmission
 import uuid
 import json
 import pytest
@@ -175,7 +178,7 @@ def test__generate_author_verification_token_and_decode():
         assert datetime.fromtimestamp(payload["exp"], tz=timezone.utc) > datetime.now(timezone.utc)
 
 
-def test_verify_author_email_success():
+def test_verify_author_email_success(_no_studio_admission):
     token = "valid_token"
     payload = {
         "email": "john.doe@example.com",
@@ -184,6 +187,8 @@ def test_verify_author_email_success():
 
     author = MagicMock()
     author.is_verified = False
+    author.is_active = False
+    author.suspended_at = None
     author.email = "john.doe@example.com"
 
     with patch("pecha_api.plans.auth.plan_auth_services.get", return_value="x"), \
@@ -195,6 +200,11 @@ def test_verify_author_email_success():
         _mock_session_local(mock_session_local)
         mock_get_author_by_email.return_value = author
 
+        def _admit(db, admitted, join_link_token=None):
+            admitted.is_active = True
+            return StudioAdmission()
+
+        _no_studio_admission.side_effect = _admit
         response: AuthorVerificationResponse = verify_author_email(token)
 
         mock_decode.assert_called_once()
@@ -202,8 +212,9 @@ def test_verify_author_email_success():
         mock_update_author.assert_called_once_with(db=ANY, author=author)
         mock_notify.assert_called_once_with(author)
         assert response.email == "john.doe@example.com"
-        assert response.status == AuthorStatus.INACTIVE
-        assert response.message == EMAIL_VERIFIED_SUCCESS
+        assert response.status == AuthorStatus.ACTIVE
+        assert response.account_status == AuthorStatus.ACTIVE
+        assert response.message == EMAIL_VERIFIED_ACTIVE
 
 
 def test_verify_author_email_already_verified():
@@ -215,6 +226,8 @@ def test_verify_author_email_already_verified():
 
     author = MagicMock()
     author.is_verified = True
+    author.is_active = False
+    author.suspended_at = None
     author.email = "john.doe@example.com"
 
     with patch("pecha_api.plans.auth.plan_auth_services.get", return_value="x"), \
@@ -313,8 +326,9 @@ def test_authenticate_author_success():
         patch("pecha_api.plans.auth.plan_auth_services.verify_password", return_value=True):
         _mock_session_local(mock_session_local)
 
-        result = authenticate_author("test@example.com", "password")
-        assert result == author
+        result_author, admission = authenticate_author("test@example.com", "password")
+        assert result_author == author
+        assert admission.joined_group_ids == []
 
 
 def test_authenticate_author_invalid_password():
@@ -360,11 +374,16 @@ def test_check_verified_author_valid():
 
 def test_authenticate_and_generate_tokens():
     author = MagicMock()
-    with patch("pecha_api.plans.auth.plan_auth_services.authenticate_author", return_value=author), \
-        patch("pecha_api.plans.auth.plan_auth_services.generate_token_author", return_value="tokens") as mock_gen:
+    group_id = uuid4()
+    admission = StudioAdmission(joined_group_ids=[group_id], join_link_error="expired")
+    tokens = MagicMock()
+    with patch("pecha_api.plans.auth.plan_auth_services.authenticate_author", return_value=(author, admission)), \
+        patch("pecha_api.plans.auth.plan_auth_services.generate_token_author", return_value=tokens) as mock_gen:
         result = authenticate_and_generate_tokens("email", "password")
         mock_gen.assert_called_once_with(author)
-        assert result == "tokens"
+        assert result is tokens
+        assert result.joined_group_ids == [group_id]
+        assert result.join_link_error == "expired"
 
 
 def test_generate_token_author_builds_response():
@@ -386,6 +405,33 @@ def test_generate_token_author_builds_response():
         assert result.auth.refresh_token == "refresh"
         assert result.user.name == "John Doe"
         assert result.user.image_url == "img.png"
+
+def test_generate_token_author_uses_studio_token_lifetimes():
+    """Studio sessions last two days and renew for a month; the app's shared
+    ACCESS_TOKEN_EXPIRE_MINUTES / REFRESH_TOKEN_EXPIRE_DAYS are untouched."""
+    author = MagicMock()
+    author.first_name = "John"
+    author.last_name = "Doe"
+    author.email = "john.doe@example.com"
+    author.image_url = "img.png"
+
+    with patch("pecha_api.plans.auth.plan_auth_services.generate_author_token_data", return_value={"sub": "123"}),         patch("pecha_api.plans.auth.plan_auth_services.create_access_token", return_value="access") as mock_access,         patch("pecha_api.plans.auth.plan_auth_services.create_refresh_token", return_value="refresh") as mock_refresh:
+        generate_token_author(author)
+
+        assert mock_access.call_args.kwargs["expires_delta"] == timedelta(days=2)
+        assert mock_refresh.call_args.kwargs["expires_delta"] == timedelta(days=30)
+
+
+def test_refresh_access_token_uses_studio_access_lifetime():
+    payload = {"sub": "123"}
+    with patch("pecha_api.plans.auth.plan_auth_services._validate_token", return_value=payload),         patch("pecha_api.plans.auth.plan_auth_services.SessionLocal") as mock_session_local,         patch("pecha_api.plans.auth.plan_auth_services.resolve_author_from_backend_payload", return_value=MagicMock()),         patch("pecha_api.plans.auth.plan_auth_services.generate_author_token_data", return_value=payload),         patch("pecha_api.plans.auth.plan_auth_services.create_access_token", return_value="access") as mock_access:
+        _mock_session_local(mock_session_local)
+
+        result = refresh_access_token("refresh-token")
+
+        assert result.access_token == "access"
+        assert mock_access.call_args.kwargs["expires_delta"] == timedelta(days=2)
+
 
 def test_request_reset_password_success():
     email = "john.doe@example.com"

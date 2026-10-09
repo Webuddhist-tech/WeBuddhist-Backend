@@ -1,15 +1,18 @@
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 import asyncio
 import logging
 from uuid import UUID
 from typing import Optional
 from starlette import status
+from starlette.concurrency import run_in_threadpool
 from pecha_api.config import get
 from fastapi import HTTPException
 from pecha_api.db.database import SessionLocal
 from pecha_api.error_contants import ErrorConstants
 from pecha_api.plans.items.plan_items_repository import get_days_by_plan_id, get_plan_day_with_tasks_and_subtasks
 from datetime import date as DateType, timedelta, datetime as dt, timezone
+from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.public.plan_response_models import PublicPlansResponse, PublicPlanDTO, PlanDayDTO, AuthorDTO,PlanDaysResponse, PlanDayBasic, SubTaskDTO, TaskDTO, ImageUrlModel, TagsResponse, DailyPlanResponse, SeriesDTO, SeriesMetadataDTO, DayVideoSummaryDTO, PlanVideoSummaryDTO
 from pecha_api.plans.tags.tag_response_models import PublicTagDetailDTO, SegmentContentDTO
 from pecha_api.plans.items.plan_items_models import PlanItem
@@ -61,10 +64,15 @@ from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_con
 
 logger = logging.getLogger(__name__)
 
-async def get_image_url(image_url: Optional[str]) -> Optional[ImageUrlModel]:
+def build_image_url(image_url: Optional[str]) -> Optional[ImageUrlModel]:
+    """Presigned URLs for the three image sizes.
+
+    Signing is local HMAC work, not a network call, so this is synchronous and
+    safe to call from inside a thread-pooled block.
+    """
     if not image_url:
         return None
-        
+
     thumbnail_url = image_url.replace("original", "thumbnail")
     medium_url = image_url.replace("original", "medium")
     original_url = image_url
@@ -74,18 +82,48 @@ async def get_image_url(image_url: Optional[str]) -> Optional[ImageUrlModel]:
         original=generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=original_url)
     )
 
+
+async def get_image_url(image_url: Optional[str]) -> Optional[ImageUrlModel]:
+    """Async wrapper kept for the existing call sites across the codebase."""
+    return build_image_url(image_url)
+
 async def get_published_plans(
     tag: Optional[str] = None,
     group_id: Optional[UUID] = None,
-    search: Optional[str] = None, 
-    language: str = "en", 
-    sort_by: str = "title", 
-    sort_order: str = "asc", 
-    skip: int = 0, 
+    search: Optional[str] = None,
+    language: str = "en",
+    sort_by: str = "title",
+    sort_order: str = "asc",
+    skip: int = 0,
+    limit: int = 20,
+    timezone_name: Optional[str] = None,
+) -> PublicPlansResponse:
+    return await run_in_threadpool(
+        _get_published_plans_sync,
+        tag=tag,
+        group_id=group_id,
+        search=search,
+        language=language,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        skip=skip,
+        limit=limit,
+        timezone_name=timezone_name,
+    )
+
+
+def _get_published_plans_sync(
+    tag: Optional[str] = None,
+    group_id: Optional[UUID] = None,
+    search: Optional[str] = None,
+    language: str = "en",
+    sort_by: str = "title",
+    sort_order: str = "asc",
+    skip: int = 0,
     limit: int = 20,
     timezone_name: Optional[str] = None,
     ) -> PublicPlansResponse:
-    
+
     try:
         with SessionLocal() as db:
             language_upper = resolve_plans_language(db=db, language=language)
@@ -114,11 +152,11 @@ async def get_published_plans(
             for plan_aggregate in plan_aggregates:
                 plan = plan_aggregate.plan
                 
-                plan_image = await get_image_url(image_url=plan.image_url)
-                
+                plan_image = build_image_url(image_url=plan.image_url)
+
                 author_dto = None
                 if plan.author:
-                    author_image = await get_image_url(image_url=plan.author.image_url)
+                    author_image = build_image_url(image_url=plan.author.image_url)
                     author_dto = AuthorDTO(
                         id=plan.author.id, 
                         firstname=plan.author.first_name, 
@@ -153,6 +191,12 @@ async def get_published_plans(
             
             return PublicPlansResponse(plans=plan_dtos, skip=skip, limit=limit, total=total)
     
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching published plans: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -162,6 +206,17 @@ async def get_published_plans(
 
 
 async def get_published_plan(
+    plan_id: UUID,
+    timezone_name: Optional[str] = None,
+) -> PublicPlanDTO:
+    return await run_in_threadpool(
+        _get_published_plan_sync,
+        plan_id=plan_id,
+        timezone_name=timezone_name,
+    )
+
+
+def _get_published_plan_sync(
     plan_id: UUID,
     timezone_name: Optional[str] = None,
 ) -> PublicPlanDTO:
@@ -179,11 +234,11 @@ async def get_published_plan(
             if not plan:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ErrorConstants.PLAN_NOT_FOUND)
             
-            plan_image= await get_image_url(image_url=plan.image_url)
-            
+            plan_image = build_image_url(image_url=plan.image_url)
+
             author_dto = None
             if plan.author:
-                author_image = await get_image_url(image_url=plan.author.image_url)
+                author_image = build_image_url(image_url=plan.author.image_url)
                 author_dto = AuthorDTO(
                     id=plan.author.id, 
                     firstname=plan.author.first_name, 
@@ -225,6 +280,12 @@ async def get_published_plan(
                 series_id=plan.series_id,
             )
 
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching published plan details: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -368,7 +429,11 @@ def add_plan_to_routine_time_blocks(
 
 async def get_plan_days(plan_id: UUID) -> PlanDaysResponse:
     """Get all days for a specific plan"""
-    
+
+    return await run_in_threadpool(_get_plan_days_sync, plan_id=plan_id)
+
+
+def _get_plan_days_sync(plan_id: UUID) -> PlanDaysResponse:
     with SessionLocal() as db:
         plan_model = get_plan_by_id(db=db, plan_id=plan_id)
         if not plan_model:
@@ -394,12 +459,47 @@ from pecha_api.plans.audio.dto_helpers import (
 )
 
 
-async def build_task_dto(task) -> TaskDTO:
+def resolve_day_references(db, tasks, language=None) -> Dict[UUID, Any]:
+    """Hydrate every reference subtask across a day's tasks, keyed by subtask id.
+
+    Callers run this in the threaded query phase, while the session is still
+    open. build_task_dto() would otherwise reach for the resolver from the event
+    loop, where it opens a session of its own and runs SQLAlchemy queries --
+    blocking every unrelated request on the worker for the duration. Batching
+    the whole day here also collapses one resolver call per task into a single
+    pass: still one query per referenced content type, now for the day rather
+    than for each task.
+
+    Subtasks that are not references, and references whose target has been
+    deleted, are simply absent from the map; both read back as None.
+    """
+    from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
+
+    subtasks = [subtask for task in tasks for subtask in task.sub_tasks]
+    if not subtasks:
+        return {}
+
+    resolved = resolve_subtask_references(subtasks=subtasks, db=db, language=language)
+    return {
+        subtask.id: reference
+        for subtask, reference in zip(subtasks, resolved)
+        if reference is not None
+    }
+
+
+async def build_task_dto(task, language=None, references=None) -> TaskDTO:
     ordered_subtasks = sorted(task.sub_tasks, key=lambda st: st.display_order)
     resolved_contents = await resolve_subtasks_content(ordered_subtasks)
+    if references is None:
+        # No caller-supplied map, so resolve this task's own references -- but
+        # in a worker thread, never inline on the loop.
+        references = await run_in_threadpool(
+            resolve_day_references, None, [task], language
+        )
 
     subtasks = []
     for subtask, resolved_content in zip(ordered_subtasks, resolved_contents):
+        reference = references.get(subtask.id)
         start_ms, end_ms = build_subtask_timestamp_fields(subtask)
         audio_url = (
             generate_presigned_access_url(bucket_name=get("AWS_BUCKET_NAME"), s3_key=subtask.audio_url)
@@ -417,6 +517,8 @@ async def build_task_dto(task) -> TaskDTO:
                 pecha_segment_id=subtask.pecha_segment_id,
                 segment_ids=subtask.segment_ids,
                 segment_numbers=subtask.segment_numbers,
+                reference_id=subtask.reference_id,
+                reference=reference,
                 display_order=subtask.display_order,
                 start_ms=start_ms,
                 end_ms=end_ms,
@@ -429,16 +531,24 @@ async def build_task_dto(task) -> TaskDTO:
         estimated_time=task.estimated_time,
         display_order=task.display_order,
         subtasks=subtasks,
+        settings=build_task_settings(task),
     )
 
 
-async def _build_plan_day_dto(plan_item) -> PlanDayDTO:
+async def _build_plan_day_dto(plan_item, language=None, references=None) -> PlanDayDTO:
     audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
     thumbnail_url, _, shareable_image_url, _ = build_plan_day_shareable_image_fields(
         getattr(plan_item, "shareable_images", None)
     )
+    if references is None:
+        references = await run_in_threadpool(
+            resolve_day_references, None, plan_item.tasks, language
+        )
     tasks = await asyncio.gather(
-        *[build_task_dto(task) for task in sorted(plan_item.tasks, key=lambda t: t.display_order)]
+        *[
+            build_task_dto(task, language=language, references=references)
+            for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
+        ]
     )
     return PlanDayDTO(
         id=plan_item.id,
@@ -454,6 +564,7 @@ async def _build_plan_day_dto(plan_item) -> PlanDayDTO:
                 url=video.url,
                 video_id=video.video_id,
                 title=video.title,
+                duration_seconds=video.duration_seconds,
                 display_order=video.display_order,
             )
             for video in sorted(plan_item.videos, key=lambda v: v.display_order)
@@ -470,19 +581,46 @@ async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
 
     cached = await get_plan_day_detail_cache(plan_id=plan_id, day_number=day_number)
     if cached is not None:
+        # Cache hits are not bypassed when video duration_seconds is null; backfill
+        # runs on miss (_load_plan_day) and after invalidation when day videos change.
         # Entries cached before series_id existed (or for non-series plans) carry
         # None; resolve it fresh so stale cache entries stay correct.
         if cached.series_id is None:
-            cached.series_id = _get_plan_series_id(plan_id)
+            cached.series_id = await run_in_threadpool(_get_plan_series_id, plan_id)
         return cached
 
-    with SessionLocal() as db:
-        plan_item = get_plan_day_with_tasks_and_subtasks(db=db, plan_id=plan_id, day_number=day_number)
-        response = await _build_plan_day_dto(plan_item)
-        response.series_id = db.query(Plan.series_id).filter(Plan.id == plan_id).scalar()
+    # Every query runs in one worker thread, subtask references included; the
+    # DTO builder then does its Mongo lookups on the loop, after the session is
+    # closed. Safe because the repository eager-loads tasks, sub-tasks and
+    # timestamps.
+    plan_item, plan_language, series_id, references = await run_in_threadpool(
+        _load_plan_day, plan_id, day_number
+    )
+
+    response = await _build_plan_day_dto(
+        plan_item, language=plan_language, references=references
+    )
+    response.series_id = series_id
 
     await set_plan_day_detail_cache(plan_id=plan_id, day_number=day_number, data=response)
     return response
+
+
+def _load_plan_day(plan_id: UUID, day_number: int):
+    from pecha_api.plans.videos.day_video_service import day_videos_with_durations
+
+    with SessionLocal() as db:
+        plan_item = get_plan_day_with_tasks_and_subtasks(
+            db=db, plan_id=plan_id, day_number=day_number
+        )
+        if plan_item is not None:
+            day_videos_with_durations(db=db, videos=plan_item.videos)
+        plan_language = db.query(Plan.language).filter(Plan.id == plan_id).scalar()
+        series_id = db.query(Plan.series_id).filter(Plan.id == plan_id).scalar()
+        references = resolve_day_references(
+            db, plan_item.tasks if plan_item else [], plan_language
+        )
+        return plan_item, plan_language, series_id, references
 
 
 def _filter_series_metadata_by_language(metadata_entries, language: Optional[str]):
@@ -581,7 +719,151 @@ async def get_plan_daily_content(
     requested_date: Optional[DateType] = None,
     language: Optional[str] = None,
 ) -> DailyPlanResponse:
+    # Phase 1: every query off the loop, subtask references included. Phase 2
+    # resolves task content from Mongo once the session is closed — safe
+    # because the day's tasks and sub-tasks are eager-loaded.
+    response, plan_item, plan_language, references = await run_in_threadpool(
+        _load_plan_daily_content,
+        plan_id=plan_id,
+        requested_date=requested_date,
+        language=language,
+    )
 
+    response.tasks = await asyncio.gather(
+        *[
+            build_task_dto(task, language=plan_language, references=references)
+            for task in sorted(plan_item.tasks, key=lambda t: t.display_order)
+        ]
+    )
+    return response
+
+
+def _resolve_daily_day_window(plan, requested_date: Optional[DateType], total_days: int):
+    """Work out the plan's date range, the date to show and its day number."""
+    today = dt.now(timezone.utc).date()
+
+    if plan.start_date:
+        start = _to_plan_date(plan.start_date)
+    else:
+        start = today
+
+    end = start + timedelta(days=total_days - 1)
+
+    if requested_date is None:
+        if plan.start_date and not start <= today <= end:
+            requested_date = start
+        else:
+            requested_date = today
+
+    day_number = (requested_date - start).days + 1
+
+    if day_number < 1 or day_number > total_days:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No content for date {requested_date}. Plan runs from {start} to {end}."
+        )
+    return start, end, requested_date, day_number
+
+
+def _build_daily_series_dto(
+    db,
+    plan,
+    language: Optional[str],
+    navigation_language: str,
+    requested_date: DateType,
+) -> Optional[SeriesDTO]:
+    if not plan.series:
+        return None
+
+    series_image = build_image_url(image_url=plan.series.image)
+    metadata_entries = getattr(plan.series, "metadata_entries", None) or []
+    if language:
+        metadata_entries = _filter_series_metadata_by_language(
+            metadata_entries,
+            language=language,
+        )
+    series_metadata = [
+        SeriesMetadataDTO(
+            id=entry.id,
+            title=entry.title,
+            sub_title=entry.sub_title if isinstance(entry.sub_title, str) else None,
+            description=entry.description,
+            language=entry.language.value
+            if hasattr(entry.language, "value")
+            else str(entry.language),
+        )
+        for entry in sorted(
+            metadata_entries,
+            key=lambda item: item.language.value
+            if hasattr(item.language, "value")
+            else str(item.language),
+        )
+    ]
+    series_plans = get_published_plans_in_series(
+        db=db,
+        series_id=plan.series_id,
+        language=navigation_language,
+    )
+    series_start, _, series_total_days = _series_schedule_from_plans(
+        series_plans,
+        published_only=True,
+        language=navigation_language,
+    )
+    return SeriesDTO(
+        id=plan.series.id,
+        metadata=format_metadata_response(series_metadata, language=language),
+        image=series_image,
+        progress=compute_series_progress(
+            start_date=series_start,
+            total_days=series_total_days,
+            reference_date=requested_date,
+        ),
+    )
+
+
+def _resolve_adjacent_plan_ids(
+    db,
+    plan,
+    navigation_language: str,
+    previous_date: Optional[DateType],
+    next_date: Optional[DateType],
+):
+    """Neighbouring plans in the series, only at the plan's first/last day."""
+    previous_plan_id = None
+    next_plan_id = None
+
+    if not plan.series_id or plan.display_order is None:
+        return previous_plan_id, next_plan_id
+
+    if previous_date is None:
+        previous_plan = get_previous_plan_in_series(
+            db=db,
+            series_id=plan.series_id,
+            current_display_order=plan.display_order,
+            language=navigation_language,
+        )
+        if previous_plan:
+            previous_plan_id = previous_plan.id
+
+    if next_date is None:
+        next_plan = get_next_plan_in_series(
+            db=db,
+            series_id=plan.series_id,
+            current_display_order=plan.display_order,
+            language=navigation_language,
+        )
+        if next_plan:
+            next_plan_id = next_plan.id
+
+    return previous_plan_id, next_plan_id
+
+
+def _load_plan_daily_content(
+    plan_id: UUID,
+    requested_date: Optional[DateType] = None,
+    language: Optional[str] = None,
+):
+    """Build the daily response minus its tasks, plus what phase 2 needs."""
     with SessionLocal() as db:
         plan = _resolve_daily_plan(
             db=db,
@@ -598,13 +880,6 @@ async def get_plan_daily_content(
                 else str(plan.language)
             )
 
-        today = dt.now(timezone.utc).date()
-
-        if plan.start_date:
-            start = _to_plan_date(plan.start_date)
-        else:
-            start = today
-
         total_days = db.query(PlanItem).filter(PlanItem.plan_id == plan.id).count()
         if total_days == 0:
             raise HTTPException(
@@ -612,110 +887,37 @@ async def get_plan_daily_content(
                 detail="This plan has no content yet."
             )
 
-        end = start + timedelta(days=total_days - 1)
-
-        if requested_date is None:
-            if plan.start_date:
-                if start <= today <= end:
-                    requested_date = today
-                else:
-                    requested_date = start
-            else:
-                requested_date = today
-
-        day_number = (requested_date - start).days + 1
-
-        if day_number < 1 or day_number > total_days:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No content for date {requested_date}. Plan runs from {start} to {end}."
-            )
+        start, end, requested_date, day_number = _resolve_daily_day_window(
+            plan, requested_date, total_days
+        )
 
         plan_item = get_plan_day_with_tasks_and_subtasks(
             db=db, plan_id=plan.id, day_number=day_number
         )
 
-        plan_image = await get_image_url(image_url=plan.image_url)
+        plan_image = build_image_url(image_url=plan.image_url)
 
-        series_dto = None
-        if plan.series:
-            series_image = await get_image_url(image_url=plan.series.image)
-            metadata_entries = getattr(plan.series, "metadata_entries", None) or []
-            if language:
-                metadata_entries = _filter_series_metadata_by_language(
-                    metadata_entries,
-                    language=language,
-                )
-            series_metadata = [
-                SeriesMetadataDTO(
-                    id=entry.id,
-                    title=entry.title,
-                    sub_title=entry.sub_title if isinstance(entry.sub_title, str) else None,
-                    description=entry.description,
-                    language=entry.language.value
-                    if hasattr(entry.language, "value")
-                    else str(entry.language),
-                )
-                for entry in sorted(
-                    metadata_entries,
-                    key=lambda item: item.language.value
-                    if hasattr(item.language, "value")
-                    else str(item.language),
-                )
-            ]
-            series_plans = get_published_plans_in_series(
-                db=db,
-                series_id=plan.series_id,
-                language=navigation_language,
-            )
-            series_start, _, series_total_days = _series_schedule_from_plans(
-                series_plans,
-                published_only=True,
-                language=navigation_language,
-            )
-            series_dto = SeriesDTO(
-                id=plan.series.id,
-                metadata=format_metadata_response(series_metadata, language=language),
-                image=series_image,
-                progress=compute_series_progress(
-                    start_date=series_start,
-                    total_days=series_total_days,
-                    reference_date=requested_date,
-                ),
-            )
+        series_dto = _build_daily_series_dto(
+            db,
+            plan,
+            language=language,
+            navigation_language=navigation_language,
+            requested_date=requested_date,
+        )
 
         previous_date = requested_date - timedelta(days=1) if day_number > 1 else None
         next_date = requested_date + timedelta(days=1) if day_number < total_days else None
 
-        previous_plan_id = None
-        next_plan_id = None
-
-        if plan.series_id and plan.display_order is not None:
-            if previous_date is None:
-                previous_plan = get_previous_plan_in_series(
-                    db=db,
-                    series_id=plan.series_id,
-                    current_display_order=plan.display_order,
-                    language=navigation_language,
-                )
-                if previous_plan:
-                    previous_plan_id = previous_plan.id
-
-            if next_date is None:
-                next_plan = get_next_plan_in_series(
-                    db=db,
-                    series_id=plan.series_id,
-                    current_display_order=plan.display_order,
-                    language=navigation_language,
-                )
-                if next_plan:
-                    next_plan_id = next_plan.id
+        previous_plan_id, next_plan_id = _resolve_adjacent_plan_ids(
+            db,
+            plan,
+            navigation_language=navigation_language,
+            previous_date=previous_date,
+            next_date=next_date,
+        )
 
         audio_url, audio_duration_ms, _, _ = build_plan_day_audio_fields(plan_item)
-        tasks = await asyncio.gather(
-            *[build_task_dto(task) for task in sorted(plan_item.tasks, key=lambda t: t.display_order)]
-        )
-        return DailyPlanResponse(
+        response = DailyPlanResponse(
             plan_id=plan.id,
             plan_title=plan.title,
             plan_description=plan.description,
@@ -732,8 +934,14 @@ async def get_plan_daily_content(
             next_plan_id=next_plan_id,
             audio_url=audio_url,
             audio_duration_ms=audio_duration_ms,
-            tasks=tasks,
+            tasks=[],
         )
+        # Tasks are filled in by the caller, off the session -- so their
+        # references are resolved here, while the session is still open.
+        references = resolve_day_references(
+            db, plan_item.tasks if plan_item else [], plan.language
+        )
+        return response, plan_item, plan.language, references
 
 
 def get_tags(language: str = "en") -> TagsResponse:
@@ -742,6 +950,12 @@ def get_tags(language: str = "en") -> TagsResponse:
             language_upper = language.upper()
             tag_rows = get_published_tags_for_language(db=db, language=language_upper)
             return TagsResponse(tags=tags_to_summary_dtos(tag_rows))
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching tags: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -772,6 +986,12 @@ def get_public_tags(
                 limit=limit,
                 total=total,
             )
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
+        raise
     except Exception as e:
         logger.error(f"Error fetching public tags: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -838,6 +1058,12 @@ async def get_public_tag_detail(
                 segments=segments_data,
             )
     except HTTPException:
+        raise
+    except SQLAlchemyPoolTimeout:
+        # Pool exhaustion has its own handler, which answers 503 with a
+        # Retry-After. Folded into the generic 500 below it would tell the
+        # client the request can never succeed, when in fact retrying in a
+        # moment is exactly the right thing to do.
         raise
     except Exception as e:
         logger.error(f"Error fetching public tag detail: {str(e)}", exc_info=True)

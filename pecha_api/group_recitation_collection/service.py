@@ -16,6 +16,8 @@ from pecha_api.region_restrictions.region_restriction_service import filter_item
 from pecha_api.texts.texts_openpecha_service import get_texts_by_edition_or_text_ids
 from pecha_api.uploads.S3_utils import generate_presigned_access_url
 
+from pecha_api.group_assets.repository import get_assets_for_items
+from pecha_api.group_assets.service import build_asset_dto
 from pecha_api.group_recitation_collection.models import GroupRecitationCollectionItem
 from pecha_api.group_recitation_collection.repository import (
     get_collection_item_counts,
@@ -53,6 +55,7 @@ def _validate_group_access(db: Session, group_id: UUID, user_id: Optional[UUID])
 
 async def _build_items_dto(
     items: list[GroupRecitationCollectionItem],
+    db: Optional[Session] = None,
 ) -> list[GroupRecitationCollectionItemDTO]:
     """Build item DTOs with text metadata fetched from OpenPecha."""
     if not items:
@@ -60,6 +63,13 @@ async def _build_items_dto(
 
     text_ids_str = [str(item.text_id) for item in items]
     texts_dict = await get_texts_by_edition_or_text_ids(text_ids_str)
+
+    # One batched fetch for every item on the page, never a query per item.
+    assets_by_item = (
+        get_assets_for_items(db=db, item_ids=[item.id for item in items])
+        if db is not None
+        else {}
+    )
 
     items_dto = []
     for item in items:
@@ -74,6 +84,10 @@ async def _build_items_dto(
                     language=text.language,
                     type=None,
                     display_order=item.display_order,
+                    audio=[
+                        build_asset_dto(asset)
+                        for asset in assets_by_item.get(item.id, [])
+                    ],
                 )
             )
     return items_dto
@@ -173,7 +187,7 @@ async def get_group_collection_detail_service(
             )
 
         items = get_collection_items(db=db, collection_id=collection_id)
-        items_dto = await _build_items_dto(items)
+        items_dto = await _build_items_dto(items, db=db)
 
         return GroupRecitationCollectionDetailDTO(
             id=collection.id,

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -89,7 +89,8 @@ def sample_series_list_response(sample_series_dto):
 
 def test_get_series_list_success(sample_series_list_response):
     with patch(
-        "pecha_api.plans.series.public_series_view.get_filtered_series",
+        "pecha_api.plans.series.public_series_view.get_filtered_series_cached",
+        new_callable=AsyncMock,
         return_value=sample_series_list_response,
     ) as mock_service:
         response = client.get("/series")
@@ -119,7 +120,8 @@ def test_get_series_list_success(sample_series_list_response):
 def test_get_featured_series_success(sample_series_list_response):
     featured_item = sample_series_list_response.series[0]
     with patch(
-        "pecha_api.plans.series.public_series_view.get_random_featured_series",
+        "pecha_api.plans.series.public_series_view.get_random_featured_series_cached",
+        new_callable=AsyncMock,
         return_value=sample_series_list_response,
     ) as mock_service:
         response = client.get("/series/featured")
@@ -164,7 +166,8 @@ def test_get_featured_series_includes_schedule_fields():
     )
 
     with patch(
-        "pecha_api.plans.series.public_series_view.get_random_featured_series",
+        "pecha_api.plans.series.public_series_view.get_random_featured_series_cached",
+        new_callable=AsyncMock,
         return_value=featured_response,
     ):
         response = client.get("/series/featured")
@@ -178,7 +181,8 @@ def test_get_featured_series_includes_schedule_fields():
 
 def test_get_featured_series_with_language(sample_series_list_response):
     with patch(
-        "pecha_api.plans.series.public_series_view.get_random_featured_series",
+        "pecha_api.plans.series.public_series_view.get_random_featured_series_cached",
+        new_callable=AsyncMock,
         return_value=sample_series_list_response,
     ) as mock_service:
         response = client.get("/series/featured", params={"language": "en"})
@@ -189,7 +193,8 @@ def test_get_featured_series_with_language(sample_series_list_response):
 
 def test_get_featured_series_not_found():
     with patch(
-        "pecha_api.plans.series.public_series_view.get_random_featured_series",
+        "pecha_api.plans.series.public_series_view.get_random_featured_series_cached",
+        new_callable=AsyncMock,
         side_effect=HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No featured series found",
@@ -204,7 +209,8 @@ def test_get_featured_series_not_found():
 def test_get_series_list_with_search_pagination(sample_series_dto):
     empty_list = SeriesListResponse(series=[], skip=2, limit=5, total=0)
     with patch(
-        "pecha_api.plans.series.public_series_view.get_filtered_series",
+        "pecha_api.plans.series.public_series_view.get_filtered_series_cached",
+        new_callable=AsyncMock,
         return_value=empty_list,
     ) as mock_service:
         response = client.get("/series", params={"search": "meditation", "skip": 2, "limit": 5})
@@ -301,7 +307,8 @@ def test_create_series_validation_error_missing_required_fields():
 def test_get_series_by_id_success(sample_series_dto):
     series_id = sample_series_dto.id
     with patch(
-        "pecha_api.plans.series.public_series_view.get_series_detail",
+        "pecha_api.plans.series.public_series_view.get_series_detail_cached",
+        new_callable=AsyncMock,
         return_value=sample_series_dto,
     ) as mock_detail:
         response = client.get(f"/series/{series_id}")
@@ -318,7 +325,8 @@ def test_get_series_by_id_success(sample_series_dto):
 def test_get_series_by_id_not_found():
     series_id = uuid.uuid4()
     with patch(
-        "pecha_api.plans.series.public_series_view.get_series_detail",
+        "pecha_api.plans.series.public_series_view.get_series_detail_cached",
+        new_callable=AsyncMock,
         side_effect=HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Series with id '{series_id}' not found",
@@ -379,7 +387,8 @@ def test_get_series_by_id_includes_total_days_in_response():
     )
 
     with patch(
-        "pecha_api.plans.series.public_series_view.get_series_detail",
+        "pecha_api.plans.series.public_series_view.get_series_detail_cached",
+        new_callable=AsyncMock,
         return_value=series_dto,
     ) as mock_detail:
         response = client.get(f"/series/{series_id}")
@@ -419,7 +428,8 @@ def test_get_series_list_returns_plan_count_not_plans():
     )
 
     with patch(
-        "pecha_api.plans.series.public_series_view.get_filtered_series",
+        "pecha_api.plans.series.public_series_view.get_filtered_series_cached",
+        new_callable=AsyncMock,
         return_value=series_list_response,
     ) as mock_service:
         response = client.get("/series")
@@ -438,7 +448,8 @@ def test_get_series_list_with_group_filter():
     series_list_response = SeriesListResponse(series=[], skip=0, limit=10, total=0)
     group_id = uuid.uuid4()
     with patch(
-        "pecha_api.plans.series.public_series_view.get_filtered_series",
+        "pecha_api.plans.series.public_series_view.get_filtered_series_cached",
+        new_callable=AsyncMock,
         return_value=series_list_response,
     ) as mock_service:
         response = client.get("/series", params={"group_id": str(group_id)})
@@ -625,7 +636,8 @@ def test_get_cms_series_by_id_forbidden():
 def test_get_series_by_id_passes_language_param(sample_series_dto):
     series_id = sample_series_dto.id
     with patch(
-        "pecha_api.plans.series.public_series_view.get_series_detail",
+        "pecha_api.plans.series.public_series_view.get_series_detail_cached",
+        new_callable=AsyncMock,
         return_value=sample_series_dto,
     ) as mock_detail:
         response = client.get(f"/series/{series_id}", params={"language": "bo"})

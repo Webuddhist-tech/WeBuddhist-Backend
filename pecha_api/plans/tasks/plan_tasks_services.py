@@ -1,5 +1,6 @@
 import asyncio
-from pecha_api.plans.tasks.plan_tasks_repository import save_task, get_task_by_id, delete_task, update_task_day, update_task_title, get_tasks_by_plan_item_id, reorder_day_tasks_display_order, update_task_order, get_tasks_by_plan_item_id
+from pecha_api.plans.tasks.plan_tasks_repository import save_task, get_task_by_id, delete_task, update_task_day, update_task_title, get_tasks_by_plan_item_id, reorder_day_tasks_display_order, update_task_order, get_tasks_by_plan_item_id, clear_live_tasks_in_day, update_task_settings
+from pecha_api.plans.tasks.task_settings_models import TaskSettingsDTO, UpdateTaskSettingsRequest, build_task_settings
 from pecha_api.plans.tasks.plan_tasks_response_model import CreateTaskRequest, TaskDTO, UpdateTaskDayRequest, UpdatedTaskDayResponse, GetTaskResponse, UpdateTaskTitleRequest, UpdateTaskTitleResponse, ContentAndImageUrl, UpdateTaskOrderRequest, UpdatedTaskOrderResponse, TaskOrderItem
 from pecha_api.plans.tasks.sub_tasks.plan_sub_tasks_response_model import SubTaskDTO
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
@@ -25,6 +26,7 @@ from pecha_api.plans.public.plans_cache_service import (
     schedule_invalidate_plan_day_cache_for_task,
 )
 from pecha_api.plans.shared.subtask_content_resolver import resolve_subtasks_content, resolve_subtasks_refs
+from pecha_api.plans.shared.subtask_reference_resolver import resolve_subtask_references
 
 def _get_max_display_order(plan_item_id: UUID) -> int:
     with SessionLocal() as db:
@@ -63,6 +65,7 @@ async def create_new_task(token: str, create_task_request: CreateTaskRequest, pl
         title=saved_task.title,
         display_order=saved_task.display_order,
         estimated_time=saved_task.estimated_time,
+        settings=build_task_settings(saved_task),
     )
 
 async def delete_task_by_id(task_id: UUID, token: str):
@@ -92,6 +95,9 @@ async def change_task_day_service(token: str, task_id: UUID, update_task_request
         source_day_id = task.plan_item_id
         task.plan_item_id = update_task_request.target_day_id
         task.display_order = display_order
+        # Live is per day: the flag does not travel, or it could clash with the
+        # target day's own live task.
+        task.is_live = False
 
         task = update_task_day(
             db=db, 
@@ -107,6 +113,7 @@ async def change_task_day_service(token: str, task_id: UUID, update_task_request
             display_order=task.display_order, 
             estimated_time=task.estimated_time,
             title=task.title,
+            settings=build_task_settings(task),
         )
 
 async def update_task_title_service(token: str, task_id: UUID, update_request: UpdateTaskTitleRequest) -> UpdateTaskTitleResponse:
@@ -127,6 +134,29 @@ async def update_task_title_service(token: str, task_id: UUID, update_request: U
             task_id=updated_task.id,
             title=updated_task.title,
         )
+
+
+async def update_task_settings_service(token: str, task_id: UUID, update_request: UpdateTaskSettingsRequest) -> TaskSettingsDTO:
+    current_author = validate_cms_author_details(token=token)
+
+    with SessionLocal() as db:
+        task = _get_author_task(db=db, task_id=task_id, current_author=current_author)
+
+        # One live task per day: going live takes the flag off the day's others.
+        if update_request.is_live:
+            clear_live_tasks_in_day(db=db, plan_item_id=task.plan_item_id, except_task_id=task.id)
+
+        task.is_commentary_open = update_request.is_commentary_open
+        task.commentary_text_id = update_request.commentary_text_id
+        task.is_translation_open = update_request.is_translation_open
+        task.translation_text_id = update_request.translation_text_id
+        task.is_live = update_request.is_live
+        task.updated_by = current_author.email
+
+        updated_task = update_task_settings(db=db, updated_task=task)
+
+        schedule_invalidate_plan_day_cache_for_task(db=db, task_id=task_id)
+        return build_task_settings(updated_task)
 
 
 async def change_task_order_service(token: str, day_id: UUID, update_task_order_request: UpdateTaskOrderRequest) -> UpdatedTaskOrderResponse:
@@ -150,9 +180,16 @@ async def get_task_subtasks_service(task_id: UUID, token: str) -> GetTaskRespons
             resolve_subtasks_content(task.sub_tasks),
             resolve_subtasks_refs(task.sub_tasks),
         )
+        plan_item = get_plan_item_by_id(db=db, day_id=task.plan_item_id)
+        plan = get_plan_by_id(db=db, plan_id=plan_item.plan_id) if plan_item else None
+        resolved_references = resolve_subtask_references(
+            db=db,
+            subtasks=task.sub_tasks,
+            language=getattr(plan, "language", None),
+        )
 
         subtasks_dto = []
-        for sub_task, resolved_content, segment_refs in zip(task.sub_tasks, resolved_contents, resolved_refs):
+        for sub_task, resolved_content, segment_refs, reference in zip(task.sub_tasks, resolved_contents, resolved_refs, resolved_references):
             content_and_image_url = _generate_image_url_content_type(
                 content_type=sub_task.content_type,
                 content=resolved_content,
@@ -173,6 +210,8 @@ async def get_task_subtasks_service(task_id: UUID, token: str) -> GetTaskRespons
                     segment_ids=sub_task.segment_ids,
                     segment_numbers=sub_task.segment_numbers,
                     segment_refs=segment_refs,
+                    reference_id=sub_task.reference_id,
+                    reference=reference,
                     image_url=content_and_image_url.image_url,
                     audio_url=audio_url,
                     display_order=sub_task.display_order,
@@ -187,6 +226,7 @@ async def get_task_subtasks_service(task_id: UUID, token: str) -> GetTaskRespons
             display_order=task.display_order,
             estimated_time=task.estimated_time,
             subtasks=subtasks_dto,
+            settings=build_task_settings(task),
         )
 
 def _generate_image_url_content_type(content_type: str, content: str) -> ContentAndImageUrl:

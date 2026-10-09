@@ -16,6 +16,7 @@ from pecha_api.plans.groups.group_summary_models import (
     AuthorGroupSummaryDTO,
     GroupMetadataDTO,
     GroupMetadataResponse,
+    GroupTraditionDTO,
 )
 from pecha_api.plans.plans_enums import LanguageCode
 from pecha_api.plans.plans_response_models import PlanDTO
@@ -23,6 +24,12 @@ from pecha_api.plans.series.series_response_models import SeriesListItemDTO
 from pecha_api.plans.tags.tag_response_models import TagSummaryDTO
 from pecha_api.group_accumulator.group_accumulator_response_models import GroupAccumulatorDTO
 from pecha_api.group_recitation_collection.response_models import GroupRecitationCollectionDTO
+from pecha_api.traditions.tradition_constants import normalize_tradition_code
+
+# Removing a joined user from a group blocks them from rejoining. The moderator
+# may pick a different length, but this is what Studio sends when they don't.
+DEFAULT_GROUP_BAN_DURATION_DAYS = 7
+MAX_GROUP_BAN_DURATION_DAYS = 365
 
 
 class GroupSeriesListItemDTO(SeriesListItemDTO):
@@ -32,6 +39,7 @@ __all__ = [
     "AuthorGroupSummaryDTO",
     "GroupMetadataDTO",
     "GroupMetadataResponse",
+    "GroupTraditionDTO",
     "GroupMetadataInput",
     "GroupSocialLinkInput",
     "GroupSocialLinkDTO",
@@ -50,6 +58,16 @@ __all__ = [
     "GroupInviteDTO",
     "GroupInviteListResponse",
     "GroupInviteCreatedResponse",
+    "BulkGroupInviteRequest",
+    "BulkGroupInviteSkippedDTO",
+    "BulkGroupInviteResponse",
+    "GroupInvitePreviewDTO",
+    "CreateGroupJoinLinkRequest",
+    "GroupJoinLinkDTO",
+    "GroupJoinLinkListResponse",
+    "GroupJoinLinkPreviewDTO",
+    "RedeemGroupJoinLinkRequest",
+    "GroupJoinLinkRedeemResponse",
     "CreateGroupJoinRequest",
     "GroupJoinRequestDTO",
     "GroupJoinRequestUserDTO",
@@ -108,6 +126,7 @@ class AuthorGroupDetailDTO(BaseModel):
     banner_key: Optional[str] = None
     avatar_url: Optional[str] = None
     banner_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     members: List[AuthorGroupMemberDTO] = []
     tags: List[TagSummaryDTO] = []
@@ -122,11 +141,17 @@ class PublicAuthorGroupSummaryDTO(AuthorGroupSummaryDTO):
     tags: List[str] = []
     # None when the caller is anonymous or has never requested to join.
     my_join_request_status: Optional[AuthorGroupJoinRequestStatus] = None
+    # None when the caller is anonymous.
+    is_joined: Optional[bool] = None
 
 
 class PublicAuthorGroupDetailDTO(AuthorGroupDetailDTO):
     tags: List[str] = []
     my_join_request_status: Optional[AuthorGroupJoinRequestStatus] = None
+    # The group chat room this caller can open, so the app can go straight to
+    # it from the group page. None when the caller is anonymous, is neither a
+    # joiner nor a follower, or nobody has started the chat yet.
+    chat_room_id: Optional[UUID] = None
 
 
 class AuthorGroupListResponse(BaseModel):
@@ -147,6 +172,7 @@ class UserFollowedAuthorGroupDTO(BaseModel):
     id: UUID
     avatar_key: Optional[str] = None
     avatar_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     follower_count: int = 0
     tags: List[str] = []
@@ -156,6 +182,7 @@ class UserJoinedAuthorGroupDTO(BaseModel):
     id: UUID
     avatar_key: Optional[str] = None
     avatar_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     joiner_count: int = 0
     tags: List[str] = []
@@ -175,12 +202,22 @@ class UserJoinedAuthorGroupListResponse(BaseModel):
     total: int
 
 
+def _normalize_optional_tradition_code(value: Optional[str]) -> Optional[str]:
+    if value is None or not value.strip():
+        return None
+    return normalize_tradition_code(value)
+
+
 class CreateAuthorGroupRequest(BaseModel):
-    slug: str
+    # Left out (the Studio no longer asks for one for practice spaces), it is
+    # generated from the group's name - see groups_service.generate_group_slug.
+    slug: Optional[str] = None
     group_type: AuthorGroupType = AuthorGroupType.PAGE
     is_public: bool = True
     avatar_key: Optional[str] = None
     banner_key: Optional[str] = None
+    # A code from GET /traditions (e.g. "tibetan"). Optional for now.
+    tradition_code: Optional[str] = None
     metadata: List[GroupMetadataInput]
 
     @field_validator("metadata")
@@ -190,13 +227,25 @@ class CreateAuthorGroupRequest(BaseModel):
             raise ValueError("At least one metadata entry is required")
         return value
 
+    @field_validator("tradition_code")
+    @classmethod
+    def validate_tradition_code(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_tradition_code(value)
+
 
 class UpdateAuthorGroupRequest(BaseModel):
     slug: Optional[str] = None
     is_public: Optional[bool] = None
     avatar_key: Optional[str] = None
     banner_key: Optional[str] = None
+    # Sent as null, clears the group's tradition.
+    tradition_code: Optional[str] = None
     metadata: Optional[List[GroupMetadataInput]] = None
+
+    @field_validator("tradition_code")
+    @classmethod
+    def validate_tradition_code(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_tradition_code(value)
 
 
 class UpdateAuthorGroupStatusRequest(BaseModel):
@@ -267,6 +316,7 @@ class GroupJoinRequestUserDTO(BaseModel):
     id: UUID
     user_id: UUID
     user_name: str
+    email: Optional[str] = None
     user_avatar_url: Optional[str] = None
     message: Optional[str] = None
     status: AuthorGroupJoinRequestStatus
@@ -275,6 +325,24 @@ class GroupJoinRequestUserDTO(BaseModel):
 
 class GroupJoinRequestListResponse(BaseModel):
     requests: List[GroupJoinRequestUserDTO]
+    skip: int
+    limit: int
+    total: int
+
+
+class GroupJoinRequestNotificationDTO(BaseModel):
+    id: UUID
+    group_id: UUID
+    group_name: str
+    group_avatar_url: Optional[str] = None
+    status: AuthorGroupJoinRequestStatus
+    title: str
+    message: str
+    created_at: datetime
+
+
+class GroupJoinRequestNotificationListResponse(BaseModel):
+    notifications: List[GroupJoinRequestNotificationDTO]
     skip: int
     limit: int
     total: int
@@ -319,6 +387,9 @@ class GroupMemberAccumulationsResponse(BaseModel):
 
 
 class AuthorGroupMemberProfileDTO(BaseModel):
+    user_id: UUID
+    # None when the caller may not see staff roles (private group, not joined).
+    role: Optional[str] = None
     username: Optional[str] = None
     fullname: str
     avatar_url: Optional[str] = None
@@ -377,6 +448,154 @@ class GroupPracticesFeedResponse(BaseModel):
 class GroupPermissionDTO(BaseModel):
     group_id: UUID
     has_permission: bool
+    can_create_content: bool
     role: Optional[AuthorGroupMemberRole] = None
     is_super_admin: bool
     author_id: Optional[UUID] = None
+
+
+class GroupJoinedUserDTO(BaseModel):
+    """A community user who joined the group, as listed in Studio.
+
+    Unlike the public `AuthorGroupMemberProfileDTO` this carries `user_id`,
+    because Studio needs it to act on the user (remove/ban).
+    """
+
+    user_id: UUID
+    username: Optional[str] = None
+    fullname: str
+    avatar_url: Optional[str] = None
+    joined_at: Optional[datetime] = None
+
+
+class GroupJoinedUsersListResponse(BaseModel):
+    users: List[GroupJoinedUserDTO]
+    skip: int
+    limit: int
+    total: int
+
+
+class RemoveGroupUserRequest(BaseModel):
+    """Remove a joined user and block them from rejoining for a while."""
+
+    ban_duration_days: int = Field(
+        default=DEFAULT_GROUP_BAN_DURATION_DAYS,
+        ge=1,
+        le=MAX_GROUP_BAN_DURATION_DAYS,
+        description=(
+            "How many days the user is blocked from rejoining. "
+            f"Defaults to {DEFAULT_GROUP_BAN_DURATION_DAYS}."
+        ),
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional note shown to other moderators in the banned list.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+class GroupBanDTO(BaseModel):
+    id: UUID
+    user_id: UUID
+    username: Optional[str] = None
+    fullname: str
+    avatar_url: Optional[str] = None
+    reason: Optional[str] = None
+    expires_at: datetime
+    lifted_at: Optional[datetime] = None
+    created_at: datetime
+    is_active: bool
+
+
+class GroupBanListResponse(BaseModel):
+    bans: List[GroupBanDTO]
+    skip: int
+    limit: int
+    total: int
+
+
+BULK_INVITE_MAX_EMAILS = 50
+
+
+class BulkGroupInviteRequest(BaseModel):
+    target_emails: List[str] = Field(min_length=1, max_length=BULK_INVITE_MAX_EMAILS)
+    role: AuthorGroupMemberRole
+
+
+class BulkGroupInviteSkippedDTO(BaseModel):
+    target_email: str
+    reason: str
+
+
+class BulkGroupInviteResponse(BaseModel):
+    invites: List[GroupInviteDTO]
+    skipped: List[BulkGroupInviteSkippedDTO]
+
+
+class GroupInvitePreviewDTO(BaseModel):
+    """What the Studio /join?invite= page shows before anyone signs in."""
+
+    invite_id: UUID
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    target_email: str
+    inviter_name: str
+    status: AuthorGroupInviteStatus
+    expires_at: datetime
+    # True when a Studio account already uses target_email: the page offers
+    # sign-in instead of the one-step sign-up.
+    account_exists: bool
+
+
+class CreateGroupJoinLinkRequest(BaseModel):
+    role: AuthorGroupMemberRole = AuthorGroupMemberRole.AUTHOR
+    max_uses: Optional[int] = Field(default=None, ge=1, le=1000)
+    expires_in_days: Optional[int] = Field(default=None, ge=1)
+
+
+class GroupJoinLinkDTO(BaseModel):
+    id: UUID
+    group_id: UUID
+    role: AuthorGroupMemberRole
+    token: str
+    url: str
+    max_uses: Optional[int] = None
+    use_count: int
+    expires_at: datetime
+    revoked_at: Optional[datetime] = None
+    created_at: datetime
+    created_by: str
+    is_usable: bool
+
+
+class GroupJoinLinkListResponse(BaseModel):
+    links: List[GroupJoinLinkDTO]
+    total: int
+
+
+class GroupJoinLinkPreviewDTO(BaseModel):
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    expires_at: datetime
+    is_usable: bool
+
+
+class RedeemGroupJoinLinkRequest(BaseModel):
+    token: str
+
+
+class GroupJoinLinkRedeemResponse(BaseModel):
+    group_id: UUID
+    group_name: str
+    role: AuthorGroupMemberRole
+    already_member: bool

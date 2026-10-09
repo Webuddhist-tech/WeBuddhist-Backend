@@ -40,6 +40,14 @@ def get_bookmarks_by_user_id(
             query = query.filter(
                 Bookmark.type.in_([BookmarkType.TEXT, BookmarkType.VERSE])
             )
+        elif type == BookmarkFilterType.ACCUMULATOR:
+            # Group accumulations list alongside personal ones; the bookmark's
+            # own `type` tells them apart.
+            query = query.filter(
+                Bookmark.type.in_(
+                    [BookmarkType.ACCUMULATOR, BookmarkType.GROUP_ACCUMULATOR]
+                )
+            )
         else:
             query = query.filter(Bookmark.type == BookmarkType[type.name])
     total = query.count()

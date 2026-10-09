@@ -419,6 +419,54 @@ def test_get_social_profile_invalid():
     assert str(exc_info.value) == "'INVALID_PROFILE' is not a valid SocialProfile"
 
 
+def test_stored_avatar_reference_keeps_an_external_picture():
+    picture = "https://lh3.googleusercontent.com/a/photo"
+    assert Utils.stored_avatar_reference(picture) == picture
+
+
+def test_stored_avatar_reference_keeps_an_s3_path():
+    assert Utils.stored_avatar_reference("images/profile_images/user.webp") == (
+        "images/profile_images/user.webp"
+    )
+
+
+def test_stored_avatar_reference_reduces_a_presigned_link_to_its_key():
+    presigned = "https://example-bucket.s3.amazonaws.com/images/profile_images/user_id.jpg"
+    assert Utils.stored_avatar_reference(presigned) == "images/profile_images/user_id.jpg"
+
+
+def test_stored_avatar_reference_drops_an_untrusted_external_picture():
+    """Avatars are served to other users, so they may not point anywhere."""
+    assert Utils.stored_avatar_reference("https://attacker.example.com/track.png") == ""
+    assert Utils.stored_avatar_reference("http://attacker.example.com/track.png") == ""
+
+
+def test_stored_avatar_reference_rejects_a_lookalike_host():
+    assert Utils.stored_avatar_reference("https://googleusercontent.com.evil.test/x") == ""
+    assert Utils.stored_avatar_reference("https://lh3.googleusercontent.com@evil.test/x") == ""
+
+
+def test_stored_avatar_reference_rejects_a_host_browsers_read_differently():
+    """A backslash ends the authority for a browser but not for urlparse."""
+    backslash_host = "https://attacker.example\\@googleusercontent.com/track"
+    assert Utils.stored_avatar_reference(backslash_host) == ""
+    assert Utils.is_social_picture_url(backslash_host) is False
+    assert Utils.stored_avatar_reference(
+        "https://attacker.example @googleusercontent.com/track"
+    ) == ""
+    assert Utils.stored_avatar_reference(
+        "https://attacker.example\t@googleusercontent.com/track"
+    ) == ""
+
+
+def test_is_social_picture_url():
+    assert Utils.is_social_picture_url("https://lh3.googleusercontent.com/a/photo") is True
+    assert Utils.is_social_picture_url("https://s.gravatar.com/avatar/abc") is True
+    assert Utils.is_social_picture_url("https://attacker.example.com/track.png") is False
+    assert Utils.is_social_picture_url("images/profile_images/user.webp") is False
+    assert Utils.is_social_picture_url(None) is False
+
+
 def test_extract_s3_key_valid_url():
     presigned_url = "https://example-bucket.s3.amazonaws.com/images/profile_images/user_id.jpg"
     assert Utils.extract_s3_key(presigned_url) == "images/profile_images/user_id.jpg"
@@ -1082,3 +1130,22 @@ def test_delete_user_account_db_error():
             delete_user_account(token)
         assert exc_info.value.status_code == 500
         assert exc_info.value.detail == "Failed to delete user account"
+
+
+def test_generate_username_suggestions_skips_reserved_candidates():
+    # The first candidate is treated as reserved and must not be suggested.
+    reserved_calls = {"count": 0}
+
+    def _is_reserved(candidate: str) -> bool:
+        reserved_calls["count"] += 1
+        return reserved_calls["count"] == 1
+
+    with patch("pecha_api.users.users_service.SessionLocal") as mock_session, \
+         patch("pecha_api.users.users_service.find_user_by_username", return_value=None), \
+         patch("pecha_api.users.users_service.is_reserved_username", side_effect=_is_reserved):
+
+        _mock_session_ctx(mock_session)
+        suggestions = _generate_username_suggestions(base="testuser", count=3)
+
+    assert len(suggestions) == 3
+    assert reserved_calls["count"] == 4

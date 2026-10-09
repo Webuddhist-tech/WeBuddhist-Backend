@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Dict
 from uuid import UUID
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import delete, func, or_, select
 import _datetime
 from _datetime import datetime, timezone
 
@@ -11,6 +11,8 @@ from pecha_api.accumulator import (
     UserGroupAccumulator,
     group_accumulator_joins,
 )
+from pecha_api.accumulator.group_accumulator_metadata_model import GroupAccumulatorMetadata
+from pecha_api.plans.shared.event_linkage import group_accumulator_not_linked_to_event
 from pecha_api.users.users_models import Users
 
 
@@ -18,6 +20,15 @@ def _apply_created_at_range(query, range_start: datetime, range_end: datetime):
     return query.filter(
         GroupAccumulatorHistory.created_at >= range_start,
         GroupAccumulatorHistory.created_at <= range_end,
+    )
+
+
+def _accumulator_load_options():
+    """Eager-load everything the DTOs serialize, so list queries stay flat."""
+    return (
+        joinedload(GroupAccumulator.accumulator),
+        selectinload(GroupAccumulator.metadata_entries),
+        selectinload(GroupAccumulator.links),
     )
 
 
@@ -51,15 +62,30 @@ def get_group_accumulators(
     group_id: UUID,
     skip: int = 0,
     limit: int = 20,
+    search: Optional[str] = None,
+    exclude_event_linked: bool = False,
 ) -> Tuple[List[GroupAccumulator], int]:
     query = (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.group_id == group_id,
             GroupAccumulator.deleted_at.is_(None),
         )
     )
+    if exclude_event_linked:
+        query = query.filter(group_accumulator_not_linked_to_event())
+    if search:
+        # Match the default title or any of its translations.
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                GroupAccumulator.title.ilike(pattern),
+                GroupAccumulator.metadata_entries.any(
+                    GroupAccumulatorMetadata.title.ilike(pattern)
+                ),
+            )
+        )
     total = query.count()
     accumulators = query.order_by(GroupAccumulator.created_at.desc()).offset(skip).limit(limit).all()
     return accumulators, total
@@ -76,10 +102,11 @@ def get_group_accumulators_for_group_ids(
         return [], 0
     query = (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.group_id.in_(group_ids),
             GroupAccumulator.deleted_at.is_(None),
+            group_accumulator_not_linked_to_event(),
         )
     )
     if exclude_ids:
@@ -95,7 +122,7 @@ def get_group_accumulator_by_id(
 ) -> Optional[GroupAccumulator]:
     return (
         db.query(GroupAccumulator)
-        .options(joinedload(GroupAccumulator.accumulator))
+        .options(*_accumulator_load_options())
         .filter(
             GroupAccumulator.id == group_accumulator_id,
             GroupAccumulator.deleted_at.is_(None),

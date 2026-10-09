@@ -5,8 +5,11 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from pecha_api.chat.notification_dispatch_service import (
+    dispatch_due_prayer_notifications,
     reconcile_undispatched_chat_notifications,
+    reconcile_undispatched_prayer_notifications,
 )
+from pecha_api.chat.prayer_translation_service import reconcile_pending_prayer_translations
 from pecha_api.plans.groups.join_request_dispatch_service import (
     reconcile_undispatched_join_request_notifications,
 )
@@ -18,11 +21,17 @@ from pecha_api.events.event_reminder_dispatch_service import (
     dispatch_due_event_reminders,
     reconcile_undispatched_event_reminders,
 )
+from pecha_api.events.event_reminder_materialize_service import (
+    materialize_recurring_event_reminders,
+    purge_expired_event_reminders,
+)
+from pecha_api.events.youtube_live_sync_service import run_due_youtube_live_syncs
 from pecha_api.group_posts.notification_dispatch_service import (
     reconcile_undispatched_group_post_notifications,
 )
 from pecha_api.plans.audio.audio_job_service import reconcile_undispatched_audio_jobs
 from pecha_api.verse_of_day.verse_of_day_service import cleanup_expired_verses_of_day
+from pecha_api.timers.timer_service import purge_deleted_timers
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +50,20 @@ def setup_scheduler() -> None:
         args=[expiry_days],
         id="cleanup_expired_verses_of_day",
         name="Cleanup expired verses of the day",
+        replace_existing=True,
+    )
+
+    timer_retention_days = get_int("TIMER_DELETED_RETENTION_DAYS")
+    if timer_retention_days < 1:
+        raise ValueError(
+            f"TIMER_DELETED_RETENTION_DAYS must be a positive integer, got {timer_retention_days}"
+        )
+    scheduler.add_job(
+        purge_deleted_timers,
+        CronTrigger(hour=0, minute=30),
+        args=[timer_retention_days],
+        id="purge_deleted_timers",
+        name="Purge soft-deleted timers past retention",
         replace_existing=True,
     )
 
@@ -63,6 +86,40 @@ def setup_scheduler() -> None:
         id="reconcile_undispatched_chat_notifications",
         name="Re-enqueue undispatched chat notifications",
         replace_existing=True,
+    )
+
+    scheduler.add_job(
+        reconcile_undispatched_prayer_notifications,
+        IntervalTrigger(seconds=chat_reconcile_interval),
+        id="reconcile_undispatched_prayer_notifications",
+        name="Re-enqueue undispatched prayer notifications",
+        replace_existing=True,
+    )
+
+    prayer_dispatch_interval = max(
+        get_int("PRAYER_NOTIFICATION_DISPATCH_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        dispatch_due_prayer_notifications,
+        IntervalTrigger(seconds=prayer_dispatch_interval),
+        id="dispatch_due_prayer_notifications",
+        name="Dispatch held prayer-received notifications",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    prayer_translation_interval = max(
+        get_int("PRAYER_TRANSLATION_RECONCILE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        reconcile_pending_prayer_translations,
+        IntervalTrigger(seconds=prayer_translation_interval),
+        id="reconcile_pending_prayer_translations",
+        name="Retry pending prayer request translations",
+        replace_existing=True,
+        max_instances=1,
     )
 
     join_request_reconcile_interval = max(
@@ -127,6 +184,42 @@ def setup_scheduler() -> None:
         max_instances=1,
     )
 
+    event_reminder_materialize_interval = max(
+        get_int("EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        materialize_recurring_event_reminders,
+        IntervalTrigger(seconds=event_reminder_materialize_interval),
+        id="materialize_recurring_event_reminders",
+        name="Materialize recurring event reminders",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    event_reminder_purge_interval = max(
+        get_int("EVENT_REMINDER_PURGE_INTERVAL_SECONDS"),
+        1,
+    )
+    scheduler.add_job(
+        purge_expired_event_reminders,
+        IntervalTrigger(seconds=event_reminder_purge_interval),
+        id="purge_expired_event_reminders",
+        name="Purge expired event reminders",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    youtube_live_sync_interval = max(get_int("YOUTUBE_LIVE_SYNC_TICK_SECONDS"), 1)
+    scheduler.add_job(
+        run_due_youtube_live_syncs,
+        IntervalTrigger(seconds=youtube_live_sync_interval),
+        id="run_due_youtube_live_syncs",
+        name="Add live YouTube streams to running events at each group's times",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     if not scheduler.running:
         scheduler.start()
     logger.info(
@@ -135,13 +228,17 @@ def setup_scheduler() -> None:
         "re-enqueueing undispatched chat notifications every %s second(s); "
         "re-enqueueing undispatched group post notifications every %s second(s); "
         "re-enqueueing undispatched event notifications every %s second(s); "
-        "dispatching due event reminders every %s second(s)",
+        "dispatching due event reminders every %s second(s); "
+        "materializing recurring event reminders every %s second(s); "
+        "checking for groups' YouTube live sync times every %s second(s)",
         expiry_days,
         reconcile_interval,
         chat_reconcile_interval,
         group_post_reconcile_interval,
         event_reconcile_interval,
         event_reminder_dispatch_interval,
+        event_reminder_materialize_interval,
+        youtube_live_sync_interval,
     )
 
 

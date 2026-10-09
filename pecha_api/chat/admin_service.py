@@ -1,17 +1,30 @@
 """CMS admin services for chat moderation reports."""
+from datetime import datetime, timezone
 from typing import Optional
+from uuid import UUID
 
 from pecha_api.chat.enums import ChatMessageReportReason, ChatMessageReportSource
 from pecha_api.chat.models import ChatMessageReport
-from pecha_api.chat.repository import list_reports
+from fastapi import HTTPException
+from starlette import status
+
+from pecha_api.chat.repository import (
+    get_report_by_id,
+    list_reports,
+)
 from pecha_api.chat.response_models import (
     AdminChatMessageReportDTO,
     AdminChatMessageReportsResponse,
     AdminChatReportUserDTO,
 )
+from pecha_api.chat.service import _message_type_value, room_kind
 from pecha_api.db.database import SessionLocal
 from pecha_api.plans.authors.plan_authors_service import validate_and_extract_author_details
-from pecha_api.plans.shared.permissions import require_super_admin_or_reviewer
+from pecha_api.plans.response_message import NOT_FOUND
+from pecha_api.plans.shared.permissions import (
+    require_super_admin,
+    require_super_admin_or_reviewer,
+)
 from pecha_api.users.users_models import Users
 
 
@@ -42,6 +55,8 @@ def _build_report_dto(report: ChatMessageReport) -> AdminChatMessageReportDTO:
         message_text=message_text,
         room_id=room.id if room else report.room_id,
         room_name=room.name if room else None,
+        room_kind=room_kind(room) if room else None,
+        message_type=_message_type_value(message) if message else None,
         reporter=_build_user_dto(report.reporter),
         reported_user=_build_user_dto(reported_user),
         created_at=report.created_at.isoformat() if report.created_at else "",
@@ -56,6 +71,7 @@ def list_chat_message_reports_service(
     source: Optional[ChatMessageReportSource] = None,
     reason: Optional[ChatMessageReportReason] = None,
     resolved: Optional[bool] = None,
+    group_id: Optional[UUID] = None,
 ) -> AdminChatMessageReportsResponse:
     author = validate_and_extract_author_details(token=token)
     require_super_admin_or_reviewer(author)
@@ -67,8 +83,26 @@ def list_chat_message_reports_service(
             source=source.value if source else None,
             reason=reason.value if reason else None,
             resolved=resolved,
+            group_id=group_id,
         )
         reports = [_build_report_dto(report) for report in rows]
     return AdminChatMessageReportsResponse(
         reports=reports, skip=skip, limit=limit, total=total
     )
+
+
+def resolve_chat_message_report_service(
+    token: str, report_id: UUID
+) -> AdminChatMessageReportDTO:
+    """Resolve (soft-delete) any chat report, including event and direct-chat
+    ones no group queue shows. Super admin only: reviewers are read-only."""
+    author = validate_and_extract_author_details(token=token)
+    require_super_admin(author)
+    with SessionLocal() as db:
+        report = get_report_by_id(db=db, report_id=report_id)
+        if report is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NOT_FOUND)
+        if report.resolved_at is None:
+            report.resolved_at = datetime.now(timezone.utc)
+            db.commit()
+        return _build_report_dto(report)

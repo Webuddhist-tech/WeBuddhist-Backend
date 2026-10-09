@@ -141,7 +141,7 @@ async def test_get_bookmarks_service_success():
         mock_validate.return_value = mock_user
         mock_session.return_value = mock_db
         mock_get.return_value = ([mock_bookmark1, mock_bookmark2], 2)
-        mock_enrich.return_value = {}
+        mock_enrich.return_value = {"series": {"id": str(uuid4())}}
 
         result = await get_bookmarks_service(token="test_token")
 
@@ -153,6 +153,63 @@ async def test_get_bookmarks_service_success():
         assert result.bookmarks[1].source_id == "segment-ref-002"
         assert result.bookmarks[1].name is None
         assert mock_enrich.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_bookmarks_service_drops_bookmarks_for_deleted_source():
+    """enrich_bookmark returns {} when the bookmarked item (recitation
+    collection, plan, series, ...) no longer exists or isn't visible to the
+    user anymore - such bookmarks must not appear in the response."""
+    user_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    mock_user = MagicMock()
+    mock_user.id = user_id
+
+    live_bookmark = MagicMock()
+    live_bookmark.id = uuid4()
+    live_bookmark.type = BookmarkType.RECITATION_COLLECTION
+    live_bookmark.source_id = str(uuid4())
+    live_bookmark.name = None
+    live_bookmark.created_at = now
+    live_bookmark.updated_at = now
+
+    stale_bookmark = MagicMock()
+    stale_bookmark.id = uuid4()
+    stale_bookmark.type = BookmarkType.RECITATION_COLLECTION
+    stale_bookmark.source_id = str(uuid4())
+    stale_bookmark.name = None
+    stale_bookmark.created_at = now
+    stale_bookmark.updated_at = now
+
+    mock_db = MagicMock()
+    mock_db.__enter__ = MagicMock(return_value=mock_db)
+    mock_db.__exit__ = MagicMock(return_value=False)
+
+    async def fake_enrich(bookmark, db, language=None):
+        if bookmark is live_bookmark:
+            return {
+                "recitation_collection": {
+                    "id": str(uuid4()),
+                    "title": "Still there",
+                    "item_count": 3,
+                }
+            }
+        return {}
+
+    with patch("pecha_api.bookmarks.bookmark_services.validate_and_extract_user_details") as mock_validate, \
+         patch("pecha_api.bookmarks.bookmark_services.SessionLocal") as mock_session, \
+         patch("pecha_api.bookmarks.bookmark_services.get_bookmarks_by_user_id") as mock_get, \
+         patch("pecha_api.bookmarks.bookmark_services.enrich_bookmark", side_effect=fake_enrich):
+
+        mock_validate.return_value = mock_user
+        mock_session.return_value = mock_db
+        mock_get.return_value = ([live_bookmark, stale_bookmark], 2)
+
+        result = await get_bookmarks_service(token="test_token")
+
+        assert len(result.bookmarks) == 1
+        assert result.bookmarks[0].id == live_bookmark.id
 
 
 @pytest.mark.asyncio

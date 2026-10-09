@@ -17,4 +17,5 @@ ONLY_USER_ACCUMULATORS_CAN_BE_DELETED = "Only user-created accumulators can be d
 ONLY_PRESET_ACCUMULATORS_CAN_BE_UPDATED = "Only preset accumulators can be updated"
 ONLY_PRESET_ACCUMULATORS_CAN_BE_DELETED = "Only preset accumulators can be deleted"
 INVALID_COUNT = "Count must be a positive integer"
+INVALID_URL = "Link URL must be a valid http or https URL"
 PRESET_METADATA_REQUIRED = "At least one metadata entry with a name is required"

@@ -12,8 +12,9 @@ from pecha_api.chat.notification_repository import (
 )
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_metadata_model import EventMetadata
+from pecha_api.events.event_reminder_model import EventReminder
 from pecha_api.events.event_participant_repository import get_event_participants_paginated
-from pecha_api.events.event_reminder_repository import get_event_reminder
+from pecha_api.events.event_reminder_repository import get_event_reminder_for_schedule
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.events.event_reminder_service import REMINDER_TYPE_T_MINUS_10, REMINDER_TYPE_T_ZERO
 from pecha_api.events.notification_response_models import (
@@ -21,6 +22,7 @@ from pecha_api.events.notification_response_models import (
     EventPushDeviceTargetDTO,
     EventReminderTargetsResponse,
 )
+from pecha_api.notification.notification_preference_enums import NotificationType
 from pecha_api.plans.response_message import NOT_FOUND
 
 _REMINDER_COPY = {
@@ -45,18 +47,32 @@ def _get_event_name(db: Session, event_id: UUID) -> str:
     return "Your event"
 
 
-def _build_reminder_copy(*, reminder_type: str, event_name: str, minutes_before: int) -> str:
+def _build_reminder_copy(
+    *,
+    reminder_type: str,
+    minutes_before: int,
+    day_index: Optional[int] = None,
+    day_total: Optional[int] = None,
+) -> str:
     template = _REMINDER_COPY.get(reminder_type, "Starting now")
-    return template.format(minutes=minutes_before)
+    body = template.format(minutes=minutes_before)
+    # A multi-day event sends the same line every morning, so without the
+    # day it is impossible to tell day five from day one. Single-day events
+    # carry no numbering and keep the copy they have always had.
+    if day_index and day_total and day_total > 1:
+        return f"Day {day_index} of {day_total} · {body}"
+    return body
 
 
-def _reminder_superseded(
+def _live_reminder(
     db: Session,
     event_id: UUID,
     reminder_type: str,
     fire_at: Optional[datetime],
-) -> bool:
-    """Final check right before targets are handed back for actual push
+) -> Optional[EventReminder]:
+    """The reminder row this delivery is for, or None if it is superseded.
+
+    Final check right before targets are handed back for actual push
     delivery - the closest point in the pipeline to real publication, and
     the last chance to catch a cancellation or reschedule that committed
     after the dispatcher's own best-effort pre-send check (see
@@ -65,29 +81,34 @@ def _reminder_superseded(
     A canceled row means delivery must be suppressed outright regardless.
 
     fire_at is the exact schedule this delivery attempt was queued for
-    (threaded through the SQS message body end to end). Any mismatch
-    against the row's current fire_at - including a missing fire_at, which
-    can never equal a real timestamp - means this row was claimed again
-    for a different schedule since: e.g. a message that outlived a cancel
-    and was superseded by a fresh dispatch of the same (event_id,
-    reminder_type) row, which a bare "not canceled" check can't tell apart
-    from the delivery this message was actually queued for. A caller with
-    no fire_at at all (only possible for a message queued before this
-    field existed) is failed closed rather than falling back to a weaker
-    "not yet due" heuristic, since that heuristic can't detect the exact
-    race this check exists for - every current dispatch path always
+    (threaded through the SQS message body end to end), and it is what the
+    row is looked up by: an event holds one row per occurrence-day, so
+    (event_id, reminder_type) no longer names a single row. Finding nothing
+    is itself the answer - the schedule this message was queued against no
+    longer exists, because the event was rebuilt onto different days or
+    dropped that day entirely. That also covers a message which outlived a
+    cancel and was superseded by a fresh dispatch of the same day, which a
+    bare "not canceled" check cannot tell apart from the delivery this
+    message was actually queued for.
+
+    A caller with no fire_at at all (only possible for a message queued
+    before this field existed) is failed closed rather than falling back to
+    a weaker "not yet due" heuristic, since that heuristic can't detect the
+    exact race this check exists for - every current dispatch path always
     supplies fire_at, so this only affects messages already stale before
     this check could apply to them anyway.
 
-    The comparison is exact: fire_at round-trips losslessly (same
-    microsecond precision and offset) through isoformat -> SQS JSON ->
-    query param -> datetime parsing, so a tolerance window would only risk
-    treating two distinct schedules that happen to land close together as
-    the same occurrence."""
-    reminder = get_event_reminder(db, event_id, reminder_type)
+    The match is exact: fire_at round-trips losslessly (same microsecond
+    precision and offset) through isoformat -> SQS JSON -> query param ->
+    datetime parsing, so a tolerance window would only risk treating two
+    distinct schedules that happen to land close together as the same
+    occurrence."""
+    if fire_at is None:
+        return None
+    reminder = get_event_reminder_for_schedule(db, event_id, reminder_type, fire_at)
     if reminder is None or reminder.canceled_at is not None:
-        return True
-    return reminder.fire_at != fire_at
+        return None
+    return reminder
 
 
 def get_event_reminder_targets(
@@ -126,21 +147,29 @@ def get_event_reminder_targets(
 
         # Fail fast: skip the participant/device work below entirely for a
         # reminder already known stale.
-        if _reminder_superseded(db, event_id, reminder_type, fire_at):
+        reminder = _live_reminder(db, event_id, reminder_type, fire_at)
+        if reminder is None:
             return _suppressed()
 
         event_name = _get_event_name(db, event.id)
         title = event_name
         body = _build_reminder_copy(
             reminder_type=reminder_type,
-            event_name=event_name,
             minutes_before=minutes_before,
+            day_index=reminder.day_index,
+            day_total=reminder.day_total,
         )
 
+        # EVENT_REMINDER has no per-group override (it is not group-scoped),
+        # so the participant query resolves it against the GLOBAL row alone.
         participant_rows, total = get_event_participants_paginated(
-            db=db, event_id=event_id, skip=skip, limit=limit,
+            db=db,
+            event_id=event_id,
+            skip=skip,
+            limit=limit,
+            notification_type=NotificationType.EVENT_REMINDER,
         )
-        recipient_ids = [user.id for user, _ in participant_rows]
+        recipient_ids = [row[0].id for row in participant_rows]
 
         devices_by_user = get_active_push_devices_by_user_ids(db=db, user_ids=recipient_ids)
         recipients: list[EventNotificationRecipientDTO] = []
@@ -167,7 +196,7 @@ def get_event_reminder_targets(
         # cancellation or reschedule to land after the fail-fast check but
         # before targets are handed back for actual delivery. This is the
         # last point backend code controls before that happens.
-        if _reminder_superseded(db, event_id, reminder_type, fire_at):
+        if _live_reminder(db, event_id, reminder_type, fire_at) is None:
             return _suppressed()
 
         return EventReminderTargetsResponse(

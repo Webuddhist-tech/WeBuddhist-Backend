@@ -1,4 +1,5 @@
 import pytest
+from typing import Any, List, Optional, Tuple
 from unittest.mock import patch, MagicMock
 from uuid import uuid4
 from datetime import datetime, timezone as tz
@@ -12,6 +13,8 @@ import pecha_api.app  # noqa: F401
 from pecha_api.chat.message_service import (
     add_message_reaction_service,
     delete_message_service,
+    delete_messages_service,
+    edit_message_service,
     list_room_messages_service,
     remove_message_reaction_service,
     report_message_service,
@@ -19,6 +22,7 @@ from pecha_api.chat.message_service import (
     send_group_message_service,
 )
 from pecha_api.chat.enums import ChatMessageReportReason
+from pecha_api.chat.response_models import ChatMessageDTO
 
 
 class MockUser:
@@ -50,6 +54,7 @@ class MockMessage:
         self.deleted_at = None
         self.parent = parent
         self.parent_message_id = parent.id if parent else None
+        self.intention = None
 
 
 class MockReaction:
@@ -217,6 +222,32 @@ class TestListRoomMessagesService:
         assert reactions["❤️"].count == 1
         assert reactions["❤️"].reacted_by_me is False
 
+    @patch('pecha_api.chat.message_service.get_reactions_map')
+    @patch('pecha_api.chat.message_service.get_room_messages')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_lists_reply_with_deleted_parent(
+        self, mock_session, mock_get_room, mock_require, mock_get_messages, mock_reactions_map
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        parent_sender = MockUser(email="parent@example.com", firstname="Bob")
+        parent = MockMessage(sender=parent_sender, sender_id=parent_sender.id, body="Secret")
+        parent.deleted_at = datetime.now(tz.utc)
+        reply = MockMessage(body="Reply", parent=parent)
+        mock_get_messages.return_value = ([reply], 1)
+        mock_reactions_map.return_value = {}
+
+        result = list_room_messages_service(room_id=uuid4(), user=MockUser(), skip=0, limit=20)
+        parent_dto = result.messages[0].parent
+
+        assert parent_dto is not None
+        assert parent_dto.id == parent.id
+        assert parent_dto.body == ""
+        assert parent_dto.sender_email == "parent@example.com"
+        assert parent_dto.sender_name == "Bob"
+        assert parent_dto.deleted_at == parent.deleted_at.isoformat()
+
 
 class TestDeleteMessageService:
 
@@ -277,6 +308,118 @@ class TestDeleteMessageService:
             delete_message_service(room_id=uuid4(), message_id=uuid4(), user=MockUser())
 
         assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestDeleteMessagesService:
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_deletes_own_messages(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        first = MockMessage(sender_id=user_id)
+        second = MockMessage(sender_id=user_id)
+        mock_get_messages.return_value = [second, first]
+        deleted_at = datetime.now(tz.utc)
+        mock_soft_delete.return_value = deleted_at
+
+        result = delete_messages_service(
+            room_id=uuid4(),
+            message_ids=[first.id, second.id],
+            user=MockUser(user_id=user_id),
+        )
+
+        mock_soft_delete.assert_called_once()
+        assert mock_soft_delete.call_args.kwargs["messages"] == [first, second]
+        assert result.message_ids == [first.id, second.id]
+        assert result.deleted_at == deleted_at.isoformat()
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_rejects_batch_containing_other_users_message(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        mine = MockMessage(sender_id=user_id)
+        theirs = MockMessage(sender_id=uuid4())
+        mock_get_messages.return_value = [mine, theirs]
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(),
+                message_ids=[mine.id, theirs.id],
+                user=MockUser(user_id=user_id),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        assert str(theirs.id) in exc_info.value.detail
+        assert str(mine.id) not in exc_info.value.detail
+        # Nothing is deleted when the selection is not entirely the caller's.
+        mock_soft_delete.assert_not_called()
+
+    @patch('pecha_api.chat.message_service.soft_delete_messages')
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_unknown_message_id_deletes_nothing(
+        self, mock_session, mock_get_room, mock_require_member,
+        mock_get_messages, mock_soft_delete,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.return_value = MockMember()
+        user_id = uuid4()
+        mine = MockMessage(sender_id=user_id)
+        unknown_id = uuid4()
+        mock_get_messages.return_value = [mine]
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(),
+                message_ids=[mine.id, unknown_id],
+                user=MockUser(user_id=user_id),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert str(unknown_id) in exc_info.value.detail
+        mock_soft_delete.assert_not_called()
+
+    @patch('pecha_api.chat.message_service.get_messages_by_ids')
+    @patch('pecha_api.chat.message_service._require_active_member')
+    @patch('pecha_api.chat.message_service._get_room_or_404')
+    @patch('pecha_api.chat.message_service.SessionLocal')
+    def test_non_member_cannot_bulk_delete(
+        self, mock_session, mock_get_room, mock_require_member, mock_get_messages
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        mock_get_room.return_value = MagicMock()
+        mock_require_member.side_effect = HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="NOT_A_MEMBER"
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            delete_messages_service(
+                room_id=uuid4(), message_ids=[uuid4()], user=MockUser()
+            )
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+        mock_get_messages.assert_not_called()
 
 
 class TestAddMessageReactionService:
@@ -501,3 +644,180 @@ class TestReportMessageService:
             )
 
         assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+
+
+class TestEditMessageService:
+
+    def setup_method(self) -> None:
+        self.room = MagicMock(group_id=uuid4(), event_id=None)
+
+    def _patch_reads(self) -> List[Any]:
+        return [
+            patch('pecha_api.chat.message_service.list_message_reactions', return_value=[]),
+            patch('pecha_api.chat.message_service.validate_message_content'),
+            patch('pecha_api.chat.message_service._require_active_member'),
+            patch('pecha_api.chat.message_service._get_room_or_404', return_value=self.room),
+            patch('pecha_api.chat.message_service.SessionLocal'),
+        ]
+
+    def _run(
+        self, message: MockMessage, user: MockUser, **kwargs: Any
+    ) -> Tuple[ChatMessageDTO, MagicMock]:
+        patches = self._patch_reads()
+        mocks = [p.start() for p in patches]
+        try:
+            mocks[-1].return_value.__enter__.return_value = MagicMock()
+            with patch('pecha_api.chat.message_service.get_message_by_id', return_value=message),                  patch('pecha_api.chat.message_service.update_message') as mock_update:
+                def _apply(
+                    db: Any, message: MockMessage, body: str, intention: Optional[str]
+                ) -> MockMessage:
+                    message.body = body
+                    message.intention = intention
+                    message.is_edited = True
+                    return message
+                mock_update.side_effect = _apply
+                result = edit_message_service(
+                    room_id=message.room_id, message_id=message.id, user=user, **kwargs
+                )
+                return result, mock_update
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_edits_own_text_message_and_flags_it(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+
+        result, mock_update = self._run(message, user, body="  Hello there ")
+
+        mock_update.assert_called_once()
+        assert result.body == "Hello there"
+        assert result.is_edited is True
+        assert result.model_dump()["is_edited"] is True
+
+    def test_unchanged_edit_does_not_flag(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+        message.is_edited = False
+
+        result, mock_update = self._run(message, user, body="Hello")
+
+        mock_update.assert_not_called()
+        assert result.is_edited is False
+
+    def test_intention_rejected_on_text_message(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id)
+        message.message_type = "TEXT"
+
+        with pytest.raises(HTTPException) as exc_info:
+            self._run(message, user, intention="peace")
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_cannot_edit_others_message(self):
+        message = MockMessage(sender_id=uuid4())
+        message.message_type = "TEXT"
+
+        with pytest.raises(HTTPException) as exc_info:
+            self._run(message, MockUser(), body="Hijack")
+
+        assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_message_not_found(self):
+        message = MockMessage()
+        patches = self._patch_reads()
+        mocks = [p.start() for p in patches]
+        try:
+            mocks[-1].return_value.__enter__.return_value = MagicMock()
+            with patch('pecha_api.chat.message_service.get_message_by_id', return_value=None):
+                with pytest.raises(HTTPException) as exc_info:
+                    edit_message_service(
+                        room_id=uuid4(), message_id=message.id, user=MockUser(), body="x"
+                    )
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_requires_body_or_intention(self):
+        with pytest.raises(HTTPException) as exc_info:
+            edit_message_service(room_id=uuid4(), message_id=uuid4(), user=MockUser())
+
+        assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_edits_prayer_intention(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = "peace"
+        event_id = uuid4()
+        self.room.event_id = event_id
+
+        with patch('pecha_api.chat.message_service.validate_message_intention_and_body', return_value="healing") as mock_validate,              patch('pecha_api.chat.message_service.get_prayer_counts_map', return_value={}),              patch('pecha_api.chat.message_service.get_prayed_message_ids', return_value=set()),              patch('pecha_api.chat.message_service.get_recent_prayers_map', return_value={}),              patch('pecha_api.chat.message_service.resolve_intention_dtos_for_slugs', return_value={}):
+            result, mock_update = self._run(message, user, intention="healing")
+
+        assert mock_validate.call_args.kwargs["body"] == "Pray for me"
+        assert mock_validate.call_args.kwargs["intention"] == "healing"
+        assert mock_validate.call_args.kwargs["event_id"] == event_id
+        assert mock_update.call_args.kwargs["intention"] == "healing"
+        assert result.is_edited is True
+
+    def test_body_only_prayer_edit_skips_event_intention_restriction(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = "legacy"
+        self.room.event_id = uuid4()
+
+        with patch(
+            "pecha_api.chat.message_service.validate_message_intention_and_body",
+            return_value="legacy",
+        ) as mock_validate, patch(
+            "pecha_api.chat.message_service.get_prayer_counts_map", return_value={}
+        ), patch(
+            "pecha_api.chat.message_service.get_prayed_message_ids", return_value=set()
+        ), patch(
+            "pecha_api.chat.message_service.get_recent_prayers_map", return_value={}
+        ), patch(
+            "pecha_api.chat.message_service.resolve_intention_dtos_for_slugs",
+            return_value={},
+        ):
+            self._run(message, user, body="Updated prayer text")
+
+        assert mock_validate.call_args.kwargs["event_id"] is None
+
+    def test_edited_prayer_request_keeps_the_authors_own_prayer_count(self):
+        """The edit response must agree with the message list, which carries
+        how many times the viewer has prayed for the request."""
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Pray for me")
+        message.message_type = "PRAYER"
+        message.intention = None
+
+        with patch('pecha_api.chat.message_service.validate_message_intention_and_body', return_value=None), \
+             patch('pecha_api.chat.message_service.get_prayer_counts_map', return_value={message.id: 4}), \
+             patch('pecha_api.chat.message_service.get_prayed_message_ids', return_value={message.id}), \
+             patch('pecha_api.chat.message_service.get_my_prayer_counts_map', return_value={message.id: 30}) as mock_mine, \
+             patch('pecha_api.chat.message_service.get_recent_prayers_map', return_value={}):
+            result, _ = self._run(message, user, body="Pray for my mother")
+
+        assert mock_mine.call_args.kwargs["user_id"] == user.id
+        assert result.my_prayer_count == 30
+        assert result.prayer_count == 4
+        assert result.prayed_by_me is True
+
+    def test_rejected_when_group_unpublished_before_commit(self):
+        user = MockUser()
+        message = MockMessage(sender=user, sender_id=user.id, body="Hello")
+        message.message_type = "TEXT"
+
+        with patch('pecha_api.chat.message_service.is_group_id_published', return_value=False) as mock_published:
+            with pytest.raises(HTTPException) as exc_info:
+                self._run(message, user, body="Changed")
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        assert mock_published.call_args.kwargs["for_update"] is True
