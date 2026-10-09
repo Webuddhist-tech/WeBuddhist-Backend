@@ -42,6 +42,7 @@ from pecha_api.events.event_model import Event
 from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_participant_model import GroupEventParticipant
 from pecha_api.events.event_link_model import EventLink
+from pecha_api.events.group_event_accumulation_model import GroupEventAccumulation
 from pecha_api.events.event_reminder_model import EventReminder
 from pecha_api.events.youtube_live_sync_model import EventYoutubeLiveSync
 from pecha_api.events.recitation_play_time_model import RecitationSegmentPlayTime

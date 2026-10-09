@@ -18,6 +18,7 @@ from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.db.database import Base
 from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_model import Event
+from pecha_api.events.group_event_accumulation_model import GroupEventAccumulation
 from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
 from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata, author_group_joins
 from pecha_api.group_accumulator.group_accumulator_repository import (
@@ -46,6 +47,7 @@ def _sessionmaker() -> sessionmaker:
             group_accumulator_joins,
             Event.__table__,
             EventMetadata.__table__,
+            GroupEventAccumulation.__table__,
             AuthorGroup.__table__,
             AuthorGroupMetadata.__table__,
             author_group_joins,

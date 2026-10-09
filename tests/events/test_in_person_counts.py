@@ -1,10 +1,12 @@
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from typing import Iterator, Optional, Tuple
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from fastapi.testclient import TestClient
 
 from pecha_api.app import api
@@ -43,13 +45,25 @@ def _row(count=108, created_at=datetime(2026, 10, 1, 6, 30, tzinfo=timezone.utc)
     )
 
 
+def _legacy_resolve_target(
+    _db: Session,
+    event: SimpleNamespace,
+    event_accumulation_id: Optional[UUID] = None,
+) -> Tuple[None, UUID]:
+    if event.group_accumulator_id is None:
+        raise HTTPException(status_code=409, detail="EVENT_HAS_NO_GROUP_ACCUMULATOR")
+    return None, event.group_accumulator_id
+
+
 @pytest.fixture
-def ctx():
+def ctx() -> Iterator[SimpleNamespace]:
     """Patches auth, the session and the event lookup; yields the event."""
     event = _event()
     with patch(f"{_SVC}.validate_cms_author_details"), patch(f"{_SVC}.SessionLocal"), patch(
         f"{_SVC}._require_can_edit_event"
-    ) as mock_perm, patch(f"{_SVC}.get_event_by_id", return_value=event):
+    ) as mock_perm, patch(f"{_SVC}.get_event_by_id", return_value=event), patch(
+        f"{_SVC}.resolve_manual_in_person_target", side_effect=_legacy_resolve_target
+    ):
         yield SimpleNamespace(event=event, perm=mock_perm)
 
 
@@ -83,12 +97,12 @@ class TestList:
         assert mock_image.call_args.args[0] == "ga/original.jpg"
         ctx.perm.assert_called_once()
 
-    def test_event_without_group_accumulator_lists_nothing(self, ctx):
+    def test_event_without_group_accumulator_is_409(self, ctx):
         ctx.event.group_accumulator_id = None
-        with patch(f"{_SVC}.list_in_person_counts") as mock_list:
-            response = service.list_in_person_counts_service(token="t", event_id=ctx.event.id, skip=0, limit=20)
+        with patch(f"{_SVC}.list_in_person_counts") as mock_list, pytest.raises(HTTPException) as exc:
+            service.list_in_person_counts_service(token="t", event_id=ctx.event.id, skip=0, limit=20)
         mock_list.assert_not_called()
-        assert response.items == [] and response.group_accumulator_id is None
+        assert exc.value.status_code == 409
 
     def test_missing_event_is_404(self):
         with patch(f"{_SVC}.validate_cms_author_details"), patch(f"{_SVC}.SessionLocal"), patch(
@@ -120,10 +134,13 @@ class TestCreate:
     def test_one_count_per_day(self, ctx):
         with patch(f"{_SVC}.user_exists", return_value=True), patch(
             f"{_SVC}.find_in_person_count_in_range", return_value=_row()
-        ), patch(f"{_SVC}.add_in_person_count") as mock_add, pytest.raises(HTTPException) as exc:
-            service.create_in_person_count_service(
-                token="t", event_id=ctx.event.id, request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1)
-            )
+        ), patch(f"{_SVC}.add_in_person_count") as mock_add:
+            with pytest.raises(HTTPException) as exc:
+                service.create_in_person_count_service(
+                    token="t",
+                    event_id=ctx.event.id,
+                    request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1),
+                )
         assert (exc.value.status_code, exc.value.detail) == (409, service.IN_PERSON_COUNT_EXISTS)
         mock_add.assert_not_called()
 
@@ -133,13 +150,16 @@ class TestCreate:
             service.create_in_person_count_service(
                 token="t", event_id=ctx.event.id, request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1)
             )
-        assert exc.value.detail == service.EVENT_HAS_NO_GROUP_ACCUMULATOR
+        assert exc.value.detail == "EVENT_HAS_NO_GROUP_ACCUMULATOR"
 
     def test_missing_in_person_user(self, ctx):
-        with patch(f"{_SVC}.user_exists", return_value=False), pytest.raises(HTTPException) as exc:
-            service.create_in_person_count_service(
-                token="t", event_id=ctx.event.id, request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1)
-            )
+        with patch(f"{_SVC}.user_exists", return_value=False):
+            with pytest.raises(HTTPException) as exc:
+                service.create_in_person_count_service(
+                    token="t",
+                    event_id=ctx.event.id,
+                    request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1),
+                )
         assert exc.value.detail == service.IN_PERSON_USER_NOT_FOUND
 
 
@@ -194,7 +214,13 @@ class TestViews:
         with patch(f"{_VIEWS}.list_in_person_counts_service", return_value=body) as mock_list:
             response = client.get(f"/cms/events/{event_id}/in-person-counts", headers=_AUTH)
         assert response.status_code == 200
-        mock_list.assert_called_once_with(token="dummy", event_id=event_id, skip=0, limit=20)
+        mock_list.assert_called_once_with(
+            token="dummy",
+            event_id=event_id,
+            skip=0,
+            limit=20,
+            event_accumulation_id=None,
+        )
 
     def test_create_validates_count(self):
         event_id = uuid4()
@@ -216,7 +242,12 @@ class TestViews:
         assert mock_put.call_args.kwargs["request"].day is None
         with patch(f"{_VIEWS}.delete_in_person_count_service") as mock_delete:
             assert client.delete(f"/cms/events/{event_id}/in-person-counts/{history_id}", headers=_AUTH).status_code == 204
-        mock_delete.assert_called_once_with(token="dummy", event_id=event_id, history_id=history_id)
+        mock_delete.assert_called_once_with(
+            token="dummy",
+            event_id=event_id,
+            history_id=history_id,
+            event_accumulation_id=None,
+        )
 
     def test_requires_auth(self):
         assert client.get(f"/cms/events/{uuid4()}/in-person-counts").status_code == 403

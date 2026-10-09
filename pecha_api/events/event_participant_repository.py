@@ -198,6 +198,27 @@ def get_event_participant_count(db: Session, event_id: UUID) -> int:
     )
 
 
+def get_offline_participant_counts(
+    db: Session,
+    event_ids: List[UUID],
+) -> Dict[UUID, int]:
+    if not event_ids:
+        return {}
+    rows = (
+        db.query(
+            GroupEventParticipant.event_id,
+            func.count(GroupEventParticipant.id).label("offline_count"),
+        )
+        .filter(
+            GroupEventParticipant.event_id.in_(event_ids),
+            GroupEventParticipant.participation_type == "offline",
+        )
+        .group_by(GroupEventParticipant.event_id)
+        .all()
+    )
+    return {row.event_id: int(row.offline_count) for row in rows}
+
+
 def get_event_participant_counts(
     db: Session,
     event_ids: List[UUID],
