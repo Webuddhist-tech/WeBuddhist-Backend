@@ -797,10 +797,15 @@ class AutoplayEngine:
             except Exception as e:
                 logger.exception("Could not take back an early line for event %s: %s", event_id, e)
                 raise
+        # The runner this stop is about. A new plan can start while the stop
+        # waits on Redis; its runner is not this stop's to cancel, or the plan
+        # stays marked running with nobody advancing it until its lease lapses.
+        stopping = self._runners.get(event_id)
         try:
             await self.store.stop(event_id, reason)
         finally:
-            self._forget_runner(event_id)
+            if self._runners.get(event_id) is stopping:
+                self._forget_runner(event_id)
         state = await self.state(event_id)
         await self._announce(event_id, state)
         return state

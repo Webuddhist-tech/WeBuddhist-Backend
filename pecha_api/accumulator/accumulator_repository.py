@@ -367,10 +367,15 @@ class GroupAccumulatorWithUserCount:
         self.event = event
 
 
-def _get_published_groups_by_id(db: Session, group_ids: List[UUID]) -> Dict[UUID, "AuthorGroup"]:
-    """Published, non-deleted groups with their metadata; other groups never reach the app."""
+def _get_visible_groups_by_id(
+    db: Session, group_ids: List[UUID], user_id: UUID
+) -> Dict[UUID, "AuthorGroup"]:
+    """Published, non-deleted groups with their metadata that this user may see:
+    public groups, and private ones the user has joined. A private group's name
+    must not reach someone who has not joined it."""
     from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
     from pecha_api.plans.groups.groups_models import AuthorGroup
+    from pecha_api.plans.groups.groups_repository import get_joined_group_ids_by_user
 
     groups = (
         db.query(AuthorGroup)
@@ -382,19 +387,27 @@ def _get_published_groups_by_id(db: Session, group_ids: List[UUID]) -> Dict[UUID
         )
         .all()
     )
-    return {group.id: group for group in groups}
+    joined_group_ids = set(get_joined_group_ids_by_user(db=db, user_id=user_id))
+    return {
+        group.id: group
+        for group in groups
+        if group.is_public or group.id in joined_group_ids
+    }
 
 
 def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) -> Dict[UUID, "Event"]:
     """The most recently created event linking each group accumulator, with its metadata.
 
     An event links a group accumulator only within the same group (see
-    group_accumulator_not_linked_to_event).
+    group_accumulator_not_linked_to_event). Events pointing at a draft or
+    missing plan/series are skipped, as in normal event reads, so their title
+    is never shown.
     """
     if not group_accumulator_ids:
         return {}
 
     from pecha_api.events.event_model import Event
+    from pecha_api.events.event_repository import _publishable_linked_content_filter
 
     latest = (
         db.query(
@@ -407,6 +420,7 @@ def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) ->
         .filter(
             Event.group_accumulator_id.in_(group_accumulator_ids),
             Event.group_id == GroupAccumulator.group_id,
+            _publishable_linked_content_filter(),
         )
         .subquery()
     )
@@ -510,7 +524,7 @@ def get_groups_by_accumulator_id(
         )
     )
 
-    groups_by_id = _get_published_groups_by_id(db, [ga.group_id for ga in group_accumulators])
+    groups_by_id = _get_visible_groups_by_id(db, [ga.group_id for ga in group_accumulators], user_id)
     events_by_group_accumulator_id = _get_latest_linked_events(
         db,
         [ga.id for ga in group_accumulators if ga.group_id in groups_by_id],

@@ -1,5 +1,5 @@
 import logging
-from datetime import date
+from datetime import date, timezone
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
@@ -68,9 +68,13 @@ def youtube_video_keys_of_event(event: Optional[Event]) -> Set[VideoKey]:
 
 def _plan_start_date(event: Event, plan: Plan) -> date:
     """Day 1 of the plan: its own start date, as the series schedule counts
-    it, falling back to the event's start when the plan has none."""
+    it, falling back to the event's start when the plan has none. Read in the
+    event's timezone, like today's date, so the two are the same calendar."""
     if plan.start_date is not None:
-        return plan.start_date.date()
+        start = plan.start_date
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        return get_date_in_timezone(event.timezone, at=start)
     return get_date_in_timezone(event.timezone, at=event.start_date)
 
 

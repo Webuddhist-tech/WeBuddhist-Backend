@@ -192,3 +192,22 @@ class TestCmsPrayerIntentionsService:
     def test_patch_rejects_whitespace_only_label(self):
         with pytest.raises(ValueError):
             PatchPrayerIntentionRequest(label="   ")
+
+
+def test_create_request_rejects_former_intention_names() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from pecha_api.prayer_intentions.prayer_intention_response_models import (
+        CreatePrayerIntentionRequest,
+    )
+
+    for slug in ("compassion", "Gratitude", "dedication"):
+        with pytest.raises(ValidationError):
+            CreatePrayerIntentionRequest(
+                slug=slug, label="L", color="#fff", description="d"
+            )
+
+    assert CreatePrayerIntentionRequest(
+        slug="Courage", label="L", color="#fff", description="d"
+    ).slug == "courage"

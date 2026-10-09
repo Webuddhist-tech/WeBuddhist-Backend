@@ -457,7 +457,7 @@ def test_create_user_with_email_success():
 
         mock_get_hashed_password.assert_called_once_with("password123")
         mock_save_user.assert_called_once()
-        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user, identifier_verified=False)
         assert response == mock_user
 
 
@@ -480,7 +480,7 @@ def test_create_user_with_google_success():
         response = create_user(create_user_request, registration_source)
 
         mock_save_user.assert_called_once()
-        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user, identifier_verified=False)
         assert response == mock_user
 
 
@@ -503,7 +503,7 @@ def test_create_user_with_facebook_success():
         response = create_user(create_user_request, registration_source)
 
         mock_save_user.assert_called_once()
-        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user, identifier_verified=False)
         assert response == mock_user
 
 
@@ -532,7 +532,7 @@ def test_create_user_links_existing_author_with_matching_email():
         response = create_user(create_user_request, registration_source)
 
         mock_save_user.assert_called_once()
-        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user)
+        mock_link_or_create_author.assert_called_once_with(db=ANY, user=mock_user, identifier_verified=False)
         assert response == mock_user
 
 

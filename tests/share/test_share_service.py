@@ -28,6 +28,14 @@ from pecha_api.texts.segments.segments_response_models import (
 from pecha_api.texts.texts_response_models import TextDTO
 
 
+@pytest.fixture(autouse=True)
+def _group_publicly_visible():
+    """Most tests are about rendering; the group visibility gate has its own
+    tests below and is open for everything else."""
+    with patch("pecha_api.share.share_service._is_group_publicly_visible", return_value=True) as gate:
+        yield gate
+
+
 @pytest.mark.asyncio
 async def test_get_generated_image_success():
     mock_image_data = b"fake_image_data"
@@ -406,6 +414,7 @@ async def test_generate_segment_content_image_with_event():
         bg_color=BgColor.DEFAULT,
     )
     event = SimpleNamespace(
+        group_id=uuid4(),
         metadata_entries=[
             SimpleNamespace(
                 name="Losar",
@@ -440,6 +449,7 @@ async def test_generate_short_url_uses_the_site_name_and_the_event_name():
         language="en",
     )
     event = SimpleNamespace(
+        group_id=uuid4(),
         metadata_entries=[
             SimpleNamespace(
                 name="Losar",
@@ -479,6 +489,7 @@ async def test_event_with_an_image_points_at_the_endpoint_not_the_s3_url():
         language="en",
     )
     event = SimpleNamespace(
+        group_id=uuid4(),
         image_url="images/plan_images/abc/original/thangka.webp",
         metadata_entries=[
             SimpleNamespace(name="Losar", description="Tibetan new year", language="EN")
@@ -510,6 +521,7 @@ async def test_event_without_an_image_falls_back_to_the_rendered_card():
         language="en",
     )
     event = SimpleNamespace(
+        group_id=uuid4(),
         image_url=None,
         metadata_entries=[
             SimpleNamespace(name="Losar", description=None, language="EN")
@@ -541,7 +553,7 @@ async def test_generate_segment_content_image_with_post():
         text_color=TextColor.DEFAULT,
         bg_color=BgColor.DEFAULT,
     )
-    post = SimpleNamespace(caption="Join tonight's recitation.")
+    post = SimpleNamespace(caption="Join tonight's recitation.", group_id=uuid4())
 
     with patch("pecha_api.share.share_service.SessionLocal") as mock_session, \
          patch("pecha_api.share.share_service.get_post_by_id_only", return_value=post), \
@@ -695,6 +707,7 @@ async def test_event_is_loaded_once_per_short_url():
         language="en",
     )
     event = SimpleNamespace(
+        group_id=uuid4(),
         metadata_entries=[
             SimpleNamespace(
                 name="Losar",
@@ -730,6 +743,7 @@ async def test_event_image_endpoint_still_loads_the_event_itself():
     event_id = str(uuid4())
     share_request = ShareRequest(event_id=event_id, language="en")
     event = SimpleNamespace(
+        group_id=uuid4(),
         metadata_entries=[
             SimpleNamespace(name="Losar", description=None, language="EN")
         ]
@@ -811,3 +825,40 @@ async def test_a_jpeg_render_is_served_as_jpeg():
 
     assert response.media_type == "image/jpeg"
     assert "max-age" in response.headers["cache-control"]
+
+
+def test_event_share_metadata_hidden_for_non_public_group(_group_publicly_visible):
+    from pecha_api.share.share_service import _load_event_share_metadata
+
+    _group_publicly_visible.return_value = False
+    event = SimpleNamespace(
+        id=uuid4(), group_id=uuid4(), image_url="events/x.jpg",
+        metadata_entries=[SimpleNamespace(name="Secret", description="d", language="EN")],
+    )
+    with patch("pecha_api.share.share_service.SessionLocal"),          patch("pecha_api.share.share_service.get_event_by_id", return_value=event):
+        result = _load_event_share_metadata(str(uuid4()), "en", "WeBuddhist")
+
+    assert result == ("WeBuddhist", None, "en", None)
+
+
+def test_post_share_text_hidden_for_non_public_group(_group_publicly_visible):
+    from pecha_api.share.share_service import _resolve_post_share_text
+
+    _group_publicly_visible.return_value = False
+    post = SimpleNamespace(caption="private caption", group_id=uuid4())
+    with patch("pecha_api.share.share_service.SessionLocal"),          patch("pecha_api.share.share_service.get_post_by_id_only", return_value=post):
+        result = _resolve_post_share_text(str(uuid4()), "WeBuddhist")
+
+    assert result == ("WeBuddhist", "WeBuddhist", None)
+
+
+def test_event_photo_s3_key_handles_bare_keys_and_urls():
+    from pecha_api.share.share_service import _event_photo_s3_key
+
+    with patch("pecha_api.share.share_service.get", return_value="my-bucket"):
+        assert _event_photo_s3_key("events/a.webp") == "events/a.webp"
+        assert (
+            _event_photo_s3_key("https://my-bucket.s3.us-east-1.amazonaws.com/events/a%20b.webp?X-Amz=1")
+            == "events/a b.webp"
+        )
+        assert _event_photo_s3_key("https://evil.example/internal") is None
