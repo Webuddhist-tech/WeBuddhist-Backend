@@ -78,7 +78,6 @@ _TYPE_TO_ID_FIELD = {
 _CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
 
 
-def _is_group_publicly_visible(db, group_id: Optional[UUID]) -> bool:
 def _is_group_publicly_visible(db: Session, group_id: Optional[UUID]) -> bool:
     """Whether anyone, signed in or not, may see this group's content.
 
