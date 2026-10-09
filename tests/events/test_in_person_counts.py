@@ -1,10 +1,12 @@
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
+from typing import Iterator, Optional, Tuple
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.orm import Session
 from fastapi.testclient import TestClient
 
 from pecha_api.app import api
@@ -43,14 +45,18 @@ def _row(count=108, created_at=datetime(2026, 10, 1, 6, 30, tzinfo=timezone.utc)
     )
 
 
-def _legacy_resolve_target(_db, event, event_accumulation_id=None):
+def _legacy_resolve_target(
+    _db: Session,
+    event: SimpleNamespace,
+    event_accumulation_id: Optional[UUID] = None,
+) -> Tuple[None, UUID]:
     if event.group_accumulator_id is None:
         raise HTTPException(status_code=409, detail="EVENT_HAS_NO_GROUP_ACCUMULATOR")
     return None, event.group_accumulator_id
 
 
 @pytest.fixture
-def ctx():
+def ctx() -> Iterator[SimpleNamespace]:
     """Patches auth, the session and the event lookup; yields the event."""
     event = _event()
     with patch(f"{_SVC}.validate_cms_author_details"), patch(f"{_SVC}.SessionLocal"), patch(

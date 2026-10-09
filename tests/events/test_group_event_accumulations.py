@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -256,12 +256,12 @@ def test_sync_preserves_stable_ids_on_update():
 
 def _link(
     *,
-    link_id,
-    group_accumulator_id,
-    count_mode,
-    display_order=1,
-    event_format="hybrid",
-):
+    link_id: UUID,
+    group_accumulator_id: UUID,
+    count_mode: str,
+    display_order: int = 1,
+    event_format: str = "hybrid",
+) -> SimpleNamespace:
     ga = SimpleNamespace(id=group_accumulator_id, title="practice", image_key=None)
     return SimpleNamespace(
         id=link_id,

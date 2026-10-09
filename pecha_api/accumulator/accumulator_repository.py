@@ -445,6 +445,7 @@ def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) ->
         .filter(
             GroupEventAccumulation.group_accumulator_id.in_(group_accumulator_ids),
             Event.group_id == GroupAccumulator.group_id,
+            _publishable_linked_content_filter(),
         )
         .options(selectinload(Event.metadata_entries))
         .order_by(Event.created_at.desc())
