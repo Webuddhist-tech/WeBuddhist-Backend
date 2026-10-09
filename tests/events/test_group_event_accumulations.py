@@ -42,6 +42,172 @@ def test_resolve_requires_event_accumulation_id_when_multiple_manual_links():
     assert exc.value.detail == EVENT_ACCUMULATION_ID_REQUIRED
 
 
+def test_sync_reassign_and_readd_accumulator_uses_separate_rows():
+    """Moving link A off X then re-adding X must not reuse A for both inputs."""
+    event_id = uuid4()
+    group_id = uuid4()
+    link_a_id = uuid4()
+    ga_x = uuid4()
+    ga_y = uuid4()
+    existing_a = MagicMock(
+        id=link_a_id,
+        event_id=event_id,
+        group_accumulator_id=ga_x,
+        parent_id=None,
+        event_format="hybrid",
+        display_order=1,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.side_effect = [
+        [existing_a],
+        [existing_a],
+    ]
+    ga = MagicMock(group_id=group_id, deleted_at=None)
+    db.query.return_value.filter.return_value.first.return_value = ga
+
+    added_rows = []
+
+    def capture_add(row):
+        added_rows.append(row)
+
+    db.add.side_effect = capture_add
+
+    sync_event_accumulations(
+        db,
+        event_id=event_id,
+        group_id=group_id,
+        inputs=[
+            EventAccumulationSyncInput(
+                id=link_a_id,
+                group_accumulator_id=ga_y,
+            ),
+            EventAccumulationSyncInput(
+                group_accumulator_id=ga_x,
+            ),
+        ],
+    )
+
+    assert len(added_rows) == 1
+    assert added_rows[0].group_accumulator_id == ga_x
+    assert existing_a.group_accumulator_id == ga_y
+
+
+def test_sync_swaps_accumulators_in_one_statement():
+    event_id = uuid4()
+    group_id = uuid4()
+    link_a_id = uuid4()
+    link_b_id = uuid4()
+    ga_x = uuid4()
+    ga_y = uuid4()
+    existing_a = MagicMock(
+        id=link_a_id,
+        event_id=event_id,
+        group_accumulator_id=ga_x,
+        parent_id=None,
+        event_format="hybrid",
+        display_order=1,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+    )
+    existing_b = MagicMock(
+        id=link_b_id,
+        event_id=event_id,
+        group_accumulator_id=ga_y,
+        parent_id=None,
+        event_format="hybrid",
+        display_order=2,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.side_effect = [
+        [existing_a, existing_b],
+        [existing_a, existing_b],
+    ]
+    ga = MagicMock(group_id=group_id, deleted_at=None)
+    db.query.return_value.filter.return_value.first.return_value = ga
+
+    sync_event_accumulations(
+        db,
+        event_id=event_id,
+        group_id=group_id,
+        inputs=[
+            EventAccumulationSyncInput(
+                id=link_a_id,
+                group_accumulator_id=ga_y,
+                display_order=1,
+            ),
+            EventAccumulationSyncInput(
+                id=link_b_id,
+                group_accumulator_id=ga_x,
+                display_order=2,
+            ),
+        ],
+    )
+
+    db.execute.assert_called_once()
+    update_params = db.execute.call_args[0][1]
+    assert update_params["id_0"] == link_a_id
+    assert update_params["ga_0"] == ga_y
+    assert update_params["id_1"] == link_b_id
+    assert update_params["ga_1"] == ga_x
+    assert existing_a.group_accumulator_id == ga_y
+    assert existing_b.group_accumulator_id == ga_x
+
+
+def test_sync_replaces_link_before_flushing_accumulator_change():
+    """Omitted links must be removed before retargeting a retained link."""
+    event_id = uuid4()
+    group_id = uuid4()
+    link_a_id = uuid4()
+    link_b_id = uuid4()
+    ga_x = uuid4()
+    ga_y = uuid4()
+    existing_a = MagicMock(
+        id=link_a_id,
+        event_id=event_id,
+        group_accumulator_id=ga_x,
+        parent_id=None,
+        event_format="hybrid",
+        display_order=1,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+    )
+    existing_b = MagicMock(
+        id=link_b_id,
+        event_id=event_id,
+        group_accumulator_id=ga_y,
+        parent_id=None,
+        event_format="hybrid",
+        display_order=2,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.side_effect = [
+        [existing_a, existing_b],
+        [existing_a],
+    ]
+    ga = MagicMock(group_id=group_id, deleted_at=None)
+    db.query.return_value.filter.return_value.first.return_value = ga
+
+    sync_event_accumulations(
+        db,
+        event_id=event_id,
+        group_id=group_id,
+        inputs=[
+            EventAccumulationSyncInput(
+                id=link_a_id,
+                group_accumulator_id=ga_y,
+            ),
+        ],
+    )
+
+    db.delete.assert_called_once_with(existing_b)
+    assert existing_a.group_accumulator_id == ga_y
+    call_names = [call[0] for call in db.method_calls]
+    delete_index = call_names.index("delete")
+    first_flush_index = call_names.index("flush")
+    assert delete_index < first_flush_index
+
+
 def test_sync_preserves_stable_ids_on_update():
     event_id = uuid4()
     group_id = uuid4()

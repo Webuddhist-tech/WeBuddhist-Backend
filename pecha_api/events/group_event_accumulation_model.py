@@ -33,13 +33,13 @@ class GroupEventAccumulation(Base):
 
     created_at = Column(
         DateTime(timezone=True),
-        default=datetime.now(_datetime.timezone.utc),
+        default=lambda: datetime.now(_datetime.timezone.utc),
         nullable=False,
     )
     updated_at = Column(
         DateTime(timezone=True),
-        default=datetime.now(_datetime.timezone.utc),
-        onupdate=datetime.now(_datetime.timezone.utc),
+        default=lambda: datetime.now(_datetime.timezone.utc),
+        onupdate=lambda: datetime.now(_datetime.timezone.utc),
     )
 
     event = relationship("Event", back_populates="accumulation_links")

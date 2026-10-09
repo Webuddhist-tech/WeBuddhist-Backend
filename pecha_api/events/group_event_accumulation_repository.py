@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette import status
 
@@ -104,6 +105,48 @@ def _detect_cycles(parent_by_id: Dict[UUID, Optional[UUID]]) -> None:
             current = parent_by_id.get(current)
 
 
+def _apply_group_accumulator_id_updates(
+    db: Session, updates: Sequence[Tuple[GroupEventAccumulation, UUID]]
+) -> None:
+    """Apply junction group_accumulator_id changes without unique-constraint races."""
+    pending = [
+        (row, ga_id)
+        for row, ga_id in updates
+        if row.group_accumulator_id != ga_id
+    ]
+    if not pending:
+        return
+    if len(pending) == 1:
+        row, ga_id = pending[0]
+        row.group_accumulator_id = ga_id
+        db.flush()
+        return
+
+    params: Dict[str, UUID] = {}
+    value_rows: List[str] = []
+    for index, (row, ga_id) in enumerate(pending):
+        id_key = f"id_{index}"
+        ga_key = f"ga_{index}"
+        params[id_key] = row.id
+        params[ga_key] = ga_id
+        value_rows.append(f"(CAST(:{id_key} AS uuid), CAST(:{ga_key} AS uuid))")
+
+    db.execute(
+        text(
+            f"""
+            UPDATE group_event_accumulations AS g
+            SET group_accumulator_id = v.new_ga
+            FROM (VALUES {", ".join(value_rows)}) AS v(id, new_ga)
+            WHERE g.id = v.id
+            """
+        ),
+        params,
+    )
+    for row, ga_id in pending:
+        row.group_accumulator_id = ga_id
+    db.flush()
+
+
 def _validate_group_accumulator(
     db: Session, *, group_accumulator_id: UUID, group_id: UUID
 ) -> None:
@@ -178,13 +221,17 @@ def sync_event_accumulations(
     key_to_id: Dict[str, UUID] = {}
     id_to_row: Dict[UUID, GroupEventAccumulation] = {}
     resolved_parents: List[Tuple[UUID, EventAccumulationSyncInput]] = []
+    claimed_row_ids: Set[UUID] = set()
+    accumulator_updates: List[Tuple[GroupEventAccumulation, UUID]] = []
 
     for item in inputs:
         row: Optional[GroupEventAccumulation] = None
         if item.id is not None:
             row = existing_by_id[item.id]
         else:
-            row = existing_by_accumulator.get(item.group_accumulator_id)
+            candidate = existing_by_accumulator.get(item.group_accumulator_id)
+            if candidate is not None and candidate.id not in claimed_row_ids:
+                row = candidate
 
         if row is None:
             row = GroupEventAccumulation(
@@ -194,7 +241,8 @@ def sync_event_accumulations(
             )
             db.add(row)
         else:
-            row.group_accumulator_id = item.group_accumulator_id
+            claimed_row_ids.add(row.id)
+            accumulator_updates.append((row, item.group_accumulator_id))
 
         row.event_format = item.event_format
         row.display_order = item.display_order
@@ -207,7 +255,12 @@ def sync_event_accumulations(
             key_to_id[item.client_key] = row.id
         resolved_parents.append((row.id, item))
 
+    for row in existing:
+        if row.id not in payload_ids:
+            db.delete(row)
     db.flush()
+
+    _apply_group_accumulator_id_updates(db, accumulator_updates)
 
     parent_by_id: Dict[UUID, Optional[UUID]] = {}
     for row_id, item in resolved_parents:
@@ -238,10 +291,6 @@ def sync_event_accumulations(
 
     for row_id, parent_id in parent_by_id.items():
         id_to_row[row_id].parent_id = parent_id
-
-    for row in existing:
-        if row.id not in payload_ids:
-            db.delete(row)
 
     db.flush()
     return list_accumulations_for_event(db, event_id)
@@ -339,5 +388,7 @@ def resolve_primary_group_accumulator_id(
         if link.count_mode == EventAccumulationCountMode.MANUAL_IN_PERSON.value
     ]
     candidates = manual_roots if manual_roots else pool
+    if not candidates:
+        return None
     chosen = min(candidates, key=lambda link: (link.display_order, str(link.id)))
     return chosen.group_accumulator_id

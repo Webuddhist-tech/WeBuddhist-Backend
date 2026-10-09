@@ -650,6 +650,14 @@ def _prayer_request_count_for_event(*, db: Session, event_id: UUID) -> int:
     return count_prayer_requests_in_room(db=db, room_id=room.id)
 
 
+def _accumulation_links_for_dto(event: Event) -> List[GroupEventAccumulation]:
+    """Return junction rows only for persisted Event ORM instances."""
+    if not isinstance(event, Event):
+        return []
+    links = event.accumulation_links
+    return list(links) if links else []
+
+
 def _cms_saved_event_dto(
     db: Session,
     saved: Event,
@@ -658,10 +666,14 @@ def _cms_saved_event_dto(
     chat_room_id: Optional[UUID] = None,
 ) -> EventDTO:
     """CMS write response: reload links and attach offline RSVP counts."""
-    event_for_dto = get_event_by_id(db, saved.id) or saved
-    offline_count = get_offline_participant_counts(db=db, event_ids=[saved.id]).get(
-        saved.id, 0
-    )
+    if isinstance(saved, Event):
+        event_for_dto = get_event_by_id(db, saved.id) or saved
+        offline_count = get_offline_participant_counts(db=db, event_ids=[saved.id]).get(
+            saved.id, 0
+        )
+    else:
+        event_for_dto = saved
+        offline_count = 0
     dto_kwargs: dict = {
         "intentions": intentions,
         "offline_participant_count": offline_count,
@@ -689,7 +701,7 @@ def _event_to_dto(
     offline_participant_count: int = 0,
 ) -> EventDTO:
     recurrence_dto = None
-    if event.is_recurring:
+    if isinstance(event, Event) and event.is_recurring:
         recurrence_dto = RecurrenceDTO(
             frequency=event.recurrence_frequency,
             date_system=event.recurrence_date_system,
@@ -703,7 +715,7 @@ def _event_to_dto(
     dto_start = start_date if start_date is not None else event.start_date
     dto_end = end_date if end_date is not None else event.end_date
     event_timezone = _effective_event_timezone(getattr(event, "timezone", None))
-    accumulation_links = getattr(event, "accumulation_links", None) or []
+    accumulation_links = _accumulation_links_for_dto(event)
     primary_ga_id, primary_ga_dto = _primary_group_accumulator_dto(
         event, accumulation_links, language
     )
