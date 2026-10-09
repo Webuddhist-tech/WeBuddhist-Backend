@@ -27,6 +27,7 @@ class InPersonCountsResponse(BaseModel):
     total_count: int
     # Null when the event has no group accumulation linked.
     group_accumulator_id: Optional[UUID] = None
+    event_accumulation_id: Optional[UUID] = None
     # The linked group accumulation the counts are added to, so the Studio
     # can say which one: its title, everyone's total and its target.
     group_accumulator_title: Optional[str] = None

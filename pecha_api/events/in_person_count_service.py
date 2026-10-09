@@ -23,6 +23,7 @@ from pecha_api.group_accumulator.group_accumulator_repository import (
 from pecha_api.group_accumulator.group_accumulator_service import _resolve_title
 from pecha_api.plans.authors.plan_authors_service import safe_get_image_url, validate_cms_author_details
 
+from .event_accumulation_in_person import resolve_manual_in_person_target
 from .event_repository import get_event_by_id
 from .event_service import _require_can_edit_event
 from .in_person_count_repository import (
@@ -41,7 +42,6 @@ from .in_person_count_response_models import (
     UpdateInPersonCountRequest,
 )
 
-EVENT_HAS_NO_GROUP_ACCUMULATOR = "EVENT_HAS_NO_GROUP_ACCUMULATOR"
 IN_PERSON_COUNT_EXISTS = "IN_PERSON_COUNT_EXISTS"
 IN_PERSON_USER_NOT_FOUND = "IN_PERSON_USER_NOT_FOUND"
 
@@ -91,10 +91,12 @@ def _load_event(db: Session, token: str, event_id: UUID):
     return event
 
 
-def _require_group_accumulator(event) -> UUID:
-    if event.group_accumulator_id is None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=EVENT_HAS_NO_GROUP_ACCUMULATOR)
-    return event.group_accumulator_id
+def _resolve_target(
+    db: Session, event, event_accumulation_id: Optional[UUID]
+) -> Tuple[Optional[UUID], UUID]:
+    return resolve_manual_in_person_target(
+        db, event, event_accumulation_id=event_accumulation_id
+    )
 
 
 def _require_free_day(db: Session, group_accumulator_id: UUID, day: date, zone: ZoneInfo, exclude_id=None) -> None:
@@ -111,11 +113,11 @@ def _require_free_day(db: Session, group_accumulator_id: UUID, day: date, zone: 
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=IN_PERSON_COUNT_EXISTS)
 
 
-def _load_row(db: Session, event, history_id: UUID):
+def _load_row(db: Session, group_accumulator_id: UUID, history_id: UUID):
     row = get_in_person_count(
         db,
         history_id=history_id,
-        group_accumulator_id=_require_group_accumulator(event),
+        group_accumulator_id=group_accumulator_id,
         user_id=in_person_user_id(),
     )
     if row is None:
@@ -123,52 +125,64 @@ def _load_row(db: Session, event, history_id: UUID):
     return row
 
 
-def list_in_person_counts_service(token: str, event_id: UUID, skip: int, limit: int) -> InPersonCountsResponse:
+def _linked_metadata(db: Session, group_accumulator_id: UUID) -> dict:
+    group_accumulator = get_group_accumulator_by_id(db, group_accumulator_id)
+    if group_accumulator is None:
+        return {}
+    return {
+        "group_accumulator_title": _resolve_title(group_accumulator, None),
+        "group_accumulator_total_count": get_group_accumulator_total_count(
+            db, group_accumulator_id
+        ),
+        "group_accumulator_target_count": group_accumulator.target_count,
+        "group_accumulator_image": safe_get_image_url(
+            group_accumulator.image_key,
+            resource_id=group_accumulator.id,
+            resource_type="group_accumulator",
+        ),
+    }
+
+
+def list_in_person_counts_service(
+    token: str,
+    event_id: UUID,
+    skip: int,
+    limit: int,
+    event_accumulation_id: Optional[UUID] = None,
+) -> InPersonCountsResponse:
     with SessionLocal() as db:
         event = _load_event(db, token, event_id)
+        link_id, group_accumulator_id = _resolve_target(db, event, event_accumulation_id)
         zone, tz_name = _zone(event.timezone)
-        rows, total, total_count = [], 0, 0
-        linked = {}
-        if event.group_accumulator_id is not None:
-            rows, total, total_count = list_in_person_counts(
-                db,
-                group_accumulator_id=event.group_accumulator_id,
-                user_id=in_person_user_id(),
-                skip=skip,
-                limit=limit,
-            )
-            group_accumulator = get_group_accumulator_by_id(db, event.group_accumulator_id)
-            if group_accumulator is not None:
-                linked = {
-                    "group_accumulator_title": _resolve_title(group_accumulator, None),
-                    "group_accumulator_total_count": get_group_accumulator_total_count(
-                        db, event.group_accumulator_id
-                    ),
-                    "group_accumulator_target_count": group_accumulator.target_count,
-                    "group_accumulator_image": safe_get_image_url(
-                        group_accumulator.image_key,
-                        resource_id=group_accumulator.id,
-                        resource_type="group_accumulator",
-                    ),
-                }
+        rows, total, total_count = list_in_person_counts(
+            db,
+            group_accumulator_id=group_accumulator_id,
+            user_id=in_person_user_id(),
+            skip=skip,
+            limit=limit,
+        )
         return InPersonCountsResponse(
             items=[_to_dto(row, zone) for row in rows],
             total=total,
             skip=skip,
             limit=limit,
             total_count=total_count,
-            group_accumulator_id=event.group_accumulator_id,
+            group_accumulator_id=group_accumulator_id,
+            event_accumulation_id=link_id,
             timezone=tz_name,
-            **linked,
+            **_linked_metadata(db, group_accumulator_id),
         )
 
 
 def create_in_person_count_service(
-    token: str, event_id: UUID, request: CreateInPersonCountRequest
+    token: str,
+    event_id: UUID,
+    request: CreateInPersonCountRequest,
+    event_accumulation_id: Optional[UUID] = None,
 ) -> InPersonCountDTO:
     with SessionLocal() as db:
         event = _load_event(db, token, event_id)
-        group_accumulator_id = _require_group_accumulator(event)
+        _, group_accumulator_id = _resolve_target(db, event, event_accumulation_id)
         if not user_exists(db, in_person_user_id()):
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=IN_PERSON_USER_NOT_FOUND)
         zone, _ = _zone(event.timezone)
@@ -184,11 +198,16 @@ def create_in_person_count_service(
 
 
 def update_in_person_count_service(
-    token: str, event_id: UUID, history_id: UUID, request: UpdateInPersonCountRequest
+    token: str,
+    event_id: UUID,
+    history_id: UUID,
+    request: UpdateInPersonCountRequest,
+    event_accumulation_id: Optional[UUID] = None,
 ) -> InPersonCountDTO:
     with SessionLocal() as db:
         event = _load_event(db, token, event_id)
-        row = _load_row(db, event, history_id)
+        _, group_accumulator_id = _resolve_target(db, event, event_accumulation_id)
+        row = _load_row(db, group_accumulator_id, history_id)
         zone, _ = _zone(event.timezone)
         if request.day is not None and request.day != row.created_at.astimezone(zone).date():
             _require_free_day(db, row.group_accumulator_id, request.day, zone, exclude_id=row.id)
@@ -197,7 +216,13 @@ def update_in_person_count_service(
         return _to_dto(save_in_person_count(db, row), zone)
 
 
-def delete_in_person_count_service(token: str, event_id: UUID, history_id: UUID) -> None:
+def delete_in_person_count_service(
+    token: str,
+    event_id: UUID,
+    history_id: UUID,
+    event_accumulation_id: Optional[UUID] = None,
+) -> None:
     with SessionLocal() as db:
         event = _load_event(db, token, event_id)
-        delete_in_person_count(db, _load_row(db, event, history_id))
+        _, group_accumulator_id = _resolve_target(db, event, event_accumulation_id)
+        delete_in_person_count(db, _load_row(db, group_accumulator_id, history_id))

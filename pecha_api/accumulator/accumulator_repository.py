@@ -417,7 +417,30 @@ def _get_latest_linked_events(db: Session, group_accumulator_ids: List[UUID]) ->
         .options(selectinload(Event.metadata_entries))
         .all()
     )
-    return {event.group_accumulator_id: event for event in events}
+    linked: Dict[UUID, "Event"] = {event.group_accumulator_id: event for event in events}
+
+    from pecha_api.events.group_event_accumulation_model import GroupEventAccumulation
+
+    junction_rows = (
+        db.query(Event, GroupEventAccumulation.group_accumulator_id)
+        .join(
+            GroupEventAccumulation,
+            GroupEventAccumulation.event_id == Event.id,
+        )
+        .join(GroupAccumulator, GroupAccumulator.id == GroupEventAccumulation.group_accumulator_id)
+        .filter(
+            GroupEventAccumulation.group_accumulator_id.in_(group_accumulator_ids),
+            Event.group_id == GroupAccumulator.group_id,
+        )
+        .options(selectinload(Event.metadata_entries))
+        .order_by(Event.created_at.desc())
+        .all()
+    )
+    for event, group_accumulator_id in junction_rows:
+        existing = linked.get(group_accumulator_id)
+        if existing is None or event.created_at > existing.created_at:
+            linked[group_accumulator_id] = event
+    return linked
 
 
 def get_groups_by_accumulator_id(

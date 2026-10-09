@@ -12,7 +12,13 @@ from pecha_api.prayer_intentions.prayer_intention_response_models import (
     PrayerIntentionDTO,
 )
 from .location_response_models import LocationDTO
-from .event_enums import RecurrenceFrequency, RecurrenceDateSystem, EventLinkType, ParticipationType
+from .event_enums import (
+    RecurrenceFrequency,
+    RecurrenceDateSystem,
+    EventLinkType,
+    ParticipationType,
+    EventAccumulationCountMode,
+)
 
 
 EventFormat = Literal["online", "offline", "hybrid"]
@@ -177,6 +183,33 @@ class LinkedResourceDTO(BaseModel):
     image_url: Optional[str] = None
 
 
+class EventGroupAccumulationDTO(BaseModel):
+    model_config = ConfigDict(ser_json_exclude_none=True)
+
+    id: UUID
+    group_accumulator_id: UUID
+    parent_id: Optional[UUID] = None
+    event_format: EventFormat = "hybrid"
+    display_order: int
+    count_mode: EventAccumulationCountMode
+    group_accumulator: LinkedResourceDTO
+    offline_participant_count: Optional[int] = Field(
+        None,
+        description="Present when count_mode is offline_participants",
+    )
+
+
+class EventGroupAccumulationInput(BaseModel):
+    group_accumulator_id: UUID
+    event_format: EventFormat = "hybrid"
+    display_order: int = 1
+    count_mode: EventAccumulationCountMode = EventAccumulationCountMode.MANUAL_IN_PERSON
+    id: Optional[UUID] = None
+    client_key: Optional[str] = Field(default=None, max_length=64)
+    parent_id: Optional[UUID] = None
+    parent_client_key: Optional[str] = Field(default=None, max_length=64)
+
+
 class RecurrenceDTO(BaseModel):
     model_config = ConfigDict(ser_json_exclude_none=True)
 
@@ -201,6 +234,7 @@ class EventDTO(BaseModel):
     accumulator: Optional[LinkedResourceDTO] = None
     group_accumulator_id: Optional[UUID] = None
     group_accumulator: Optional[LinkedResourceDTO] = None
+    accumulations: List[EventGroupAccumulationDTO] = []
     mantra_id: Optional[UUID] = None
     mantra: Optional[LinkedResourceDTO] = None
     timer_id: Optional[UUID] = None
@@ -323,6 +357,7 @@ class CreateEventRequest(BaseModel):
     series_id: Optional[UUID] = None
     accumulator_id: Optional[UUID] = None
     group_accumulator_id: Optional[UUID] = None
+    accumulations: List[EventGroupAccumulationInput] = []
     mantra_id: Optional[UUID] = None
     timer_id: Optional[UUID] = None
     group_recitation_collection_id: Optional[UUID] = None
@@ -379,6 +414,7 @@ class UpdateEventRequest(BaseModel):
     series_id: Optional[UUID] = None
     accumulator_id: Optional[UUID] = None
     group_accumulator_id: Optional[UUID] = None
+    accumulations: Optional[List[EventGroupAccumulationInput]] = None
     mantra_id: Optional[UUID] = None
     timer_id: Optional[UUID] = None
     group_recitation_collection_id: Optional[UUID] = None

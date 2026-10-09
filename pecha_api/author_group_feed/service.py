@@ -9,6 +9,7 @@ from pecha_api.config import get
 from pecha_api.events.event_participant_repository import (
     get_event_participant_counts,
     get_joined_event_ids_by_user,
+    get_offline_participant_counts,
     get_participation_types_by_user,
 )
 from pecha_api.events.event_model import Event
@@ -260,6 +261,7 @@ def _author_group_feed_event_item_dto(
     published_series_ids: Set[UUID],
     language: Optional[str],
     counts_by_event: Dict[UUID, int],
+    offline_counts_by_event: Dict[UUID, int],
     joined_event_ids: Set[UUID],
     participation_types: Dict[UUID, str],
     timezone_name: Optional[str],
@@ -268,6 +270,7 @@ def _author_group_feed_event_item_dto(
     event_dto_kwargs = {
         "language": language,
         "participant_count": counts_by_event.get(event.id, 0),
+        "offline_participant_count": offline_counts_by_event.get(event.id, 0),
         "is_joined": event.id in joined_event_ids,
         "my_participation_type": participation_types.get(event.id),
     }
@@ -420,6 +423,7 @@ def _get_author_group_feed(
 
     event_ids = list({item["event"].id for item in page_event_items})
     counts_by_event = get_event_participant_counts(db=db, event_ids=event_ids)
+    offline_counts_by_event = get_offline_participant_counts(db=db, event_ids=event_ids)
     joined_event_ids: Set[UUID] = set()
     participation_types: Dict[UUID, str] = {}
     if current_user and event_ids:
@@ -499,6 +503,7 @@ def _get_author_group_feed(
                         published_series_ids=published_series_ids,
                         language=language,
                         counts_by_event=counts_by_event,
+                        offline_counts_by_event=offline_counts_by_event,
                         joined_event_ids=joined_event_ids,
                         participation_types=participation_types,
                         timezone_name=timezone_name,

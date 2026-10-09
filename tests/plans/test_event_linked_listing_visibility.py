@@ -39,6 +39,7 @@ PLAN_EVENT_GATE = "events.plan_id = plans.id"
 SERIES_EVENT_GATE = "events.series_id = series.id"
 GROUP_ACCUMULATOR_EVENT_GATE = "events.group_accumulator_id = group_accumulators.id"
 GROUP_ACCUMULATOR_SAME_GROUP_GATE = "events.group_id = group_accumulators.group_id"
+GROUP_ACCUMULATOR_JUNCTION_GATE = "group_event_accumulations.group_accumulator_id = group_accumulators.id"
 EVENT_PLAN_GATE = "events.plan_id IS NULL"
 EVENT_SERIES_GATE = "events.series_id IS NULL"
 
@@ -122,14 +123,22 @@ def _sql(db: Session) -> str:
                 limit=20,
                 exclude_event_linked=True,
             ),
-            (GROUP_ACCUMULATOR_EVENT_GATE, GROUP_ACCUMULATOR_SAME_GROUP_GATE),
+            (
+                GROUP_ACCUMULATOR_EVENT_GATE,
+                GROUP_ACCUMULATOR_SAME_GROUP_GATE,
+                GROUP_ACCUMULATOR_JUNCTION_GATE,
+            ),
         ),
         (
             "GET /author/groups/practices accumulators",
             lambda db: get_group_accumulators_for_group_ids(
                 db=db, group_ids=[uuid.uuid4()], limit=20
             ),
-            (GROUP_ACCUMULATOR_EVENT_GATE, GROUP_ACCUMULATOR_SAME_GROUP_GATE),
+            (
+                GROUP_ACCUMULATOR_EVENT_GATE,
+                GROUP_ACCUMULATOR_SAME_GROUP_GATE,
+                GROUP_ACCUMULATOR_JUNCTION_GATE,
+            ),
         ),
     ],
 )
