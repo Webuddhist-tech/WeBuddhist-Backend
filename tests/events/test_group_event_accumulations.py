@@ -485,3 +485,4 @@ def test_sync_clears_all_links_when_payload_empty():
     assert result == []
     db.delete.assert_called_once_with(existing)
     db.flush.assert_called()
+

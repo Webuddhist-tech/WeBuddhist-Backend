@@ -24,6 +24,7 @@ from pecha_api.group_accumulator.group_accumulator_service import _resolve_title
 from pecha_api.plans.authors.plan_authors_service import safe_get_image_url, validate_cms_author_details
 
 from .event_accumulation_in_person import resolve_manual_in_person_target
+from .event_model import Event
 from .event_repository import get_event_by_id
 from .event_service import _require_can_edit_event
 from .in_person_count_repository import (
@@ -92,7 +93,9 @@ def _load_event(db: Session, token: str, event_id: UUID):
 
 
 def _resolve_target(
-    db: Session, event, event_accumulation_id: Optional[UUID]
+    db: Session,
+    event: Event,
+    event_accumulation_id: Optional[UUID],
 ) -> Tuple[Optional[UUID], UUID]:
     return resolve_manual_in_person_target(
         db, event, event_accumulation_id=event_accumulation_id

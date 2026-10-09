@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
+from sqlalchemy.engine.row import Row
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -34,6 +35,7 @@ from pecha_api.events.recurrence_service import (
     combine_occurrence_window,
 )
 from pecha_api.group_posts.enums import GroupPostStatus
+from pecha_api.group_posts.models import GroupPost
 from pecha_api.group_posts.repository import get_posts_for_group_ids
 from pecha_api.group_posts.service import build_post_dtos
 from pecha_api.plans.groups.groups_models import AuthorGroup
@@ -313,8 +315,8 @@ def _author_group_feed_event_item_dto(
 
 
 def _author_group_feed_ranked_entries(
-    posts,
-    one_shot_keys,
+    posts: Sequence[GroupPost],
+    one_shot_keys: Sequence[Row[Any]],
     expanded_recurring: Sequence[dict],
     *,
     now: datetime,
