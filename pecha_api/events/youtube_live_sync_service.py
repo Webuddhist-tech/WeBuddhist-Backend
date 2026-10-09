@@ -77,7 +77,7 @@ class SyncOutcome:
 
 
 def _zone(timezone_name: Optional[str]) -> ZoneInfo:
-    for candidate in (timezone_name, config.get("DEFAULT_EVENT_TIMEZONE"), "UTC"):
+    for candidate in (timezone_name, config.get("DEFAULT_EVENT_TIMEZONE")):
         try:
             if candidate:
                 return ZoneInfo(candidate.strip())
