@@ -109,4 +109,5 @@ class YoutubeLiveSyncRunDTO(BaseModel):
     live_streams_found: int
     events_checked: int
     links_added: int
+    links_replaced: int = 0
     skipped_unknown_language: int
