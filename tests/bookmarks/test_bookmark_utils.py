@@ -1216,7 +1216,7 @@ def test_enrich_group_recitation_collection_bookmark_allows_private_group_member
         "pecha_api.bookmarks.bookmark_utils.get_group_by_id",
         return_value=_mock_group(is_public=False),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.get_group_member",
+        "pecha_api.bookmarks.bookmark_utils.is_user_joined_group",
         return_value=MagicMock(),
     ) as mock_get_member, patch(
         "pecha_api.bookmarks.bookmark_utils.get_collection_item_counts",
@@ -1231,7 +1231,7 @@ def test_enrich_group_recitation_collection_bookmark_allows_private_group_member
             user_id=user_id,
         )
 
-    assert mock_get_member.call_args.kwargs["author_id"] == user_id
+    assert mock_get_member.call_args.kwargs["user_id"] == user_id
     assert result["group_recitation_collection"].id == collection_id
 
 
@@ -1252,7 +1252,7 @@ def test_enrich_group_recitation_collection_bookmark_returns_empty_for_non_membe
         "pecha_api.bookmarks.bookmark_utils.get_group_by_id",
         return_value=_mock_group(is_public=False),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.get_group_member",
+        "pecha_api.bookmarks.bookmark_utils.is_user_joined_group",
         return_value=None,
     ):
         result = enrich_group_recitation_collection_bookmark(
@@ -1594,7 +1594,7 @@ def test_enrich_group_accumulator_bookmark_allows_private_group_member() -> None
         "pecha_api.bookmarks.bookmark_utils.get_group_by_id",
         return_value=_mock_group(is_public=False),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.get_group_member",
+        "pecha_api.bookmarks.bookmark_utils.is_user_joined_group",
         return_value=MagicMock(),
     ) as mock_get_member, patch(
         "pecha_api.bookmarks.bookmark_utils._generate_collection_image_url",
@@ -1606,7 +1606,7 @@ def test_enrich_group_accumulator_bookmark_allows_private_group_member() -> None
             user_id=user_id,
         )
 
-    assert mock_get_member.call_args.kwargs["author_id"] == user_id
+    assert mock_get_member.call_args.kwargs["user_id"] == user_id
     assert result["group_accumulator"].id == group_accumulator_id
 
 
@@ -1622,7 +1622,7 @@ def test_enrich_group_accumulator_bookmark_returns_empty_for_non_member() -> Non
         "pecha_api.bookmarks.bookmark_utils.get_group_by_id",
         return_value=_mock_group(is_public=False),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.get_group_member",
+        "pecha_api.bookmarks.bookmark_utils.is_user_joined_group",
         return_value=None,
     ):
         result = enrich_group_accumulator_bookmark(

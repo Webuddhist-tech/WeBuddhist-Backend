@@ -797,10 +797,19 @@ class AutoplayEngine:
             except Exception as e:
                 logger.exception("Could not take back an early line for event %s: %s", event_id, e)
                 raise
+        # The runner and plan this stop is about, taken after the hold, which
+        # may have replaced them. A new plan can start while the stop waits on
+        # Redis; neither its runner nor its stored state is this stop's to
+        # touch, or the plan stays marked running with nobody advancing it, or
+        # is marked stopped under its own runner.
+        stopping = self._runners.get(event_id)
         try:
-            await self.store.stop(event_id, reason)
+            current = await self.store.read(event_id)
+            if current and current.get("plan_id"):
+                await self.store.stop(event_id, reason, plan_id=current["plan_id"])
         finally:
-            self._forget_runner(event_id)
+            if self._runners.get(event_id) is stopping:
+                self._forget_runner(event_id)
         state = await self.state(event_id)
         await self._announce(event_id, state)
         return state

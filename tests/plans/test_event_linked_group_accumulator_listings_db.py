@@ -19,7 +19,7 @@ from pecha_api.db.database import Base
 from pecha_api.events.event_metadata_model import EventMetadata
 from pecha_api.events.event_model import Event
 from pecha_api.plans.groups.groups_enums import AuthorGroupStatus
-from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata
+from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata, author_group_joins
 from pecha_api.group_accumulator.group_accumulator_repository import (
     get_group_accumulators,
     get_group_accumulators_for_group_ids,
@@ -48,8 +48,19 @@ def _sessionmaker() -> sessionmaker:
             EventMetadata.__table__,
             AuthorGroup.__table__,
             AuthorGroupMetadata.__table__,
+            author_group_joins,
         ],
     )
+    # Only the columns the linked-content publication check reads. The real
+    # tables carry Postgres-only indexes that SQLite cannot create.
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE plans (id CHAR(32) PRIMARY KEY, status VARCHAR, "
+            "deleted_at DATETIME, series_id CHAR(32))"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE series (id CHAR(32) PRIMARY KEY, status VARCHAR, deleted_at DATETIME)"
+        )
     return sessionmaker(bind=engine)
 
 
@@ -310,8 +321,11 @@ def _add_group(
     slug: str,
     titles: dict,
     status: AuthorGroupStatus = AuthorGroupStatus.PUBLISHED,
+    is_public: bool = True,
 ) -> AuthorGroup:
-    group = AuthorGroup(id=uuid4(), slug=slug, status=status, created_by="author@example.com")
+    group = AuthorGroup(
+        id=uuid4(), slug=slug, status=status, is_public=is_public, created_by="author@example.com"
+    )
     db.add(group)
     for language, title in titles.items():
         db.add(AuthorGroupMetadata(id=uuid4(), group_id=group.id, language=language, title=title))
@@ -428,3 +442,85 @@ def test_accumulator_groups_service_returns_group_name_and_event_title(
     chinese = run("zh")
     assert chinese[event_linked.id].group_name == "Sangha Circle"
     assert chinese[event_linked.id].event_title == "Saga Dawa Retreat"
+
+
+def _groups_service_response(
+    listing_db: Session, preset_id: UUID, user_id: UUID, joined_only: bool = False
+):
+    from unittest.mock import MagicMock, patch
+
+    from pecha_api.accumulator.accumulator_service import get_accumulator_groups_service
+
+    with patch(
+        "pecha_api.accumulator.accumulator_service.SessionLocal",
+        return_value=MagicMock(__enter__=MagicMock(return_value=listing_db), __exit__=MagicMock(return_value=False)),
+    ), patch(
+        "pecha_api.accumulator.accumulator_service.validate_and_extract_user_details",
+        return_value=MagicMock(id=user_id),
+    ), patch(
+        "pecha_api.accumulator.accumulator_service.get_accumulator_by_id",
+        return_value=MagicMock(),
+    ):
+        response = get_accumulator_groups_service(
+            token="token", accumulator_id=preset_id, joined_only=joined_only
+        )
+    return {group.group_accumulator_id: group for group in response.groups}
+
+
+def test_private_group_name_hidden_until_the_user_joins_the_group(
+    listing_db: Session,
+) -> None:
+    preset_id = uuid4()
+    user_id = uuid4()
+    private = _add_group(listing_db, slug="private-circle", titles={"EN": "Private Circle"}, is_public=False)
+    row = GroupAccumulator(
+        id=uuid4(), group_id=private.id, accumulator_id=preset_id,
+        title="Private accumulation", created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add(row)
+    listing_db.commit()
+
+    outsider_view = _groups_service_response(listing_db, preset_id, user_id)
+    assert outsider_view[row.id].group_name is None
+
+    listing_db.execute(
+        author_group_joins.insert().values(
+            group_id=private.id, user_id=user_id, created_at=datetime.now(timezone.utc)
+        )
+    )
+    listing_db.commit()
+
+    member_view = _groups_service_response(listing_db, preset_id, user_id)
+    assert member_view[row.id].group_name == "Private Circle"
+
+
+def test_event_title_skips_events_linked_to_unpublished_plans(listing_db: Session) -> None:
+    preset_id = uuid4()
+    user_id = uuid4()
+    group = _add_group(listing_db, slug="open-circle", titles={"EN": "Open Circle"})
+    row = GroupAccumulator(
+        id=uuid4(), group_id=group.id, accumulator_id=preset_id,
+        title="Linked accumulation", created_at=datetime.now(timezone.utc),
+    )
+    listing_db.add(row)
+    listing_db.commit()
+    _join(listing_db, group_accumulator_id=row.id, user_id=user_id)
+
+    published = _add_event(listing_db, group_id=group.id, group_accumulator_id=row.id)
+    published.created_at = datetime.now(timezone.utc) - timedelta(days=1)
+    _add_event_metadata(listing_db, event_id=published.id, names={"EN": "Visible event"})
+
+    draft_plan_id = uuid4()
+    listing_db.execute(
+        __import__("sqlalchemy").text("INSERT INTO plans (id, status) VALUES (:id, 'DRAFT')"),
+        {"id": draft_plan_id.hex},
+    )
+    newest = _add_event(listing_db, group_id=group.id, group_accumulator_id=row.id)
+    newest.plan_id = draft_plan_id
+    newest.created_at = datetime.now(timezone.utc)
+    listing_db.commit()
+    _add_event_metadata(listing_db, event_id=newest.id, names={"EN": "Hidden draft event"})
+
+    response = _groups_service_response(listing_db, preset_id, user_id, joined_only=True)
+
+    assert response[row.id].event_title == "Visible event"

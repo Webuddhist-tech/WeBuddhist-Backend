@@ -671,6 +671,42 @@ class TestChangingCourse:
 
         assert event_id not in h.engine._runners
 
+    @pytest.mark.asyncio
+    async def test_a_stop_does_not_cancel_a_plan_started_while_it_waited(self):
+        h = Harness()
+        h.gate = asyncio.Event()
+        event_id = uuid4()
+        await h.engine.start(event_id, _steps(1000, 1000))
+        in_stop = asyncio.Event()
+        let_stop_finish = asyncio.Event()
+        real_stop = h.store.stop
+
+        async def slow_stop(*args, **kwargs):
+            in_stop.set()
+            await let_stop_finish.wait()
+            return await real_stop(*args, **kwargs)
+
+        h.store.stop = slow_stop
+        stopping = asyncio.create_task(h.engine.stop(event_id))
+        await in_stop.wait()
+
+        # A new plan starts, and its runner is tracked, while the stop waits.
+        h.store.stop = real_stop
+        newer = await h.engine.start(event_id, _steps(1000, 1000))
+        runner = h.engine._runners[event_id]
+        h.store.stop = slow_stop
+        let_stop_finish.set()
+        await stopping
+
+        assert h.engine._runners.get(event_id) is runner
+        assert not runner.cancelled()
+        assert h.engine._runner_plans[event_id] == newer.plan_id
+        # Its stored state too: the stop was for the old plan only.
+        assert h.store.states[event_id]["plan_id"] == newer.plan_id
+        assert h.store.states[event_id]["status"] == "running"
+        assert h.store._holder(event_id) == h.engine.owner
+        h.engine._forget_runner(event_id)
+
 
 class TestTakingOver:
 

@@ -28,7 +28,8 @@ from ..users.users_repository import (
     save_user,
     update_user,
 )
-from ..plans.authors.author_user_link_service import link_or_create_author_for_user
+from ..plans.authors.plan_authors_repository import link_author_to_user
+from ..plans.authors.author_user_link_service import find_claimable_author, link_or_create_author_for_user
 from ..users.user_resolution import resolve_user_from_payload
 from .auth_repository import (
     create_access_token,
@@ -87,7 +88,14 @@ def _apply_email_registration(create_user_request: CreateUserRequest, new_user: 
     new_user.password = get_hashed_password(create_user_request.password)
 
 
-def create_user(create_user_request: CreateUserRequest, registration_source: RegistrationSource) -> Users:
+def create_user(
+    create_user_request: CreateUserRequest,
+    registration_source: RegistrationSource,
+    identifier_verified: bool = False,
+) -> Users:
+    """`identifier_verified` says the caller has proved ownership of the email
+    or phone being registered. Only then may the new account take over an
+    existing Author with the same identifier."""
     logging.debug(f"RegistrationSource: {registration_source.value}")
     logging.debug(f"Creating user with first name: {create_user_request.firstname}")
 
@@ -110,7 +118,11 @@ def create_user(create_user_request: CreateUserRequest, registration_source: Reg
 
     with SessionLocal() as db_session:
         saved_user = save_user(db=db_session, user=new_user)
-        link_or_create_author_for_user(db=db_session, user=saved_user)
+        link_or_create_author_for_user(
+            db=db_session,
+            user=saved_user,
+            identifier_verified=identifier_verified,
+        )
         return saved_user
 
 
@@ -158,6 +170,40 @@ def remember_social_avatar(create_user_request: CreateUserRequest) -> None:
             update_user(db=db_session, user=user)
     except Exception:
         logging.exception("Failed to store social profile image")
+
+
+def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> None:
+    """Link an existing Author to an account that already exists, once a
+    trusted caller has proved ownership of its email.
+
+    Signup could not link it: an email/password registration proves nothing.
+    That same weakness is why the account's password and every token already
+    issued are revoked first when the account came from such a signup -
+    whoever set the password may not be the owner, and would otherwise inherit
+    the Author's permissions. The verified owner signs
+    in through their identity provider or resets the password by email.
+    Best-effort and fail-closed: any error leaves the Author unlinked.
+    """
+    if not create_user_request.email:
+        return
+    try:
+        with SessionLocal() as db_session:
+            user = get_user_by_email_or_none(db=db_session, email=create_user_request.email)
+            if user is None:
+                return
+            author = find_claimable_author(db=db_session, user=user)
+            if author is None:
+                return
+            if user.registration_source == RegistrationSource.EMAIL.value:
+                # Credentials of an unverified signup: the password, and every
+                # token already issued - a refresh token would otherwise keep
+                # minting access tokens that gain the Author's permissions.
+                user.password = None
+                user.tokens_valid_after = datetime.now(timezone.utc)
+                user = update_user(db=db_session, user=user)
+            link_author_to_user(db=db_session, author=author, user_id=user.id)
+    except Exception:
+        logging.exception("Failed to link Author after verified social login")
 
 
 def _validate_password(password: str):
@@ -287,7 +333,8 @@ def exchange_phone_token(request: PhoneExchangeRequest) -> PhoneExchangeResponse
             is_admin=False,
         )
         user = save_phone_user(db=db, user=user)
-        link_or_create_author_for_user(db=db, user=user)
+        # The phone number comes from a verified Auth0 SMS token.
+        link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
         return _phone_exchange_response(user, sms_identity.phone_number)
 
 

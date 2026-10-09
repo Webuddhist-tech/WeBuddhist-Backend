@@ -704,11 +704,14 @@ class RecitationBroadcaster:
         """Close the session's marks so the gap before the next session is not
         taken for a line that took hours to recite.
 
-        The marks are not deleted. This runs as background work alongside the
-        mark writes it has to shut out, and the two cannot be ordered: a delete
-        that ran late would take the next session's first mark with it, and one
-        that ran early would leave the mark it came to remove. Recording the
-        revision the session ended on settles both, whenever it lands.
+        The marks are not deleted. A delete that ran late would take the next
+        session's first mark with it, and one that ran early would leave the
+        mark it came to remove, so the revision the session ended on is
+        recorded instead. That revision is drawn when this runs, so callers
+        await it before the session can be restarted: only then is every
+        position of the next session guaranteed to be above it. (The mark
+        writes of the session that just ended are background work and may land
+        later; they are at or below the boundary and are dropped.)
         """
         try:
             await self.redis.eval(

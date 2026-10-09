@@ -68,7 +68,13 @@ def youtube_video_keys_of_event(event: Optional[Event]) -> Set[VideoKey]:
 
 def _plan_start_date(event: Event, plan: Plan) -> date:
     """Day 1 of the plan: its own start date, as the series schedule counts
-    it, falling back to the event's start when the plan has none."""
+    it, falling back to the event's start when the plan has none.
+
+    A plan's start is a calendar date, not a moment in some viewer's zone: the
+    series schedule and the plan CMS both read it as stored, so this does too.
+    Converting it to the event's timezone would move day 1 (a plan starting at
+    midnight UTC on 1 Oct would begin on 30 Sep in Los Angeles) and put videos
+    on the wrong day relative to what the schedule shows."""
     if plan.start_date is not None:
         return plan.start_date.date()
     return get_date_in_timezone(event.timezone, at=event.start_date)

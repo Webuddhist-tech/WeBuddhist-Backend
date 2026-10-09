@@ -6,7 +6,7 @@ from ..users.users_models import Users
 from starlette import status
 from .auth_service import authenticate_and_generate_tokens, refresh_access_token, register_user_with_source, \
     request_reset_password, update_password, create_user, exchange_phone_token, link_phone_identity, \
-    remember_social_avatar, is_trusted_social_register_caller
+    remember_social_avatar, is_trusted_social_register_caller, claim_author_for_verified_login
 from .auth_models import CreateUserRequest, UserLoginRequest, RefreshTokenRequest, PasswordResetRequest, \
     ResetPasswordRequest, UserLoginResponse, RefreshTokenResponse, CreateSocialUserRequest, \
     PhoneExchangeRequest, PhoneExchangeResponse, PhoneLinkRequest, PhoneLinkResponse
@@ -47,10 +47,19 @@ def register_user(
     registration_source = RegistrationSource.EMAIL
     if create_social_user_request.platform:
         registration_source =  create_social_user_request.platform
+    # This route is public, so a body claiming "google" proves nothing about
+    # who sent it. Only the Auth0 Post Login Action holds the shared secret and
+    # has actually verified the identity, so only its calls may take over an
+    # existing Author with the same email.
+    identifier_verified = (
+        registration_source != RegistrationSource.EMAIL
+        and is_trusted_social_register_caller(x_social_register_token)
+    )
     try:
         return create_user(
             create_user_request=create_social_user_request.create_user_request,
-            registration_source=registration_source
+            registration_source=registration_source,
+            identifier_verified=identifier_verified,
         )
     except HTTPException as exc:
         # The Auth0 action calls this on every login. After the first one the
@@ -66,6 +75,10 @@ def register_user(
             x_social_register_token
         ):
             remember_social_avatar(create_social_user_request.create_user_request)
+            # The account exists, so signup could not link its Author. A
+            # trusted caller has now proved ownership of the email.
+            if registration_source != RegistrationSource.EMAIL:
+                claim_author_for_verified_login(create_social_user_request.create_user_request)
         raise
 
 @auth_router.post("/login", status_code=status.HTTP_200_OK)

@@ -22,12 +22,22 @@ from pecha_api.users.users_repository import (
 )
 
 
-def link_or_create_author_for_user(db: Session, user: Users) -> Optional[Author]:
+def link_or_create_author_for_user(
+    db: Session,
+    user: Users,
+    identifier_verified: bool = False,
+) -> Optional[Author]:
     """Ensure `user` has a linked Author record, so CMS/group-permission
     checks that key off Author.user_id resolve for this account: link an
     existing Author sharing the same email/phone, or create one. Call this
     once, right when `user` is created - not on every login. Best-effort:
     failures are logged, never raised, so they can't block signup.
+
+    An existing Author carries CMS and group permissions, so it is only linked
+    when `identifier_verified` says the registration proved ownership of the
+    email/phone (an Auth0 SMS login, or a trusted social-login caller). A
+    plain email/password signup proves nothing, so it never takes over an
+    existing Author.
     """
     try:
         existing = find_author_by_user_id(db=db, user_id=user.id)
@@ -39,6 +49,12 @@ def link_or_create_author_for_user(db: Session, user: Users) -> Optional[Author]
             author = get_author_by_phone(db=db, phone_number=user.phone_number)
 
         if author is not None:
+            if not identifier_verified:
+                logging.warning(
+                    f"Not linking User {user.id} to existing Author {author.id}: "
+                    "registration identifier is not verified"
+                )
+                return None
             if author.user_id is None:
                 author = link_author_to_user(db=db, author=author, user_id=user.id)
             return author
@@ -58,6 +74,17 @@ def link_or_create_author_for_user(db: Session, user: Users) -> Optional[Author]
     except Exception:
         logging.exception(f"Failed to link/create Author for User {user.id}")
         return None
+
+
+def find_claimable_author(db: Session, user: Users) -> Optional[Author]:
+    """The existing, still unlinked Author that shares `user`'s email, if the
+    user has no Author yet. Looks only; linking is the caller's decision."""
+    if user.email is None or find_author_by_user_id(db=db, user_id=user.id) is not None:
+        return None
+    author = find_author_by_email(db=db, email=user.email)
+    if author is None or author.user_id is not None:
+        return None
+    return author
 
 
 def link_or_create_user_for_author(db: Session, author: Author) -> Optional[Users]:

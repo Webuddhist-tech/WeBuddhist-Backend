@@ -43,7 +43,7 @@ class TestLinkOrCreateAuthorForUser:
         existing_author = _make_author(email="a@example.com", user_id=user.id)
         mock_find_author_by_user_id.return_value = existing_author
 
-        result = link_or_create_author_for_user(db=db, user=user)
+        result = link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
 
         assert result == existing_author
         mock_find_author_by_user_id.assert_called_once_with(db=db, user_id=user.id)
@@ -65,7 +65,7 @@ class TestLinkOrCreateAuthorForUser:
         mock_find_author_by_email.return_value = unlinked_author
         mock_link_author_to_user.return_value = linked_author
 
-        result = link_or_create_author_for_user(db=db, user=user)
+        result = link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
 
         assert result == linked_author
         mock_find_author_by_email.assert_called_once_with(db=db, email="a@example.com")
@@ -90,7 +90,7 @@ class TestLinkOrCreateAuthorForUser:
         mock_get_author_by_phone.return_value = unlinked_author
         mock_link_author_to_user.return_value = unlinked_author
 
-        result = link_or_create_author_for_user(db=db, user=user)
+        result = link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
 
         assert result == unlinked_author
         mock_get_author_by_phone.assert_called_once_with(db=db, phone_number="+15551234567")
@@ -115,7 +115,7 @@ class TestLinkOrCreateAuthorForUser:
         mock_find_author_by_user_id.return_value = None
         mock_find_author_by_email.return_value = already_linked_author
 
-        result = link_or_create_author_for_user(db=db, user=user)
+        result = link_or_create_author_for_user(db=db, user=user, identifier_verified=True)
 
         assert result == already_linked_author
         mock_link_author_to_user.assert_not_called()
@@ -178,6 +178,29 @@ class TestLinkOrCreateAuthorForUser:
         result = link_or_create_author_for_user(db=db, user=user)
 
         assert result is None
+
+
+    @patch('pecha_api.plans.authors.author_user_link_service.link_author_to_user')
+    @patch('pecha_api.plans.authors.author_user_link_service.save_author')
+    @patch('pecha_api.plans.authors.author_user_link_service.find_author_by_email')
+    @patch('pecha_api.plans.authors.author_user_link_service.find_author_by_user_id')
+    def test_does_not_link_existing_author_when_identifier_is_unverified(
+        self,
+        mock_find_author_by_user_id: MagicMock,
+        mock_find_author_by_email: MagicMock,
+        mock_save_author: MagicMock,
+        mock_link_author_to_user: MagicMock,
+    ) -> None:
+        db = MagicMock()
+        user = _make_user(email="victim@example.com")
+        mock_find_author_by_user_id.return_value = None
+        mock_find_author_by_email.return_value = _make_author(email="victim@example.com", user_id=None)
+
+        result = link_or_create_author_for_user(db=db, user=user)
+
+        assert result is None
+        mock_link_author_to_user.assert_not_called()
+        mock_save_author.assert_not_called()
 
 
 class TestLinkOrCreateUserForAuthor:

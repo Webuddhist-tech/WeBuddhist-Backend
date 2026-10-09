@@ -6,8 +6,10 @@ import re
 from threading import Lock
 from functools import partial
 from typing import Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from pecha_api.error_contants import ErrorConstants
 from starlette.responses import StreamingResponse
@@ -25,6 +27,8 @@ from pecha_api.poems.repository import get_poem_by_id
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.group_posts.enums import GroupPostStatus
 from pecha_api.group_posts.repository import get_post_by_id_only
+from pecha_api.plans.groups.groups_models import AuthorGroup
+from pecha_api.plans.groups.groups_repository import is_group_published
 import anyio
 from anyio import to_thread
 
@@ -72,6 +76,24 @@ _TYPE_TO_ID_FIELD = {
 }
 # Order matters: _primary_content_id resolves ties with this precedence.
 _CONTENT_ID_FIELDS = ("poem_id", "event_id", "post_id", "segment_id", "text_id")
+
+
+def _is_group_publicly_visible(db: Session, group_id: Optional[UUID]) -> bool:
+    """Whether anyone, signed in or not, may see this group's content.
+
+    The share endpoints are unauthenticated, so a card is only rendered for a
+    published public group - the same gate the app applies to a viewer who has
+    not joined. A private or unpublished group's events and posts must not leak
+    through a guessed id.
+    """
+    if group_id is None:
+        return False
+    group = (
+        db.query(AuthorGroup)
+        .filter(AuthorGroup.id == group_id, AuthorGroup.deleted_at.is_(None))
+        .first()
+    )
+    return group is not None and bool(group.is_public) and is_group_published(group)
 
 
 def _share_image_headers() -> dict:
@@ -277,6 +299,25 @@ def _event_photo_cache_limit() -> int:
     return max(get_int("SHARE_EVENT_PHOTO_CACHE_SIZE"), 0)
 
 
+def _event_photo_s3_key(image_key: str) -> Optional[str]:
+    """The S3 key behind an event's stored photo reference.
+
+    The column normally holds a bare key, but a full URL is accepted elsewhere
+    (it is returned as-is when signing). A URL into our own bucket is reduced to
+    its key; any other URL is not fetched - this endpoint is public, and
+    downloading an arbitrary address on its behalf would be an SSRF vector - so
+    the card falls back to the title render.
+    """
+    image_key = image_key.strip()
+    if not image_key.lower().startswith(("http://", "https://")):
+        return image_key or None
+    bucket = get("AWS_BUCKET_NAME")
+    host = (urlparse(image_key).hostname or "").lower()
+    if not bucket or not host.startswith(f"{bucket.lower()}."):
+        return None
+    return unquote(urlparse(image_key).path.lstrip("/")) or None
+
+
 def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
     """The event photo from S3, as bytes, memoised per key.
 
@@ -291,6 +332,9 @@ def _load_event_photo_bytes(image_key: Optional[str]) -> Optional[bytes]:
     Returns None for an event with no photo, or when S3 will not give it up -
     the card falls back to the title render rather than the share failing.
     """
+    if not image_key:
+        return None
+    image_key = _event_photo_s3_key(image_key)
     if not image_key:
         return None
 
@@ -341,7 +385,7 @@ def _load_event_share_metadata(
 
     with SessionLocal() as db:
         event = get_event_by_id(db=db, event_id=event_uuid)
-        if event is None:
+        if event is None or not _is_group_publicly_visible(db, event.group_id):
             return site_name, None, language, None
         image_key = getattr(event, "image_url", None) or None
         metadata = _first_metadata(event.metadata_entries, language)
@@ -368,8 +412,8 @@ def _resolve_post_share_text(post_id: str, site_name: str) -> tuple[str, str, Op
             post_id=post_uuid,
             status=GroupPostStatus.PUBLISHED,
         )
-    if post is None:
-        return site_name, site_name, None
+        if post is None or not _is_group_publicly_visible(db, post.group_id):
+            return site_name, site_name, None
 
     main_text = (post.caption or "").strip() or site_name
     return main_text, site_name, None

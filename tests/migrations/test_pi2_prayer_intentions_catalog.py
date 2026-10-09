@@ -104,7 +104,7 @@ class TestPi2PrayerIntentionsCatalogMigration:
             assert catalog["healing"]["description"].startswith("Recovery")
             assert _message_intentions(connection) == ["love", "healing"]
 
-    def test_downgrade_restores_catalog_without_rewriting_new_message_slugs(self):
+    def test_downgrade_restores_catalog_and_maps_message_slugs_back(self):
         engine = create_engine("sqlite:///:memory:")
         _create_tables(engine)
 
@@ -129,4 +129,5 @@ class TestPi2PrayerIntentionsCatalogMigration:
             catalog = _catalog_by_slug(connection)
             assert catalog["dedication"]["label"] == "Dedication"
             assert "peace" not in catalog
-            assert _message_intentions(connection) == ["love", "healing", "peace"]
+            # The restored catalog has no love/peace rows, so messages move back with it.
+            assert _message_intentions(connection) == ["compassion", "healing", "dedication"]
