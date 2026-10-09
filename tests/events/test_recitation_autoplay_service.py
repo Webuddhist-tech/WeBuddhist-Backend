@@ -701,6 +701,10 @@ class TestChangingCourse:
         assert h.engine._runners.get(event_id) is runner
         assert not runner.cancelled()
         assert h.engine._runner_plans[event_id] == newer.plan_id
+        # Its stored state too: the stop was for the old plan only.
+        assert h.store.states[event_id]["plan_id"] == newer.plan_id
+        assert h.store.states[event_id]["status"] == "running"
+        assert h.store._holder(event_id) == h.engine.owner
         h.engine._forget_runner(event_id)
 
 

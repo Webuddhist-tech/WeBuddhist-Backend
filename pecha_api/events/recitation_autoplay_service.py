@@ -800,9 +800,16 @@ class AutoplayEngine:
         # The runner this stop is about. A new plan can start while the stop
         # waits on Redis; its runner is not this stop's to cancel, or the plan
         # stays marked running with nobody advancing it until its lease lapses.
+        # The runner and plan this stop is about, taken after the hold, which
+        # may have replaced them. A new plan can start while the stop waits on
+        # Redis; neither its runner nor its stored state is this stop's to
+        # touch, or the plan stays marked running with nobody advancing it, or
+        # is marked stopped under its own runner.
         stopping = self._runners.get(event_id)
         try:
-            await self.store.stop(event_id, reason)
+            current = await self.store.read(event_id)
+            if current and current.get("plan_id"):
+                await self.store.stop(event_id, reason, plan_id=current["plan_id"])
         finally:
             if self._runners.get(event_id) is stopping:
                 self._forget_runner(event_id)

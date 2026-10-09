@@ -76,6 +76,17 @@ def link_or_create_author_for_user(
         return None
 
 
+def find_claimable_author(db: Session, user: Users) -> Optional[Author]:
+    """The existing, still unlinked Author that shares `user`'s email, if the
+    user has no Author yet. Looks only; linking is the caller's decision."""
+    if user.email is None or find_author_by_user_id(db=db, user_id=user.id) is not None:
+        return None
+    author = find_author_by_email(db=db, email=user.email)
+    if author is None or author.user_id is not None:
+        return None
+    return author
+
+
 def link_or_create_user_for_author(db: Session, author: Author) -> Optional[Users]:
     """Symmetric counterpart to link_or_create_author_for_user, called once
     when `author` is created."""
