@@ -518,6 +518,7 @@ def get_groups_paginated(
     group_type: Optional[AuthorGroupType] = None,
     status: Optional[AuthorGroupStatus] = None,
     tradition_code: Optional[str] = None,
+    also_group_type: Optional[AuthorGroupType] = None,
 ) -> Tuple[List[AuthorGroup], int]:
     filters = [AuthorGroup.deleted_at.is_(None)]
     if is_public is not None:
@@ -563,9 +564,18 @@ def get_groups_paginated(
             )
         )
     if group_ids is not None:
-        if not group_ids:
-            return [], 0
-        filters.append(AuthorGroup.id.in_(group_ids))
+        if also_group_type is not None:
+            # group_ids OR every group of also_group_type (e.g. memberships + all pages).
+            filters.append(
+                or_(
+                    AuthorGroup.id.in_(group_ids),
+                    AuthorGroup.group_type == also_group_type,
+                )
+            )
+        else:
+            if not group_ids:
+                return [], 0
+            filters.append(AuthorGroup.id.in_(group_ids))
     if exclude_group_ids:
         filters.append(AuthorGroup.id.not_in(exclude_group_ids))
 

@@ -7,7 +7,8 @@ import _datetime
 from .verse_of_day_model import VerseOfDay
 from .verse_metadata_model import VerseMetadata
 from .verse_of_day_enums import SortOrder
-from pecha_api.plans.groups.groups_models import AuthorGroupMetadata
+from pecha_api.plans.groups.groups_enums import AuthorGroupType
+from pecha_api.plans.groups.groups_models import AuthorGroup, AuthorGroupMetadata
 
 
 def get_verse_of_day_by_filters(
@@ -145,6 +146,15 @@ def get_group_metadata_by_group_id(
     return db.query(AuthorGroupMetadata).filter(
         AuthorGroupMetadata.group_id == group_id
     ).all()
+
+
+def get_page_by_id(db: Session, page_id: UUID) -> Optional[AuthorGroup]:
+    """A live (not deleted) PAGE-type group, or None."""
+    return db.query(AuthorGroup).filter(
+        AuthorGroup.id == page_id,
+        AuthorGroup.group_type == AuthorGroupType.PAGE,
+        AuthorGroup.deleted_at.is_(None),
+    ).first()
 
 
 def update_verse_of_day(

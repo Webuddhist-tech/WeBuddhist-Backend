@@ -22,6 +22,7 @@ from pecha_api.plans.authors.plan_authors_service import validate_and_extract_au
 from pecha_api.plans.shared.permissions import (
     _STATUS_CHANGE_ROLES,
     can_create_group_content,
+    can_manage_any_page,
     get_member_role,
     is_reviewer,
     is_super_admin,
@@ -470,7 +471,7 @@ def _assert_metadata_valid(metadata_entries: List) -> None:
         )
     seen_languages = set()
     for item in metadata_entries:
-        if not item.title:
+        if not (item.title or "").strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Metadata title is required",
@@ -506,6 +507,27 @@ def _assert_role_allowed(member: AuthorGroupMember, allowed_roles: List[AuthorGr
 _GROUP_SETTINGS_ROLES = [AuthorGroupMemberRole.OWNER, AuthorGroupMemberRole.ADMIN]
 _MEMBER_MANAGEMENT_ROLES = [AuthorGroupMemberRole.OWNER, AuthorGroupMemberRole.ADMIN]
 _ADMIN_INVITE_ROLE = AuthorGroupMemberRole.ADMIN.value
+
+
+def _is_platform_manager_of(author, group: AuthorGroup) -> bool:
+    """Super admins manage any group; content admins manage any PAGE, with no
+    membership needed."""
+    if is_super_admin(author):
+        return True
+    return can_manage_any_page(author) and _to_group_type(group.group_type) == AuthorGroupType.PAGE
+
+
+def _assert_can_manage_group_settings(
+    db,
+    *,
+    group: AuthorGroup,
+    author,
+    allowed_roles: List[AuthorGroupMemberRole] = _GROUP_SETTINGS_ROLES,
+) -> None:
+    if _is_platform_manager_of(author, group):
+        return
+    member = _get_member_or_403(db=db, group_id=group.id, author_id=author.id)
+    _assert_role_allowed(member=member, allowed_roles=allowed_roles)
 
 
 def _resolve_actor_group_role(
@@ -932,16 +954,7 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
         elif get_group_by_slug(db=db, slug=slug):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Group slug already exists")
 
-        metadata_entries = [
-            AuthorGroupMetadata(
-                language=item.language.value,
-                title=item.title,
-                sub_title=item.sub_title,
-                description=item.description,
-                description_long=item.description_long,
-            )
-            for item in request.metadata
-        ]
+        metadata_entries = _metadata_request_to_entries(request.metadata)
         group = AuthorGroup(
             slug=slug,
             group_type=request.group_type.value,
@@ -996,9 +1009,7 @@ def update_author_group(token: str, group_id: UUID, request: UpdateAuthorGroupRe
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
+        _assert_can_manage_group_settings(db, group=group, author=author)
 
         fields_set = request.model_fields_set
         _assert_group_name_clean(
@@ -1065,9 +1076,7 @@ def update_group_status(
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
+        _assert_can_manage_group_settings(db, group=group, author=author)
 
         # Lock the row so an in-flight chat send that already passed its status
         # check cannot commit a message after this hide lands.
@@ -1095,12 +1104,12 @@ def delete_author_group(token: str, group_id: UUID) -> None:
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(
-                member=member,
-                allowed_roles=[AuthorGroupMemberRole.OWNER],
-            )
+        _assert_can_manage_group_settings(
+            db,
+            group=group,
+            author=author,
+            allowed_roles=[AuthorGroupMemberRole.OWNER],
+        )
 
         now = datetime.now(timezone.utc)
         group.deleted_at = now
@@ -1628,9 +1637,9 @@ def get_cms_group_detail(
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author) and not is_reviewer(author):
+        if not _is_platform_manager_of(author, group) and not is_reviewer(author):
             _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-        follower_count = get_followers_count_map(db=db, group_ids=[group_id]).get(group_id, 0)
+        follower_count =get_followers_count_map(db=db, group_ids=[group_id]).get(group_id, 0)
         joiner_count = get_joiners_count_map(db=db, group_ids=[group_id]).get(group_id, 0)
         return _group_to_detail(
             group=group,
@@ -1730,11 +1739,14 @@ def list_cms_groups(
     author = validate_and_extract_author_details(token=token)
     with SessionLocal() as db:
         group_ids = None
+        also_group_type = None
         if for_transfer:
             require_cms_write_access(author)
         elif not is_super_admin(author) and not is_reviewer(author):
             membership_rows = db.query(AuthorGroupMember.group_id).filter(AuthorGroupMember.author_id == author.id).all()
             group_ids = [row.group_id for row in membership_rows]
+            # Content admins also see every page, whether or not they belong to it.
+            also_group_type = AuthorGroupType.PAGE if can_manage_any_page(author) else None
         groups, total = get_groups_paginated(
             db=db,
             skip=skip,
@@ -1743,6 +1755,7 @@ def list_cms_groups(
             language=language,
             tag_id=tag_id,
             group_ids=group_ids,
+            also_group_type=also_group_type,
             is_public=is_public,
             group_type=group_type,
             # Unset means Studio sees every status.
@@ -1776,9 +1789,7 @@ def replace_group_tags(token: str, group_id: UUID, request: ReplaceGroupTagsRequ
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
+        _assert_can_manage_group_settings(db, group=group, author=author)
         _validate_group_links(db=db, tag_ids=request.tag_ids, series_ids=None, plan_ids=None)
         replace_group_relation_ids(db=db, table=author_group_tags, group_id=group_id, column_name="tag_id", ids=request.tag_ids)
         db.commit()
@@ -1798,10 +1809,8 @@ def replace_group_social_links_by_id(
         group = get_group_by_id(db=db, group_id=group_id)
         if not group:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=GROUP_NOT_FOUND)
-        if not is_super_admin(author):
-            member = _get_member_or_403(db=db, group_id=group_id, author_id=author.id)
-            _assert_role_allowed(member=member, allowed_roles=_GROUP_SETTINGS_ROLES)
-        social_links = [AuthorGroupSocialLink(platform=item.platform, url=item.url) for item in request.social_links]
+        _assert_can_manage_group_settings(db, group=group, author=author)
+        social_links =[AuthorGroupSocialLink(platform=item.platform, url=item.url) for item in request.social_links]
         replace_group_social_links(db=db, group_id=group_id, social_links=social_links)
         db.commit()
         loaded = get_group_by_id(db=db, group_id=group_id)
@@ -3207,7 +3216,7 @@ def get_group_permission(token: str, group_id: UUID) -> GroupPermissionDTO:
         author_is_super_admin = is_super_admin(author)
         return GroupPermissionDTO(
             group_id=group_id,
-            has_permission=author_is_super_admin or role in _GROUP_SETTINGS_ROLES,
+            has_permission=_is_platform_manager_of(author, group) or role in _GROUP_SETTINGS_ROLES,
             can_create_content=author_is_super_admin or can_create_group_content(role),
             role=role,
             is_super_admin=author_is_super_admin,

@@ -86,6 +86,12 @@ def require_content_manager(author: Author) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
 
 
+def can_manage_any_page(author: Author) -> bool:
+    """Super admins and content admins manage every PAGE-type group without
+    being a member of it. COMMUNITY groups stay member-only for content admins."""
+    return is_super_admin(author) or is_content_admin(author)
+
+
 def require_super_admin_or_reviewer(author: Author) -> None:
     role = get_platform_role(author)
     if role not in {PlatformRole.SUPER_ADMIN, PlatformRole.REVIEWER}:

@@ -82,7 +82,7 @@ class CreateVerseOfDayRequest(BaseModel):
     ref_id: Optional[str] = None
     source: Optional[str] = Field(default=None, max_length=255)
     ref_type: Optional[str] = None
-    group_id: Optional[UUID] = None
+    group_id: Optional[UUID] = Field(default=None, description="ID of the page (PAGE-type group) to link")
     date: datetime.date
 
 
@@ -93,5 +93,5 @@ class UpdateVerseOfDayRequest(BaseModel):
     ref_id: Optional[str] = None
     source: Optional[str] = Field(default=None, max_length=255)
     ref_type: Optional[str] = None
-    group_id: Optional[UUID] = None
+    group_id: Optional[UUID] = Field(default=None, description="ID of the page (PAGE-type group) to link")
     date: Optional[datetime.date] = None

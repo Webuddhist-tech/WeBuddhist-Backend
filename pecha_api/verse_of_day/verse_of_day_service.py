@@ -16,6 +16,7 @@ from .verse_of_day_repository import (
     create_verse_of_day,
     create_verse_metadata_bulk,
     get_group_metadata_by_group_id,
+    get_page_by_id,
     update_verse_of_day,
     delete_verse_metadata_by_verse_id,
     delete_verse_of_day,
@@ -270,6 +271,14 @@ def get_verse_of_day_today_service(
         )
 
 
+def _assert_page_exists(db, page_id: UUID) -> None:
+    if get_page_by_id(db, page_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected page does not exist"
+        )
+
+
 def create_verse_of_day_service(request: CreateVerseOfDayRequest, created_by: str) -> VerseOfDayDTO:
 
     with SessionLocal() as db:
@@ -281,6 +290,9 @@ def create_verse_of_day_service(request: CreateVerseOfDayRequest, created_by: st
                 detail=f"A verse of the day already exists for date {request.date}. Please update the existing verse or choose a different date."
             )
         
+        if request.group_id is not None:
+            _assert_page_exists(db, request.group_id)
+
         verse_of_day = VerseOfDay(
             verse_id=request.verse_id,
             ref_id=request.ref_id,
@@ -336,6 +348,7 @@ def update_verse_of_day_service(
         if request.image_urls is not None:
             updates['image_urls'] = request.image_urls
         if request.group_id is not None:
+            _assert_page_exists(db, request.group_id)
             updates['group_id'] = request.group_id
         if request.date is not None:
             updates['date'] = request.date

@@ -31,7 +31,7 @@ cms_verse_of_day_router = APIRouter(
     response_model=VerseOfDayPublicResponse
 )
 def get_verse_of_day_endpoint(
-    group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
+    group_id: Annotated[Optional[UUID], Query(description="Filter by the linked page (group) ID")] = None,
     date: Annotated[Optional[date], Query(description="Filter by date (YYYY-MM-DD)")] = None,
     lang: Annotated[Optional[str], Query(description="Filter by language (en, bo, zh, hi, ne, mn). Returns all languages if not specified.")] = None,
 ):
@@ -85,7 +85,7 @@ def get_verse_of_day_by_id_endpoint(
 )
 def cms_get_verse_of_day_endpoint(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(oauth2_scheme)],
-    group_id: Annotated[Optional[UUID], Query(description="Filter by group ID")] = None,
+    group_id: Annotated[Optional[UUID], Query(description="Filter by the linked page (group) ID")] = None,
     date: Annotated[Optional[date], Query(description="Filter by date (YYYY-MM-DD)")] = None,
     lang: Annotated[Optional[str], Query(description="Filter by language (en, bo, zh, hi, ne, mn). Returns all languages if not specified.")] = None,
     search: Annotated[Optional[str], Query(description="Free-text search over verse content (any language)")] = None,
