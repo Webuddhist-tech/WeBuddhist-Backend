@@ -172,6 +172,7 @@ class UserFollowedAuthorGroupDTO(BaseModel):
     id: UUID
     avatar_key: Optional[str] = None
     avatar_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     follower_count: int = 0
     tags: List[str] = []
@@ -181,6 +182,7 @@ class UserJoinedAuthorGroupDTO(BaseModel):
     id: UUID
     avatar_key: Optional[str] = None
     avatar_url: Optional[str] = None
+    tradition: Optional[GroupTraditionDTO] = None
     metadata: GroupMetadataResponse = []
     joiner_count: int = 0
     tags: List[str] = []
