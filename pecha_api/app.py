@@ -101,6 +101,7 @@ from pecha_api.events import (
     events_router,
     cms_events_router,
     cms_locations_router,
+    cms_youtube_live_sync_router,
     recitation_live_router,
     recitation_viewer_router,
 )
@@ -248,6 +249,7 @@ api.include_router(recitation_viewer_router)
 api.include_router(cms_events_router)
 api.include_router(event_notification_internal_views.internal_event_notifications_router)
 api.include_router(cms_locations_router)
+api.include_router(cms_youtube_live_sync_router)
 api.include_router(tradition_views.tradition_router)
 api.include_router(tradition_views.user_tradition_router)
 api.include_router(tradition_views.cms_traditions_router)

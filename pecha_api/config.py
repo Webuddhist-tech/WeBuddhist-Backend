@@ -346,6 +346,14 @@ DEFAULTS = dict(
     # means lookups are skipped; GET paths still return the link.
     YOUTUBE_API_KEY="",
 
+    # Adding a group channel's live stream to the group's running events.
+    # Run times are per group (the youtube-live-sync CMS endpoints); the job
+    # only wakes every TICK seconds to see whether any group's time has come,
+    # and still runs a time it woke up to within GRACE seconds of it.
+    GEMINI_YOUTUBE_LIVE_LANGUAGE_MODEL="gemini-3.8-flash",
+    YOUTUBE_LIVE_SYNC_TICK_SECONDS=60,
+    YOUTUBE_LIVE_SYNC_GRACE_SECONDS=600,
+
     # Sentry error tracking (disabled unless SENTRY_DSN is set)
     SENTRY_DSN="",
     SENTRY_ENVIRONMENT="development",

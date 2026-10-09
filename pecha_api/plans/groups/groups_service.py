@@ -958,7 +958,13 @@ def create_author_group(token: str, request: CreateAuthorGroupRequest) -> Author
             created_by=author.email,
             updated_by=author.email,
         )
-        created = create_group(db=db, group=group, metadata_entries=metadata_entries, owner_member=owner_member)
+        created = create_group(
+            db=db,
+            group=group,
+            metadata_entries=metadata_entries,
+            owner_member=owner_member,
+            creator_user_id=author.user_id,
+        )
         loaded = get_group_by_id(db=db, group_id=created.id)
         return _group_to_detail(loaded, follower_count=0, db=db)
 

@@ -107,7 +107,7 @@ def test_notify_pending_invites_skips_phone_only_authors():
 
 
 def test_accept_pending_invites_skips_ones_that_fail():
-    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    author = SimpleNamespace(id=uuid4(), email="a@example.org", user_id=uuid4())
     good, bad = SimpleNamespace(id=uuid4()), SimpleNamespace(id=uuid4())
     group = SimpleNamespace(id=uuid4())
 
@@ -503,7 +503,7 @@ def test_create_group_rejects_a_bad_name(slug, title, sub_title):
 
 
 def test_create_group_allows_dharma_vocabulary():
-    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    author = SimpleNamespace(id=uuid4(), email="a@example.org", user_id=uuid4())
     with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author), \
             patch(f"{GROUPS}.SessionLocal") as session_local, \
             patch(f"{GROUPS}.get_group_by_slug", return_value=None), \
@@ -623,7 +623,7 @@ def test_generated_slug_gives_up_eventually():
 
 
 def test_create_group_without_a_slug_generates_one():
-    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    author = SimpleNamespace(id=uuid4(), email="a@example.org", user_id=uuid4())
     with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author), \
             patch(f"{GROUPS}.SessionLocal") as session_local, \
             patch(f"{GROUPS}.get_group_by_slug", return_value=None), \
@@ -638,8 +638,19 @@ def test_create_group_without_a_slug_generates_one():
     assert re.fullmatch(r"morning-sit_\d{4}", create.call_args.kwargs["group"].slug)
 
 
+def test_create_group_joins_the_creator():
+    author = SimpleNamespace(id=uuid4(), email="a@example.org", user_id=uuid4())
+    with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author),             patch(f"{GROUPS}.SessionLocal") as session_local,             patch(f"{GROUPS}.get_group_by_slug", return_value=None),             patch(f"{GROUPS}.create_group", return_value=SimpleNamespace(id=uuid4())) as create,             patch(f"{GROUPS}.get_group_by_id"),             patch(f"{GROUPS}._group_to_detail"):
+        _session(session_local)
+        create_author_group(
+            token="t",
+            request=CreateAuthorGroupRequest(slug="bodhichitta-authors", metadata=_metadata("Bodhichitta Authors")),
+        )
+    assert create.call_args.kwargs["creator_user_id"] == author.user_id
+
+
 def test_create_group_still_honours_a_given_slug():
-    author = SimpleNamespace(id=uuid4(), email="a@example.org")
+    author = SimpleNamespace(id=uuid4(), email="a@example.org", user_id=uuid4())
     with patch(f"{GROUPS}.validate_and_extract_author_details", return_value=author), \
             patch(f"{GROUPS}.SessionLocal") as session_local, \
             patch(f"{GROUPS}.get_group_by_slug", return_value=None), \

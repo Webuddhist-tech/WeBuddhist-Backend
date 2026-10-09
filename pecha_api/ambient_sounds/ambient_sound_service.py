@@ -17,7 +17,7 @@ from pecha_api.uploads.S3_utils import (
 )
 from pecha_api.config import get, get_int, DEFAULTS
 from pecha_api.plans.authors.plan_authors_service import validate_cms_author_details
-from pecha_api.plans.shared.permissions import require_super_admin
+from pecha_api.plans.shared.permissions import require_content_manager
 from .ambient_sound_repository import (
     get_ambient_sound_by_id,
     list_ambient_sounds,
@@ -78,7 +78,7 @@ def convert_ambient_sound_to_dto(ambient_sound: AmbientSound) -> AmbientSoundDTO
 
 def _validate_admin(token: str) -> None:
     author = validate_cms_author_details(token=token)
-    require_super_admin(author)
+    require_content_manager(author)
 
 
 def _validate_audio_file(file: UploadFile) -> None:

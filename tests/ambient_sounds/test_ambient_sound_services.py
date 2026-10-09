@@ -102,11 +102,11 @@ class TestGenerateAmbientSoundPresignedUrl:
 
 
 class TestCreateAmbientSoundService:
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    def test_create_forbidden_when_not_admin(self, mock_validate_author, mock_require_super_admin):
+    def test_create_forbidden_when_not_admin(self, mock_validate_author, mock_require_content_manager):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
-        mock_require_super_admin.side_effect = HTTPException(
+        mock_require_content_manager.side_effect = HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN"
         )
         file = TestDataFactory.create_mock_upload_file()
@@ -122,9 +122,9 @@ class TestCreateAmbientSoundService:
 
         assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
 
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    def test_create_rejects_invalid_extension(self, mock_validate_author, mock_require_super_admin):
+    def test_create_rejects_invalid_extension(self, mock_validate_author, mock_require_content_manager):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
         file = TestDataFactory.create_mock_upload_file(filename="sound.txt")
 
@@ -145,9 +145,9 @@ class TestCreateAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.upload_file')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.generate_presigned_access_url')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_create_success_unsets_other_defaults(
-        self, mock_require_super_admin, mock_validate_author, mock_presign, mock_upload,
+        self, mock_require_content_manager, mock_validate_author, mock_presign, mock_upload,
         mock_unset_defaults, mock_save, mock_session
     ):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
@@ -180,9 +180,9 @@ class TestCreateAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.upload_file')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.generate_presigned_access_url')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_create_success_not_default_skips_unset(
-        self, mock_require_super_admin, mock_validate_author, mock_presign, mock_upload,
+        self, mock_require_content_manager, mock_validate_author, mock_presign, mock_upload,
         mock_unset_defaults, mock_save, mock_session
     ):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
@@ -205,11 +205,11 @@ class TestCreateAmbientSoundService:
 
 
 class TestUpdateAmbientSoundService:
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    def test_update_forbidden_when_not_admin(self, mock_validate_author, mock_require_super_admin):
+    def test_update_forbidden_when_not_admin(self, mock_validate_author, mock_require_content_manager):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
-        mock_require_super_admin.side_effect = HTTPException(
+        mock_require_content_manager.side_effect = HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN"
         )
 
@@ -228,8 +228,8 @@ class TestUpdateAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.SessionLocal')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.get_ambient_sound_by_id')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
-    def test_update_not_found(self, mock_require_super_admin, mock_validate_author, mock_get, mock_session):
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
+    def test_update_not_found(self, mock_require_content_manager, mock_validate_author, mock_get, mock_session):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
@@ -253,9 +253,9 @@ class TestUpdateAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.unset_other_defaults')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.generate_presigned_access_url')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_update_partial_name_only(
-        self, mock_require_super_admin, mock_validate_author, mock_presign, mock_unset_defaults,
+        self, mock_require_content_manager, mock_validate_author, mock_presign, mock_unset_defaults,
         mock_update, mock_get, mock_session
     ):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
@@ -287,9 +287,9 @@ class TestUpdateAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.upload_file')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.generate_presigned_access_url')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_update_replaces_file_and_deletes_old(
-        self, mock_require_super_admin, mock_validate_author, mock_presign, mock_upload,
+        self, mock_require_content_manager, mock_validate_author, mock_presign, mock_upload,
         mock_update, mock_get, mock_session, mock_delete_file
     ):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
@@ -318,11 +318,11 @@ class TestUpdateAmbientSoundService:
 
 
 class TestDeleteAmbientSoundService:
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    def test_delete_forbidden_when_not_admin(self, mock_validate_author, mock_require_super_admin):
+    def test_delete_forbidden_when_not_admin(self, mock_validate_author, mock_require_content_manager):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
-        mock_require_super_admin.side_effect = HTTPException(
+        mock_require_content_manager.side_effect = HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN"
         )
 
@@ -334,8 +334,8 @@ class TestDeleteAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.SessionLocal')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.get_ambient_sound_by_id')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
-    def test_delete_not_found(self, mock_require_super_admin, mock_validate_author, mock_get, mock_session):
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
+    def test_delete_not_found(self, mock_require_content_manager, mock_validate_author, mock_get, mock_session):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
         mock_db = MagicMock()
         mock_session.return_value.__enter__.return_value = mock_db
@@ -351,9 +351,9 @@ class TestDeleteAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.get_ambient_sound_by_id')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.delete_ambient_sound')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_delete_success(
-        self, mock_require_super_admin, mock_validate_author, mock_delete_repo, mock_get,
+        self, mock_require_content_manager, mock_validate_author, mock_delete_repo, mock_get,
         mock_session, mock_delete_file
     ):
         mock_validate_author.return_value = TestDataFactory.create_mock_author()
@@ -375,9 +375,9 @@ class TestDeleteAmbientSoundService:
     @patch('pecha_api.ambient_sounds.ambient_sound_service.get_ambient_sound_by_id')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.delete_ambient_sound')
     @patch('pecha_api.ambient_sounds.ambient_sound_service.validate_cms_author_details')
-    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_super_admin')
+    @patch('pecha_api.ambient_sounds.ambient_sound_service.require_content_manager')
     def test_delete_also_removes_the_cover(
-        self, mock_require_super_admin, mock_validate_author, mock_delete_repo, mock_get,
+        self, mock_require_content_manager, mock_validate_author, mock_delete_repo, mock_get,
         mock_session, mock_delete_file
     ):
         """The cover belongs to the sound, so it goes with it."""

@@ -22,6 +22,7 @@ def _get_int_side_effect(key: str) -> int:
         "EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS": 60,
         "EVENT_REMINDER_MATERIALIZE_INTERVAL_SECONDS": 3600,
         "EVENT_REMINDER_PURGE_INTERVAL_SECONDS": 86400,
+        "YOUTUBE_LIVE_SYNC_TICK_SECONDS": 60,
     }
     return defaults[key]
 
@@ -80,7 +81,7 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
 
         setup_scheduler()
 
-        assert mock_scheduler.add_job.call_count == 14
+        assert mock_scheduler.add_job.call_count == 15
         job_ids = [call.kwargs["id"] for call in mock_scheduler.add_job.call_args_list]
         assert job_ids == [
             "cleanup_expired_verses_of_day",
@@ -97,6 +98,7 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
             "reconcile_undispatched_event_reminders",
             "materialize_recurring_event_reminders",
             "purge_expired_event_reminders",
+            "run_due_youtube_live_syncs",
         ]
         assert mock_scheduler.add_job.call_args_list[0].kwargs["args"] == [7]
         assert mock_scheduler.add_job.call_args_list[1].kwargs["args"] == [30]
@@ -116,6 +118,8 @@ def test_setup_scheduler_registers_cleanup_and_reconcile_jobs():
             # Recurring series are topped up hourly and swept daily.
             {"seconds": 3600},
             {"seconds": 86400},
+            # Each group's own YouTube live sync times are checked every minute.
+            {"seconds": 60},
         ]
         mock_scheduler.start.assert_called_once()
 

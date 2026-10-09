@@ -58,6 +58,10 @@ def is_reviewer(author: Author) -> bool:
     return get_platform_role(author) == PlatformRole.REVIEWER
 
 
+def is_content_admin(author: Author) -> bool:
+    return get_platform_role(author) == PlatformRole.CONTENT_ADMIN
+
+
 def is_platform_read_only(author: Author) -> bool:
     return is_reviewer(author)
 
@@ -72,6 +76,13 @@ def require_active_author(author: Author) -> None:
 
 def require_super_admin(author: Author) -> None:
     if not is_super_admin(author):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
+
+
+def require_content_manager(author: Author) -> None:
+    """The app-wide content catalogues (not tied to any space): super admins
+    and content admins may change them."""
+    if not (is_super_admin(author) or is_content_admin(author)):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FORBIDDEN)
 
 
@@ -247,7 +258,7 @@ def build_author_access_context(db: Session, author: Author) -> dict:
     can_create_content = (
         bool(author.is_active)
         and has_group
-        and role in {PlatformRole.CREATOR, PlatformRole.SUPER_ADMIN}
+        and role in {PlatformRole.CREATOR, PlatformRole.CONTENT_ADMIN, PlatformRole.SUPER_ADMIN}
     )
     return {
         "platform_role": role,
