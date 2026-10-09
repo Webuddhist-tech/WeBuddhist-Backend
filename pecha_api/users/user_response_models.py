@@ -13,8 +13,7 @@ class SocialMediaProfile(BaseModel):
     url: str
 
 class UserInfoRequest(BaseModel):
-    firstname: str
-    lastname: str
+    display_name: str
     title: Optional[str] = None
     organization: Optional[str] = None
     location: Optional[str] = None
@@ -25,6 +24,7 @@ class UserInfoRequest(BaseModel):
 
 class UserInfoResponse(BaseModel):
     id: UUID
+    display_name: Optional[str] = None
     firstname: str
     lastname: str
     username: str

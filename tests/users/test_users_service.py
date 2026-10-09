@@ -41,6 +41,7 @@ async def test_get_user_info_success():
     with patch("pecha_api.users.users_service.validate_token", return_value={"email": "john.doe@example.com"}), \
             patch("pecha_api.users.user_resolution.get_user_by_email", return_value=user):
         response = await get_user_info(token)
+        assert response.display_name == "John"
         assert response.firstname == "John"
         assert response.lastname == "Doe"
         assert response.username == "johndoe"
@@ -95,8 +96,7 @@ async def test_get_user_info_invalid_token():
 def test_update_user_info_success():
     token = "valid_token"
     user_info_request = UserInfoRequest(
-        firstname="Jane",
-        lastname="Doe",
+        display_name="Jane",
         title="Manager",
         organization="ExampleOrg",
         educations=["BSc", "MBA"],
@@ -123,13 +123,14 @@ def test_update_user_info_success():
             patch("pecha_api.users.users_service.update_user") as mock_update_user:
         update_user_info(token, user_info_request)
         mock_update_user.assert_called_once()
+        assert user.firstname == "Jane"
+        assert user.lastname == "Doe"
 
 
 def test_update_user_info_invalid_token():
     token = "invalid_token"
     user_info_request = UserInfoRequest(
-        firstname="Jane",
-        lastname="Doe",
+        display_name="Jane",
         title="Manager",
         organization="ExampleOrg",
         educations=["BSc", "MBA"],
@@ -149,8 +150,7 @@ def test_update_user_info_invalid_token():
 def test_update_user_info_500_db_error():
     token = "valid_token"
     user_info_request = UserInfoRequest(
-        firstname="Jane",
-        lastname="Doe",
+        display_name="Jane",
         title="Manager",
         organization="ExampleOrg",
         educations=["BSc", "MBA"],

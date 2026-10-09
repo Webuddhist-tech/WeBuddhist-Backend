@@ -39,8 +39,7 @@ def test_get_user_information():
 
 def test_update_user_information():
     user_info_request = {
-        "firstname": "John",
-        "lastname": "Doe",
+        "display_name": "John",
         "title": "Software Engineer",
         "organization": "Tech Corp",
         "educations": [
@@ -55,6 +54,19 @@ def test_update_user_information():
         mock_update_user_info.return_value = None
         response = client.post("/users/info", json=user_info_request, headers={"Authorization": "Bearer testtoken"})
         assert response.status_code == 201
+
+
+def test_update_user_information_requires_display_name():
+    user_info_request = {
+        "firstname": "John",
+        "lastname": "Doe",
+        "educations": [],
+        "social_profiles": []
+    }
+    with patch("pecha_api.users.users_views.update_user_info") as mock_update_user_info:
+        response = client.post("/users/info", json=user_info_request, headers={"Authorization": "Bearer testtoken"})
+        assert response.status_code == 422
+        mock_update_user_info.assert_not_called()
 
 def test_upload_user_avatar_image():
     with patch("pecha_api.users.users_views.upload_user_image") as mock_upload_user_image:
