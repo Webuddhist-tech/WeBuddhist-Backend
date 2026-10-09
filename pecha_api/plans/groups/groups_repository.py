@@ -595,6 +595,7 @@ def create_group(
     group: AuthorGroup,
     metadata_entries: List[AuthorGroupMetadata],
     owner_member: AuthorGroupMember,
+    creator_user_id: Optional[UUID] = None,
 ) -> AuthorGroup:
     db.add(group)
     db.flush()
@@ -603,6 +604,10 @@ def create_group(
         db.add(entry)
     owner_member.group_id = group.id
     db.add(owner_member)
+    db.flush()
+    if creator_user_id is not None:
+        # The creator starts out joined, in the same transaction as the group.
+        upsert_group_join(db=db, group_id=group.id, user_id=creator_user_id, commit=False)
     db.commit()
     db.refresh(group)
     return group

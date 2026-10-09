@@ -16,6 +16,7 @@ from pecha_api.plans.groups.groups_enums import (
 )
 from pecha_api.plans.groups.groups_repository import (
     clear_user_series_partner_ids_for_group,
+    create_group,
     create_group_join_request,
     has_pending_join_request,
     list_join_requests_by_group,
@@ -455,6 +456,30 @@ def test_list_join_requests_by_group_filters_by_status():
     assert rows == []
     assert total == 0
     base.filter.assert_called_once()
+
+
+def test_create_group_joins_the_creator_before_committing():
+    db = _make_session_mock()
+    group = MagicMock(id=uuid.uuid4())
+    user_id = uuid.uuid4()
+
+    with patch("pecha_api.plans.groups.groups_repository.upsert_group_join") as join:
+        create_group(
+            db=db, group=group, metadata_entries=[], owner_member=MagicMock(),
+            creator_user_id=user_id,
+        )
+
+    join.assert_called_once_with(db=db, group_id=group.id, user_id=user_id, commit=False)
+    db.commit.assert_called_once()
+
+
+def test_create_group_without_a_creator_user_joins_no_one():
+    db = _make_session_mock()
+
+    with patch("pecha_api.plans.groups.groups_repository.upsert_group_join") as join:
+        create_group(db=db, group=MagicMock(), metadata_entries=[], owner_member=MagicMock())
+
+    join.assert_not_called()
 
 
 def test_create_group_join_request_commits_and_refreshes():
