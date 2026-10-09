@@ -1,7 +1,7 @@
 """add event_youtube_live_sync
 
 Revision ID: ytls1a2b3c4d5e
-Revises: tva1a2b3c4d5e
+Revises: d8ee2e5050ab
 Create Date: 2026-10-10 00:00:00.000000
 
 Schedules an admin sets up in Studio for individual events: at the chosen
@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql
 from migrations.idempotency import index_exists, table_exists
 
 revision: str = "ytls1a2b3c4d5e"
-down_revision: Union[str, None] = "tva1a2b3c4d5e"
+down_revision: Union[str, None] = "d8ee2e5050ab"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
