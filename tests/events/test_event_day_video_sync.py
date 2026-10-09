@@ -296,12 +296,12 @@ def test_failure_is_rolled_back_and_not_raised() -> None:
     invalidate.assert_not_called()
 
 
-def test_plan_start_date_is_read_in_the_events_timezone() -> None:
+def test_plan_start_date_is_its_stored_calendar_date_in_any_event_timezone() -> None:
     from pecha_api.events.event_day_video_sync import _plan_start_date
 
-    # 20:00 UTC on 1 Oct is already 2 Oct in Asia/Kolkata (+05:30), the same
-    # calendar the event's "today" is read in.
-    plan = SimpleNamespace(start_date=datetime(2026, 10, 1, 20, 0, tzinfo=timezone.utc))
-    event = SimpleNamespace(timezone="Asia/Kolkata", start_date=None)
+    # Midnight UTC on 1 Oct is still 30 Sep in Los Angeles, but the series
+    # schedule counts the plan from 1 Oct, so day 1 must stay 1 Oct.
+    plan = SimpleNamespace(start_date=datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc))
+    event = SimpleNamespace(timezone="America/Los_Angeles", start_date=None)
 
-    assert _plan_start_date(event, plan).isoformat() == "2026-10-02"
+    assert _plan_start_date(event, plan).isoformat() == "2026-10-01"

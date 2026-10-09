@@ -177,9 +177,10 @@ def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> N
     trusted caller has proved ownership of its email.
 
     Signup could not link it: an email/password registration proves nothing.
-    That same weakness is why the account's password is cleared first when the
-    account came from such a signup - whoever set it may not be the owner, and
-    would otherwise inherit the Author's permissions. The verified owner signs
+    That same weakness is why the account's password and every token already
+    issued are revoked first when the account came from such a signup -
+    whoever set the password may not be the owner, and would otherwise inherit
+    the Author's permissions. The verified owner signs
     in through their identity provider or resets the password by email.
     Best-effort and fail-closed: any error leaves the Author unlinked.
     """
@@ -193,8 +194,12 @@ def claim_author_for_verified_login(create_user_request: CreateUserRequest) -> N
             author = find_claimable_author(db=db_session, user=user)
             if author is None:
                 return
-            if user.registration_source == RegistrationSource.EMAIL.value and user.password:
+            if user.registration_source == RegistrationSource.EMAIL.value:
+                # Credentials of an unverified signup: the password, and every
+                # token already issued - a refresh token would otherwise keep
+                # minting access tokens that gain the Author's permissions.
                 user.password = None
+                user.tokens_valid_after = datetime.now(timezone.utc)
                 user = update_user(db=db_session, user=user)
             link_author_to_user(db=db_session, author=author, user_id=user.id)
     except Exception:

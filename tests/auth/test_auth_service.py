@@ -1078,6 +1078,7 @@ class TestClaimAuthorForVerifiedLogin:
         mock_update, mock_link = self._run(user, author)
 
         assert user.password is None
+        assert user.tokens_valid_after is not None
         mock_update.assert_called_once()
         mock_link.assert_called_once_with(db=ANY, author=author, user_id=user.id)
 
