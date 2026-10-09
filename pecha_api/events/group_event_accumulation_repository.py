@@ -173,23 +173,13 @@ def _validate_group_accumulator(
         )
 
 
-def sync_event_accumulations(
+def _validate_sync_input_items(
     db: Session,
     *,
-    event_id: UUID,
     group_id: UUID,
     inputs: Sequence[EventAccumulationSyncInput],
-) -> List[GroupEventAccumulation]:
-    existing = list_accumulations_for_event(db, event_id)
-    existing_by_id = {row.id: row for row in existing}
-    existing_by_accumulator = {row.group_accumulator_id: row for row in existing}
-
-    if not inputs:
-        for row in existing:
-            db.delete(row)
-        db.flush()
-        return []
-
+    existing_by_id: Dict[UUID, GroupEventAccumulation],
+) -> None:
     seen_ids: Set[UUID] = set()
     seen_accumulators: Set[UUID] = set()
     for item in inputs:
@@ -217,6 +207,24 @@ def sync_event_accumulations(
             )
         seen_accumulators.add(item.group_accumulator_id)
 
+
+@dataclass
+class _SyncRowsState:
+    payload_ids: Set[UUID]
+    id_to_row: Dict[UUID, GroupEventAccumulation]
+    key_to_id: Dict[str, UUID]
+    resolved_parents: List[Tuple[UUID, EventAccumulationSyncInput]]
+    accumulator_updates: List[Tuple[GroupEventAccumulation, UUID]]
+
+
+def _materialize_sync_rows(
+    db: Session,
+    *,
+    event_id: UUID,
+    inputs: Sequence[EventAccumulationSyncInput],
+    existing_by_id: Dict[UUID, GroupEventAccumulation],
+    existing_by_accumulator: Dict[UUID, GroupEventAccumulation],
+) -> _SyncRowsState:
     payload_ids: Set[UUID] = set()
     key_to_id: Dict[str, UUID] = {}
     id_to_row: Dict[UUID, GroupEventAccumulation] = {}
@@ -255,13 +263,21 @@ def sync_event_accumulations(
             key_to_id[item.client_key] = row.id
         resolved_parents.append((row.id, item))
 
-    for row in existing:
-        if row.id not in payload_ids:
-            db.delete(row)
-    db.flush()
+    return _SyncRowsState(
+        payload_ids=payload_ids,
+        id_to_row=id_to_row,
+        key_to_id=key_to_id,
+        resolved_parents=resolved_parents,
+        accumulator_updates=accumulator_updates,
+    )
 
-    _apply_group_accumulator_id_updates(db, accumulator_updates)
 
+def _parent_ids_for_sync_inputs(
+    resolved_parents: Sequence[Tuple[UUID, EventAccumulationSyncInput]],
+    *,
+    key_to_id: Dict[str, UUID],
+    payload_ids: Set[UUID],
+) -> Dict[UUID, Optional[UUID]]:
     parent_by_id: Dict[UUID, Optional[UUID]] = {}
     for row_id, item in resolved_parents:
         parent_id: Optional[UUID] = None
@@ -286,11 +302,53 @@ def sync_event_accumulations(
                 detail="Accumulation link cannot be its own parent",
             )
         parent_by_id[row_id] = parent_id
+    return parent_by_id
 
+
+def sync_event_accumulations(
+    db: Session,
+    *,
+    event_id: UUID,
+    group_id: UUID,
+    inputs: Sequence[EventAccumulationSyncInput],
+) -> List[GroupEventAccumulation]:
+    existing = list_accumulations_for_event(db, event_id)
+    existing_by_id = {row.id: row for row in existing}
+    existing_by_accumulator = {row.group_accumulator_id: row for row in existing}
+
+    if not inputs:
+        for row in existing:
+            db.delete(row)
+        db.flush()
+        return []
+
+    _validate_sync_input_items(
+        db, group_id=group_id, inputs=inputs, existing_by_id=existing_by_id
+    )
+    sync_state = _materialize_sync_rows(
+        db,
+        event_id=event_id,
+        inputs=inputs,
+        existing_by_id=existing_by_id,
+        existing_by_accumulator=existing_by_accumulator,
+    )
+
+    for row in existing:
+        if row.id not in sync_state.payload_ids:
+            db.delete(row)
+    db.flush()
+
+    _apply_group_accumulator_id_updates(db, sync_state.accumulator_updates)
+
+    parent_by_id = _parent_ids_for_sync_inputs(
+        sync_state.resolved_parents,
+        key_to_id=sync_state.key_to_id,
+        payload_ids=sync_state.payload_ids,
+    )
     _detect_cycles(parent_by_id)
 
     for row_id, parent_id in parent_by_id.items():
-        id_to_row[row_id].parent_id = parent_id
+        sync_state.id_to_row[row_id].parent_id = parent_id
 
     db.flush()
     return list_accumulations_for_event(db, event_id)

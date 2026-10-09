@@ -128,10 +128,13 @@ class TestCreate:
     def test_one_count_per_day(self, ctx):
         with patch(f"{_SVC}.user_exists", return_value=True), patch(
             f"{_SVC}.find_in_person_count_in_range", return_value=_row()
-        ), patch(f"{_SVC}.add_in_person_count") as mock_add, pytest.raises(HTTPException) as exc:
-            service.create_in_person_count_service(
-                token="t", event_id=ctx.event.id, request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1)
-            )
+        ), patch(f"{_SVC}.add_in_person_count") as mock_add:
+            with pytest.raises(HTTPException) as exc:
+                service.create_in_person_count_service(
+                    token="t",
+                    event_id=ctx.event.id,
+                    request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1),
+                )
         assert (exc.value.status_code, exc.value.detail) == (409, service.IN_PERSON_COUNT_EXISTS)
         mock_add.assert_not_called()
 
@@ -144,10 +147,13 @@ class TestCreate:
         assert exc.value.detail == "EVENT_HAS_NO_GROUP_ACCUMULATOR"
 
     def test_missing_in_person_user(self, ctx):
-        with patch(f"{_SVC}.user_exists", return_value=False), pytest.raises(HTTPException) as exc:
-            service.create_in_person_count_service(
-                token="t", event_id=ctx.event.id, request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1)
-            )
+        with patch(f"{_SVC}.user_exists", return_value=False):
+            with pytest.raises(HTTPException) as exc:
+                service.create_in_person_count_service(
+                    token="t",
+                    event_id=ctx.event.id,
+                    request=CreateInPersonCountRequest(day=date(2026, 10, 1), count=1),
+                )
         assert exc.value.detail == service.IN_PERSON_USER_NOT_FOUND
 
 

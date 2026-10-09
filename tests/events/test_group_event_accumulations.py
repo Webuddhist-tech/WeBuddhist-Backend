@@ -13,9 +13,13 @@ from pecha_api.events.event_accumulation_in_person import (
     resolve_manual_in_person_target,
 )
 from pecha_api.events.event_enums import EventAccumulationCountMode
-from pecha_api.events.event_service import _accumulation_links_to_dtos
+from pecha_api.events.event_service import (
+    _accumulation_links_for_dto,
+    _accumulation_links_to_dtos,
+)
 from pecha_api.events.group_event_accumulation_repository import (
     EventAccumulationSyncInput,
+    resolve_primary_group_accumulator_id,
     sync_event_accumulations,
     upsert_legacy_single_accumulation,
 )
@@ -420,3 +424,64 @@ def test_resolve_single_manual_link_without_event_accumulation_id():
         link_id, ga_id = resolve_manual_in_person_target(db, event, event_accumulation_id=None)
     assert link_id == praise_link_id
     assert ga_id == praise_ga
+
+
+def test_accumulation_links_for_dto_ignores_non_event_objects():
+    assert _accumulation_links_for_dto(MagicMock()) == []
+
+
+def test_resolve_primary_prefers_manual_in_person_link():
+    manual_ga = uuid4()
+    offline_ga = uuid4()
+    manual = _link(
+        link_id=uuid4(),
+        group_accumulator_id=manual_ga,
+        count_mode=EventAccumulationCountMode.MANUAL_IN_PERSON.value,
+        display_order=2,
+    )
+    offline = _link(
+        link_id=uuid4(),
+        group_accumulator_id=offline_ga,
+        count_mode=EventAccumulationCountMode.OFFLINE_PARTICIPANTS.value,
+        display_order=1,
+    )
+    assert resolve_primary_group_accumulator_id([offline, manual]) == manual_ga
+
+
+def test_sync_rejects_duplicate_group_accumulator_in_request():
+    event_id = uuid4()
+    group_id = uuid4()
+    ga_id = uuid4()
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    ga = MagicMock(group_id=group_id, deleted_at=None)
+    db.query.return_value.filter.return_value.first.return_value = ga
+
+    with pytest.raises(HTTPException) as exc:
+        sync_event_accumulations(
+            db,
+            event_id=event_id,
+            group_id=group_id,
+            inputs=[
+                EventAccumulationSyncInput(group_accumulator_id=ga_id),
+                EventAccumulationSyncInput(group_accumulator_id=ga_id),
+            ],
+        )
+    assert exc.value.detail == "Duplicate group_accumulator_id in request"
+
+
+def test_sync_clears_all_links_when_payload_empty():
+    event_id = uuid4()
+    existing = MagicMock(id=uuid4())
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [
+        existing
+    ]
+
+    result = sync_event_accumulations(
+        db, event_id=event_id, group_id=uuid4(), inputs=[]
+    )
+
+    assert result == []
+    db.delete.assert_called_once_with(existing)
+    db.flush.assert_called()

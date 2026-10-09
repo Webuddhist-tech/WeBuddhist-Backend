@@ -104,11 +104,15 @@ def test_event_to_dto_times_follow_occurrence_dates() -> None:
     occurrence_start = datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc)
     occurrence_end = datetime(2026, 11, 1, 6, 15, tzinfo=timezone.utc)
 
+    from pecha_api.events.event_service import _EventDtoDisplay
+
     dto = _event_to_dto(
         _event(),
-        start_date=occurrence_start,
-        end_date=occurrence_end,
-        occurrence_date=occurrence_start,
+        display=_EventDtoDisplay(
+            start_date=occurrence_start,
+            end_date=occurrence_end,
+            occurrence_date=occurrence_start,
+        ),
     )
 
     assert dto.start_time == "09:30"
