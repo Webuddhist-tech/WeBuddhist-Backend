@@ -25,6 +25,7 @@ from pecha_api.events.event_reminder_materialize_service import (
     materialize_recurring_event_reminders,
     purge_expired_event_reminders,
 )
+from pecha_api.events.youtube_live_sync_service import run_due_youtube_live_syncs
 from pecha_api.group_posts.notification_dispatch_service import (
     reconcile_undispatched_group_post_notifications,
 )
@@ -209,6 +210,16 @@ def setup_scheduler() -> None:
         max_instances=1,
     )
 
+    youtube_live_sync_interval = max(get_int("YOUTUBE_LIVE_SYNC_TICK_SECONDS"), 1)
+    scheduler.add_job(
+        run_due_youtube_live_syncs,
+        IntervalTrigger(seconds=youtube_live_sync_interval),
+        id="run_due_youtube_live_syncs",
+        name="Add live YouTube streams to running events at each group's times",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     if not scheduler.running:
         scheduler.start()
     logger.info(
@@ -218,7 +229,8 @@ def setup_scheduler() -> None:
         "re-enqueueing undispatched group post notifications every %s second(s); "
         "re-enqueueing undispatched event notifications every %s second(s); "
         "dispatching due event reminders every %s second(s); "
-        "materializing recurring event reminders every %s second(s)",
+        "materializing recurring event reminders every %s second(s); "
+        "checking for groups' YouTube live sync times every %s second(s)",
         expiry_days,
         reconcile_interval,
         chat_reconcile_interval,
@@ -226,6 +238,7 @@ def setup_scheduler() -> None:
         event_reconcile_interval,
         event_reminder_dispatch_interval,
         event_reminder_materialize_interval,
+        youtube_live_sync_interval,
     )
 
 
