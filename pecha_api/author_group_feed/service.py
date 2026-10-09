@@ -317,7 +317,7 @@ def _author_group_feed_event_item_dto(
 def _author_group_feed_ranked_entries(
     posts: Sequence[GroupPost],
     one_shot_keys: Sequence[Row[Any]],
-    expanded_recurring: Sequence[dict],
+    expanded_recurring: Sequence[Dict[str, Any]],
     *,
     now: datetime,
 ) -> List[Tuple[datetime, AuthorGroupFeedItemType, object]]:
