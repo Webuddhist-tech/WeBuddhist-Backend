@@ -1,6 +1,7 @@
 from contextlib import closing
 from http import HTTPMethod
 from io import BytesIO
+from typing import BinaryIO, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -54,6 +55,35 @@ def upload_bytes(bucket_name: str, s3_key: str, file: BytesIO, content_type: str
                 "ExpectedBucketOwner": get("AWS_BUCKET_OWNER")
             }
         )
+        return s3_key
+    except ClientError as e:
+        logging.error(e)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to upload file to S3.")
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="An unexpected error occurred.")
+
+
+def upload_stream(
+    bucket_name: str,
+    s3_key: str,
+    fileobj: BinaryIO,
+    content_type: str,
+    content_disposition: Optional[str] = None,
+) -> str:
+    """Upload a file-like object as is, streamed rather than read into memory.
+
+    `content_disposition` lets a stored document be served as a download, so
+    a presigned link to an uploaded HTML or SVG never renders in the browser.
+    """
+    extra_args = {
+        "ContentType": content_type,
+        "ExpectedBucketOwner": get("AWS_BUCKET_OWNER"),
+    }
+    if content_disposition:
+        extra_args["ContentDisposition"] = content_disposition
+    try:
+        s3_client.upload_fileobj(Fileobj=fileobj, Bucket=bucket_name, Key=s3_key, ExtraArgs=extra_args)
         return s3_key
     except ClientError as e:
         logging.error(e)
