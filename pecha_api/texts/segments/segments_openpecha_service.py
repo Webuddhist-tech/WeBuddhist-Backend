@@ -31,6 +31,7 @@ from .segments_response_models import (
     V2SegmentTranslationsResponse,
 )
 from pecha_api.search.search_service import flatten_content_search_matches
+from pecha_api.plans.shared.subtask_content_resolver import fetch_segment_content_safe
 from ..texts_openpecha_api import fetch_text_source_link
 from ..texts_openpecha_service import _extract_title
 
@@ -407,16 +408,22 @@ async def search_segments_by_content_service(
         logger.warning("Unexpected OpenPecha content search response type: %s", type(results).__name__)
         return SegmentResponse(segments=[])
 
+    # A hit's context is a snippet that can span several segments, so each
+    # segment's own body is fetched; one that can't be is left out.
     matches = flatten_content_search_matches(results)[:SEGMENT_SEARCH_LIMIT]
+    contents = await asyncio.gather(
+        *[fetch_segment_content_safe(match["pecha_segment_id"]) for match in matches]
+    )
     return SegmentResponse(
         segments=[
             SegmentDTO(
                 id=match["pecha_segment_id"],
                 pecha_segment_id=match["pecha_segment_id"],
                 text_id=match["text_id"],
-                content=match["content"],
+                content=content,
                 type=SegmentType.SOURCE,
             )
-            for match in matches
+            for match, content in zip(matches, contents)
+            if content is not None
         ]
     )

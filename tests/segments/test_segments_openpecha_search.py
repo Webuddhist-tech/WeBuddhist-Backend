@@ -17,13 +17,19 @@ async def test_maps_openpecha_hits_to_segments():
         {"score": 0.4, "context": "weaker", "text_id": "t1", "edition_id": "e1", "segment_ids": ["s1"]},
         {"score": 0.9, "context": "best", "text_id": "t2", "edition_id": "e2", "segment_ids": ["s2", "s1"]},
     ]
-    with patch(f"{MODULE}.search_by_content", new_callable=AsyncMock, return_value=hits) as search:
+    bodies = {"s1": "body of s1", "s2": "body of s2"}
+
+    async def content(segment_id):
+        return bodies[segment_id]
+
+    with patch(f"{MODULE}.search_by_content", new_callable=AsyncMock, return_value=hits) as search,          patch(f"{MODULE}.fetch_segment_content_safe", side_effect=content):
         response = await search_segments_by_content_service(SegmentSearchRequest(content="refuge"))
 
     search.assert_awaited_once_with(query="refuge", limit=20)
+    # Each segment carries its own body, not the hit's shared snippet.
     assert [(s.id, s.pecha_segment_id, s.text_id, s.content) for s in response.segments] == [
-        ("s1", "s1", "t2", "best"),
-        ("s2", "s2", "t2", "best"),
+        ("s1", "s1", "t2", "body of s1"),
+        ("s2", "s2", "t2", "body of s2"),
     ]
     assert all(s.type == SegmentType.SOURCE for s in response.segments)
 
@@ -42,3 +48,16 @@ async def test_empty_on_unexpected_response():
         response = await search_segments_by_content_service(SegmentSearchRequest(content="refuge"))
 
     assert response.segments == []
+
+
+@pytest.mark.asyncio
+async def test_leaves_out_segments_whose_content_cannot_be_fetched():
+    hits = [{"score": 0.9, "context": "snippet", "text_id": "t1", "edition_id": "e1", "segment_ids": ["s1", "s2"]}]
+
+    async def content(segment_id):
+        return None if segment_id == "s1" else "body of s2"
+
+    with patch(f"{MODULE}.search_by_content", new_callable=AsyncMock, return_value=hits),          patch(f"{MODULE}.fetch_segment_content_safe", side_effect=content):
+        response = await search_segments_by_content_service(SegmentSearchRequest(content="refuge"))
+
+    assert [(s.id, s.content) for s in response.segments] == [("s2", "body of s2")]

@@ -17,7 +17,7 @@ def _mock_db(rowcount: int = 0, skipped_rows=None):
 
 
 class TestRemapSegmentIdsAcceptsPlainStrings:
-    def test_non_uuid_segment_id_updates_segment_ids_and_bookmarks_only(self):
+    def test_openpecha_segment_ids_update_every_segment_column(self):
         db = _mock_db(rowcount=1)
 
         updated, skipped = remap_segment_ids(
@@ -34,17 +34,16 @@ class TestRemapSegmentIdsAcceptsPlainStrings:
         # pecha_segment_id is never touched by the remap anymore.
         assert "sub_tasks.pecha_segment_id" not in updated
 
-        # tag_segments.segment_id is a native UUID column and can't hold a
-        # non-UUID value, so it's skipped rather than erroring.
-        assert "tag_segments" not in updated
+        # tag_segments.segment_id is a string column, so OpenPecha ids remap too.
+        assert "tag_segments" in updated
 
-    def test_uuid_segment_id_also_touches_tag_segments(self):
+    def test_mongo_uuid_to_openpecha_id_touches_tag_segments(self):
         db = _mock_db(rowcount=1)
 
         updated, skipped = remap_segment_ids(
             db=db,
             old_segment_id="11111111-1111-1111-1111-111111111111",
-            new_segment_id="22222222-2222-2222-2222-222222222222",
+            new_segment_id="06gCCWizfl2OLp0ehIpwB",
         )
 
         assert "sub_tasks.segment_ids" in updated
@@ -98,3 +97,48 @@ class TestRemapTextIdsAcceptsPlainStrings:
 
         assert isinstance(updated, dict)
         assert isinstance(skipped, list)
+
+
+
+class TestRemapTagSegmentsAgainstARealTable:
+    """tag_segments.segment_id holds strings, so a Mongo UUID can be renamed
+    to an OpenPecha id in place."""
+
+    def test_renames_a_mongo_uuid_to_an_openpecha_id(self):
+        from uuid import uuid4
+
+        from sqlalchemy import Column, MetaData, String, Table, create_engine, select
+        from sqlalchemy.orm import Session
+
+        from pecha_api.id_remap.id_remap_repository import _conflict_aware_update
+
+        table = Table(
+            "tag_segments",
+            MetaData(),
+            Column("tag_id", String, primary_key=True),
+            Column("segment_id", String(255), primary_key=True),
+            Column("language", String, primary_key=True),
+        )
+        engine = create_engine("sqlite:///:memory:")
+        table.metadata.create_all(engine)
+        tag_id = str(uuid4())
+        old_id = "11111111-1111-1111-1111-111111111111"
+
+        with Session(engine) as db:
+            db.execute(table.insert(), [
+                {"tag_id": tag_id, "segment_id": old_id, "language": "EN"},
+                {"tag_id": tag_id, "segment_id": "keep-me", "language": "EN"},
+            ])
+            count, skipped = _conflict_aware_update(
+                db=db,
+                table=table,
+                id_column="segment_id",
+                owner_columns=["tag_id", "language"],
+                old_value=old_id,
+                new_value="06gCCWizfl2OLp0ehIpwB",
+            )
+            ids = sorted(db.execute(select(table.c.segment_id)).scalars())
+
+        assert count == 1
+        assert skipped == []
+        assert ids == ["06gCCWizfl2OLp0ehIpwB", "keep-me"]
