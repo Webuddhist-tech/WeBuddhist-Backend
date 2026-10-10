@@ -362,6 +362,10 @@ DEFAULTS = dict(
     # only wakes every TICK seconds to see whether any group's time has come,
     # and still runs a time it woke up to within GRACE seconds of it.
     GEMINI_YOUTUBE_LIVE_LANGUAGE_MODEL="gemini-3.8-flash",
+    GEMINI_LIVE_SHORT_TITLE_MODEL="gemini-3.8-flash",
+    # Encrypts live controller tokens so Studio can copy them again. Falls
+    # back to JWT_SECRET_KEY; changing it makes stored tokens uncopyable.
+    LIVE_CONTROL_TOKEN_KEY="WebuddHISt11ve",
     YOUTUBE_LIVE_SYNC_TICK_SECONDS=60,
     YOUTUBE_LIVE_SYNC_GRACE_SECONDS=600,
 

@@ -170,3 +170,98 @@ def suggest_live_stream_languages(titles_by_id: Dict[str, str]) -> Dict[str, Lan
     except Exception:
         logger.exception("Gemini live stream language suggestion failed")
         return {}
+
+
+_SHORT_TITLE_PROMPT = """You name the sections of a Buddhist liturgy for a live recitation controller.
+
+The operator taps these names in a narrow sidebar while the room recites, so each
+section needs a short title and one emoji icon.
+
+Rules:
+- Write each short title in the language code {language}; if a section title is in
+  another language, translate it into {language}.
+- At most {max_len} characters, ideally two to four words; keep the words a
+  practitioner would recognise (the name of the prayer, deity or practice).
+- One emoji per section that fits its content (e.g. a lotus for an offering, folded
+  hands for a supplication). Never repeat the same emoji for two sections unless
+  they are the same kind of practice.
+- No numbering and no trailing punctuation.
+
+Respond with JSON only, in this exact shape, with every section id as a key:
+{{
+  "sections": {{
+    "<section id>": {{"title": "...", "icon": "..."}}
+  }}
+}}
+
+Sections (id: title), in reading order:
+{sections}
+"""
+
+
+def parse_short_title_payload(
+    payload: object, section_ids: Iterable[str], max_len: int
+) -> Dict[str, Tuple[str, str]]:
+    """Keep only sections that were asked about, with a non-empty title; titles
+    are cut to `max_len` and icons to 16 characters."""
+    sections = payload.get("sections") if isinstance(payload, dict) else None
+    if not isinstance(sections, dict):
+        return {}
+    result: Dict[str, Tuple[str, str]] = {}
+    for section_id in section_ids:
+        raw = sections.get(section_id)
+        if not isinstance(raw, dict):
+            continue
+        title = raw.get("title")
+        icon = raw.get("icon")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        result[section_id] = (
+            " ".join(title.split())[:max_len],
+            icon.strip()[:16] if isinstance(icon, str) else "",
+        )
+    return result
+
+
+def suggest_short_titles(
+    titles_by_id: Dict[str, str], language: str, max_len: int
+) -> Optional[Dict[str, Tuple[str, str]]]:
+    """One Gemini call for all of an edition's sections: section id to a short
+    title and an icon. None when Gemini is unavailable or the call fails."""
+    if not titles_by_id:
+        return {}
+    api_key = (config.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        logger.warning("GEMINI_API_KEY is not set; short titles not suggested")
+        return None
+
+    sections = "\n".join(
+        f"{section_id}: {' '.join(title.split())[:300]}"
+        for section_id, title in titles_by_id.items()
+    )
+    prompt = _SHORT_TITLE_PROMPT.format(language=language, max_len=max_len, sections=sections)
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        logger.exception("google-genai is not installed")
+        return None
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=config.get("GEMINI_LIVE_SHORT_TITLE_MODEL"),
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
+        raw = (response.text or "").strip()
+        if not raw:
+            return None
+        return parse_short_title_payload(json.loads(raw), titles_by_id, max_len)
+    except Exception:
+        logger.exception("Gemini short title suggestion failed")
+        return None
