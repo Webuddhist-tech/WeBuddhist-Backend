@@ -4,7 +4,7 @@
 
 The backend is a FastAPI application with a single app in `pecha_api/app.py`.
 Routers are registered on `api` with `root_path="/api/v1"` and a shared
-lifespan in `pecha_api/db/mongo_database.py`.
+lifespan in `pecha_api/db/lifespan.py`.
 
 Each feature module typically contains:
 - `*_views.py` for routes
@@ -42,7 +42,6 @@ Routers included in `pecha_api/app.py`:
 
 Local services used during development (see `local_setup/docker-compose.yml`):
 - Postgres (port 5434)
-- MongoDB (port 27017)
 - Dragonfly/Redis (port 6379)
 - Elasticsearch (port 9200)
 

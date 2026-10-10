@@ -7,60 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 from pecha_api.bookmarks.bookmark_enums import BookmarkType
-from pecha_api.texts.first_segment_preview_service import resolve_segment_by_ref
 from pecha_api.bookmarks.bookmark_utils import (
     enrich_text_bookmark,
 )
-
-
-@pytest.mark.asyncio
-async def test_resolve_segment_by_ref_with_uuid():
-    segment_id = str(uuid4())
-    mock_segment = MagicMock()
-
-    with patch(
-        "pecha_api.texts.first_segment_preview_service.Segment.get_segment_by_id",
-        new_callable=AsyncMock,
-        return_value=mock_segment,
-    ):
-        result = await resolve_segment_by_ref(segment_id)
-
-    assert result is mock_segment
-
-
-@pytest.mark.asyncio
-async def test_resolve_segment_by_ref_with_pecha_id_when_uuid_lookup_fails():
-    mock_segment = MagicMock()
-
-    with patch(
-        "pecha_api.texts.first_segment_preview_service.Segment.get_segment_by_id",
-        new_callable=AsyncMock,
-        return_value=None,
-    ), patch(
-        "pecha_api.texts.first_segment_preview_service.Segment.get_segment_by_pecha_segment_id",
-        new_callable=AsyncMock,
-        return_value=mock_segment,
-    ) as mock_pecha_lookup:
-        result = await resolve_segment_by_ref(str(uuid4()))
-
-    mock_pecha_lookup.assert_awaited_once()
-    assert result is mock_segment
-
-
-@pytest.mark.asyncio
-async def test_resolve_segment_by_ref_with_non_uuid_uses_pecha_lookup():
-    verse_locator = "segment-ref-abc-123"
-    mock_segment = MagicMock()
-
-    with patch(
-        "pecha_api.texts.first_segment_preview_service.Segment.get_segment_by_pecha_segment_id",
-        new_callable=AsyncMock,
-        return_value=mock_segment,
-    ) as mock_pecha_lookup:
-        result = await resolve_segment_by_ref(verse_locator)
-
-    mock_pecha_lookup.assert_awaited_once_with(pecha_segment_id=verse_locator)
-    assert result is mock_segment
 
 
 @pytest.mark.asyncio
@@ -326,9 +275,9 @@ async def test_enrich_text_bookmark_without_verse_uses_first_segment():
         new_callable=AsyncMock,
         return_value=None,
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
-        return_value=(segment_id, "Segment content"),
+        return_value=MagicMock(id=segment_id, content="Segment content"),
     ), patch(
         "pecha_api.bookmarks.bookmark_utils.get_text_by_id_from_openpecha",
         new_callable=AsyncMock,
@@ -405,9 +354,9 @@ async def test_enrich_text_bookmark_with_name_falls_back_to_first_segment_when_r
         new_callable=AsyncMock,
         return_value=mock_text,
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
-        return_value=(segment_id, "Fallback preview content"),
+        return_value=MagicMock(id=segment_id, content="Fallback preview content"),
     ):
         result = await enrich_text_bookmark(bookmark)
 
@@ -435,7 +384,7 @@ async def test_enrich_text_bookmark_returns_empty_when_segment_missing():
         new_callable=AsyncMock,
         return_value=MagicMock(title="Unused"),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
         return_value=None,
     ):
@@ -525,9 +474,9 @@ async def test_enrich_text_bookmark_handles_missing_text_details():
         new_callable=AsyncMock,
         side_effect=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Text not found."),
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
-        return_value=(segment_id, "Segment content"),
+        return_value=MagicMock(id=segment_id, content="Segment content"),
     ):
         result = await enrich_text_bookmark(bookmark)
 
@@ -560,13 +509,13 @@ async def test_enrich_text_bookmark_with_language_uses_localized_text():
         new_callable=AsyncMock,
         return_value=localized_text,
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
-        return_value=(segment_id, "English content"),
+        return_value=MagicMock(id=segment_id, content="English content"),
     ) as mock_preview:
         result = await enrich_text_bookmark(bookmark, language="BO")
 
-    mock_preview.assert_awaited_once_with(localized_text_id)
+    mock_preview.assert_awaited_once_with(text_id=localized_text_id)
     assert result["text"].id == localized_text_id
     assert result["text"].title == "བོད་ཡིག་ཁ་བྱང་"
 
@@ -1406,9 +1355,9 @@ async def test_enrich_text_bookmark_falls_back_when_localized_text_missing():
         new_callable=AsyncMock,
         return_value=mock_text,
     ), patch(
-        "pecha_api.bookmarks.bookmark_utils.build_first_segment_preview_for_text",
+        "pecha_api.bookmarks.bookmark_utils.get_first_segment_for_text",
         new_callable=AsyncMock,
-        return_value=(segment_id, "Fallback content"),
+        return_value=MagicMock(id=segment_id, content="Fallback content"),
     ):
         result = await enrich_text_bookmark(bookmark, language="BO")
 

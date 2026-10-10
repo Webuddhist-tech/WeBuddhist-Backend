@@ -90,11 +90,31 @@ __all__ = [
 
 
 class GroupMetadataInput(BaseModel):
+    """One language's text for a group. Only the title is required; the
+    sub-title and both descriptions may be left out or blank, and blank means
+    the same as left out. Creating and editing a group both go through this."""
+
     title: str
     sub_title: Optional[str] = None
     description: Optional[str] = None
     description_long: Optional[str] = None
     language: LanguageCode
+
+    @field_validator("title")
+    @classmethod
+    def validate_title_not_blank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Title is required")
+        return cleaned
+
+    @field_validator("sub_title", "description", "description_long")
+    @classmethod
+    def blank_optional_text_is_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class GroupSocialLinkInput(BaseModel):

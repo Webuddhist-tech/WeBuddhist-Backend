@@ -39,6 +39,14 @@ def _reminder_still_due(reminder_id: UUID, expected_fire_at: datetime) -> bool:
     )
 
 
+def _send_cutoff(now: datetime) -> datetime:
+    """Earliest fire time still worth sending at `now`. Anything older was
+    missed (backend down, scheduler stopped) and would now arrive after the
+    moment it announces."""
+    max_lateness = max(get_int("EVENT_REMINDER_MAX_LATENESS_SECONDS"), 0)
+    return now - timedelta(seconds=max_lateness)
+
+
 def _send_reminder(reminder_id: UUID, event_id: UUID, reminder_type: str, fire_at: datetime) -> str | None:
     try:
         sqs_message_id = send_event_notification_message(
@@ -78,7 +86,9 @@ def dispatch_due_event_reminders() -> int:
     now = datetime.now(timezone.utc)
 
     with SessionLocal() as db:
-        due = list_due_reminders(db, now=now, limit=batch_size)
+        due = list_due_reminders(
+            db, now=now, not_before=_send_cutoff(now), limit=batch_size,
+        )
         candidates = [
             (reminder.id, reminder.event_id, reminder.reminder_type, reminder.fire_at)
             for reminder in due
@@ -111,10 +121,13 @@ def reconcile_undispatched_event_reminders() -> int:
 
     grace_seconds = max(get_int("EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS"), 1)
     batch_size = max(get_int("EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE"), 1)
-    older_than = datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)
+    now = datetime.now(timezone.utc)
+    older_than = now - timedelta(seconds=grace_seconds)
 
     with SessionLocal() as db:
-        stuck = list_undispatched_reminders_missing_sqs_id(db, older_than=older_than, limit=batch_size)
+        stuck = list_undispatched_reminders_missing_sqs_id(
+            db, older_than=older_than, not_before=_send_cutoff(now), limit=batch_size,
+        )
         candidates = [
             (reminder.id, reminder.event_id, reminder.reminder_type, reminder.fire_at)
             for reminder in stuck

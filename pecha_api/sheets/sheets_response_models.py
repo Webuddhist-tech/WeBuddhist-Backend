@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from pecha_api.texts.segments.segments_models import SegmentType
+from pecha_api.texts.segments.segments_enum import SegmentType
 
 class Source(BaseModel):
     position: int

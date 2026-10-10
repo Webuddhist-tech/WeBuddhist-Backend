@@ -43,7 +43,7 @@ def get_segment_ids_map_for_tags(
     db: Session,
     tag_ids: List[UUID],
     language: str = "EN",
-) -> Dict[UUID, List[UUID]]:
+) -> Dict[UUID, List[str]]:
     if not tag_ids:
         return {}
     rows = db.execute(
@@ -52,7 +52,7 @@ def get_segment_ids_map_for_tags(
             tag_segments.c.language == language,
         )
     ).all()
-    mapping: Dict[UUID, List[UUID]] = {tag_id: [] for tag_id in tag_ids}
+    mapping: Dict[UUID, List[str]] = {tag_id: [] for tag_id in tag_ids}
     for tag_id, segment_id in rows:
         mapping[tag_id].append(segment_id)
     return mapping
@@ -165,7 +165,7 @@ def set_tag_plans(db: Session, tag: Tag, plan_ids: List[UUID], commit: bool = Tr
 def set_tag_segments(
     db: Session,
     tag: Tag,
-    segment_ids: List[UUID],
+    segment_ids: List[str],
     language: str = "EN",
     commit: bool = True,
 ) -> Tag:

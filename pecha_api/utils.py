@@ -2,10 +2,6 @@ from typing import Optional, List, Union
 import hashlib
 import io
 import logging
-from beanie import PydanticObjectId
-from fastapi import HTTPException
-from bson.errors import InvalidId
-from starlette import status
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 from .config import get_int
@@ -76,18 +72,6 @@ class Utils:
     def get_value_from_dict(values: dict[str, str], language: str):
         value = "" if not isinstance(values, dict) or not values else values.get(language, "")
         return value
-
-    @staticmethod
-    def get_parent_id(parent_id: Optional[str]):
-        topic_parent_id = None
-        if parent_id is not None:
-            try:
-                topic_parent_id = PydanticObjectId(parent_id)
-            except InvalidId as e:
-                logging.debug(f"error with id: ${e}")
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Parent id")
-
-        return topic_parent_id
 
     @staticmethod
     def get_number_by_language(value: int, language: str) -> str:

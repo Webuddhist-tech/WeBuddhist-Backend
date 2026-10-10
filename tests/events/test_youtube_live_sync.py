@@ -252,8 +252,9 @@ def test_only_live_now_streams_are_used():
 
 
 def test_new_link_goes_after_the_events_existing_youtube_links():
+    # The existing links are English, so a Tibetan stream is a new language.
     event = _event("CCCCCCCCCCC", "DDDDDDDDDDD")
-    _, db, _, _, _ = _run([_video("AAAAAAAAAAA")], [event], {"AAAAAAAAAAA": LanguageCode.EN})
+    _, db, _, _, _ = _run([_video("AAAAAAAAAAA")], [event], {"AAAAAAAAAAA": LanguageCode.BO})
     assert db.add.call_args.args[0].display_order == 3
 
 

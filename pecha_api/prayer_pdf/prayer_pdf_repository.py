@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -66,17 +66,17 @@ def delete_settings(db: Session, row: PrayerPdfSettings) -> None:
 def list_prayer_requests(
     db: Session,
     *,
-    room_id: UUID,
+    room_ids: Sequence[UUID],
     start_utc: datetime,
     end_utc: datetime,
 ) -> List[Tuple[ChatMessage, Users]]:
-    """A room's live prayer requests posted in [start_utc, end_utc), oldest
+    """The rooms' live prayer requests posted in [start_utc, end_utc), oldest
     first, each with the person who asked."""
     return (
         db.query(ChatMessage, Users)
         .join(Users, Users.id == ChatMessage.sender_id)
         .filter(
-            ChatMessage.room_id == room_id,
+            ChatMessage.room_id.in_(room_ids),
             ChatMessage.message_type == ChatMessageType.PRAYER.value,
             ChatMessage.deleted_at.is_(None),
             ChatMessage.created_at >= start_utc,
@@ -90,20 +90,20 @@ def list_prayer_requests(
 def page_prayer_requests(
     db: Session,
     *,
-    room_id: UUID,
+    room_ids: Sequence[UUID],
     start_utc: Optional[datetime],
     end_utc: Optional[datetime],
     skip: int,
     limit: int,
 ) -> Tuple[List[Tuple[ChatMessage, Users]], int]:
-    """One page of a room's live prayer requests, newest first, each with the
+    """One page of the rooms' live prayer requests, newest first, each with the
     person who asked, and how many there are in all. Without a window it
-    pages through every request the room has had."""
+    pages through every request the rooms have had."""
     query = (
         db.query(ChatMessage, Users)
         .join(Users, Users.id == ChatMessage.sender_id)
         .filter(
-            ChatMessage.room_id == room_id,
+            ChatMessage.room_id.in_(room_ids),
             ChatMessage.message_type == ChatMessageType.PRAYER.value,
             ChatMessage.deleted_at.is_(None),
         )

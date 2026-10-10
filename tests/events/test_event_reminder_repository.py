@@ -20,6 +20,8 @@ from pecha_api.events.event_reminder_model import EventReminder
 from pecha_api.events.event_reminder_repository import (
     clear_reminders_for_event,
     get_event_reminder_for_schedule,
+    list_due_reminders,
+    list_undispatched_reminders_missing_sqs_id,
     purge_reminders_before,
 )
 
@@ -161,3 +163,45 @@ def test_purge_drops_only_reminders_whose_moment_has_passed():
 
     assert deleted == 1
     assert db.query(EventReminder).count() == 1
+
+
+def test_due_list_skips_reminders_too_late_to_send():
+    """A backlog left by downtime must not go out on the first poll after it."""
+    Session = _make_sessionmaker()
+    db = Session()
+    now = datetime.now(timezone.utc)
+    on_time = _reminder(event_id=uuid4(), fire_at=now - timedelta(minutes=1))
+    db.add(on_time)
+    db.add(_reminder(event_id=uuid4(), fire_at=now - timedelta(hours=2)))
+    db.add(_reminder(event_id=uuid4(), fire_at=now + timedelta(minutes=5)))
+    db.commit()
+
+    due = list_due_reminders(
+        db, now=now, not_before=now - timedelta(minutes=5), limit=10,
+    )
+
+    assert [reminder.id for reminder in due] == [on_time.id]
+
+
+def test_stuck_list_skips_reminders_too_late_to_send():
+    Session = _make_sessionmaker()
+    db = Session()
+    now = datetime.now(timezone.utc)
+    claimed_at = now - timedelta(minutes=3)
+    recent = _reminder(
+        event_id=uuid4(), fire_at=now - timedelta(minutes=3), dispatched_at=claimed_at,
+    )
+    db.add(recent)
+    db.add(_reminder(
+        event_id=uuid4(), fire_at=now - timedelta(hours=2), dispatched_at=claimed_at,
+    ))
+    db.commit()
+
+    stuck = list_undispatched_reminders_missing_sqs_id(
+        db,
+        older_than=now - timedelta(minutes=2),
+        not_before=now - timedelta(minutes=5),
+        limit=10,
+    )
+
+    assert [reminder.id for reminder in stuck] == [recent.id]

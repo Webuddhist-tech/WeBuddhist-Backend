@@ -13,7 +13,7 @@ from ..plans_enums import ContentType
 logger = logging.getLogger(__name__)
 
 
-async def _fetch_segment_content_safe(segment_id: str) -> Optional[str]:
+async def fetch_segment_content_safe(segment_id: str) -> Optional[str]:
     try:
         return await cached_segment_value(
             cache_type=CacheType.OPENPECHA_SEGMENT_CONTENT,
@@ -54,7 +54,7 @@ async def resolve_subtask_content(
         return content
 
     segment_contents = await asyncio.gather(
-        *[_fetch_segment_content_safe(segment_id) for segment_id in segment_ids]
+        *[fetch_segment_content_safe(segment_id) for segment_id in segment_ids]
     )
 
     resolved_contents = [

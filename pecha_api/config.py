@@ -59,10 +59,8 @@ DEFAULTS = dict(
     MAX_AUDIO_FILE_SIZE = 50 * 1024 * 1024,
     ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'},
     ALLOWED_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'},
-    MONGO_CONNECTION_STRING="",
 
     WEBUDDHIST_STUDIO_BASE_URL="https://studio.webuddhist.com",
-    MONGO_DATABASE_NAME="webuddhist",
     REFRESH_TOKEN_EXPIRE_DAYS=30,
     VERSION="0.0.1",
     # Cache Configuration
@@ -230,6 +228,15 @@ DEFAULTS = dict(
     FEEDBACK_MAX_IMAGES=3,
     # Discord's per-message upload cap; above it the webhook rejects the post.
     FEEDBACK_MAX_TOTAL_IMAGE_MB=10,
+    # Studio text requests (POST /cms/author/text-requests): an author asks
+    # for chants that are not in the library yet. Always stored; also posted
+    # to this Discord webhook when set. Attachments go to S3, not to Discord,
+    # so they are not bound by Discord's upload cap.
+    DISCORD_TEXT_REQUEST_WEBHOOK_URL="",
+    TEXT_REQUEST_MAX_MESSAGE_LENGTH=4000,
+    TEXT_REQUEST_MAX_REPLY_LENGTH=4000,
+    TEXT_REQUEST_MAX_ATTACHMENTS=10,
+    TEXT_REQUEST_MAX_TOTAL_ATTACHMENT_MB=50,
     # /share/image serves an event's own photo, re-encoded as JPEG because the
     # stored WebP is not a format link-preview crawlers render. The endpoint is
     # public, so the fetch is bounded and the bytes are held per process.
@@ -317,6 +324,10 @@ DEFAULTS = dict(
     EVENT_REMINDER_MINUTES_BEFORE=10,
     EVENT_REMINDER_DISPATCH_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_BATCH_SIZE=100,
+    # A reminder more than this late is dropped rather than sent, so a
+    # backlog left by downtime doesn't push "starting in 10 min" for an event
+    # that has already started.
+    EVENT_REMINDER_MAX_LATENESS_SECONDS=300,
     EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE=50,

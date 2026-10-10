@@ -26,7 +26,10 @@ from pecha_api.texts.texts_openpecha_service import (
     get_text_versions_from_openpecha,
 )
 from pecha_api.texts.texts_openpecha_api import fetch_edition_text_id
-from pecha_api.recitations.recitations_services import build_first_segment_for_edition
+from pecha_api.recitations.recitations_services import (
+    build_first_segment_for_edition,
+    get_first_segment_for_text,
+)
 from pecha_api.plans.public.plan_repository import get_published_plan_by_id
 from pecha_api.plans.plans_enums import PlanStatus
 from pecha_api.plans.items.plan_items_models import PlanItem
@@ -47,9 +50,6 @@ from pecha_api.accumulator.group_accumulator_models import GroupAccumulator
 from pecha_api.accumulator.accumulator_service import (
     generate_mala_image_presigned_url,
     resolve_accumulator_bookmark_mala_image_url,
-)
-from pecha_api.texts.first_segment_preview_service import (
-    build_first_segment_preview_for_text,
 )
 from pecha_api.mantra.mantra_repository import get_mantra_by_id
 from pecha_api.plans.groups.groups_repository import (
@@ -129,13 +129,17 @@ async def _try_get_openpecha_text(text_id: str):
 
 
 async def _try_build_first_segment_preview(text_id: str):
+    """(segment_id, content) of the text's first openpecha segment, or None."""
     try:
-        return await build_first_segment_preview_for_text(text_id)
+        segment = await get_first_segment_for_text(text_id=text_id)
     except Exception:
         # A preview is a nice-to-have decoration; don't let a lookup failure
-        # (e.g. Mongo unavailable) 500 the whole bookmarks list.
+        # 500 the whole bookmarks list.
         logger.warning("Failed to build first segment preview for text %s", text_id, exc_info=True)
         return None
+    if segment is None:
+        return None
+    return segment.id, segment.content
 
 
 async def _resolve_edition_text_id(edition_id: str) -> Optional[str]:
