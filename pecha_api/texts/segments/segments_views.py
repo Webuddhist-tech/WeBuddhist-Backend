@@ -2,9 +2,7 @@ from fastapi.security import HTTPBearer
 from fastapi import APIRouter
 from starlette import status
 
-from .segments_service import (
-    search_segments_by_content_service,
-)
+from .segments_openpecha_service import search_segments_by_content_service
 from .segments_response_models import (
     SegmentResponse,
     SegmentSearchRequest,

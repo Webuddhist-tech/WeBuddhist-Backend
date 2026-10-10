@@ -249,10 +249,10 @@ def test_create_tag_with_plan_ids(sample_tag_dto):
 
 
 def test_create_tag_with_segment_ids(sample_tag_dto):
-    segment_id = uuid.uuid4()
+    segment_id = "06gCCWizfl2OLp0ehIpwB"
     payload = {
         "metadata": [{"language": "EN", "name": "Segments"}],
-        "segment_ids": [str(segment_id)]
+        "segment_ids": [segment_id]
     }
 
     with patch(

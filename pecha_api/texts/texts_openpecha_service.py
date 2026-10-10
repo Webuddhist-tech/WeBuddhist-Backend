@@ -2,8 +2,11 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any, List, Tuple
 
+import httpx
 from fastapi import HTTPException
 from starlette import status
+
+from pecha_api.error_contants import ErrorConstants
 
 from pecha_api.texts.texts_response_models import (
     AvailableLanguage,
@@ -249,12 +252,42 @@ async def _fetch_text_summary_by_edition_or_text_id(edition_or_text_id: str) -> 
         return None
 
 
+async def ensure_text_or_edition_exists(text_or_edition_id: str) -> None:
+    """404 unless OpenPecha knows this id as an edition or a text; 502 when
+    OpenPecha can't be asked."""
+    try:
+        text_id = await _resolve_text_or_edition_id(text_or_edition_id)
+        data = await fetch_text_by_id(text_id)
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ErrorConstants.TEXT_NOT_FOUND_MESSAGE,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch text from upstream service",
+        )
+    except Exception:
+        logger.exception("Failed to check OpenPecha text %s", text_or_edition_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to fetch text from upstream service",
+        )
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ErrorConstants.TEXT_NOT_FOUND_MESSAGE,
+        )
+
+
 async def get_texts_by_edition_or_text_ids(text_ids: List[str]) -> Dict[str, V2TextDTO]:
     """Resolve collection-item ids (OpenPecha edition or text ids) to text details.
 
-    Recitation collection items store OpenPecha edition ids as `text_id`, which
-    are never synced into the local Mongo `Text` collection, so details must
-    come straight from OpenPecha rather than a local lookup.
+    Recitation collection items store OpenPecha edition ids as `text_id`, and
+    details come straight from OpenPecha.
     """
     unique_ids = list(dict.fromkeys(text_ids))
     results = await asyncio.gather(

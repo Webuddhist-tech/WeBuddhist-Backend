@@ -2,11 +2,15 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from sqlalchemy.orm import strategies
-from .segments_models import Mapping
 
 from .segments_enum import SegmentType
 from pecha_api.texts.texts_response_models import TextDTO
 from pecha_api.plans.videos.plan_video_response_models import PlanVideoDTO
+
+
+class Mapping(BaseModel):
+    text_id: str
+    segments: List[str]
 
 
 class CreateSegment(BaseModel):

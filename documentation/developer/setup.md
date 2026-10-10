@@ -12,7 +12,6 @@ Defaults are defined in `pecha_api/config.py`, but for local development
 you typically override these values:
 
 - `DATABASE_URL`
-- `MONGO_CONNECTION_STRING`
 - `CACHE_CONNECTION_STRING`
 - `ELASTICSEARCH_URL`
 - `ELASTICSEARCH_API` (optional for local)
@@ -31,7 +30,7 @@ poetry install
 
 ### Database and Search
 
-Start local services (Postgres, MongoDB, Redis/Dragonfly, Elasticsearch):
+Start local services (Postgres, Redis/Dragonfly, Elasticsearch):
 
 ```sh
 cd local_setup

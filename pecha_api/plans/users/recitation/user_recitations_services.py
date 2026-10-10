@@ -2,8 +2,10 @@ from uuid import UUID
 from typing import Dict, List
 
 from pecha_api.db.database import SessionLocal
-from pecha_api.texts.texts_utils import TextUtils
-from pecha_api.texts.texts_repository import get_texts_by_ids
+from pecha_api.texts.texts_openpecha_service import (
+    ensure_text_or_edition_exists,
+    get_texts_by_edition_or_text_ids,
+)
 from pecha_api.users.users_service import validate_and_extract_user_details
 from pecha_api.plans.users.recitation.user_recitations_models import UserRecitations
 from pecha_api.plans.users.recitation.user_recitations_repository import (
@@ -44,7 +46,7 @@ async def _build_recitation_dtos(db, user_id: UUID) -> List[UserRecitationDTO]:
         return []
 
     text_ids = [str(recitation.text_id) for recitation in user_recitations]
-    texts_dict = await get_texts_by_ids(text_ids=text_ids)
+    texts_dict = await get_texts_by_edition_or_text_ids(text_ids)
     image_url_map = get_image_url_map_by_text_ids(db=db, text_ids=text_ids)
 
     return [
@@ -65,8 +67,8 @@ async def create_user_recitation_service(
 ) -> None:
     current_user = validate_and_extract_user_details(token=token)
     with SessionLocal() as db:
-        await TextUtils.validate_text_exists(
-            text_id=str(create_user_recitation_request.text_id)
+        await ensure_text_or_edition_exists(
+            str(create_user_recitation_request.text_id)
         )
 
         max_order = get_max_display_order_for_user(db=db, user_id=current_user.id)

@@ -14,7 +14,7 @@ from pecha_api.plans.items.plan_items_repository import get_days_by_plan_id, get
 from datetime import date as DateType, timedelta, datetime as dt, timezone
 from pecha_api.plans.tasks.task_settings_models import build_task_settings
 from pecha_api.plans.public.plan_response_models import PublicPlansResponse, PublicPlanDTO, PlanDayDTO, AuthorDTO,PlanDaysResponse, PlanDayBasic, SubTaskDTO, TaskDTO, ImageUrlModel, TagsResponse, DailyPlanResponse, SeriesDTO, SeriesMetadataDTO, DayVideoSummaryDTO, PlanVideoSummaryDTO
-from pecha_api.plans.tags.tag_response_models import PublicTagDetailDTO, SegmentContentDTO
+from pecha_api.plans.tags.tag_response_models import PublicTagDetailDTO
 from pecha_api.plans.items.plan_items_models import PlanItem
 from pecha_api.plans.plans_models import Plan
 from pecha_api.plans.plans_enums import ContentType, UserPlanStatus
@@ -51,7 +51,7 @@ from pecha_api.region_restrictions.region_restriction_service import (
 )
 from pecha_api.plans.tags.tag_repository import get_published_tags_for_language, get_all_tags_paginated, get_tag_by_id
 from pecha_api.plans.tags.tag_response_models import PublicTagsListResponse
-from pecha_api.texts.segments.segments_repository import get_segments_by_ids
+from pecha_api.plans.tags.tag_segments_openpecha import fetch_tag_segments
 from pecha_api.plans.shared.metadata_utils import (
     format_metadata_response,
     filter_by_language_with_fallback,
@@ -590,7 +590,7 @@ async def get_plan_day_details(plan_id: UUID, day_number: int) -> PlanDayDTO:
         return cached
 
     # Every query runs in one worker thread, subtask references included; the
-    # DTO builder then does its Mongo lookups on the loop, after the session is
+    # DTO builder then does its OpenPecha lookups on the loop, after the session is
     # closed. Safe because the repository eager-loads tasks, sub-tasks and
     # timestamps.
     plan_item, plan_language, series_id, references = await run_in_threadpool(
@@ -720,7 +720,7 @@ async def get_plan_daily_content(
     language: Optional[str] = None,
 ) -> DailyPlanResponse:
     # Phase 1: every query off the loop, subtask references included. Phase 2
-    # resolves task content from Mongo once the session is closed — safe
+    # resolves task content from OpenPecha once the session is closed — safe
     # because the day's tasks and sub-tasks are eager-loaded.
     response, plan_item, plan_language, references = await run_in_threadpool(
         _load_plan_daily_content,
@@ -1034,18 +1034,7 @@ async def get_public_tag_detail(
             # Get segment IDs from tag (same as CMS endpoint uses)
             segment_ids = tag.segment_ids if hasattr(tag, 'segment_ids') and tag.segment_ids else []
             
-            # Fetch segment contents using segment_ids from tag
-            segments_data = []
-            if segment_ids:
-                segments_dict = await get_segments_by_ids([str(sid) for sid in segment_ids])
-                for segment_id in segment_ids:
-                    segment = segments_dict.get(str(segment_id))
-                    if segment:
-                        segments_data.append(SegmentContentDTO(
-                            segment_id=segment.id,
-                            text_id=segment.text_id,
-                            content=segment.content
-                        ))
+            segments_data = await fetch_tag_segments([str(sid) for sid in segment_ids])
             
             return PublicTagDetailDTO(
                 id=tag.id,

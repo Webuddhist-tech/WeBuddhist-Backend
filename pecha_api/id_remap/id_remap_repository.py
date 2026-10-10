@@ -1,4 +1,3 @@
-import uuid
 from typing import Callable, List, Optional, Tuple
 
 from sqlalchemy import and_, exists, func, select, update
@@ -17,13 +16,6 @@ from pecha_api.plans.users.recitation_collection.recitation_collection_models im
 from pecha_api.routines.routines_enums import SessionType
 from pecha_api.routines.routines_models import RoutineSession
 from pecha_api.texts.text_images_models import TextImage
-
-
-def try_parse_uuid(value: str) -> Optional[uuid.UUID]:
-    try:
-        return uuid.UUID(value)
-    except (ValueError, AttributeError, TypeError):
-        return None
 
 
 def _conflict_aware_update(
@@ -84,23 +76,20 @@ def remap_segment_ids(
     )
     updated["sub_tasks.segment_ids"] = result.rowcount
 
-    old_uuid = try_parse_uuid(old_segment_id)
-    new_uuid = try_parse_uuid(new_segment_id)
-
-    if old_uuid is not None and new_uuid is not None:
-        count, conflicts = _conflict_aware_update(
-            db=db,
-            table=tag_segments,
-            id_column="segment_id",
-            owner_columns=["tag_id", "language"],
-            old_value=old_uuid,
-            new_value=new_uuid,
-        )
-        updated["tag_segments"] = count
-        skipped.extend(
-            {"table": "tag_segments", "reason": "duplicate (tag_id, segment_id, language)", "detail": d}
-            for d in conflicts
-        )
+    # tag_segments.segment_id is a string too (Mongo UUIDs and OpenPecha ids).
+    count, conflicts = _conflict_aware_update(
+        db=db,
+        table=tag_segments,
+        id_column="segment_id",
+        owner_columns=["tag_id", "language"],
+        old_value=old_segment_id,
+        new_value=new_segment_id,
+    )
+    updated["tag_segments"] = count
+    skipped.extend(
+        {"table": "tag_segments", "reason": "duplicate (tag_id, segment_id, language)", "detail": d}
+        for d in conflicts
+    )
 
     count, conflicts = _conflict_aware_update(
         db=db,

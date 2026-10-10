@@ -119,11 +119,20 @@ def clear_reminders_for_event(db: Session, event_id: UUID) -> None:
     ).delete(synchronize_session=False)
 
 
-def list_due_reminders(db: Session, *, now: datetime, limit: int) -> List[EventReminder]:
+def list_due_reminders(
+    db: Session,
+    *,
+    now: datetime,
+    not_before: datetime,
+    limit: int,
+) -> List[EventReminder]:
+    """Unsent reminders whose fire time falls in [not_before, now]. Older ones
+    missed their moment and are left for the purge job."""
     return (
         db.query(EventReminder)
         .filter(
             EventReminder.fire_at <= now,
+            EventReminder.fire_at >= not_before,
             EventReminder.dispatched_at.is_(None),
             EventReminder.canceled_at.is_(None),
         )
@@ -159,15 +168,18 @@ def list_undispatched_reminders_missing_sqs_id(
     db: Session,
     *,
     older_than: datetime,
+    not_before: datetime,
     limit: int,
 ) -> List[EventReminder]:
     """Reminders that were claimed (dispatched_at set) but never recorded an
-    SQS MessageId - the commit-before-send crash window."""
+    SQS MessageId - the commit-before-send crash window. Ones whose fire time
+    is before not_before are too late to send and are skipped."""
     return (
         db.query(EventReminder)
         .filter(
             EventReminder.dispatched_at.isnot(None),
             EventReminder.dispatched_at <= older_than,
+            EventReminder.fire_at >= not_before,
             EventReminder.sqs_message_id.is_(None),
             EventReminder.canceled_at.is_(None),
         )

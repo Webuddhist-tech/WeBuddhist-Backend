@@ -59,10 +59,8 @@ DEFAULTS = dict(
     MAX_AUDIO_FILE_SIZE = 50 * 1024 * 1024,
     ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'},
     ALLOWED_AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.wav', '.aac', '.ogg'},
-    MONGO_CONNECTION_STRING="",
 
     WEBUDDHIST_STUDIO_BASE_URL="https://studio.webuddhist.com",
-    MONGO_DATABASE_NAME="webuddhist",
     REFRESH_TOKEN_EXPIRE_DAYS=30,
     VERSION="0.0.1",
     # Cache Configuration
@@ -326,6 +324,10 @@ DEFAULTS = dict(
     EVENT_REMINDER_MINUTES_BEFORE=10,
     EVENT_REMINDER_DISPATCH_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_BATCH_SIZE=100,
+    # A reminder more than this late is dropped rather than sent, so a
+    # backlog left by downtime doesn't push "starting in 10 min" for an event
+    # that has already started.
+    EVENT_REMINDER_MAX_LATENESS_SECONDS=300,
     EVENT_REMINDER_DISPATCH_RECONCILE_GRACE_SECONDS=120,
     EVENT_REMINDER_DISPATCH_RECONCILE_INTERVAL_SECONDS=60,
     EVENT_REMINDER_DISPATCH_RECONCILE_BATCH_SIZE=50,

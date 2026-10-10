@@ -8,7 +8,7 @@ from pecha_api.middleware.request_observability import RequestObservabilityMiddl
 from pecha_api.middleware.sentry import init_sentry
 from pecha_api.db.overload_handler import register_db_overload_handlers
 
-from pecha_api.db.mongo_database import lifespan
+from pecha_api.db.lifespan import lifespan
 from pecha_api.auth import auth_views
 from pecha_api.sheets import sheets_views
 from pecha_api.texts import text_recordings_views
