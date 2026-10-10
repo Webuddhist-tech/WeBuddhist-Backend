@@ -24,7 +24,7 @@ from pecha_api.plans.authors.plan_authors_service import validate_cms_author_det
 from pecha_api.plans.shared.permissions import require_cms_write_access
 
 from . import live_control_library as library
-from .live_control_auth import generate_token, hash_token, token_hint
+from .live_control_auth import decrypt_token, encrypt_token, generate_token, hash_token, token_hint
 from .live_control_models import EventLiveController, EventLiveSettings, LiveEditionSettings
 from .live_control_repository import (
     add_controller,
@@ -289,6 +289,7 @@ def _controller_dto(controller: EventLiveController) -> ControllerDTO:
         event_id=controller.event_id,
         name=controller.name,
         token_hint=controller.token_hint,
+        token=None if controller.revoked_at else decrypt_token(controller.token_encrypted),
         default_text_id=controller.default_text_id,
         created_by=controller.created_by,
         created_at=controller.created_at,
@@ -298,7 +299,9 @@ def _controller_dto(controller: EventLiveController) -> ControllerDTO:
 
 
 def _with_token(controller: EventLiveController, token: str) -> ControllerWithTokenDTO:
-    return ControllerWithTokenDTO(**_controller_dto(controller).model_dump(), token=token)
+    return ControllerWithTokenDTO(
+        **_controller_dto(controller).model_dump(exclude={"token"}), token=token
+    )
 
 
 def _new_token(db: Session, requested: Optional[str]) -> Tuple[str, str]:
@@ -340,6 +343,7 @@ def create_controller_service(
                 name=request.name.strip(),
                 token_hash=token_hash,
                 token_hint=token_hint(controller_token),
+                token_encrypted=encrypt_token(controller_token),
                 default_text_id=(request.default_text_id or "").strip() or None,
                 created_by=actor_name(author),
                 created_at=datetime.now(timezone.utc),
@@ -380,6 +384,7 @@ def update_controller_service(
         if request.token or request.regenerate_token:
             new_token, controller.token_hash = _new_token(db, request.token)
             controller.token_hint = token_hint(new_token)
+            controller.token_encrypted = encrypt_token(new_token)
         try:
             db.commit()
         except IntegrityError:
@@ -401,6 +406,7 @@ def revoke_controller_service(token: str, event_id: UUID, controller_id: UUID) -
             raise _not_found(f"Controller with id '{controller_id}' not found")
         if controller.revoked_at is None:
             controller.revoked_at = datetime.now(timezone.utc)
+            controller.token_encrypted = None
             db.commit()
 
 

@@ -186,6 +186,8 @@ class ControllerDTO(BaseModel):
     event_id: UUID
     name: str
     token_hint: str
+    # For event editors to copy; None once revoked, or when it could not be kept.
+    token: Optional[str] = None
     default_text_id: Optional[str] = None
     created_by: str
     created_at: datetime
@@ -194,7 +196,7 @@ class ControllerDTO(BaseModel):
 
 
 class ControllerWithTokenDTO(ControllerDTO):
-    """Returned only when a token is set: the one time Studio sees it."""
+    """Returned when a token is set."""
 
     token: str
 

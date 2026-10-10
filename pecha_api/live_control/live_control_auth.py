@@ -5,12 +5,14 @@ Studio. A token drives only its own event. The shared emit secret
 (RECITATION_EMIT_SECRET_TOKEN) is still accepted alongside them, for the
 scripts and pedals that hold it today."""
 
+import base64
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Header, HTTPException
 from starlette import status
 from starlette.concurrency import run_in_threadpool
@@ -100,3 +102,31 @@ async def verify_event_controller_token(
             detail="Invalid recitation token",
         )
     return controller
+
+
+def _token_cipher() -> Optional[Fernet]:
+    """The key controller tokens are encrypted with, so Studio can show a token
+    again for copying. LIVE_CONTROL_TOKEN_KEY when set, else derived from the
+    JWT secret; None when neither is configured, and tokens are then not kept."""
+    secret = get("LIVE_CONTROL_TOKEN_KEY") or get("JWT_SECRET_KEY")
+    if not secret:
+        return None
+    digest = hashlib.sha256(f"live-control-token:{secret}".encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def encrypt_token(token: str) -> Optional[str]:
+    cipher = _token_cipher()
+    return cipher.encrypt(token.encode("utf-8")).decode("ascii") if cipher else None
+
+
+def decrypt_token(value: Optional[str]) -> Optional[str]:
+    """The token kept for a controller, or None when none was kept or the key
+    has changed since."""
+    cipher = _token_cipher()
+    if not value or cipher is None:
+        return None
+    try:
+        return cipher.decrypt(value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        return None

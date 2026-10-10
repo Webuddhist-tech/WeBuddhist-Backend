@@ -221,6 +221,48 @@ class TestControllers:
         assert len(created.token) >= 16
         db.commit.assert_called_once()
 
+    def test_the_list_gives_editors_each_live_token_to_copy(self):
+        from datetime import datetime, timezone
+
+        event_id = uuid4()
+        now = datetime.now(timezone.utc)
+
+        def row(**overrides):
+            values = dict(
+                id=uuid4(),
+                event_id=event_id,
+                name="iPad",
+                token_hint="1234",
+                token_encrypted="sealed",
+                default_text_id=None,
+                created_by="a",
+                created_at=now,
+                last_used_at=None,
+                revoked_at=None,
+            )
+            values.update(overrides)
+            return SimpleNamespace(**values)
+
+        a, b, c = self._patches(MagicMock())
+        with a, b, c, patch(
+            f"{MODULE}.list_controllers",
+            return_value=[row(), row(revoked_at=now), row(token_encrypted=None)],
+        ), patch(f"{MODULE}.decrypt_token", side_effect=lambda v: "tok-1234" if v else None):
+            listed = service.list_controllers_service("tok", event_id).controllers
+
+        assert [c.token for c in listed] == ["tok-1234", None, None]
+
+    def test_revoking_drops_the_kept_token(self):
+        controller = SimpleNamespace(revoked_at=None, token_encrypted="sealed")
+        db = MagicMock()
+        a, b, c = self._patches(db)
+        with a, b, c, patch(f"{MODULE}.get_controller", return_value=controller):
+            service.revoke_controller_service("tok", uuid4(), uuid4())
+
+        assert controller.revoked_at is not None
+        assert controller.token_encrypted is None
+        db.commit.assert_called_once()
+
     def test_revoking_an_unknown_controller_is_404(self):
         a, b, c = self._patches(MagicMock())
         with a, b, c, patch(f"{MODULE}.get_controller", return_value=None):

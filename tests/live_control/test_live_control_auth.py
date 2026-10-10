@@ -120,3 +120,30 @@ class TestVerifyEventControllerToken:
             f"{MODULE}.find_live_controller", return_value=_controller(event_id)
         ):
             assert await auth.is_event_controller_token(event_id, "tok") is True
+
+
+class TestTokenEncryption:
+
+    def _config(self, values):
+        return patch(f"{MODULE}.get", side_effect=lambda key: values.get(key, ""))
+
+    def test_a_token_comes_back_from_its_encrypted_form(self):
+        with self._config({"LIVE_CONTROL_TOKEN_KEY": "k1"}):
+            stored = auth.encrypt_token("main-hall-token-1234")
+            assert stored and "main-hall-token-1234" not in stored
+            assert auth.decrypt_token(stored) == "main-hall-token-1234"
+
+    def test_the_jwt_secret_is_used_when_no_key_is_set(self):
+        with self._config({"JWT_SECRET_KEY": "jwt"}):
+            assert auth.decrypt_token(auth.encrypt_token("abc")) == "abc"
+
+    def test_nothing_is_kept_without_any_key(self):
+        with self._config({}):
+            assert auth.encrypt_token("abc") is None
+            assert auth.decrypt_token("anything") is None
+
+    def test_a_changed_key_reads_as_no_token(self):
+        with self._config({"LIVE_CONTROL_TOKEN_KEY": "k1"}):
+            stored = auth.encrypt_token("abc")
+        with self._config({"LIVE_CONTROL_TOKEN_KEY": "k2"}):
+            assert auth.decrypt_token(stored) is None

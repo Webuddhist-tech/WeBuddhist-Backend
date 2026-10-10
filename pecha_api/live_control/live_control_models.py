@@ -8,6 +8,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UUID,
     text,
 )
@@ -61,8 +62,8 @@ class EventLiveSettings(Base):
 class EventLiveController(Base):
     """One device allowed to drive an event's recitation.
 
-    Only a hash of the token is kept: the operator enters the token once on the
-    device, so the backend never has to hand it back.
+    The token is looked up by its hash. It is also kept encrypted, so an event
+    editor can copy it again from Studio.
     """
 
     __tablename__ = "event_live_controllers"
@@ -78,6 +79,8 @@ class EventLiveController(Base):
     token_hash = Column(String(64), nullable=False, unique=True)
     # The token's last characters, so Studio can tell two controllers apart.
     token_hint = Column(String(8), nullable=False)
+    # The token, encrypted (see live_control_auth.encrypt_token). Cleared on revoke.
+    token_encrypted = Column(Text, nullable=True)
     # Opened on load when the room has no open text.
     default_text_id = Column(String(255), nullable=True)
     created_by = Column(String(255), nullable=False)
