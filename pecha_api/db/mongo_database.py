@@ -89,6 +89,9 @@ async def lifespan(api: FastAPI):
 
         bind_app_event_loop(asyncio.get_running_loop())
 
+        # Scheduled jobs run on Postgres/Redis only, so start them regardless of MongoDB.
+        setup_scheduler()
+
         connection_string = get("MONGO_CONNECTION_STRING")
         if not _is_mongo_connection_string_configured(connection_string):
             logger.warning(
@@ -126,8 +129,6 @@ async def lifespan(api: FastAPI):
             allow_index_dropping=True,
         )
         logger.info("Beanie initialized with MongoDB document models.")
-
-        setup_scheduler()
 
         yield
     finally:
