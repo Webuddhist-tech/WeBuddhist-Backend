@@ -559,7 +559,7 @@ class TestUpdateRecitationOrderView:
 
 class TestGetUserRecitationsService:
     @pytest.mark.asyncio
-    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_texts_by_ids")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_texts_by_edition_or_text_ids")
     @patch("pecha_api.plans.users.recitation.user_recitations_services.get_image_url_map_by_text_ids")
     @patch("pecha_api.plans.users.recitation.user_recitations_services.get_user_recitations_by_user_id")
     @patch("pecha_api.plans.users.recitation.user_recitations_services.SessionLocal")
@@ -595,3 +595,102 @@ class TestGetUserRecitationsService:
         assert len(result.recitations) == 1
         assert result.recitations[0].title == "Heart Sutra"
         assert result.recitations[0].text_id == str(text_id)
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_texts_by_edition_or_text_ids")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_image_url_map_by_text_ids")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_user_recitations_by_user_id")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.SessionLocal")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.validate_and_extract_user_details")
+    async def test_resolves_openpecha_edition_ids(
+        self,
+        mock_validate,
+        mock_session_local,
+        mock_get_user_recitations,
+        mock_image_map,
+        mock_get_texts,
+    ):
+        from types import SimpleNamespace
+        from pecha_api.plans.users.recitation.user_recitations_services import (
+            get_user_recitations_service,
+        )
+
+        edition_id = "KyaWXQG9NpDdBPnBMroGD"
+        mock_validate.return_value = SimpleNamespace(id=uuid4())
+        mock_session_local.return_value.__enter__.return_value = MagicMock()
+        mock_get_user_recitations.return_value = [
+            SimpleNamespace(text_id=edition_id, display_order=1)
+        ]
+        mock_get_texts.return_value = {
+            edition_id: SimpleNamespace(title="Refuge", language="zh")
+        }
+        mock_image_map.return_value = {}
+
+        result = await get_user_recitations_service(token="valid_token")
+
+        mock_get_texts.assert_awaited_once_with([edition_id])
+        assert [r.text_id for r in result.recitations] == [edition_id]
+        assert result.recitations[0].title == "Refuge"
+
+
+class TestCreateUserRecitationService:
+    @pytest.mark.asyncio
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.save_user_recitation")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.get_max_display_order_for_user", return_value=2)
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.ensure_text_or_edition_exists")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.SessionLocal")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.validate_and_extract_user_details")
+    async def test_saves_an_openpecha_edition_id(
+        self, mock_validate, mock_session_local, mock_ensure, _max_order, mock_save,
+    ):
+        from types import SimpleNamespace
+        from pecha_api.plans.users.recitation.user_recitations_response_models import (
+            CreateUserRecitationRequest,
+        )
+        from pecha_api.plans.users.recitation.user_recitations_services import (
+            create_user_recitation_service,
+        )
+
+        mock_validate.return_value = SimpleNamespace(id=uuid4())
+        mock_session_local.return_value.__enter__.return_value = MagicMock()
+
+        await create_user_recitation_service(
+            token="valid_token",
+            create_user_recitation_request=CreateUserRecitationRequest(text_id="KyaWXQG9NpDdBPnBMroGD"),
+        )
+
+        mock_ensure.assert_awaited_once_with("KyaWXQG9NpDdBPnBMroGD")
+        saved = mock_save.call_args.kwargs["user_recitations"]
+        assert saved.text_id == "KyaWXQG9NpDdBPnBMroGD"
+        assert saved.display_order == 3
+
+    @pytest.mark.asyncio
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.save_user_recitation")
+    @patch(
+        "pecha_api.plans.users.recitation.user_recitations_services.ensure_text_or_edition_exists",
+        side_effect=HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Text not found"),
+    )
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.SessionLocal")
+    @patch("pecha_api.plans.users.recitation.user_recitations_services.validate_and_extract_user_details")
+    async def test_does_not_save_an_unknown_id(
+        self, mock_validate, mock_session_local, _ensure, mock_save,
+    ):
+        from types import SimpleNamespace
+        from pecha_api.plans.users.recitation.user_recitations_response_models import (
+            CreateUserRecitationRequest,
+        )
+        from pecha_api.plans.users.recitation.user_recitations_services import (
+            create_user_recitation_service,
+        )
+
+        mock_validate.return_value = SimpleNamespace(id=uuid4())
+        mock_session_local.return_value.__enter__.return_value = MagicMock()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await create_user_recitation_service(
+                token="valid_token",
+                create_user_recitation_request=CreateUserRecitationRequest(text_id="unknown"),
+            )
+
+        assert exc_info.value.status_code == status.HTTP_404_NOT_FOUND
+        mock_save.assert_not_called()

@@ -10,10 +10,14 @@ from openpecha_api.segments.openpecha_segment_service import (
     fetch_segment_content,
     fetch_segment_details,
 )
-from openpecha_api.text.openpecha_text_service import fetch_text_by_id
+from openpecha_api.text.openpecha_text_service import fetch_text_by_id, search_by_content
 
+from .segments_enum import SegmentType
 from .segments_response_models import (
     ParentSegment,
+    SegmentDTO,
+    SegmentResponse,
+    SegmentSearchRequest,
     SegmentRelatedText,
     SegmentResources,
     V2RelatedSegmentItem,
@@ -26,6 +30,7 @@ from .segments_response_models import (
     V2SegmentTextGroup,
     V2SegmentTranslationsResponse,
 )
+from pecha_api.search.search_service import flatten_content_search_matches
 from ..texts_openpecha_api import fetch_text_source_link
 from ..texts_openpecha_service import _extract_title
 
@@ -35,6 +40,7 @@ TRANSLATION = "translation"
 COMMENTARY = "commentary"
 MAX_PAGINATION_SKIP = 10000
 MAX_PAGINATION_LIMIT = 100
+SEGMENT_SEARCH_LIMIT = 20
 
 
 def _classify_text(text_payload: Dict[str, Any]) -> Optional[str]:
@@ -382,3 +388,35 @@ async def get_segment_info_by_id_from_openpecha(
     )
 
     return V2SegmentInfoResponse(segment_info=segment_info)
+
+
+async def search_segments_by_content_service(
+    segment_search_request: SegmentSearchRequest,
+) -> SegmentResponse:
+    """Segments whose content matches, from OpenPecha's content search. A
+    failed search comes back empty, like a search with no hits."""
+    try:
+        results = await search_by_content(
+            query=segment_search_request.content,
+            limit=SEGMENT_SEARCH_LIMIT,
+        )
+    except Exception:
+        logger.exception("OpenPecha segment content search failed")
+        return SegmentResponse(segments=[])
+    if not isinstance(results, list):
+        logger.warning("Unexpected OpenPecha content search response type: %s", type(results).__name__)
+        return SegmentResponse(segments=[])
+
+    matches = flatten_content_search_matches(results)[:SEGMENT_SEARCH_LIMIT]
+    return SegmentResponse(
+        segments=[
+            SegmentDTO(
+                id=match["pecha_segment_id"],
+                pecha_segment_id=match["pecha_segment_id"],
+                text_id=match["text_id"],
+                content=match["content"],
+                type=SegmentType.SOURCE,
+            )
+            for match in matches
+        ]
+    )

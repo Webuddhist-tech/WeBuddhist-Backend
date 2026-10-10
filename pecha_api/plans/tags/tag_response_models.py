@@ -22,7 +22,7 @@ class TagSummaryDTO(BaseModel):
 
 class TagDTO(TagSummaryDTO):
     plan_ids: List[UUID] = []
-    segment_ids: List[UUID] = []
+    segment_ids: List[str] = []
     metadata: List[TagMetadataDTO] = []
 
 
@@ -30,7 +30,7 @@ class TagMetadataInput(BaseModel):
     language: str
     name: str
     description: Optional[str] = None
-    segment_ids: Optional[List[UUID]] = None
+    segment_ids: Optional[List[str]] = None
 
 
 class CreateTagRequest(BaseModel):
@@ -39,7 +39,7 @@ class CreateTagRequest(BaseModel):
     featured: bool = False
     display_order: Optional[int] = None
     plan_ids: Optional[List[UUID]] = None
-    segment_ids: Optional[List[UUID]] = None
+    segment_ids: Optional[List[str]] = None
 
 
 class UpdateTagRequest(BaseModel):
@@ -48,7 +48,7 @@ class UpdateTagRequest(BaseModel):
     featured: Optional[bool] = None
     display_order: Optional[int] = None
     plan_ids: Optional[List[UUID]] = None
-    segment_ids: Optional[List[UUID]] = None
+    segment_ids: Optional[List[str]] = None
 
 
 class TagsListResponse(BaseModel):

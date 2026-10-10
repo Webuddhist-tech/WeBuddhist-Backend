@@ -19,25 +19,6 @@ services:
     networks:
       - pecha-network
 
-  mongo-local:
-    image: mongo:latest
-    container_name: pecha-mongodb
-    restart: always
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=admin
-      - MONGO_INITDB_ROOT_PASSWORD=pechaAdmin
-      - MONGO_INITDB_DATABASE=pecha
-    logging:
-      options:
-        max-size: 10m
-        max-file: "3"
-    ports:
-      - "27017:27017"
-    volumes:
-      - ./data/mongo-local:/data/db  # Persist MongoDB data
-    networks:
-      - pecha-network
-
   dragonfly:
     image: 'docker.dragonflydb.io/dragonflydb/dragonfly'
     ulimits:

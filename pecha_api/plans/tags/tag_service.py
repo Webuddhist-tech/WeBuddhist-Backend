@@ -34,7 +34,7 @@ from pecha_api.plans.tags.tag_response_models import (
     TagsListResponse,
     UpdateTagRequest,
 )
-from pecha_api.texts.segments.segments_repository import get_segments_by_ids
+from pecha_api.plans.tags.tag_segments_openpecha import validate_segment_ids
 
 
 def _active_plan_ids(tag: Tag) -> List[UUID]:
@@ -43,7 +43,7 @@ def _active_plan_ids(tag: Tag) -> List[UUID]:
     return [p.id for p in tag.plans if p.deleted_at is None]
 
 
-def _tag_segment_ids(tag: Tag) -> List[UUID]:
+def _tag_segment_ids(tag: Tag) -> List[str]:
     return getattr(tag, "segment_ids", []) or []
 
 
@@ -103,27 +103,11 @@ def _validate_plan_ids(db, plan_ids: List[UUID]) -> None:
             )
 
 
-async def _validate_segment_ids(segment_ids: List[UUID]) -> None:
-    if not segment_ids:
-        return
-    unique_segment_ids = list(dict.fromkeys(segment_ids))
-    found_segments = await get_segments_by_ids(
-        segment_ids=[str(segment_id) for segment_id in unique_segment_ids]
-    )
-    found_ids = {UUID(segment_id) for segment_id in found_segments.keys()}
-    for segment_id in unique_segment_ids:
-        if segment_id not in found_ids:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Segment with id '{segment_id}' does not exist",
-            )
-
-
 def _segments_by_language_from_metadata(
     metadata_inputs: List,
-    fallback_segment_ids: Optional[List[UUID]] = None,
-) -> dict[str, List[UUID]]:
-    segments_by_language: dict[str, List[UUID]] = {}
+    fallback_segment_ids: Optional[List[str]] = None,
+) -> dict[str, List[str]]:
+    segments_by_language: dict[str, List[str]] = {}
     for meta_input in metadata_inputs:
         if meta_input.segment_ids is not None:
             segments_by_language[meta_input.language] = meta_input.segment_ids
@@ -135,7 +119,7 @@ def _segments_by_language_from_metadata(
 def _apply_tag_segments_by_language(
     db_session,
     tag: Tag,
-    segments_by_language: dict[str, List[UUID]],
+    segments_by_language: dict[str, List[str]],
     commit: bool = False,
 ) -> None:
     for language, segment_ids in segments_by_language.items():
@@ -175,7 +159,7 @@ async def create_new_tag(token: str, create_tag_request: CreateTagRequest) -> Ta
         )
         _validate_plan_ids(db=db_session, plan_ids=plan_ids)
         for segment_ids in segments_by_language.values():
-            await _validate_segment_ids(segment_ids=segment_ids)
+            await validate_segment_ids(segment_ids)
 
         tag = Tag(
             image_key=create_tag_request.image_key,
@@ -280,7 +264,7 @@ async def update_existing_tag(token: str, tag_id: UUID, update_tag_request: Upda
 
         if segments_by_language is not None:
             for segment_ids in segments_by_language.values():
-                await _validate_segment_ids(segment_ids=segment_ids)
+                await validate_segment_ids(segment_ids)
             _apply_tag_segments_by_language(
                 db_session=db_session,
                 tag=tag,

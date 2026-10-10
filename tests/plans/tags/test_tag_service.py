@@ -703,7 +703,7 @@ async def test_create_new_tag_with_segment_ids():
     from pecha_api.plans.tags.tag_response_models import TagMetadataInput
     
     author = _make_author()
-    segment_id = uuid.uuid4()
+    segment_id = "06gCCWizfl2OLp0ehIpwB"
     request = CreateTagRequest(
         metadata=[TagMetadataInput(language="EN", name="Segments")],
         segment_ids=[segment_id]
@@ -718,9 +718,8 @@ async def test_create_new_tag_with_segment_ids():
         "pecha_api.plans.tags.tag_service.get_tag_by_name",
         return_value=None,
     ), patch(
-        "pecha_api.plans.tags.tag_service.get_segments_by_ids",
+        "pecha_api.plans.tags.tag_service.validate_segment_ids",
         new_callable=AsyncMock,
-        return_value={str(segment_id): MagicMock()},
     ), patch(
         "pecha_api.plans.tags.tag_service.save_tag",
         return_value=saved,
@@ -747,7 +746,7 @@ async def test_create_new_tag_with_segment_ids():
 async def test_create_new_tag_invalid_segment_id_raises_400():
     from pecha_api.plans.tags.tag_response_models import TagMetadataInput
     
-    missing_id = uuid.uuid4()
+    missing_id = "unknownSegmentId00000"
     request = CreateTagRequest(
         metadata=[TagMetadataInput(language="EN", name="New")],
         segment_ids=[missing_id]
@@ -760,9 +759,9 @@ async def test_create_new_tag_invalid_segment_id_raises_400():
         "pecha_api.plans.tags.tag_service.get_tag_by_name",
         return_value=None,
     ), patch(
-        "pecha_api.plans.tags.tag_service.get_segments_by_ids",
+        "pecha_api.plans.tags.tag_service.validate_segment_ids",
         new_callable=AsyncMock,
-        return_value={},
+        side_effect=HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing"),
     ), patch("pecha_api.plans.tags.tag_service.save_tag") as mock_save:
         _session_local_context(mock_session)
 
@@ -776,7 +775,7 @@ async def test_create_new_tag_invalid_segment_id_raises_400():
 @pytest.mark.asyncio
 async def test_update_existing_tag_replaces_segment_ids():
     tag_id = uuid.uuid4()
-    segment_id = uuid.uuid4()
+    segment_id = "06gCCWizfl2OLp0ehIpwB"
     existing = _make_tag()
     refreshed = _make_tag(segment_ids=[segment_id])
     request = UpdateTagRequest(segment_ids=[segment_id])
@@ -788,9 +787,8 @@ async def test_update_existing_tag_replaces_segment_ids():
         "pecha_api.plans.tags.tag_service.get_tag_by_id",
         side_effect=[existing, refreshed],
     ), patch(
-        "pecha_api.plans.tags.tag_service.get_segments_by_ids",
+        "pecha_api.plans.tags.tag_service.validate_segment_ids",
         new_callable=AsyncMock,
-        return_value={str(segment_id): MagicMock()},
     ), patch(
         "pecha_api.plans.tags.tag_service.set_tag_segments",
         return_value=refreshed,
@@ -808,11 +806,11 @@ async def test_update_existing_tag_replaces_segment_ids():
 
 
 @pytest.mark.asyncio
-async def test_create_new_tag_deduplicates_duplicate_segment_ids_in_request():
+async def test_create_new_tag_validates_requested_segment_ids():
     from pecha_api.plans.tags.tag_response_models import TagMetadataInput
     
     author = _make_author()
-    segment_id = uuid.uuid4()
+    segment_id = "06gCCWizfl2OLp0ehIpwB"
     request = CreateTagRequest(
         metadata=[TagMetadataInput(language="EN", name="Tag")],
         segment_ids=[segment_id, segment_id]
@@ -826,9 +824,8 @@ async def test_create_new_tag_deduplicates_duplicate_segment_ids_in_request():
         "pecha_api.plans.tags.tag_service.get_tag_by_name",
         return_value=None,
     ), patch(
-        "pecha_api.plans.tags.tag_service.get_segments_by_ids",
+        "pecha_api.plans.tags.tag_service.validate_segment_ids",
         new_callable=AsyncMock,
-        return_value={str(segment_id): MagicMock()},
     ) as mock_get_segments, patch(
         "pecha_api.plans.tags.tag_service.save_tag",
         return_value=saved,
@@ -845,7 +842,7 @@ async def test_create_new_tag_deduplicates_duplicate_segment_ids_in_request():
         _session_local_context(mock_session)
         await create_new_tag(token="tok", create_tag_request=request)
 
-    mock_get_segments.assert_awaited_once_with(segment_ids=[str(segment_id)])
+    mock_get_segments.assert_awaited_once_with([segment_id, segment_id])
 
 
 @pytest.mark.asyncio

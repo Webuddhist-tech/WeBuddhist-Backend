@@ -6,7 +6,7 @@ from pecha_api.group_assets.response_models import GroupAssetDTO
 
 
 class GroupRecitationCollectionItemDTO(BaseModel):
-    """DTO for collection item with text details from MongoDB"""
+    """DTO for collection item with text details from OpenPecha"""
     id: UUID
     # str, not UUID: text_id can hold a non-UUID pecha-style text id.
     text_id: str

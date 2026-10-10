@@ -30,7 +30,6 @@ pytestmark = pytest.mark.skipif(not REDIS_URL, reason="AUTOPLAY_TEST_REDIS_URL n
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("REDIS_URL", REDIS_URL)
-    monkeypatch.setenv("MONGO_CONNECTION_STRING", "")
     monkeypatch.setenv("RECITATION_EMIT_SECRET_TOKEN", SECRET)
     with ExitStack() as stack:
         # The event lookups live in Postgres; everything else is real.

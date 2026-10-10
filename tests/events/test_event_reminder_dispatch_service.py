@@ -151,6 +151,20 @@ class TestDispatchDueEventReminders:
         mock_send.assert_not_called()
 
 
+    @patch(f"{MODULE}.get_int", return_value=300)
+    @patch(f"{MODULE}.is_event_notification_sqs_configured", return_value=True)
+    @patch(f"{MODULE}.SessionLocal")
+    @patch(f"{MODULE}.list_due_reminders", return_value=[])
+    def test_only_lists_reminders_within_the_lateness_window(
+        self, mock_list, mock_session, _configured, _get_int,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+
+        dispatch_due_event_reminders()
+
+        kwargs = mock_list.call_args.kwargs
+        assert kwargs["now"] - kwargs["not_before"] == timedelta(seconds=300)
+
 class TestReconcileUndispatchedEventReminders:
     @patch(f"{MODULE}.is_event_notification_sqs_configured", return_value=False)
     def test_skips_when_sqs_not_configured(self, _configured):
@@ -188,3 +202,19 @@ class TestReconcileUndispatchedEventReminders:
 
         assert reconcile_undispatched_event_reminders() == 0
         mock_send.assert_not_called()
+
+    @patch(f"{MODULE}.get_int", return_value=300)
+    @patch(f"{MODULE}.is_event_notification_sqs_configured", return_value=True)
+    @patch(f"{MODULE}.SessionLocal")
+    @patch(f"{MODULE}.list_undispatched_reminders_missing_sqs_id", return_value=[])
+    def test_only_lists_stuck_reminders_within_the_lateness_window(
+        self, mock_list, mock_session, _configured, _get_int,
+    ):
+        mock_session.return_value.__enter__.return_value = MagicMock()
+        before = datetime.now(timezone.utc)
+
+        reconcile_undispatched_event_reminders()
+
+        not_before = mock_list.call_args.kwargs["not_before"]
+        after = datetime.now(timezone.utc)
+        assert before - timedelta(seconds=300) <= not_before <= after - timedelta(seconds=300)

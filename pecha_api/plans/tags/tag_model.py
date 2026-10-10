@@ -18,7 +18,7 @@ tag_segments = Table(
     "tag_segments",
     Base.metadata,
     Column("tag_id", UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
-    Column("segment_id", UUID(as_uuid=True), primary_key=True),
+    Column("segment_id", String(255), primary_key=True),
     Column("language", LanguageCodeEnum, primary_key=True, nullable=False),
 )
 
