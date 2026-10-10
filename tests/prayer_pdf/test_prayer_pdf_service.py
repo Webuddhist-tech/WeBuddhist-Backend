@@ -212,7 +212,7 @@ class TestBuildDocument:
     def _run(self, target, day, *, settings=None, room=True, rows=(), avatars=None):
         room_value = SimpleNamespace(id=uuid4()) if room else None
         with patch(f"{_SVC}._resolve_settings", return_value=(settings, PrayerPdfSettingsSource.GROUP)), patch(
-            f"{_SVC}.get_room_by_group_id", return_value=room_value
+            f"{_SVC}.get_room_ids_by_group_with_events", return_value=[room_value.id] if room_value else []
         ), patch(f"{_SVC}.get_room_by_event_id", return_value=room_value), patch(
             f"{_SVC}.list_prayer_requests", return_value=list(rows)
         ), patch(
@@ -370,7 +370,7 @@ class TestListRequests:
             f"{_SVC}.SessionLocal"
         ), patch(f"{_SVC}._load_group_target", return_value=_target()), patch(
             f"{_SVC}._resolve_settings", return_value=(settings, PrayerPdfSettingsSource.GROUP)
-        ), patch(f"{_SVC}.get_room_by_group_id", return_value=room), patch(
+        ), patch(f"{_SVC}.get_room_ids_by_group_with_events", return_value=[room.id] if room else []), patch(
             f"{_SVC}.page_prayer_requests", return_value=page
         ) as mock_page, patch(
             f"{_SVC}.preview_avatar_url", side_effect=lambda ref: f"https://signed/{ref}" if ref else None
@@ -405,3 +405,32 @@ class TestListRequests:
         response, mock_page = self._run(room=None)
         mock_page.assert_not_called()
         assert response.items == [] and response.total == 0
+
+    def test_queries_every_room_of_the_group(self):
+        room = SimpleNamespace(id=uuid4())
+        _, mock_page = self._run(room=room)
+        assert mock_page.call_args.kwargs["room_ids"] == [room.id]
+
+
+class TestRoomIds:
+    def test_group_uses_its_room_and_its_events_rooms(self):
+        group_room, event_room = uuid4(), uuid4()
+        target = _target()
+        with patch(
+            f"{_SVC}.get_room_ids_by_group_with_events", return_value=[group_room, event_room]
+        ) as mock_group, patch(f"{_SVC}.get_room_by_event_id") as mock_event:
+            assert service._room_ids(MagicMock(), target) == [group_room, event_room]
+        assert mock_group.call_args.kwargs["group_id"] == target.group_id
+        mock_event.assert_not_called()
+
+    def test_event_uses_only_its_own_room(self):
+        room = SimpleNamespace(id=uuid4())
+        with patch(f"{_SVC}.get_room_by_event_id", return_value=room), patch(
+            f"{_SVC}.get_room_ids_by_group_with_events"
+        ) as mock_group:
+            assert service._room_ids(MagicMock(), _target(event_id=uuid4())) == [room.id]
+        mock_group.assert_not_called()
+
+    def test_event_without_a_room(self):
+        with patch(f"{_SVC}.get_room_by_event_id", return_value=None):
+            assert service._room_ids(MagicMock(), _target(event_id=uuid4())) == []

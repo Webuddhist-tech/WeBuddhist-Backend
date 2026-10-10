@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette import status
 from starlette.concurrency import run_in_threadpool
 
-from pecha_api.chat.repository import get_room_by_event_id, get_room_by_group_id
+from pecha_api.chat.repository import get_room_by_event_id, get_room_ids_by_group_with_events
 from pecha_api.db.database import SessionLocal
 from pecha_api.events.event_repository import get_event_by_id
 from pecha_api.plans.authors.plan_authors_model import Author
@@ -256,20 +256,21 @@ def _posted_by(user) -> str:
     return f"{user.firstname or ''} {user.lastname or ''}".strip()
 
 
-def _room(db: Session, target: _Target):
-    return (
-        get_room_by_event_id(db=db, event_id=target.event_id)
-        if target.event_id is not None
-        else get_room_by_group_id(db=db, group_id=target.group_id)
-    )
+def _room_ids(db: Session, target: _Target) -> List[UUID]:
+    """An event's own room; for a group, its room and all its events' rooms,
+    since requests are mostly posted in the event rooms."""
+    if target.event_id is not None:
+        room = get_room_by_event_id(db=db, event_id=target.event_id)
+        return [room.id] if room is not None else []
+    return get_room_ids_by_group_with_events(db=db, group_id=target.group_id)
 
 
 def _room_rows(db: Session, target: _Target, day: date, tz_name: str):
-    room = _room(db, target)
-    if room is None:
+    room_ids = _room_ids(db, target)
+    if not room_ids:
         return []
     start_utc, end_utc = day_window_utc(day, tz_name)
-    return list_prayer_requests(db, room_id=room.id, start_utc=start_utc, end_utc=end_utc)
+    return list_prayer_requests(db, room_ids=room_ids, start_utc=start_utc, end_utc=end_utc)
 
 
 def _cards_from_rows(rows, settings) -> CardList:
@@ -429,12 +430,12 @@ def _list_requests(
         _require_can_manage(db, target.group_id, author)
         row, _ = _resolve_settings(db, target)
         tz_name = row.timezone if row is not None and row.timezone else DEFAULT_TIMEZONE
-        room = _room(db, target)
+        room_ids = _room_ids(db, target)
         rows, total = [], 0
-        if room is not None:
+        if room_ids:
             start_utc, end_utc = day_window_utc(day, tz_name) if day is not None else (None, None)
             rows, total = page_prayer_requests(
-                db, room_id=room.id, start_utc=start_utc, end_utc=end_utc, skip=skip, limit=limit
+                db, room_ids=room_ids, start_utc=start_utc, end_utc=end_utc, skip=skip, limit=limit
             )
         return PrayerRequestListResponse(
             items=[
