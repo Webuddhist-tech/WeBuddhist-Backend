@@ -52,6 +52,22 @@ def get_room_by_group_id(db: Session, group_id: UUID) -> Optional[ChatRoom]:
     )
 
 
+def get_room_ids_by_group_with_events(db: Session, group_id: UUID) -> List[UUID]:
+    """Ids of a group's own room and of every room its events have."""
+    rows = (
+        db.query(ChatRoom.id)
+        .filter(
+            ChatRoom.deleted_at.is_(None),
+            or_(
+                ChatRoom.group_id == group_id,
+                ChatRoom.event_id.in_(select(Event.id).where(Event.group_id == group_id)),
+            ),
+        )
+        .all()
+    )
+    return [room_id for (room_id,) in rows]
+
+
 def get_room_by_event_id(db: Session, event_id: UUID) -> Optional[ChatRoom]:
     return (
         db.query(ChatRoom)

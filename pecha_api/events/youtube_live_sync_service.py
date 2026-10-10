@@ -3,9 +3,11 @@
 In Studio an admin picks events and the times of day for each (see the
 `event_youtube_live_sync` table). A job wakes up every minute and finds the
 schedules whose time has come. For each group with something due it looks at
-the group's YouTube channel once, and adds a stream that is live right now to
+the group's YouTube channel once, and puts a stream that is live right now on
 the scheduled events that do not already have it, in the language an LLM reads
-from the stream's title. Events nobody scheduled are never touched.
+from the stream's title. If the event already has a YouTube link in that
+language, that link is switched to the new stream; otherwise one is added.
+Events nobody scheduled are never touched.
 """
 
 import logging
@@ -70,6 +72,7 @@ class SyncOutcome:
     live_streams_found: int = 0
     events_checked: int = 0
     links_added: int = 0
+    links_replaced: int = 0
     skipped_unknown_language: int = 0
 
 
@@ -153,6 +156,21 @@ def _existing_video_ids(event: Event) -> Set[str]:
         if video_id:
             ids.add(video_id)
     return ids
+
+
+def _language_code(language: object) -> str:
+    return str(getattr(language, "value", language) or "").upper()
+
+
+def _first_youtube_link_in(event: Event, language_code: str) -> Optional[EventLink]:
+    """The event's YouTube link in this language that comes first in its list."""
+    candidates = [
+        link
+        for link in event.links or []
+        if (link.type or "").strip().lower() == EventLinkType.YOUTUBE.value
+        and _language_code(link.language) == language_code
+    ]
+    return min(candidates, key=lambda link: link.display_order or 0, default=None)
 
 
 def _next_youtube_display_order(event: Event) -> int:
@@ -251,6 +269,11 @@ def sync_group_live_streams(
     changed: List[Event] = []
     for event in events:
         added_here = 0
+        changes = 0
+        # Languages this run has already put a stream on for this event. A
+        # second live stream in the same language is added next to the first,
+        # not swapped in over it.
+        touched: Set[str] = set()
         for video in missing.get(event.id, []):
             language = languages.get(video.id)
             if language is None:
@@ -260,21 +283,32 @@ def sync_group_live_streams(
                     event.id, video.id,
                 )
                 continue
-            if added_here == 0:
+            if event.id not in keys_before:
                 keys_before[event.id] = youtube_video_keys_of_event(event)
-            db.add(
-                EventLink(
-                    event_id=event.id,
-                    type=EventLinkType.YOUTUBE.value,
-                    url=video.url,
-                    label=video.title[:_MAX_LABEL_LENGTH],
-                    language=language,
-                    display_order=_next_youtube_display_order(event) + added_here,
+            code = _language_code(language)
+            label = video.title[:_MAX_LABEL_LENGTH]
+            current = None if code in touched else _first_youtube_link_in(event, code)
+            if current is not None:
+                current.url = video.url
+                current.label = label
+                current.updated_at = now
+                outcome.links_replaced += 1
+            else:
+                db.add(
+                    EventLink(
+                        event_id=event.id,
+                        type=EventLinkType.YOUTUBE.value,
+                        url=video.url,
+                        label=label,
+                        language=language,
+                        display_order=_next_youtube_display_order(event) + added_here,
+                    )
                 )
-            )
-            added_here += 1
-        if added_here:
-            outcome.links_added += added_here
+                added_here += 1
+                outcome.links_added += 1
+            touched.add(code)
+            changes += 1
+        if changes:
             changed.append(event)
     if changed:
         db.commit()
@@ -295,7 +329,7 @@ def _record_outcome(
             .where(EventYoutubeLiveSync.event_id.in_(list(event_ids)))
             .values(
                 last_run_at=datetime.now(timezone.utc),
-                last_run_added=outcome.links_added if outcome else None,
+                last_run_added=(outcome.links_added + outcome.links_replaced) if outcome else None,
                 last_run_error=error[:_MAX_ERROR_LENGTH] if error else None,
             )
         )
@@ -317,9 +351,10 @@ def run_group_sync(group_id: UUID, event_ids: Sequence[UUID]) -> Optional[SyncOu
         _record_outcome(event_ids, outcome=None, error=f"{type(error).__name__}: {error}")
         return None
     _record_outcome(event_ids, outcome=outcome, error=None)
-    if outcome.links_added:
+    if outcome.links_added or outcome.links_replaced:
         logger.info(
-            "YouTube live sync for group %s added %s link(s)", group_id, outcome.links_added
+            "YouTube live sync for group %s added %s and replaced %s link(s)",
+            group_id, outcome.links_added, outcome.links_replaced,
         )
     return outcome
 
@@ -516,5 +551,6 @@ def run_youtube_live_sync_now_service(
         live_streams_found=outcome.live_streams_found,
         events_checked=outcome.events_checked,
         links_added=outcome.links_added,
+        links_replaced=outcome.links_replaced,
         skipped_unknown_language=outcome.skipped_unknown_language,
     )

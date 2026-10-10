@@ -62,6 +62,7 @@ from pecha_api.region_restrictions.region_restriction_models import ChinaRestric
 from pecha_api.notification.notification_preference_models import UserNotificationPreference
 from pecha_api.prayer_pdf.prayer_pdf_model import PrayerPdfSettings
 from pecha_api.feedback.feedback_models import Feedback
+from pecha_api.text_requests.text_request_models import TextRequest  # noqa: F401
 from pecha_api.chat.models import ChatMessageTranslation  # noqa: F401
 
 # this is the Alembic Config object, which provides

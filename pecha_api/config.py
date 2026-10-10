@@ -228,6 +228,15 @@ DEFAULTS = dict(
     FEEDBACK_MAX_IMAGES=3,
     # Discord's per-message upload cap; above it the webhook rejects the post.
     FEEDBACK_MAX_TOTAL_IMAGE_MB=10,
+    # Studio text requests (POST /cms/author/text-requests): an author asks
+    # for chants that are not in the library yet. Always stored; also posted
+    # to this Discord webhook when set. Attachments go to S3, not to Discord,
+    # so they are not bound by Discord's upload cap.
+    DISCORD_TEXT_REQUEST_WEBHOOK_URL="",
+    TEXT_REQUEST_MAX_MESSAGE_LENGTH=4000,
+    TEXT_REQUEST_MAX_REPLY_LENGTH=4000,
+    TEXT_REQUEST_MAX_ATTACHMENTS=10,
+    TEXT_REQUEST_MAX_TOTAL_ATTACHMENT_MB=50,
     # /share/image serves an event's own photo, re-encoded as JPEG because the
     # stored WebP is not a format link-preview crawlers render. The endpoint is
     # public, so the fetch is bounded and the bytes are held per process.

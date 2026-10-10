@@ -5,7 +5,7 @@ from OpenPecha, whose ids are nanoid strings, so the column becomes text.
 Existing UUIDs are kept as their string form.
 
 Revision ID: tsopp1a2b3c4
-Revises: cadm1a2b3c4d5e
+Revises: txrq1a2b3c4d5e
 Create Date: 2026-10-10 12:00:00.000000
 
 """
@@ -17,7 +17,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "tsopp1a2b3c4"
-down_revision: Union[str, None] = "cadm1a2b3c4d5e"
+down_revision: Union[str, None] = "txrq1a2b3c4d5e"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
