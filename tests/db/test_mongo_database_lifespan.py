@@ -77,7 +77,7 @@ async def test_lifespan_cleans_up_when_beanie_init_fails():
             async with lifespan(api):
                 pass
 
-    mock_setup_scheduler.assert_not_called()
+    mock_setup_scheduler.assert_called_once()
     mock_shutdown_scheduler.assert_called_once()
     mock_client.close.assert_called_once()
 
@@ -111,7 +111,7 @@ async def test_lifespan_cleans_up_when_scheduler_setup_fails():
                 pass
 
     mock_shutdown_scheduler.assert_called_once()
-    mock_client.close.assert_called_once()
+    mock_client_cls.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -128,7 +128,9 @@ async def test_lifespan_skips_mongo_when_connection_string_empty():
             "MONGO_DATABASE_NAME": "testdb",
             "REDIS_URL": "redis://localhost:6379/0",
         }[key],
-    ), patch(
+    ), patch("pecha_api.db.mongo_database.setup_scheduler") as mock_setup_scheduler, patch(
+        "pecha_api.db.mongo_database.shutdown_scheduler"
+    ) as mock_shutdown_scheduler, patch(
         "pecha_api.db.mongo_database.init_broadcaster", new_callable=AsyncMock
     ) as mock_init_broadcaster, patch(
         "pecha_api.db.mongo_database.init_chat_broadcaster", new_callable=AsyncMock
@@ -139,6 +141,8 @@ async def test_lifespan_skips_mongo_when_connection_string_empty():
     mock_client_cls.assert_not_called()
     mock_init_broadcaster.assert_called_once_with(redis_url="redis://localhost:6379/0")
     mock_init_chat_broadcaster.assert_called_once_with(redis_url="redis://localhost:6379/0")
+    mock_setup_scheduler.assert_called_once()
+    mock_shutdown_scheduler.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -155,7 +159,9 @@ async def test_lifespan_skips_mongo_when_connection_string_invalid():
             "MONGO_DATABASE_NAME": "testdb",
             "REDIS_URL": "redis://localhost:6379/0",
         }[key],
-    ), patch(
+    ), patch("pecha_api.db.mongo_database.setup_scheduler") as mock_setup_scheduler, patch(
+        "pecha_api.db.mongo_database.shutdown_scheduler"
+    ) as mock_shutdown_scheduler, patch(
         "pecha_api.db.mongo_database.init_broadcaster", new_callable=AsyncMock
     ) as mock_init_broadcaster, patch(
         "pecha_api.db.mongo_database.init_chat_broadcaster", new_callable=AsyncMock
@@ -170,3 +176,5 @@ async def test_lifespan_skips_mongo_when_connection_string_invalid():
     mock_client_cls.assert_called_once()
     mock_init_broadcaster.assert_called_once_with(redis_url="redis://localhost:6379/0")
     mock_init_chat_broadcaster.assert_called_once_with(redis_url="redis://localhost:6379/0")
+    mock_setup_scheduler.assert_called_once()
+    mock_shutdown_scheduler.assert_called_once()
