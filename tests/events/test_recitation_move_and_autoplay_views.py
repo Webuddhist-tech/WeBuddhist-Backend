@@ -20,7 +20,7 @@ from pecha_api.events.recitation_websocket import AutoplayGuard, AutoplayRefused
 client = TestClient(api)
 
 MODULE = "pecha_api.events.recitation_live_views"
-DEPENDENCIES = "pecha_api.events.recitation_dependencies"
+DEPENDENCIES = "pecha_api.live_control.live_control_auth"
 SECRET = "emit-secret"
 AUTH = {"X-Recitation-Token": SECRET}
 

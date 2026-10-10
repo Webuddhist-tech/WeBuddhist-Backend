@@ -46,6 +46,12 @@ from pecha_api.events.group_event_accumulation_model import GroupEventAccumulati
 from pecha_api.events.event_reminder_model import EventReminder
 from pecha_api.events.youtube_live_sync_model import EventYoutubeLiveSync
 from pecha_api.events.recitation_play_time_model import RecitationSegmentPlayTime
+from pecha_api.live_control.live_control_models import (  # noqa: F401
+    EventLiveController,
+    EventLiveSectionOrder,
+    EventLiveSettings,
+    LiveEditionSettings,
+)
 from pecha_api.events.location_model import Location
 from pecha_api.events.location_metadata_model import LocationMetadata
 from pecha_api.group_posts.models import GroupPost, GroupPostMedia, GroupPostLink

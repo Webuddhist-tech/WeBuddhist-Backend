@@ -11,7 +11,7 @@ from pecha_api.app import api
 client = TestClient(api)
 
 MODULE = "pecha_api.events.recitation_live_views"
-DEPENDENCIES = "pecha_api.events.recitation_dependencies"
+DEPENDENCIES = "pecha_api.live_control.live_control_auth"
 SECRET = "emit-secret"
 AUTH = {"X-Recitation-Token": SECRET}
 
@@ -195,12 +195,13 @@ class TestPublishPositionOverHttp:
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
         broadcaster.broadcast_position.assert_not_awaited()
 
-    def test_unconfigured_secret_disables_the_endpoint(self):
-        """An empty secret must not mean 'any token works'."""
+    def test_unconfigured_secret_lets_no_other_token_through(self):
+        """An empty secret must not mean 'any token works'. The endpoint stays
+        open to event controller tokens, so a token none holds is refused."""
         with _http_env(secret="") as broadcaster:
             response = client.post(_url(uuid4()), json=_body(), headers=AUTH)
 
-        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
         broadcaster.broadcast_position.assert_not_awaited()
 
     def test_throttled_caller_is_told_to_slow_down(self):

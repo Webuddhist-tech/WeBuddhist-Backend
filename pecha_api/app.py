@@ -107,6 +107,10 @@ from pecha_api.events import (
     recitation_viewer_router,
 )
 from pecha_api.events import notification_internal_views as event_notification_internal_views
+from pecha_api.live_control.live_control_views import (
+    cms_live_control_router,
+    live_control_router,
+)
 from pecha_api.traditions import tradition_views
 from pecha_api.languages import language_views
 from pecha_api.plans.admin.admin_views import cms_admin_router
@@ -248,6 +252,8 @@ api.include_router(mantra_views.cms_mantra_router)
 api.include_router(user_mantra_count_router)
 api.include_router(events_router)
 api.include_router(recitation_live_router)
+api.include_router(live_control_router)
+api.include_router(cms_live_control_router)
 api.include_router(recitation_viewer_router)
 api.include_router(cms_events_router)
 api.include_router(event_notification_internal_views.internal_event_notifications_router)

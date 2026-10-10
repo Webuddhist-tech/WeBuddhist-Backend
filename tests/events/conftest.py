@@ -4,7 +4,7 @@ Pytest configuration for events tests.
 Ensures all SQLAlchemy models are imported before tests run to avoid
 mapper configuration errors from circular relationships.
 """
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -19,6 +19,23 @@ def no_event_chat_room_by_default():
         "pecha_api.events.event_service._chat_room_id_for_event", return_value=None
     ), patch(
         "pecha_api.events.event_service._chat_room_ids_for_events", return_value={}
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def no_event_controllers_by_default():
+    """The recitation routes and socket look every token up among the event's
+    controllers, and these suites have no database to look in. Default to "no
+    controller holds it", so only the shared emit secret drives a room; tests of
+    controller tokens patch this themselves."""
+    with patch(
+        "pecha_api.live_control.live_control_auth.find_live_controller", return_value=None
+    ), patch(
+        # Ending a session also clears the room state, in the Redis these
+        # suites mock through the broadcaster rather than reach.
+        "pecha_api.events.recitation_live_views.clear_room_state",
+        new=AsyncMock(return_value=True),
     ):
         yield
 

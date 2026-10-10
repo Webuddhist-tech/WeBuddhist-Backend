@@ -25,9 +25,9 @@ from pecha_api.events.recitation_autoplay_service import (
     current_autoplay_send_permit,
     get_autoplay_engine,
 )
-from pecha_api.events.recitation_dependencies import (
-    is_recitation_emit_secret,
-    verify_recitation_emit_token,
+from pecha_api.live_control.live_control_auth import (
+    is_event_controller_token,
+    verify_event_controller_token,
 )
 from pecha_api.events.recitation_live_models import (
     AutoplayPlanCommand,
@@ -94,6 +94,14 @@ def _error(code: str, message: str) -> dict:
 
 def _detail_code(detail: object) -> str:
     return detail if isinstance(detail, str) else "ERROR"
+
+
+async def clear_room_state(event_id: UUID) -> bool:
+    """The open text, on-air flags and return counts go with the session."""
+    # Imported here: the live control package imports this module's package.
+    from pecha_api.live_control.live_control_room_state import clear_room_state as clear
+
+    return await clear(event_id)
 
 
 def _require_broadcaster() -> RecitationBroadcaster:
@@ -328,7 +336,7 @@ async def _socket_autoplay_command(
     "/{event_id}/recitation/position",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Publish a recitation position over HTTP",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def publish_recitation_position(
     event_id: UUID,
@@ -406,7 +414,7 @@ async def publish_recitation_position(
     "/{event_id}/recitation/move",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Publish one move - every edition's position - in one request",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def publish_recitation_move(
     event_id: UUID,
@@ -443,7 +451,7 @@ async def publish_recitation_move(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay",
     summary="Start autoplay on a plan, or replace the plan it is running",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def start_recitation_autoplay(
     event_id: UUID,
@@ -471,7 +479,7 @@ async def start_recitation_autoplay(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay/stop",
     summary="Stop autoplay where it is",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def stop_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
     autoplay = _require_autoplay()
@@ -510,7 +518,7 @@ async def _http_autoplay_command(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay/seek",
     summary="Move the running plan to one of its steps, now",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def seek_recitation_autoplay(
     event_id: UUID, request: AutoplaySeekRequest
@@ -522,7 +530,7 @@ async def seek_recitation_autoplay(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay/hold",
     summary="Hold the running plan on its line",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def hold_recitation_autoplay(
     event_id: UUID, request: AutoplayPlanCommand
@@ -533,7 +541,7 @@ async def hold_recitation_autoplay(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay/resume",
     summary="Let a held plan go on",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def resume_recitation_autoplay(
     event_id: UUID, request: AutoplayPlanCommand
@@ -544,7 +552,7 @@ async def resume_recitation_autoplay(
 @recitation_live_router.post(
     "/{event_id}/recitation/autoplay/settings",
     summary="Set autoplay's lead and pace for this event",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def update_recitation_autoplay_settings(
     event_id: UUID, request: AutoplaySettingsRequest
@@ -557,7 +565,7 @@ async def update_recitation_autoplay_settings(
 @recitation_live_router.get(
     "/{event_id}/recitation/autoplay",
     summary="Where autoplay is",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def read_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
     """For a controller that has no socket open, or has just reopened one."""
@@ -576,7 +584,7 @@ async def read_recitation_autoplay(event_id: UUID) -> AutoplayStateResponse:
     "/{event_id}/recitation/end",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="End a recitation session over HTTP",
-    dependencies=[Depends(verify_recitation_emit_token)],
+    dependencies=[Depends(verify_event_controller_token)],
 )
 async def end_recitation_session(event_id: UUID) -> Response:
     """The `end` frame's HTTP twin.
@@ -595,6 +603,7 @@ async def end_recitation_session(event_id: UUID) -> Response:
         )
     cleared = await broadcaster.clear_position(event_id)
     announced = await broadcaster.broadcast_session_ended(event_id)
+    cleared = await clear_room_state(event_id) and cleared
 
     # Both steps swallow their Redis errors so a failing socket path keeps
     # serving; an HTTP caller has somewhere to put the failure, and ending a
@@ -692,10 +701,11 @@ async def websocket_recitation_live(
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Redis unavailable")
         return
 
-    # The live controller holds the emit secret and no user session, the same as
-    # it does for the HTTP routes. Such a socket drives the room but is nobody
-    # in it: it is not counted among the people present.
-    by_emit_secret = is_recitation_emit_secret(token)
+    # The live controller holds a controller token of this event (or the shared
+    # emit secret) and no user session, the same as it does for the HTTP
+    # routes. Such a socket drives the room but is nobody in it: it is not
+    # counted among the people present.
+    by_emit_secret = await is_event_controller_token(event_id, token)
     # No token is a signed-out viewer, who follows along like anyone else but
     # has no session to check anything against.
     anonymous = not token
@@ -943,6 +953,7 @@ async def websocket_recitation_live(
                         continue
                     cleared = await broadcaster.clear_position(event_id)
                     announced = await broadcaster.broadcast_session_ended(event_id)
+                    cleared = await clear_room_state(event_id) and cleared
                     if not (cleared and announced):
                         await websocket.send_json(
                             _error("SERVER_ERROR", "Failed to end the session; try again")
